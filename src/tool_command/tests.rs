@@ -325,13 +325,10 @@ fn explicit_project_lcm_dispatch_allows_first_touch_init() {
 fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
     let dispatch = DaemonToolDispatch::for_tool(
         None,
-        "tracedecay_lcm_preflight",
+        "tracedecay_lcm_status",
         &json!({
             "provider": "hermes",
-            "session_id": "stock-check-session",
             "storage_scope": "user",
-            "transcript_projection": true,
-            "messages": [],
         }),
     );
 

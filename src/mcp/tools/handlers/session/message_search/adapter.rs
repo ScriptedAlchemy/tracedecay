@@ -309,6 +309,9 @@ fn apply_unavailable(payload: &mut Value, unavailable: SessionRetrievalUnavailab
         "session_retrieval_service_unavailable",
         "the authorized session retrieval service is unavailable",
     )?;
+    let map = payload_object_mut(payload)?;
+    map.insert("count".to_string(), Value::Null);
+    map.insert("results".to_string(), Value::Null);
     let error = error_object_mut(payload)?;
     error.insert("reason".to_string(), json!(unavailable.reason.as_str()));
     error.insert(
@@ -701,10 +704,9 @@ pub(crate) async fn handle_message_search_with_service(
         }
     }
     let markdown = render_temporal_message_search_md(&payload)?;
-    Ok(tool_json_with_md(
-        project_root,
-        &args,
-        &payload,
-        move || markdown,
-    ))
+    let semantic_error = payload.get("error").is_some_and(|error| !error.is_null());
+    Ok(
+        tool_json_with_md(project_root, &args, &payload, move || markdown)
+            .with_semantic_error(semantic_error),
+    )
 }

@@ -271,6 +271,8 @@ pub struct McpServer {
     user_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     project_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
     user_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
+    project_lcm_authority: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
+    user_lcm_authority: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
     /// Owned cancellable project replay worker (daemon-owned servers). Joined on
     /// [`Self::shutdown`] so Unix and Windows drain the same way.
     project_host_admission_replay:
@@ -802,6 +804,26 @@ impl McpServer {
             Arc::new(DaemonProjectRegistryReadService::new(Arc::clone(registry)))
                 as Arc<dyn ProjectRegistryReadPort>
         });
+        let project_lcm_authority = project_session_retrieval_root
+            .as_ref()
+            .zip(registered_session_db.as_ref())
+            .and_then(|(root, database)| {
+                crate::daemon::lcm_authority::mount_registered_lcm_authority(
+                    Arc::clone(database),
+                    root.identity().clone(),
+                    root.expected_runtime_shard()?,
+                )
+            });
+        let user_lcm_authority = profile_session_retrieval_root
+            .as_ref()
+            .zip(registered_user_session_db.as_ref())
+            .and_then(|(root, database)| {
+                crate::daemon::lcm_authority::mount_registered_lcm_authority(
+                    Arc::clone(database),
+                    root.identity().clone(),
+                    root.expected_runtime_shard()?,
+                )
+            });
         let project_session_retrieval_service = session_db
             .as_ref()
             .zip(project_session_retrieval_root)
@@ -868,6 +890,8 @@ impl McpServer {
             user_session_refresh_service,
             project_session_retrieval_service,
             user_session_retrieval_service,
+            project_lcm_authority,
+            user_lcm_authority,
             project_host_admission_replay: tokio::sync::Mutex::new(None),
             automation_scheduler_reconciler,
             database_owner_reconciler,

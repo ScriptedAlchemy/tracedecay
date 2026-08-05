@@ -16,7 +16,7 @@ pub use authority::{
     LcmAuthorityFuture, LcmAuthorityInvocation, LcmAuthorityOperation, LcmAuthorityOutcome,
     LcmAuthorityPayload, LcmAuthorityPort, LcmAuthorityReceipt, LcmAuthorityRequest,
     LcmAuthorityResponse, LcmAuthorityUnavailableReason, LcmCompactionCommand,
-    LcmCompressionEvidence, LcmHostProtocol, LcmStatusQuery, LcmTemporalReadRequest,
+    LcmCompressionEvidence, LcmHostProtocol, LcmStatusQuery, LcmTranscriptIngestCommand,
     lcm_authority_operation_identity,
 };
 pub use contracts::{

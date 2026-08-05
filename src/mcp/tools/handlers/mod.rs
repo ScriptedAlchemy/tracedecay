@@ -87,10 +87,7 @@ mod dispatch_tests;
 )]
 mod tool_definition_tests;
 
-pub use lcm_tool_entry::handle_user_lcm_tool;
-pub(crate) use lcm_tool_entry::{
-    handle_user_lcm_tool_with_db, handle_user_lcm_tool_with_retained_authority,
-};
+pub(crate) use lcm_tool_entry::handle_user_lcm_tool_with_authorities;
 pub use session_authorities::SessionAuthorities;
 use std::path::Path;
 use std::sync::Arc;
@@ -329,12 +326,10 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                     }
                     let dispatch: std::pin::Pin<
                         Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
-                    > = Box::pin(handle_user_lcm_tool_with_db(
+                    > = Box::pin(handle_user_lcm_tool_with_authorities(
                         tool_name,
                         args,
-                        &profile_root,
-                        options.session_authorities.user,
-                        options.global_db.map(std::sync::Arc::as_ref),
+                        options.session_authorities.profile_lcm,
                         options.session_authorities.profile_retrieval,
                     ));
                     return dispatch.await;
@@ -399,11 +394,9 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 .or(options.session_authorities.project)
         })
         .flatten();
-        let active_lcm_context = session::LcmHandlerContext::active(
-            cg,
-            active_project_session_db,
-            options.session_authorities.project_retrieval,
-        );
+        let active_lcm_context =
+            session::LcmHandlerContext::active(cg, options.session_authorities.project_retrieval)
+                .with_lcm_authority(options.session_authorities.project_lcm);
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks;
         // `tracedecay_diagnostics` without an executor falls through to the

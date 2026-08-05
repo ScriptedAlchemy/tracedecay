@@ -3,35 +3,11 @@ use tracedecay_application::{
     OperationTermination, RequestContext,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
-use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_usecases::context::{RequestInterruption, application_observed_at};
-use tracedecay_usecases::session::SessionRetrievalOutcome;
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityOperation, LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityReceipt,
     LcmAuthorityResponse, LcmAuthorityUnavailableReason,
 };
-
-pub(super) fn temporal_termination(
-    outcome: &SessionRetrievalOutcome<TemporalKernelResult>,
-) -> OperationTermination {
-    match outcome {
-        SessionRetrievalOutcome::Partial { .. }
-        | SessionRetrievalOutcome::Stale { .. }
-        | SessionRetrievalOutcome::Locked
-        | SessionRetrievalOutcome::Redacted
-        | SessionRetrievalOutcome::Deleted
-        | SessionRetrievalOutcome::CursorManifestLimitExceeded { .. }
-        | SessionRetrievalOutcome::BudgetExhausted => OperationTermination::Partial,
-        SessionRetrievalOutcome::Cancelled => OperationTermination::Cancelled,
-        SessionRetrievalOutcome::Unavailable => OperationTermination::Unavailable,
-        SessionRetrievalOutcome::Denied | SessionRetrievalOutcome::WrongScope => {
-            OperationTermination::Failed
-        }
-        SessionRetrievalOutcome::Complete { .. } | SessionRetrievalOutcome::CompleteZero { .. } => {
-            OperationTermination::Completed
-        }
-    }
-}
 
 pub(super) fn unavailable(
     context: &RequestContext,

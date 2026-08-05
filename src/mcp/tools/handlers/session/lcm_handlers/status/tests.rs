@@ -1,31 +1,7 @@
-use std::path::Path;
-
 use super::super::super::*;
 use super::super::shared::lcm_status_payload;
 use super::super::test_support::*;
 use super::*;
-
-#[tokio::test]
-async fn malformed_doctor_controls_are_rejected_before_storage_open() {
-    for (args, field) in [
-        (
-            json!({"provider": "claude", "mode": false, "format": "json"}),
-            "mode",
-        ),
-        (
-            json!({"provider": "claude", "apply": "yes", "format": "json"}),
-            "apply",
-        ),
-    ] {
-        let error = handle_lcm_doctor(
-            LcmHandlerContext::user(Path::new("/missing"), None, None),
-            args,
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains(field), "{error}");
-    }
-}
 
 #[test]
 fn status_envelope_preserves_exact_json_and_markdown_rendering() {

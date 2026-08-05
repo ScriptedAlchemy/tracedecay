@@ -114,9 +114,16 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_lcm_describe"));
     assert!(tool_names.contains(&"tracedecay_lcm_expand"));
     assert!(tool_names.contains(&"tracedecay_lcm_expand_query"));
-    assert!(tool_names.contains(&"tracedecay_lcm_preflight"));
-    assert!(tool_names.contains(&"tracedecay_lcm_compress"));
-    assert!(tool_names.contains(&"tracedecay_lcm_session_boundary"));
+    assert!(!tool_names.contains(&"tracedecay_lcm_preflight"));
+    assert!(!tool_names.contains(&"tracedecay_lcm_compress"));
+    assert!(!tool_names.contains(&"tracedecay_lcm_session_boundary"));
+    let doctor = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_doctor")
+        .expect("read-only LCM Doctor is advertised");
+    assert_eq!(doctor.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    assert_eq!(doctor.input_schema["additionalProperties"], false);
+    assert_eq!(doctor.input_schema["properties"], json!({}));
     assert!(tool_names.contains(&"tracedecay_read"));
     assert!(tool_names.contains(&"tracedecay_outline"));
     assert!(tool_names.contains(&"tracedecay_implementations"));
@@ -257,10 +264,6 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_context_scout_claim",
         "tracedecay_context_scout_delivery",
         "tracedecay_context_scout_feedback",
-        "tracedecay_lcm_doctor",
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
     ];
     for tool in &tools {
         let ann = tool

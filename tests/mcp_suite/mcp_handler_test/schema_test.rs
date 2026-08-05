@@ -136,9 +136,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tracedecay_lcm_describe",
         "tracedecay_lcm_expand",
         "tracedecay_lcm_expand_query",
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
         "tracedecay_lcm_doctor",
     ] {
         assert!(names.contains(expected), "missing {expected}");
@@ -151,6 +148,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tracedecay_lcm_describe",
         "tracedecay_lcm_expand",
         "tracedecay_lcm_expand_query",
+        "tracedecay_lcm_doctor",
     ] {
         let tool = tools
             .iter()
@@ -171,18 +169,15 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         }
     }
 
-    for mutating in [
+    for retired in [
         "tracedecay_lcm_preflight",
         "tracedecay_lcm_compress",
         "tracedecay_lcm_session_boundary",
-        "tracedecay_lcm_doctor",
     ] {
-        let tool = tools
-            .iter()
-            .find(|tool| tool.name == mutating)
-            .unwrap_or_else(|| panic!("{mutating} definition"));
-        assert_eq!(tool.input_schema["type"], "object");
-        assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], false);
+        assert!(
+            !names.contains(retired),
+            "{retired} must remain daemon-internal"
+        );
     }
 
     for scoped in [
@@ -192,10 +187,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tracedecay_lcm_describe",
         "tracedecay_lcm_expand",
         "tracedecay_lcm_expand_query",
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
-        "tracedecay_lcm_doctor",
     ] {
         let tool = tools
             .iter()

@@ -42,15 +42,12 @@ pub enum RetainedSurfaceOperation {
     LcmDescribe,
     LcmExpand,
     LcmExpandQuery,
-    LcmPreflight,
-    LcmCompress,
-    LcmSessionBoundary,
     SessionStart,
     SessionEnd,
 }
 
 impl RetainedSurfaceOperation {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 16] = [
         Self::FactStore,
         Self::FactFeedback,
         Self::MemoryStatus,
@@ -64,9 +61,6 @@ impl RetainedSurfaceOperation {
         Self::LcmDescribe,
         Self::LcmExpand,
         Self::LcmExpandQuery,
-        Self::LcmPreflight,
-        Self::LcmCompress,
-        Self::LcmSessionBoundary,
         Self::SessionStart,
         Self::SessionEnd,
         Self::Workflows,
@@ -88,9 +82,6 @@ impl RetainedSurfaceOperation {
             Self::LcmDescribe => "lcm_describe",
             Self::LcmExpand => "lcm_expand",
             Self::LcmExpandQuery => "lcm_expand_query",
-            Self::LcmPreflight => "lcm_preflight",
-            Self::LcmCompress => "lcm_compress",
-            Self::LcmSessionBoundary => "lcm_session_boundary",
             Self::SessionStart => "session_start",
             Self::SessionEnd => "session_end",
         }

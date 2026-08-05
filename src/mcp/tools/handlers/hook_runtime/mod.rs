@@ -159,7 +159,6 @@ pub(crate) async fn handle_projectless_hook_runtime(
                 &args,
                 profile_root,
                 Some(&session_runtime_registry),
-                required_user_db(session_authorities)?,
                 host_admission_broker,
             )
             .await?

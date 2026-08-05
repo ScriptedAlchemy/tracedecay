@@ -180,48 +180,6 @@ fn message_text_snippet_plain_text_is_collapsed() {
     assert_eq!(message_text_snippet(text, 240), "line one line two tabbed");
 }
 
-#[test]
-fn lcm_preflight_markdown_truncation_stores_retrieval_handle() {
-    let _store_guard = lock_response_handle_store();
-    // Regression: the markdown-default preflight path must thread the
-    // project root so an oversized payload truncates *with* a recoverable
-    // handle rather than an irreversible clip.
-    let dir = tempfile::TempDir::new().unwrap();
-    // Oversize the payload the way a real preflight does — via a large
-    // replay_messages array (what the compaction tiers actually target).
-    let replay: Vec<Value> = (0..200)
-        .map(|i| json!({"role": "user", "content": format!("message {i} {}", "y".repeat(200))}))
-        .collect();
-    let payload = json!({
-        "status": "ok",
-        "provider": "claude",
-        "session_id": "s1",
-        "should_compress": false,
-        "reason": "no_compression_needed",
-        "replay_messages": replay,
-    });
-
-    // Markdown default (no `format` arg): must produce the readable
-    // truncation envelope with a stored handle.
-    let result = lcm_preflight_tool_json(Some(dir.path()), &json!({}), &payload);
-    let text = result.value["content"][0]["text"].as_str().unwrap();
-    assert!(text.starts_with("# Truncated Response"), "{text}");
-    assert!(text.contains("Full response stored locally"), "{text}");
-    assert!(text.contains("tracedecay_retrieve"), "{text}");
-    assert!(
-        serde_json::from_str::<Value>(text).is_err(),
-        "markdown truncation must not be a JSON envelope: {text}"
-    );
-
-    // `format:"json"` still yields the compact Hermes bridge contract.
-    let json_result =
-        lcm_preflight_tool_json(Some(dir.path()), &json!({"format": "json"}), &payload);
-    let json_text = json_result.value["content"][0]["text"].as_str().unwrap();
-    let parsed: Value = serde_json::from_str(json_text).unwrap();
-    assert_eq!(parsed["status"], "ok");
-    assert_eq!(parsed["should_compress"], false);
-}
-
 /// Builds an expand-query payload that overflows even the `Minimal`
 /// compaction tier: `Minimal` clones `context_pagination` items whole (up
 /// to 10) and `matches` metadata fields verbatim, so oversized entries

@@ -1991,45 +1991,16 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             }),
         )
     };
-    // Write-path call: opens the session DB in write mode, creating it and
-    // ensuring the schema. With only a session_id it records nothing
-    // (`not_compression_boundary`) — its sole job here is to exercise the
-    // migration-running open in each serve session.
-    let lcm_boundary_call = |id: i64| {
-        jsonrpc_request(
-            json!(id),
-            "tools/call",
-            json!({
-                "name": "tracedecay_lcm_session_boundary",
-                "arguments": {
-                    "provider": "codex",
-                    "session_id": "migration-rerun-probe"
-                }
-            }),
-        )
-    };
     let responses = run_server_with_messages(
         server,
         vec![
             jsonrpc_request(json!(1), "initialize", json!({})),
             jsonrpc_notification("notifications/initialized"),
-            lcm_boundary_call(4),
             lcm_status_call(2),
             lcm_status_call(3),
         ],
     )
     .await;
-    {
-        let resp = responses
-            .iter()
-            .map(|r| parse_response(r))
-            .find(|r| r["id"] == json!(4))
-            .expect("missing response for boundary call");
-        assert!(
-            resp["error"].is_null(),
-            "lcm_session_boundary should not error: {resp}"
-        );
-    }
     for id in [2_i64, 3] {
         let resp = responses
             .iter()

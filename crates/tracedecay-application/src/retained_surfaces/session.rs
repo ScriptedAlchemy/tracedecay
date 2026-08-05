@@ -7,7 +7,7 @@ const PROJECT_SCOPE: &[ScopeDimension] = &[ScopeDimension::Project];
 const PROJECT_SESSION_SCOPE: &[ScopeDimension] =
     &[ScopeDimension::Project, ScopeDimension::Session];
 
-pub(super) const SPECS: [RetainedSurfaceSpec; 15] = [
+pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::SessionRefresh,
         summary: "Control session refresh",
@@ -47,7 +47,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 15] = [
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::LcmDoctor,
         summary: "Diagnose retained LCM state",
-        description: "Inspect temporal-store integrity without opening another session store.",
+        description: "Read bounded temporal-store health through the mounted session authority.",
         example: "Diagnose retained LCM state",
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
@@ -97,33 +97,6 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 15] = [
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
         paginated: true,
-    },
-    RetainedSurfaceSpec {
-        operation: RetainedSurfaceOperation::LcmPreflight,
-        summary: "Preflight retained temporal context",
-        description: "Measure one bounded temporal assembly against the mounted authority.",
-        example: "Preflight this retained context request",
-        effect: EffectClass::Read,
-        scope: SESSION_SCOPE,
-        paginated: false,
-    },
-    RetainedSurfaceSpec {
-        operation: RetainedSurfaceOperation::LcmCompress,
-        summary: "Compress retained temporal context",
-        description: "Commit bounded temporal compression through the mounted authority.",
-        example: "Compress this retained session context",
-        effect: EffectClass::Administrative,
-        scope: SESSION_SCOPE,
-        paginated: false,
-    },
-    RetainedSurfaceSpec {
-        operation: RetainedSurfaceOperation::LcmSessionBoundary,
-        summary: "Record a retained session boundary",
-        description: "Commit an exact temporal boundary through the mounted authority.",
-        example: "Record this retained session boundary",
-        effect: EffectClass::Administrative,
-        scope: SESSION_SCOPE,
-        paginated: false,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::SessionStart,

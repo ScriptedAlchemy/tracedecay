@@ -33,6 +33,7 @@ pub enum GlobalRequestSurface {
     SessionRefresh,
     AutomationSessionRetrieval,
     McpSessionRetrieval,
+    LcmDaemon,
 }
 
 impl GlobalRequestSurface {
@@ -55,6 +56,7 @@ impl GlobalRequestSurface {
             Self::SessionRefresh => "request.mcp.session-refresh",
             Self::AutomationSessionRetrieval => "request.automation.session-retrieval",
             Self::McpSessionRetrieval => "request.mcp.session-retrieval",
+            Self::LcmDaemon => "request.daemon.lcm",
         }
     }
 }

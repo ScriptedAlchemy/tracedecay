@@ -84,6 +84,14 @@ pub(crate) struct DaemonSessionRetrievalRoot {
 }
 
 impl DaemonSessionRetrievalRoot {
+    pub(crate) fn identity(&self) -> &ResolvedSessionIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn expected_runtime_shard(&self) -> Option<&StoreShardIdV1> {
+        self.expected_runtime_shard.as_ref()
+    }
+
     pub(crate) async fn project(cg: &TraceDecay, registry: &RegisteredGlobalDb) -> Option<Self> {
         let project_id = cg.store_layout().identity.project_id.as_deref()?;
         let context = registry

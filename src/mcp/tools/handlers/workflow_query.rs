@@ -156,12 +156,12 @@ pub(super) async fn handle_workflows(
 
     if render::field_str(&payload, "status") == "unavailable" {
         let message = render::field_str(&payload, "message").to_string();
-        return Ok(tool_json_with_md(
-            Some(cg.project_root()),
-            &args,
-            &payload,
-            || render_unavailable_md(&message),
-        ));
+        return Ok(
+            tool_json_with_md(Some(cg.project_root()), &args, &payload, || {
+                render_unavailable_md(&message)
+            })
+            .with_semantic_error(true),
+        );
     }
 
     Ok(tool_json_with_md(

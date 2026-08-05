@@ -346,8 +346,16 @@ async fn projectless_user_lcm_tools_call_response(
             Arc::clone(&user_session_db),
         )
         .await;
-    let retrieval_service = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
-        .and_then(|root| root.with_profile_runtime_shard(profile_identity))
+    let profile_root = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
+        .and_then(|root| root.with_profile_runtime_shard(profile_identity));
+    let lcm_authority = profile_root.as_ref().and_then(|root| {
+        crate::daemon::lcm_authority::mount_registered_lcm_authority(
+            Arc::clone(&user_session_db),
+            root.identity().clone(),
+            root.expected_runtime_shard()?,
+        )
+    });
+    let retrieval_service = profile_root
         .and_then(|root| {
             crate::mcp::server::DaemonSessionRetrievalService::new_registered(
                 Arc::clone(&user_session_db),
@@ -359,35 +367,15 @@ async fn projectless_user_lcm_tools_call_response(
         .map(|service| {
             Arc::new(service) as Arc<dyn crate::mcp::tools::SessionRetrievalServicePort>
         });
-    let result = crate::mcp::tools::handle_user_lcm_tool_with_retained_authority(
+    let result = crate::mcp::tools::handle_user_lcm_tool_with_authorities(
         tool_name,
         arguments.clone(),
-        &client_identity.profile_root,
-        &user_session_db,
+        lcm_authority.as_deref(),
         retrieval_service.as_deref(),
     )
     .await;
     match result {
-        Ok(result) => {
-            if tool_name == "tracedecay_lcm_preflight"
-                && arguments
-                    .get("transcript_projection")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-            {
-                let _ = refresh_wake
-                    .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
-                    .await;
-            } else if matches!(
-                tool_name,
-                "tracedecay_lcm_preflight"
-                    | "tracedecay_lcm_compress"
-                    | "tracedecay_lcm_session_boundary"
-            ) {
-                refresh_wake.wake();
-            }
-            JsonRpcResponse::success(id, result.value)
-        }
+        Ok(result) => JsonRpcResponse::success(id, result.value),
         Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
 }

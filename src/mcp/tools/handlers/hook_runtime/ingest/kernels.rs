@@ -111,9 +111,11 @@ transcript_capture_kernels! {
     ClaudeProfileKernelV1 => capture_claude_profile,
     CodexProfileKernelV1 => capture_codex_profile,
     CursorProfileKernelV1 => capture_cursor_profile,
+    HermesProfileKernelV1 => capture_hermes_profile,
     KiroProfileKernelV1 => capture_kiro_profile,
     CodexProjectKernelV1 => capture_codex_project,
     CursorProjectKernelV1 => capture_cursor_project,
+    HermesProjectKernelV1 => capture_hermes_project,
     KiroProjectKernelV1 => capture_kiro_project,
 }
 
@@ -122,9 +124,11 @@ const TRANSCRIPT_CAPTURE_KERNELS: &[(&str, bool, &dyn TranscriptCaptureKernelV1)
     ("claude", true, &ClaudeProfileKernelV1),
     ("codex", true, &CodexProfileKernelV1),
     ("cursor", true, &CursorProfileKernelV1),
+    ("hermes", true, &HermesProfileKernelV1),
     ("kiro", true, &KiroProfileKernelV1),
     ("codex", false, &CodexProjectKernelV1),
     ("cursor", false, &CursorProjectKernelV1),
+    ("hermes", false, &HermesProjectKernelV1),
     ("kiro", false, &KiroProjectKernelV1),
 ];
 
@@ -210,6 +214,26 @@ async fn capture_cursor_profile(
     })
 }
 
+async fn capture_hermes_profile(
+    ctx: TranscriptCaptureContext<'_>,
+) -> Result<TranscriptCaptureOutcome> {
+    ctx.profile_root()?;
+    let global_db = ctx.global_db()?;
+    let roots = registered_project_roots(global_db).await?;
+    let outcome = tracedecay_sessions::runtime::hermes::ingest_user_sessions_capped_with_admission(
+        ctx.facade,
+        &roots,
+        ctx.max_new_bytes,
+        ctx.cancellation,
+    )
+    .await;
+    Ok(TranscriptCaptureOutcome {
+        messages_upserted: outcome.stats.messages_upserted,
+        source_deferred: outcome.deferred_by_byte_cap,
+        ..TranscriptCaptureOutcome::default()
+    })
+}
+
 async fn capture_kiro_profile(
     ctx: TranscriptCaptureContext<'_>,
 ) -> Result<TranscriptCaptureOutcome> {
@@ -238,6 +262,25 @@ async fn capture_kiro_profile(
     Ok(TranscriptCaptureOutcome {
         messages_upserted,
         snapshot: Some(capture),
+        ..TranscriptCaptureOutcome::default()
+    })
+}
+
+async fn capture_hermes_project(
+    ctx: TranscriptCaptureContext<'_>,
+) -> Result<TranscriptCaptureOutcome> {
+    let project = ctx.project()?;
+    let outcome = tracedecay_sessions::runtime::hermes::ingest_for_project_capped_with_admission_and_cancellation(
+        project.project_root(),
+        project_observation_id(project)?,
+        ctx.facade,
+        ctx.max_new_bytes,
+        ctx.cancellation,
+    )
+    .await;
+    Ok(TranscriptCaptureOutcome {
+        messages_upserted: outcome.stats.messages_upserted,
+        source_deferred: outcome.deferred_by_byte_cap,
         ..TranscriptCaptureOutcome::default()
     })
 }

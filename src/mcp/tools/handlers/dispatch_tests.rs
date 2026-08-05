@@ -1533,15 +1533,8 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
 
 #[test]
 fn unavailable_effect_contract_fails_before_handler_dispatch() {
-    let error = super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").unwrap_err();
-    assert_eq!(
-        error.project_route_context(),
-        Some((
-            "mcp_dispatch_effect_journey_unverified",
-            false,
-            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
-        ))
-    );
+    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").is_ok());
+    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_compress").is_err());
     assert!(super::ensure_mcp_dispatch_available("tracedecay_dashboard").is_ok());
     assert!(super::ensure_mcp_dispatch_available("tracedecay_search").is_ok());
 }
@@ -1617,12 +1610,11 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
 
     let error = handle_tool_call_with_registry_and_implicit_project(
         &cg,
-        "tracedecay_lcm_doctor",
+        "tracedecay_lcm_compress",
         json!({
             "storage_scope": "user",
             "provider": "codex",
-            "mode": "repair",
-            "apply": true,
+            "session_id": "retired",
         }),
         None,
         None,
@@ -1634,14 +1626,7 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     .await
     .unwrap_err();
 
-    assert_eq!(
-        error.project_route_context(),
-        Some((
-            "mcp_dispatch_effect_journey_unverified",
-            false,
-            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
-        ))
-    );
+    assert!(error.to_string().contains("unknown"));
     assert!(
         !sessions_db.exists(),
         "unavailable LCM must not open its profile store"

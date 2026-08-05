@@ -84,9 +84,6 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_describe",
     "tracedecay_lcm_expand",
     "tracedecay_lcm_expand_query",
-    "tracedecay_lcm_preflight",
-    "tracedecay_lcm_compress",
-    "tracedecay_lcm_session_boundary",
 ];
 
 const DEFAULT_TOOL_DEADLINE: Duration = Duration::from_secs(120);

@@ -30,7 +30,7 @@ fn test_hermes_user_install_writes_single_plugin() {
     assert!(manifest.contains("provides_tools:"));
     assert!(manifest.contains("tracedecay_context"));
     assert!(manifest.contains("tracedecay_lcm_status"));
-    assert!(manifest.contains("tracedecay_lcm_compress"));
+    assert!(!manifest.contains("tracedecay_lcm_compress"));
     assert!(manifest.contains("provides_hooks:"));
     assert!(manifest.contains("pre_llm_call"));
     assert!(manifest.contains("post_tool_call"));
@@ -52,7 +52,7 @@ fn test_hermes_user_install_writes_single_plugin() {
     assert!(!init_py.contains("hermes_profile"));
     assert!(!init_py.contains("hermes_home\": self.hermes_home"));
     assert!(!init_py.contains("HERMES_HOME"));
-    assert!(init_py.contains("tracedecay_lcm_compress"));
+    assert!(!init_py.contains("tracedecay_lcm_compress"));
 
     let schemas_py = std::fs::read_to_string(plugin_dir.join("schemas.py")).unwrap();
     assert!(schemas_py.contains("TOOL_SCHEMAS"));
@@ -152,7 +152,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "389dd3e460527324e47e73ceaef3660e0c1b378a2a264d739fcf55a0749eb560",
+        "5d297ea66e289675992183dfab10e89e280427ecd3659d3fe6db5a71fdd5f5ba",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }
@@ -171,9 +171,9 @@ fn test_hermes_generated_python_registers_lcm_context_engine() {
     assert!(init_py.contains("routed.setdefault(\"storage_scope\", \"user\")"));
     assert!(init_py.contains("def call_tracedecay_json"));
     assert!(init_py.contains("tracedecay_lcm_status"));
-    assert!(init_py.contains("\"tracedecay_lcm_preflight\","));
-    assert!(init_py.contains("\"tracedecay_lcm_compress\","));
-    assert!(init_py.contains("tracedecay_lcm_session_boundary"));
+    assert!(!init_py.contains("\"tracedecay_lcm_preflight\","));
+    assert!(!init_py.contains("\"tracedecay_lcm_compress\","));
+    assert!(!init_py.contains("tracedecay_lcm_session_boundary"));
     // Both registered provider identities are "tracedecay"; "lcm" is reserved
     // for the tool surface (lcm_* / tracedecay_lcm_*), not the engine name.
     assert!(init_py.contains("return \"tracedecay\""));
@@ -234,8 +234,8 @@ fn test_hermes_generated_python_registers_lcm_context_engine() {
         .collect();
     assert_eq!(
         lcm_tool_names.len(),
-        10,
-        "expected the 10 LCM MCP tools, got {lcm_tool_names:?}"
+        7,
+        "expected the 7 read-only LCM MCP tools, got {lcm_tool_names:?}"
     );
     for name in &lcm_tool_names {
         assert!(
@@ -889,7 +889,7 @@ def fake_call(name, args, **kwargs):
 original_call = plugin.tools.call_tracedecay_tool
 plugin.tools.call_tracedecay_tool = fake_call
 assert engine.should_compress(123) is False
-assert calls and calls[0][0] == "tracedecay_lcm_preflight"
+assert calls == []
 plugin.tools.call_tracedecay_tool = original_call
 
 # Stock memory activation: plugins/memory drives register() through its
