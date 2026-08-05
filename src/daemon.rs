@@ -318,6 +318,7 @@ pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
 mod store_writer_gate;
 mod wire_io;
+mod work_product_graph;
 pub(crate) mod work_runtime;
 pub(crate) mod workflow_runtime;
 use wire_io::{

@@ -272,9 +272,22 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     pub(super) authority_digest: ManifestDigest,
     pub(super) policy_digest: ManifestDigest,
     pub(super) configuration_digest: ManifestDigest,
+    pub(super) product_graph: Arc<RegisteredWorkGraphAdapter>,
 }
 
 impl RegisteredWorkRuntime {
+    pub(super) fn product_service(
+        &self,
+    ) -> tracedecay_application::WorkProductService<
+        Arc<RegisteredWorkGraphAdapter>,
+        Arc<RegisteredWorkGraphAdapter>,
+    > {
+        tracedecay_application::WorkProductService::new(
+            Arc::clone(&self.product_graph),
+            Arc::clone(&self.product_graph),
+        )
+    }
+
     /// Takes the provider runtime out for shutdown, dropping the rest of the
     /// registration with it.
     pub(in crate::daemon::service) fn into_runtime(

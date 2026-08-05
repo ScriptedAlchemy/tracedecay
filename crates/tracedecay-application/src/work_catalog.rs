@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use tracedecay_domain::{
     ManifestDigest, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
-    canonical_sha256,
+    WorkProposalV1, WorkTaskEvidenceV1, canonical_sha256,
 };
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, CancellationContract, CancellationPoint,
@@ -17,16 +17,19 @@ use tracedecay_tool_catalog::{
 
 use crate::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
-    CreateWorkCommand, ReplanDependenciesCommand, ReviewProposalRequestV1,
-    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
-    WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
-    WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
-    WorkAttemptStartRequestV1, WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1,
+    CreateWorkCommand, ExpandWorkEvidenceRequestV1, GenerateWorkProposalRequestV1,
+    ReplanDependenciesCommand, ReviewProposalRequestV1, WorkAttemptAcquireLeaseRequestV1,
+    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
+    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
+    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
+    WorkAttemptTerminalizeRequestV1, WorkEvidenceExpansionV1, WorkProductMutationReceiptV1,
+    WorkProductMutationRequestV1, WorkProductProjectionReadV1, WorkProductProjectionsRequestV1,
+    WorkProductSnapshotRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkTaskEvidenceRequestV1, WorkTopologyReadV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 9] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 15] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -63,6 +66,36 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 9] = [
         "accept_task",
         "capability.work.accept_task",
         "use-case.work.accept_task",
+    ),
+    (
+        "product_snapshot",
+        "capability.work.product_snapshot",
+        "use-case.work.product_snapshot",
+    ),
+    (
+        "product_projections",
+        "capability.work.product_projections",
+        "use-case.work.product_projections",
+    ),
+    (
+        "task_evidence",
+        "capability.work.task_evidence",
+        "use-case.work.task_evidence",
+    ),
+    (
+        "expand_task_evidence",
+        "capability.work.expand_task_evidence",
+        "use-case.work.expand_task_evidence",
+    ),
+    (
+        "generate_work_proposal",
+        "capability.work.generate_work_proposal",
+        "use-case.work.generate_work_proposal",
+    ),
+    (
+        "apply_work_command",
+        "capability.work.apply_work_command",
+        "use-case.work.apply_work_command",
     ),
 ];
 pub const WORK_ATTEMPT_OPERATION_IDS_V1: [(&str, &str, &str); 9] = [
@@ -159,6 +192,36 @@ pub fn work_executable_binding_registry()
         available::<AcceptTaskCommand, WorkProjection>(
             "accept_task",
             "/application/work/accept-task",
+            EffectClass::Administrative,
+        )?,
+        available::<WorkProductSnapshotRequestV1, WorkTopologyReadV1>(
+            "product_snapshot",
+            "/application/work/product/snapshot",
+            EffectClass::Read,
+        )?,
+        available::<WorkProductProjectionsRequestV1, WorkProductProjectionReadV1>(
+            "product_projections",
+            "/application/work/product/projections",
+            EffectClass::Read,
+        )?,
+        available::<WorkTaskEvidenceRequestV1, WorkTaskEvidenceV1>(
+            "task_evidence",
+            "/application/work/product/task-evidence",
+            EffectClass::Read,
+        )?,
+        available::<ExpandWorkEvidenceRequestV1, WorkEvidenceExpansionV1>(
+            "expand_task_evidence",
+            "/application/work/product/expand-task-evidence",
+            EffectClass::Read,
+        )?,
+        available::<GenerateWorkProposalRequestV1, WorkProposalV1>(
+            "generate_work_proposal",
+            "/application/work/product/generate-proposal",
+            EffectClass::Read,
+        )?,
+        available::<WorkProductMutationRequestV1, WorkProductMutationReceiptV1>(
+            "apply_work_command",
+            "/application/work/product/apply-command",
             EffectClass::Administrative,
         )?,
     ];
@@ -374,7 +437,9 @@ fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
 mod tests {
     use tracedecay_tool_catalog::{CancellationPoint, RouteExposureV1};
 
-    use super::work_executable_binding_registry;
+    use crate::WorkProductOperationV1;
+
+    use super::{WORK_APPLICATION_OPERATION_IDS_V1, work_executable_binding_registry};
 
     #[test]
     fn work_registry_advertises_only_mounted_application_operations() {
@@ -453,6 +518,31 @@ mod tests {
                 RouteExposureV1::Public { route_path, .. }
                     if route_path.starts_with("/application/work/attempt/")
             ));
+        }
+    }
+
+    #[test]
+    fn product_operations_share_the_canonical_work_registry() {
+        let registry = work_executable_binding_registry().unwrap();
+        assert_eq!(
+            WORK_APPLICATION_OPERATION_IDS_V1.len(),
+            9 + WorkProductOperationV1::ALL.len()
+        );
+        for operation in WorkProductOperationV1::ALL {
+            let operation_id = tracedecay_tool_catalog::OperationId::new(format!(
+                "operation.work.{}",
+                operation.key()
+            ))
+            .unwrap();
+            let binding = registry.get(&operation_id).unwrap().binding().unwrap();
+            assert!(matches!(
+                binding.exposure(),
+                RouteExposureV1::Public { route_path, .. }
+                    if route_path.starts_with("/application/work/product/")
+            ));
+            assert_eq!(binding.effect().is_read_only(), operation.is_read_only());
+            assert_ne!(binding.request_schema().body()["title"], "Value");
+            assert_ne!(binding.result_schema().body()["title"], "Value");
         }
     }
 }

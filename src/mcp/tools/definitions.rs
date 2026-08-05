@@ -29,6 +29,7 @@ mod memory;
 mod session;
 mod skills;
 mod testing;
+pub(super) mod work;
 
 use admin::*;
 use analysis::*;
@@ -365,6 +366,28 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
     if registry_mode == ToolRegistryMode::HostAvailable {
         retain_host_available_tool_definitions(&mut definitions);
     }
+    if [
+        ScopeDimension::Project,
+        ScopeDimension::Repository,
+        ScopeDimension::Worktree,
+    ]
+    .into_iter()
+    .all(|scope| available_scope.contains(&scope))
+    {
+        definitions.extend(
+            work::product_definitions()?
+                .into_iter()
+                .filter(|definition| {
+                    definition
+                        .name
+                        .strip_prefix("tracedecay_")
+                        .and_then(|operation| {
+                            CapabilityId::new(format!("capability.work.{operation}")).ok()
+                        })
+                        .is_some_and(|capability| authorized_capabilities.contains(&capability))
+                }),
+        );
+    }
     let mut definitions = definitions
         .into_iter()
         .filter(|definition| {
@@ -396,13 +419,32 @@ pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
 }
 
 pub fn default_catalog_discovery_authority()
--> Result<BTreeSet<CapabilityId>, crate::application_surface::ApplicationSurfaceAdapterError> {
-    Ok(
-        crate::application_surface::application_surface_catalog_ref()?
-            .capabilities()
-            .map(|capability| capability.capability_id().clone())
-            .collect(),
-    )
+-> Result<BTreeSet<CapabilityId>, super::dispatch::McpDispatchMetadataError> {
+    let mut authority = crate::application_surface::application_surface_catalog_ref()?
+        .capabilities()
+        .map(|capability| capability.capability_id().clone())
+        .collect::<BTreeSet<_>>();
+    let work_registry = tracedecay_application::work_executable_binding_registry()?;
+    for operation in tracedecay_api::WorkOperation::PRODUCT {
+        let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
+            .map_err(
+                |_| tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
+                    field: "Work MCP discovery operation ID",
+                    reason: "must be a canonical catalog identifier",
+                },
+            )?;
+        let binding = work_registry
+            .get(&operation_id)
+            .and_then(|availability| availability.binding())
+            .ok_or(
+                tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
+                    field: "Work MCP discovery binding",
+                    reason: "must be available before its capability is authorized",
+                },
+            )?;
+        authority.insert(binding.capability_id().clone());
+    }
+    Ok(authority)
 }
 
 pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
@@ -1027,6 +1069,31 @@ mod tests {
         assert_eq!(source_edit_dispatch["availability"]["state"], "available");
         assert_eq!(source_edit_dispatch["idempotency"], "key_required");
 
+        for tool_name in [
+            "tracedecay_product_snapshot",
+            "tracedecay_product_projections",
+            "tracedecay_task_evidence",
+            "tracedecay_expand_task_evidence",
+            "tracedecay_generate_work_proposal",
+        ] {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == tool_name)
+                .unwrap_or_else(|| panic!("{tool_name} must be authorized and discoverable"));
+            let dispatch = &definition.meta.as_ref().unwrap()["tracedecay/dispatch"];
+            assert_eq!(dispatch["effect"], "read");
+            assert_eq!(dispatch["availability"]["state"], "available");
+            assert_eq!(dispatch["read_only"], true);
+        }
+        let apply = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_apply_work_command")
+            .expect("Work mutation remains visible with truthful unavailable metadata");
+        let apply_dispatch = &apply.meta.as_ref().unwrap()["tracedecay/dispatch"];
+        assert_eq!(apply_dispatch["effect"], "administrative");
+        assert_eq!(apply_dispatch["availability"]["state"], "unavailable");
+        assert_eq!(apply_dispatch["idempotency"], "key_required");
+
         let fingerprints = definitions
             .iter()
             .map(|definition| {
@@ -1156,6 +1223,15 @@ mod tests {
                 .iter()
                 .all(|definition| definition.name != "tracedecay_git_preview"),
             "catalog-bound tools require explicit capability authority"
+        );
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| !tracedecay_api::WorkOperation::PRODUCT
+                    .into_iter()
+                    .any(|operation| definition.name
+                        == format!("tracedecay_{}", operation.operation_key()))),
+            "Work product tools require their exact capability authority"
         );
     }
 

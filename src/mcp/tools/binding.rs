@@ -30,6 +30,7 @@ use tracedecay_tool_catalog::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum McpToolDispatchGroup {
     ApplicationSurface,
+    Work,
     Graph,
     Info,
     Admin,
@@ -151,6 +152,12 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_diagnose", group: Some(McpToolDispatchGroup::SessionWorkflow), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_run_affected_tests", group: Some(McpToolDispatchGroup::SessionWorkflow), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_dashboard", group: Some(McpToolDispatchGroup::SessionWorkflow), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_product_snapshot", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_product_projections", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_task_evidence", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_expand_task_evidence", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_generate_work_proposal", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_apply_work_command", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_affected_tests", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_code_callees", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_code_callers", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -308,6 +315,35 @@ fn application_capability_for_tool(
     }))
 }
 
+fn work_executable_binding_for_tool(
+    tool_name: &str,
+) -> Result<
+    Option<tracedecay_tool_catalog::ExecutableBindingV1>,
+    super::dispatch::McpDispatchMetadataError,
+> {
+    let Some(operation_key) = tool_name.strip_prefix("tracedecay_") else {
+        return Ok(None);
+    };
+    let Some(operation) = tracedecay_api::WorkOperation::PRODUCT
+        .into_iter()
+        .find(|operation| operation.operation_key() == operation_key)
+    else {
+        return Ok(None);
+    };
+    let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
+        .map_err(
+            |_| tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
+                field: "Work MCP operation ID",
+                reason: "must be a canonical catalog identifier",
+            },
+        )?;
+    let registry = tracedecay_application::work_executable_binding_registry()?;
+    Ok(registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+        .cloned())
+}
+
 pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
     matches!(
         binding(tool_name).and_then(|binding| binding.group),
@@ -320,6 +356,7 @@ pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
 
 pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
+        || dispatch_group_for_tool(tool_name) == Some(McpToolDispatchGroup::Work)
         || tool_dispatches_source_edit_effect(tool_name)
         || matches!(
             tool_name,
@@ -375,8 +412,13 @@ fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract 
 fn idempotency_for_tool(
     tool_name: &str,
     application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
+    work_binding: Option<&tracedecay_tool_catalog::ExecutableBindingV1>,
 ) -> McpIdempotencyContract {
-    match application_capability.map(tracedecay_tool_catalog::CapabilityManifestV1::idempotency) {
+    match work_binding
+        .map(tracedecay_tool_catalog::ExecutableBindingV1::idempotency)
+        .or_else(|| {
+            application_capability.map(tracedecay_tool_catalog::CapabilityManifestV1::idempotency)
+        }) {
         Some(tracedecay_tool_catalog::IdempotencyContract::Required) => {
             McpIdempotencyContract::KeyRequired
         }
@@ -416,8 +458,11 @@ fn build_mcp_dispatch_catalog()
         .filter(|binding| !super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&binding.name))
     {
         let application_capability = application_capability_for_tool(binding.name)?;
+        let work_binding = work_executable_binding_for_tool(binding.name)?;
         let direct_effect = direct_effect(binding.name);
-        let effect = if direct_effect.is_effect() {
+        let effect = if let Some(work_binding) = &work_binding {
+            work_binding.effect()
+        } else if direct_effect.is_effect() {
             direct_effect
         } else {
             application_capability.map_or(
@@ -426,7 +471,10 @@ fn build_mcp_dispatch_catalog()
             )
         };
         let available = executable_handler_is_available(binding, effect, application_capability);
-        let cancellation = cancellation_for_tool(binding.name, application_capability)?;
+        let cancellation = match &work_binding {
+            Some(work_binding) => work_binding.cancellation().clone(),
+            None => cancellation_for_tool(binding.name, application_capability)?,
+        };
         let mut terminal_states = vec![
             McpTerminalState::Completed,
             McpTerminalState::DeadlineExceeded,
@@ -455,7 +503,11 @@ fn build_mcp_dispatch_catalog()
             deadline: McpDeadlineContractV1::new(
                 super::handlers::tool_dispatch_ceiling(binding.name).as_millis() as u64,
             )?,
-            idempotency: idempotency_for_tool(binding.name, application_capability),
+            idempotency: idempotency_for_tool(
+                binding.name,
+                application_capability,
+                work_binding.as_ref(),
+            ),
             inverse: inverse_for_tool(binding.name, effect),
             cancellation,
             terminal_states,
@@ -514,11 +566,17 @@ mod tests {
     }
 
     #[test]
-    fn every_maximal_tool_definition_has_a_binding() {
-        let defined = super::super::definitions::get_maximal_tool_definitions()
+    fn every_negotiated_tool_definition_has_a_binding() {
+        let mut defined = super::super::definitions::get_maximal_tool_definitions()
             .into_iter()
             .map(|definition| definition.name)
             .collect::<std::collections::BTreeSet<_>>();
+        defined.extend(
+            super::super::definitions::work::product_definitions()
+                .unwrap()
+                .into_iter()
+                .map(|definition| definition.name),
+        );
         let bound = MCP_TOOL_BINDINGS
             .iter()
             .filter(|binding| {

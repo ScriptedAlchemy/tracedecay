@@ -132,9 +132,9 @@ pub(super) async fn concrete_dispatch_group_accepts(
         )
     };
     match group {
-        McpToolDispatchGroup::ApplicationSurface | McpToolDispatchGroup::RetainedApplication => {
-            false
-        }
+        McpToolDispatchGroup::ApplicationSurface
+        | McpToolDispatchGroup::Work
+        | McpToolDispatchGroup::RetainedApplication => false,
         McpToolDispatchGroup::Graph => owned(
             dispatch_graph_tools(tool_name, cg, invalid_args, None, None, None, None, None).await,
         ),

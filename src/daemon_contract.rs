@@ -19,22 +19,17 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_application::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, ApplicationContractError,
-    ApplicationOutcome, ApplicationProblem, AttachRuntimeEvidenceCommand, AuthorityReceipt,
-    AuthorizedScopeSet, CancellationContext, CreateWorkCommand, Deadline, EffectId, EffectReceipt,
-    EffectResult, EvidenceAuthority, EvidenceCoverage, EvidencePacket, EvidenceScore,
-    IdempotencyKey, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
-    MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, Omission,
+    ApplicationContractError, ApplicationOutcome, ApplicationProblem, AuthorityReceipt,
+    AuthorizedScopeSet, CancellationContext, Deadline, EffectId, EffectReceipt, EffectResult,
+    EvidenceAuthority, EvidenceCoverage, EvidencePacket, EvidenceScore, IdempotencyKey,
+    MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
+    MultiRootScopeSetReadRequestV1, Omission,
     OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1,
     OpenTaskHandoffResultV1, OperationReceipt, PageRequest, PageState, PreviewId, PreviewResult,
-    ReconciliationState, ReplanDependenciesCommand, RequestId, ResolvedScope,
-    RetrieverContribution, ReviewProposalRequestV1, TaskHandoffGrant, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState, WorkAttemptAcquireLeaseRequestV1,
-    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
-    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
-    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
-    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-    WorkflowActivation, WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff,
+    ReconciliationState, RequestId, ResolvedScope, RetrieverContribution, TaskHandoffGrant,
+    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState,
+    WorkAttemptResponseV1, WorkflowActivation, WorkflowDefinitionActivateRequest,
+    WorkflowDefinitionDiff,
     WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
     WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
     WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
@@ -42,7 +37,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
-    ScopeSetId, UtcMicros, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
+    ScopeSetId, UtcMicros,
 };
 use tracedecay_lsp::{
     LspSessionAccess, LspSessionCredential, LspSessionId, MAX_LSP_FRAME_BYTES,
@@ -59,39 +54,11 @@ use crate::application_surface::{
     GitPreviewSurfaceRequest, GitReadSurfaceRequest,
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(
-    tag = "attempt_operation",
-    content = "request",
-    rename_all = "snake_case"
-)]
-pub(crate) enum WorkAttemptInvocationV1 {
-    AcquireLease(Box<WorkAttemptAcquireLeaseRequestV1>),
-    RenewLease(WorkAttemptRenewLeaseRequestV1),
-    Start(WorkAttemptStartRequestV1),
-    PublishProgress(WorkAttemptPublishProgressRequestV1),
-    PublishArtifact(WorkAttemptPublishArtifactRequestV1),
-    Cancel(WorkAttemptCancelRequestV1),
-    Recover(WorkAttemptRecoverRequestV1),
-    Finish(WorkAttemptFinishRequestV1),
-    Terminalize(WorkAttemptTerminalizeRequestV1),
-}
+mod work;
 
-impl WorkAttemptInvocationV1 {
-    pub(crate) const fn operation_key(&self) -> &'static str {
-        match self {
-            Self::AcquireLease(_) => "attempt_acquire_lease",
-            Self::RenewLease(_) => "attempt_renew_lease",
-            Self::Start(_) => "attempt_start",
-            Self::PublishProgress(_) => "attempt_publish_progress",
-            Self::PublishArtifact(_) => "attempt_publish_artifact",
-            Self::Cancel(_) => "attempt_cancel",
-            Self::Recover(_) => "attempt_recover",
-            Self::Finish(_) => "attempt_finish",
-            Self::Terminalize(_) => "attempt_terminalize",
-        }
-    }
-}
+pub(crate) use work::{
+    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkAttemptInvocationV1,
+};
 
 /// Request-field character rules. The contract accepts opaque handles and ids
 /// only in a shape it can echo back safely, so validation travels with the
@@ -265,36 +232,6 @@ impl DaemonLspSessionAccess {
             .and_then(|credential| LspSessionCredential::new(credential).ok())
             .ok_or(DaemonInvocationProblem::InvalidRequest)?;
         Ok(LspSessionAccess::new(session_id, credential))
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "operation", content = "request", rename_all = "snake_case")]
-pub(crate) enum WorkApplicationInvocationV1 {
-    Snapshot(WorkProjectionSnapshotRequestV1),
-    Delta(WorkProjectionDeltaRequestV1),
-    Create(CreateWorkCommand),
-    ReplanDependencies(ReplanDependenciesCommand),
-    ReviewProposal(ReviewProposalRequestV1),
-    AcceptProposal(AcceptProposalCommand),
-    AdmitExecution(AdmitExecutionCommand),
-    AttachRuntimeEvidence(AttachRuntimeEvidenceCommand),
-    AcceptTask(AcceptTaskCommand),
-}
-
-impl WorkApplicationInvocationV1 {
-    pub(crate) const fn operation_key(&self) -> &'static str {
-        match self {
-            Self::Snapshot(_) => "snapshot",
-            Self::Delta(_) => "delta",
-            Self::Create(_) => "create",
-            Self::ReplanDependencies(_) => "replan_dependencies",
-            Self::ReviewProposal(_) => "review_proposal",
-            Self::AcceptProposal(_) => "accept_proposal",
-            Self::AdmitExecution(_) => "admit_execution",
-            Self::AttachRuntimeEvidence(_) => "attach_runtime_evidence",
-            Self::AcceptTask(_) => "accept_task",
-        }
     }
 }
 
@@ -2364,20 +2301,6 @@ pub(crate) enum DaemonInvocationOutcome {
     Problem {
         problem: DaemonInvocationProblem,
     },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
-pub(crate) enum WorkApplicationOutcomeV1 {
-    Snapshot(ApplicationOutcome<WorkProjectionSnapshotV1>),
-    Delta(ApplicationOutcome<WorkProjectionDeltaV1>),
-    Create(ApplicationOutcome<WorkProjection>),
-    ReplanDependencies(ApplicationOutcome<WorkProjection>),
-    ReviewProposal(ApplicationOutcome<WorkProjection>),
-    AcceptProposal(ApplicationOutcome<WorkProjection>),
-    AdmitExecution(ApplicationOutcome<WorkProjection>),
-    AttachRuntimeEvidence(ApplicationOutcome<WorkProjection>),
-    AcceptTask(ApplicationOutcome<WorkProjection>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -395,6 +395,418 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
 }
 
 #[tokio::test]
+async fn registered_work_product_graph_survives_replay_rollback_and_reopen() {
+    use tracedecay_application::{
+        ApplyWorkProductCommandV1, CreateWorkProductCommandV1, GenerateWorkProposalRequestV1,
+        WorkProductCommandV1, WorkProductMutationRequestV1,
+    };
+    use tracedecay_domain::{
+        AttemptId, InitiativeId, MilestoneId, ProviderId, RunId, WorkAttemptIdentityV1,
+        WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1,
+        WorkPlanId, WorkPlanV1, WorkProductGraphV1, WorkProposalDispositionV1, WorkProviderRouteId,
+        WorkProviderRouteV1, WorkRouteDecisionV1, WorkScoreKindV1, WorkShapeAssessmentV1,
+        WorkSizingV1,
+    };
+
+    let _pin = crate::config::PinnedUserDataDir::new();
+    let project = tempfile::tempdir().expect("project root");
+    let project_id = ProjectId::new("project.work.product-invocation").expect("project id");
+    let host = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        crate::storage::default_profile_root().expect("profile root"),
+        project.path(),
+        project_id.clone(),
+    )
+    .await
+    .expect("registered project runtime");
+    let database = host
+        .project_observation_database_arc_for_test()
+        .expect("registered project database");
+    let actor = ActorId::new("actor.work.product-invocation").expect("actor id");
+    let scope = ResolvedScope::new(
+        project_id,
+        tracedecay_domain::RepositoryId::new("repository.work.product-invocation")
+            .expect("repository id"),
+        tracedecay_domain::WorktreeId::new("worktree.work.product-invocation")
+            .expect("worktree id"),
+        None,
+    )
+    .expect("resolved scope");
+    let grant_digest =
+        ManifestDigest::new(format!("sha256:{}", "7".repeat(64))).expect("grant digest");
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.work.product-invocation").expect("grant id"),
+        1,
+        grant_digest.clone(),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(10_000),
+        scope.clone(),
+        tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+            .iter()
+            .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
+            .collect(),
+        tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+            .iter()
+            .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
+            .collect(),
+        DisclosureClass::Sensitive,
+    )
+    .expect("Work product grant");
+    let authority = WorkAuthority::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        actor.clone(),
+        grant_digest,
+    )
+    .expect("Work authority");
+    let policy_digest =
+        ManifestDigest::new(format!("sha256:{}", "8".repeat(64))).expect("policy digest");
+    let configuration_digest =
+        ManifestDigest::new(format!("sha256:{}", "9".repeat(64))).expect("configuration digest");
+    let service = DaemonInvocationService::default();
+
+    macro_rules! register {
+        ($grant:expr, $message:literal) => {
+            DaemonWorkRuntimeRegistrar::new(&service)
+                .register(
+                    project.path().to_path_buf(),
+                    Arc::clone(&database),
+                    authority.clone(),
+                    actor.clone(),
+                    $grant,
+                    policy_digest.clone(),
+                    configuration_digest.clone(),
+                    crate::sessions::codex_app_server::CodexAppServerSummaryConfig {
+                        codex_bin: "tracedecay-work-provider-not-used".to_owned(),
+                        model: None,
+                        timeout: Duration::from_secs(5),
+                    },
+                )
+                .await
+                .expect($message);
+        };
+    }
+    register!(grant.clone(), "registered Work product runtime");
+    let lsp_registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+
+    macro_rules! invoke {
+        ($request_id:literal, $request:expr) => {
+            service
+                .invoke(
+                    &lsp_registry,
+                    Some(project.path()),
+                    None,
+                    None,
+                    DaemonInvocationRequest::work_application(
+                        $request_id,
+                        $request,
+                        UtcMicros(100),
+                        Deadline::new(UtcMicros(1_000)).expect("deadline"),
+                        CancellationContext::active(concat!("cancel.", $request_id))
+                            .expect("cancellation"),
+                    ),
+                )
+                .await
+                .outcome
+        };
+    }
+
+    let task_id = tracedecay_domain::TaskId::new("task.work.product-invocation").expect("task id");
+    let initiative_id =
+        InitiativeId::new("initiative.work.product-invocation").expect("initiative id");
+    let plan_id = WorkPlanId::new("plan.work.product-invocation").expect("plan id");
+    let milestone_id = MilestoneId::new("milestone.work.product-invocation").expect("milestone id");
+    let graph = WorkProductGraphV1::new(
+        WorkGraphVersionV1::initial(),
+        vec![
+            WorkInitiativeV1::new(
+                initiative_id.clone(),
+                "Product invocation".to_owned(),
+                UtcMicros(2),
+            )
+            .expect("initiative"),
+        ],
+        vec![
+            WorkPlanV1::new(
+                plan_id.clone(),
+                initiative_id.clone(),
+                "Product invocation plan".to_owned(),
+                UtcMicros(3),
+            )
+            .expect("plan"),
+        ],
+        vec![
+            tracedecay_domain::WorkMilestoneV1::new(
+                milestone_id.clone(),
+                plan_id.clone(),
+                "Product invocation milestone".to_owned(),
+                UtcMicros(4),
+            )
+            .expect("milestone"),
+        ],
+        vec![
+            WorkItemV1::new(WorkItemInputV1 {
+                task_id: task_id.clone(),
+                hierarchy: WorkHierarchyV1::new(initiative_id, plan_id, milestone_id),
+                title: "Exercise the registered product graph".to_owned(),
+                dependencies: BTreeSet::new(),
+                informational_relations: BTreeSet::new(),
+                causal_candidates: BTreeSet::new(),
+                acceptance_criteria: Vec::new(),
+                effort: 3,
+                scheduled_at: None,
+                deadline: Some(UtcMicros(900)),
+                created_at: UtcMicros(5),
+                updated_at: UtcMicros(5),
+            })
+            .expect("Work item"),
+        ],
+    )
+    .expect("Work product graph");
+    let create_command =
+        tracedecay_domain::WorkCommandId::new("command.work.product.create").expect("command id");
+    let created = invoke!(
+        "request.work.product.create",
+        WorkApplicationInvocationV1::ApplyWorkCommand(WorkProductMutationRequestV1::Create(
+            CreateWorkProductCommandV1 {
+                graph,
+                command_id: create_command,
+                occurred_at: UtcMicros(10),
+            },
+        ))
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::ApplyWorkCommand(ApplicationOutcome::Effect(created_effect)),
+        ..
+    } = created
+    else {
+        panic!("product create must return an effect: {created:?}");
+    };
+    let created = created_effect.payload.expect("created product graph");
+    assert_eq!(created.graph().version(), WorkGraphVersionV1::initial());
+    assert!(!created.replayed());
+
+    let snapshot = invoke!(
+        "request.work.product.snapshot",
+        WorkApplicationInvocationV1::ProductSnapshot(
+            tracedecay_application::WorkProductSnapshotRequestV1::default(),
+        )
+    );
+    assert!(matches!(
+        snapshot,
+        DaemonInvocationOutcome::WorkApplication {
+            outcome: WorkApplicationOutcomeV1::ProductSnapshot(ApplicationOutcome::Evidence(_)),
+            ..
+        }
+    ));
+    let projections = invoke!(
+        "request.work.product.projections",
+        WorkApplicationInvocationV1::ProductProjections(
+            tracedecay_application::WorkProductProjectionsRequestV1::default(),
+        )
+    );
+    assert!(matches!(
+        projections,
+        DaemonInvocationOutcome::WorkApplication {
+            outcome: WorkApplicationOutcomeV1::ProductProjections(ApplicationOutcome::Evidence(_)),
+            ..
+        }
+    ));
+
+    let route = WorkProviderRouteV1::new(
+        ProviderId::new("provider.work.product-invocation").expect("provider id"),
+        WorkProviderRouteId::new("route.work.product-invocation").expect("route id"),
+    )
+    .expect("provider route");
+    let proposal = invoke!(
+        "request.work.product.proposal",
+        WorkApplicationInvocationV1::GenerateWorkProposal(GenerateWorkProposalRequestV1 {
+            proposal_id: tracedecay_domain::ProposalId::new("proposal.work.product-invocation")
+                .expect("proposal id"),
+            task_id: task_id.clone(),
+            shape: WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 2, 1, 2, 1).expect("shape"),
+            sizing: WorkSizingV1::new(
+                WorkScoreKindV1::CalibratedRange,
+                1,
+                2,
+                3,
+                "registered product graph",
+            )
+            .expect("sizing"),
+            children: Vec::new(),
+            route: WorkRouteDecisionV1::selected(
+                route.clone(),
+                Vec::new(),
+                BTreeSet::new(),
+                "use the registered provider".to_owned(),
+            )
+            .expect("route decision"),
+            explanation: "The graph evidence supports direct execution".to_owned(),
+            evidence_limit: 10,
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::GenerateWorkProposal(ApplicationOutcome::Evidence(proposal)),
+        ..
+    } = proposal
+    else {
+        panic!("proposal generation must return evidence: {proposal:?}");
+    };
+    let proposal = proposal.payload.expect("proposal");
+
+    let accept_command =
+        tracedecay_domain::WorkCommandId::new("command.work.product.accept").expect("command id");
+    let accepted_request = WorkProductMutationRequestV1::Apply(ApplyWorkProductCommandV1 {
+        expected_version: WorkGraphVersionV1::initial(),
+        command_id: accept_command,
+        occurred_at: UtcMicros(20),
+        command: WorkProductCommandV1::DecideProposal {
+            proposal: proposal.clone(),
+            disposition: WorkProposalDispositionV1::Accepted,
+        },
+    });
+    let accepted = invoke!(
+        "request.work.product.accept",
+        WorkApplicationInvocationV1::ApplyWorkCommand(accepted_request)
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::ApplyWorkCommand(ApplicationOutcome::Effect(accepted_effect)),
+        ..
+    } = accepted
+    else {
+        panic!("proposal acceptance must return an effect: {accepted:?}");
+    };
+    let accepted = accepted_effect.payload.expect("accepted product graph");
+    let accepted_version = accepted.graph().version();
+
+    let identity = WorkAttemptIdentityV1::new(
+        task_id.clone(),
+        RunId::new("run.work.product-invocation").expect("run id"),
+        AttemptId::new("attempt.work.product-invocation").expect("attempt id"),
+    )
+    .expect("attempt identity");
+    let admit_command =
+        tracedecay_domain::WorkCommandId::new("command.work.product.admit").expect("command id");
+    let admitted_request = WorkProductMutationRequestV1::Apply(ApplyWorkProductCommandV1 {
+        expected_version: accepted_version,
+        command_id: admit_command.clone(),
+        occurred_at: UtcMicros(30),
+        command: WorkProductCommandV1::AdmitProvider {
+            task_id: task_id.clone(),
+            proposal_id: proposal.proposal_id().clone(),
+            identity: identity.clone(),
+            route,
+        },
+    });
+    let admitted = invoke!(
+        "request.work.product.admit",
+        WorkApplicationInvocationV1::ApplyWorkCommand(admitted_request.clone())
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::ApplyWorkCommand(ApplicationOutcome::Effect(admitted_effect)),
+        ..
+    } = admitted
+    else {
+        panic!("provider admission must return an effect: {admitted:?}");
+    };
+    let admitted = admitted_effect.payload.expect("admitted product graph");
+    let admitted_version = admitted.graph().version();
+
+    let rollback = invoke!(
+        "request.work.product.rollback",
+        WorkApplicationInvocationV1::ApplyWorkCommand(WorkProductMutationRequestV1::Apply(
+            ApplyWorkProductCommandV1 {
+                expected_version: admitted_version,
+                command_id: tracedecay_domain::WorkCommandId::new("command.work.product.rollback",)
+                    .expect("command id"),
+                occurred_at: UtcMicros(40),
+                command: WorkProductCommandV1::RollbackAdmission {
+                    task_id: task_id.clone(),
+                    identity: identity.clone(),
+                },
+            },
+        ))
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::ApplyWorkCommand(ApplicationOutcome::Effect(rollback_effect)),
+        ..
+    } = rollback
+    else {
+        panic!("admission rollback must return an effect: {rollback:?}");
+    };
+    let rolled_back = rollback_effect.payload.expect("rolled back product graph");
+    assert_eq!(
+        rolled_back.graph().version().get(),
+        admitted_version.get() + 1
+    );
+
+    let replay = invoke!(
+        "request.work.product.admit-replay",
+        WorkApplicationInvocationV1::ApplyWorkCommand(admitted_request)
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::ApplyWorkCommand(ApplicationOutcome::Effect(replay_effect)),
+        ..
+    } = replay
+    else {
+        panic!("provider admission replay must return an effect: {replay:?}");
+    };
+    let replayed = replay_effect.payload.expect("replayed admission");
+    assert!(replayed.replayed());
+    assert_eq!(replayed.command_id(), &admit_command);
+    assert_eq!(replayed.graph().version(), admitted_version);
+
+    let stale = invoke!(
+        "request.work.product.stale",
+        WorkApplicationInvocationV1::ApplyWorkCommand(WorkProductMutationRequestV1::Apply(
+            ApplyWorkProductCommandV1 {
+                expected_version: admitted_version,
+                command_id: tracedecay_domain::WorkCommandId::new("command.work.product.stale")
+                    .expect("command id"),
+                occurred_at: UtcMicros(50),
+                command: WorkProductCommandV1::RollbackAdmission { task_id, identity },
+            },
+        ))
+    );
+    assert!(matches!(
+        stale,
+        DaemonInvocationOutcome::ApplicationProblem {
+            problem: ApplicationProblem::Conflict { .. }
+        }
+    ));
+
+    let stopped = service
+        .project_runtimes
+        .withdraw::<RegisteredWorkRuntime>(project.path())
+        .await
+        .expect("registered product runtime before reopen");
+    drop(stopped);
+    register!(grant, "reopened registered Work product runtime");
+    let reopened = invoke!(
+        "request.work.product.reopened",
+        WorkApplicationInvocationV1::ProductSnapshot(
+            tracedecay_application::WorkProductSnapshotRequestV1::default(),
+        )
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::ProductSnapshot(ApplicationOutcome::Evidence(reopened)),
+        ..
+    } = reopened
+    else {
+        panic!("reopened product snapshot must return evidence: {reopened:?}");
+    };
+    let reopened = reopened.payload.expect("reopened topology");
+    assert_eq!(reopened.graph().version(), rolled_back.graph().version());
+}
+
+#[tokio::test]
 async fn registered_workflow_services_dispatch_durable_fan_out_and_handoff() {
     let _pin = crate::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");

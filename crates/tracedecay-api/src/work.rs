@@ -26,14 +26,21 @@ use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, ApplicationProblem,
-    AttachRuntimeEvidenceCommand, CreateWorkCommand, ReplanDependenciesCommand, RequestId,
-    RetryDirective, ReviewProposalRequestV1, WorkAttemptAcquireLeaseRequestV1,
-    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
+    AttachRuntimeEvidenceCommand, CreateWorkCommand, ExpandWorkEvidenceRequestV1,
+    GenerateWorkProposalRequestV1, ReplanDependenciesCommand, RequestId, RetryDirective,
+    ReviewProposalRequestV1, WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1,
+    WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
     WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
     WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
-    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkAttemptTerminalizeRequestV1, WorkEvidenceExpansionV1, WorkProductMutationReceiptV1,
+    WorkProductMutationRequestV1, WorkProductProjectionReadV1, WorkProductProjectionsRequestV1,
+    WorkProductSnapshotRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkTaskEvidenceRequestV1, WorkTopologyReadV1,
 };
-use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
+use tracedecay_domain::{
+    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkProposalV1,
+    WorkTaskEvidenceV1,
+};
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem,
@@ -46,12 +53,13 @@ fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
 
 /// Which router family mounts an operation.
 ///
-/// The distinction is load-bearing rather than cosmetic: core operations are
-/// the projection and command surface the dashboard is allowed to reach, and
-/// attempt operations are the runtime lease protocol, which it is not.
+/// The distinction is load-bearing rather than cosmetic: core and product
+/// operations are dashboard-visible, while attempt operations are the runtime
+/// lease protocol and are not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WorkOperationFamily {
     Core,
+    Product,
     Attempt,
 }
 
@@ -67,6 +75,12 @@ pub enum WorkOperation {
     AdmitExecution,
     AttachRuntimeEvidence,
     AcceptTask,
+    ProductSnapshot,
+    ProductProjections,
+    TaskEvidence,
+    ExpandTaskEvidence,
+    GenerateWorkProposal,
+    ApplyWorkCommand,
     AttemptAcquireLease,
     AttemptRenewLease,
     AttemptStart,
@@ -83,15 +97,21 @@ macro_rules! work_family_route_prefix {
     (Core) => {
         "/work/"
     };
+    (Product) => {
+        "/work/product/"
+    };
     (Attempt) => {
         "/work/attempt/"
     };
 }
 
-/// The dashboard path, which exists only for the core family.
+/// The dashboard path, which exists for the core and product families.
 macro_rules! work_dashboard_route_path {
     (Core, $segment:literal) => {
         Some(concat!("/api/work/", $segment))
+    };
+    (Product, $segment:literal) => {
+        Some(concat!("/api/work/product/", $segment))
     };
     (Attempt, $segment:literal) => {
         None
@@ -149,8 +169,7 @@ macro_rules! work_operations {
                 }
             }
 
-            /// The public dashboard path, for the core operations the
-            /// dashboard mounts.
+            /// The public dashboard path, for operations the dashboard mounts.
             pub const fn dashboard_route_path(self) -> Option<&'static str> {
                 match self {
                     $(Self::$variant => work_dashboard_route_path!($family, $segment),)+
@@ -170,6 +189,12 @@ work_operations! {
     AdmitExecution: Core, "admit_execution", "admit-execution";
     AttachRuntimeEvidence: Core, "attach_runtime_evidence", "attach-runtime-evidence";
     AcceptTask: Core, "accept_task", "accept-task";
+    ProductSnapshot: Product, "product_snapshot", "snapshot";
+    ProductProjections: Product, "product_projections", "projections";
+    TaskEvidence: Product, "task_evidence", "task-evidence";
+    ExpandTaskEvidence: Product, "expand_task_evidence", "expand-task-evidence";
+    GenerateWorkProposal: Product, "generate_work_proposal", "generate-proposal";
+    ApplyWorkCommand: Product, "apply_work_command", "apply-command";
     AttemptAcquireLease: Attempt, "attempt_acquire_lease", "acquire-lease";
     AttemptRenewLease: Attempt, "attempt_renew_lease", "renew-lease";
     AttemptStart: Attempt, "attempt_start", "start";
@@ -208,8 +233,18 @@ impl WorkOperation {
         Self::AttemptTerminalize,
     ];
 
+    /// The versioned product graph operations, in mounted order.
+    pub const PRODUCT: [Self; 6] = [
+        Self::ProductSnapshot,
+        Self::ProductProjections,
+        Self::TaskEvidence,
+        Self::ExpandTaskEvidence,
+        Self::GenerateWorkProposal,
+        Self::ApplyWorkCommand,
+    ];
+
     /// Every mounted Work operation.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 24] = [
         Self::Snapshot,
         Self::Delta,
         Self::Create,
@@ -219,6 +254,12 @@ impl WorkOperation {
         Self::AdmitExecution,
         Self::AttachRuntimeEvidence,
         Self::AcceptTask,
+        Self::ProductSnapshot,
+        Self::ProductProjections,
+        Self::TaskEvidence,
+        Self::ExpandTaskEvidence,
+        Self::GenerateWorkProposal,
+        Self::ApplyWorkCommand,
         Self::AttemptAcquireLease,
         Self::AttemptRenewLease,
         Self::AttemptStart,
@@ -237,7 +278,16 @@ impl WorkOperation {
 
     /// Whether the operation reads without producing a durable effect.
     pub const fn is_read_only(self) -> bool {
-        matches!(self, Self::Snapshot | Self::Delta)
+        matches!(
+            self,
+            Self::Snapshot
+                | Self::Delta
+                | Self::ProductSnapshot
+                | Self::ProductProjections
+                | Self::TaskEvidence
+                | Self::ExpandTaskEvidence
+                | Self::GenerateWorkProposal
+        )
     }
 
     /// The generated name of the schema this operation's request satisfies.
@@ -252,6 +302,12 @@ impl WorkOperation {
             Self::AdmitExecution => schema_name::<AdmitExecutionCommand>(),
             Self::AttachRuntimeEvidence => schema_name::<AttachRuntimeEvidenceCommand>(),
             Self::AcceptTask => schema_name::<AcceptTaskCommand>(),
+            Self::ProductSnapshot => schema_name::<WorkProductSnapshotRequestV1>(),
+            Self::ProductProjections => schema_name::<WorkProductProjectionsRequestV1>(),
+            Self::TaskEvidence => schema_name::<WorkTaskEvidenceRequestV1>(),
+            Self::ExpandTaskEvidence => schema_name::<ExpandWorkEvidenceRequestV1>(),
+            Self::GenerateWorkProposal => schema_name::<GenerateWorkProposalRequestV1>(),
+            Self::ApplyWorkCommand => schema_name::<WorkProductMutationRequestV1>(),
             Self::AttemptAcquireLease => schema_name::<WorkAttemptAcquireLeaseRequestV1>(),
             Self::AttemptRenewLease => schema_name::<WorkAttemptRenewLeaseRequestV1>(),
             Self::AttemptStart => schema_name::<WorkAttemptStartRequestV1>(),
@@ -276,6 +332,12 @@ impl WorkOperation {
             | Self::AdmitExecution
             | Self::AttachRuntimeEvidence
             | Self::AcceptTask => schema_name::<WorkProjection>(),
+            Self::ProductSnapshot => schema_name::<WorkTopologyReadV1>(),
+            Self::ProductProjections => schema_name::<WorkProductProjectionReadV1>(),
+            Self::TaskEvidence => schema_name::<WorkTaskEvidenceV1>(),
+            Self::ExpandTaskEvidence => schema_name::<WorkEvidenceExpansionV1>(),
+            Self::GenerateWorkProposal => schema_name::<WorkProposalV1>(),
+            Self::ApplyWorkCommand => schema_name::<WorkProductMutationReceiptV1>(),
             Self::AttemptAcquireLease
             | Self::AttemptRenewLease
             | Self::AttemptStart
@@ -291,6 +353,7 @@ impl WorkOperation {
     fn parse(family: WorkOperationFamily, segment: &str) -> Option<Self> {
         let candidates: &[Self] = match family {
             WorkOperationFamily::Core => &Self::CORE,
+            WorkOperationFamily::Product => &Self::PRODUCT,
             WorkOperationFamily::Attempt => &Self::ATTEMPT,
         };
         candidates
@@ -330,29 +393,30 @@ where
     }
 }
 
-/// Build every mounted Work route: the core surface and the attempt runtime.
+/// Build every mounted Work route: core, product, and attempt runtime.
 pub fn work_application_router<O>(owner: O) -> Router
 where
     O: WorkApplicationOwner,
 {
     Router::new()
         .route("/work/{operation}", post(core_operation::<O>))
+        .route("/work/product/{operation}", post(product_operation::<O>))
         .route("/work/attempt/{operation}", post(attempt_operation::<O>))
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owner)
 }
 
-/// Build only the core Work routes, relative to the mount point.
+/// Build dashboard-visible Work routes, relative to the mount point.
 ///
-/// The dashboard nests this at `/api/work`. Because the attempt routes are not
-/// registered here, an attempt path is not reachable through the dashboard even
-/// though the handlers behind both families are the same.
+/// The dashboard nests this at `/api/work`. Product routes are mounted below
+/// `/product`; attempt routes remain unreachable through the dashboard.
 pub fn work_core_router<O>(owner: O) -> Router
 where
     O: WorkApplicationOwner,
 {
     Router::new()
         .route("/{operation}", post(core_operation::<O>))
+        .route("/product/{operation}", post(product_operation::<O>))
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owner)
 }
@@ -390,6 +454,27 @@ where
 {
     dispatch(
         WorkOperationFamily::Attempt,
+        segment,
+        state,
+        request_id,
+        controls,
+        body,
+    )
+    .await
+}
+
+async fn product_operation<O>(
+    Path(segment): Path<String>,
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    controls: Extension<HttpApplicationControls>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: WorkApplicationOwner,
+{
+    dispatch(
+        WorkOperationFamily::Product,
         segment,
         state,
         request_id,
@@ -469,10 +554,10 @@ mod tests {
     }
 
     #[test]
-    fn the_two_families_partition_the_surface_and_never_borrow_each_others_paths() {
+    fn the_three_families_partition_the_surface_and_never_borrow_each_others_paths() {
         assert_eq!(
             WorkOperation::ALL.len(),
-            WorkOperation::CORE.len() + WorkOperation::ATTEMPT.len()
+            WorkOperation::CORE.len() + WorkOperation::PRODUCT.len() + WorkOperation::ATTEMPT.len()
         );
         assert_eq!(
             WorkOperation::ALL
@@ -491,6 +576,21 @@ mod tests {
                 WorkOperation::parse(WorkOperationFamily::Attempt, operation.route_segment()),
                 None,
                 "a core segment must not resolve on the attempt router"
+            );
+        }
+        for operation in WorkOperation::PRODUCT {
+            assert_eq!(operation.family(), WorkOperationFamily::Product);
+            assert!(operation.route_path().starts_with("/work/product/"));
+            assert!(operation.dashboard_route_path().is_some());
+            assert_eq!(
+                WorkOperation::parse(WorkOperationFamily::Core, operation.route_segment()),
+                None,
+                "a product segment must not resolve on the core router"
+            );
+            assert_eq!(
+                WorkOperation::parse(WorkOperationFamily::Attempt, operation.route_segment()),
+                None,
+                "a product segment must not resolve on the attempt router"
             );
         }
         for operation in WorkOperation::ATTEMPT {
@@ -539,14 +639,22 @@ mod tests {
     }
 
     #[test]
-    fn only_the_projection_reads_are_read_only() {
+    fn only_declared_read_operations_are_read_only() {
         let read_only = WorkOperation::ALL
             .into_iter()
             .filter(|operation| operation.is_read_only())
             .collect::<Vec<_>>();
         assert_eq!(
             read_only,
-            vec![WorkOperation::Snapshot, WorkOperation::Delta]
+            vec![
+                WorkOperation::Snapshot,
+                WorkOperation::Delta,
+                WorkOperation::ProductSnapshot,
+                WorkOperation::ProductProjections,
+                WorkOperation::TaskEvidence,
+                WorkOperation::ExpandTaskEvidence,
+                WorkOperation::GenerateWorkProposal,
+            ]
         );
     }
 }

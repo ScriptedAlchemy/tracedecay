@@ -32,19 +32,13 @@ use tracedecay_application::retrieval::{
     TypeHierarchyRequest,
 };
 use tracedecay_application::{
-    APPLICATION_DEFAULT_PROFILE_ID, AcceptProposalCommand, AcceptTaskCommand,
-    AdmitExecutionCommand, ApplicationContractError, ApplicationEnvelope, ApplicationOperation,
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
-    AttachRuntimeEvidenceCommand, CancellationContext, CancellationSignal, CreateWorkCommand,
-    Deadline, HealthReadRequest, IdempotencyKey, LegalAction, OpaqueCursor, OperationTermination,
-    PageRequest, ProblemOwningLayer, ReplanDependenciesCommand, RequestContext, RequestId,
-    ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
-    RetryDirective, ReviewProposalRequestV1, SafeDiagnostic, SessionLookupRequest,
-    SourceLinesRequest, StreamEvent, StreamEventKind, WorkAttemptAcquireLeaseRequestV1,
-    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
-    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
-    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
-    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
+    ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
+    ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthReadRequest,
+    IdempotencyKey, LegalAction, OpaqueCursor, OperationTermination, PageRequest,
+    ProblemOwningLayer, RequestContext, RequestId, ResultContractRef, ResultProjection,
+    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, SafeDiagnostic,
+    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
 };
 pub use tracedecay_application::{
     ConfigurationAuditRequestV1 as ConfigurationAuditSurfaceRequest,
@@ -69,7 +63,7 @@ use tracedecay_domain::{
     ExactTechnicalTermKindV1, GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexPreviewV1,
     GitIndexTransactionOperationV1, HunkRefV1, ManifestDigest, ProjectId,
     QueryNormalizationRevision, RepositoryStateSnapshotV1, SanitizerRevision, UtcMicros,
-    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, canonical_sha256,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, CatalogSnapshotV1, CatalogValidationError, FeatureId,
@@ -100,13 +94,11 @@ use crate::daemon_client::{
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
     InvocationControls, RequestedOutputFormat, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
-use crate::daemon_contract::{
-    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkAttemptInvocationV1,
-};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 mod configuration_wire;
 mod handoff;
+mod work;
 mod workflow;
 
 use configuration_wire::{
@@ -114,6 +106,10 @@ use configuration_wire::{
     validate_configuration_outcome,
 };
 use handoff::router_with_executor as handoff_application_router_with_executor;
+use work::{
+    WorkExecutorOwner, router_with_executor as work_application_router_with_executor,
+    validate_catalog_bindings as validate_work_catalog_bindings,
+};
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
@@ -879,178 +875,7 @@ pub(crate) async fn invoke_multi_root_surface_request(
         .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)
 }
 
-fn work_application_router_with_executor(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
-) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
-    validate_work_catalog_bindings()?;
-    Ok(tracedecay_api::work_application_router(WorkExecutorOwner {
-        executor,
-    }))
-}
-
-/// Refuse to mount Work unless the catalog advertises every descriptor
-/// operation at exactly the path this build answers on.
-///
-/// The descriptor and the catalog are two statements of the same surface, and a
-/// mount that disagreed with the catalog would advertise routes nobody serves.
-pub(crate) fn validate_work_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
-    let registry = tracedecay_application::work_executable_binding_registry()
-        .map_err(ApplicationSurfaceAdapterError::CatalogValidation)?;
-    for operation in WorkOperation::ALL {
-        let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
-            .map_err(ApplicationSurfaceAdapterError::Identifier)?;
-        let Some(binding) = registry
-            .get(&operation_id)
-            .and_then(|availability| availability.binding())
-        else {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        };
-        let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        };
-        if route_path != operation.application_route_path() {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        }
-    }
-    Ok(())
-}
-
-/// The Work application owner: canonical dispatch behind every Work route,
-/// whichever router mounted it.
-#[derive(Clone)]
-pub(crate) struct WorkExecutorOwner {
-    pub(crate) executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
-}
-
-impl tracedecay_api::WorkApplicationOwner for WorkExecutorOwner {
-    fn invoke_work(
-        &self,
-        request: tracedecay_api::WorkHttpRequest,
-    ) -> tracedecay_api::WorkInvocationFuture {
-        Box::pin(invoke_work_operation(Arc::clone(&self.executor), request))
-    }
-}
-
-async fn invoke_work_operation(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
-    request: tracedecay_api::WorkHttpRequest,
-) -> Response {
-    let tracedecay_api::WorkHttpRequest {
-        operation,
-        request_id,
-        controls,
-        body,
-    } = request;
-
-    macro_rules! core {
-        ($request_ty:ty, $variant:ident, $output:ty) => {{
-            let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
-                return tracedecay_api::work_invalid_request_response(request_id);
-            };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::work_application(
-                request_id.as_str(),
-                WorkApplicationInvocationV1::$variant(decoded),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
-            invoke_registered_http::<$output, _>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::WorkApplication {
-                        scope,
-                        outcome: WorkApplicationOutcomeV1::$variant(outcome),
-                    } => Some((scope, outcome)),
-                    _ => None,
-                },
-            )
-            .await
-        }};
-    }
-
-    macro_rules! attempt {
-        ($request_ty:ty, $variant:ident) => {{
-            let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
-                return tracedecay_api::work_invalid_request_response(request_id);
-            };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::work_attempt(
-                request_id.as_str(),
-                WorkAttemptInvocationV1::$variant(decoded.into()),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
-            invoke_registered_http::<WorkAttemptResponseV1, _>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::WorkAttempt {
-                        scope,
-                        outcome,
-                    } => Some((scope, *outcome)),
-                    _ => None,
-                },
-            )
-            .await
-        }};
-    }
-
-    match operation {
-        WorkOperation::Snapshot => core!(
-            WorkProjectionSnapshotRequestV1,
-            Snapshot,
-            WorkProjectionSnapshotV1
-        ),
-        WorkOperation::Delta => core!(WorkProjectionDeltaRequestV1, Delta, WorkProjectionDeltaV1),
-        WorkOperation::Create => core!(CreateWorkCommand, Create, WorkProjection),
-        WorkOperation::ReplanDependencies => {
-            core!(
-                ReplanDependenciesCommand,
-                ReplanDependencies,
-                WorkProjection
-            )
-        }
-        WorkOperation::ReviewProposal => {
-            core!(ReviewProposalRequestV1, ReviewProposal, WorkProjection)
-        }
-        WorkOperation::AcceptProposal => {
-            core!(AcceptProposalCommand, AcceptProposal, WorkProjection)
-        }
-        WorkOperation::AdmitExecution => {
-            core!(AdmitExecutionCommand, AdmitExecution, WorkProjection)
-        }
-        WorkOperation::AttachRuntimeEvidence => core!(
-            AttachRuntimeEvidenceCommand,
-            AttachRuntimeEvidence,
-            WorkProjection
-        ),
-        WorkOperation::AcceptTask => core!(AcceptTaskCommand, AcceptTask, WorkProjection),
-        WorkOperation::AttemptAcquireLease => {
-            attempt!(WorkAttemptAcquireLeaseRequestV1, AcquireLease)
-        }
-        WorkOperation::AttemptRenewLease => attempt!(WorkAttemptRenewLeaseRequestV1, RenewLease),
-        WorkOperation::AttemptStart => attempt!(WorkAttemptStartRequestV1, Start),
-        WorkOperation::AttemptPublishProgress => {
-            attempt!(WorkAttemptPublishProgressRequestV1, PublishProgress)
-        }
-        WorkOperation::AttemptPublishArtifact => {
-            attempt!(WorkAttemptPublishArtifactRequestV1, PublishArtifact)
-        }
-        WorkOperation::AttemptCancel => attempt!(WorkAttemptCancelRequestV1, Cancel),
-        WorkOperation::AttemptRecover => attempt!(WorkAttemptRecoverRequestV1, Recover),
-        WorkOperation::AttemptFinish => attempt!(WorkAttemptFinishRequestV1, Finish),
-        WorkOperation::AttemptTerminalize => attempt!(WorkAttemptTerminalizeRequestV1, Terminalize),
-    }
-}
-
-/// Refuse a registered request that never reached dispatch in the canonical envelope.
+/// Refuse a Work request that never reached dispatch, in the canonical envelope.
 ///
 /// Everything before the executor call is adapter territory: the catalog would
 /// not build, the operation is not advertised, or its binding carries no public

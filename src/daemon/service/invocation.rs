@@ -148,6 +148,7 @@ use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationS
 use crate::daemon::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
 };
+use crate::daemon::work_product_graph::RegisteredWorkGraphAdapter;
 use crate::daemon::work_runtime::DaemonWorkRuntimeV1;
 use crate::daemon::workflow_runtime::execute_canonical_workflow;
 // Re-exported so the long tail of daemon-internal call sites can keep naming the
@@ -253,6 +254,8 @@ pub(in crate::daemon::service) use types::{
 pub(crate) struct DaemonInvocationService {
     code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     lsp_admission_open: Arc<Mutex<bool>>,
+    work_graph_databases:
+        Result<Arc<tracedecay_graph_db::GraphDbRegistry>, tracedecay_graph_db::GraphDbError>,
     lsp_sessions: Arc<Mutex<BTreeMap<LspSessionId, RuntimeLspSession>>>,
     lsp_lease_tasks: Arc<LspLeaseTaskRegistry>,
     authorized_lsp_workspaces: Arc<Mutex<BTreeMap<ManifestDigest, AuthorizedDaemonLspWorkspace>>>,
@@ -279,6 +282,10 @@ impl DaemonInvocationService {
         Self {
             code_index_schedulers,
             lsp_admission_open: Arc::new(Mutex::new(true)),
+            work_graph_databases: tracedecay_graph_db::GraphDbRegistry::new(
+                tracedecay_graph_db::GraphDbRegistryConfig { max_open: 64 },
+            )
+            .map(Arc::new),
             lsp_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             lsp_lease_tasks: Arc::new(LspLeaseTaskRegistry::default()),
             authorized_lsp_workspaces: Arc::new(Mutex::new(BTreeMap::new())),

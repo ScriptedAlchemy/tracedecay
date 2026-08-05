@@ -833,8 +833,25 @@ impl DaemonWorkRuntimeRegistrar {
                 || {
                     // Opening the provider runtime is deferred until the slot is
                     // known to be free so a refused registration never starts one.
+                    let graph_registry = self
+                        .service
+                        .work_graph_databases
+                        .as_ref()
+                        .map(Arc::clone)
+                        .map_err(|error| TraceDecayError::Config {
+                            message: format!(
+                                "canonical Work product graph registry is unavailable: {error}"
+                            ),
+                        })?;
+                    let product_graph =
+                        RegisteredWorkGraphAdapter::resolve(graph_registry, &database, &authority)
+                            .map_err(|error| TraceDecayError::Config {
+                                message: format!(
+                                    "canonical Work product graph registration failed: {error}"
+                                ),
+                            })?;
                     let runtime = DaemonWorkRuntimeV1::new(
-                        authority,
+                        authority.clone(),
                         database.work_storage()?,
                         config,
                         executable_bindings,
@@ -850,6 +867,7 @@ impl DaemonWorkRuntimeRegistrar {
                         authority_digest: authority_digest.clone(),
                         policy_digest: policy_digest.clone(),
                         configuration_digest: configuration_digest.clone(),
+                        product_graph,
                     })
                 },
             )

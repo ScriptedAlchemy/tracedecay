@@ -5,6 +5,7 @@
 //! `Arc<GraphDb>`; this crate never opens a database or discovers a registry.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -313,6 +314,34 @@ pub trait WorkTopologyPort: Send + Sync {
     ) -> Result<Option<WorkProductMutationReceiptV1>, WorkTopologyPortError>;
 }
 
+impl<T> WorkTopologyPort for Arc<T>
+where
+    T: WorkTopologyPort + ?Sized,
+{
+    fn read(
+        &self,
+        authority: &tracedecay_domain::WorkAuthority,
+    ) -> Result<WorkTopologyReadV1, WorkTopologyPortError> {
+        (**self).read(authority)
+    }
+
+    fn compare_and_swap(
+        &self,
+        request: &WorkTopologyCasRequestV1,
+    ) -> Result<WorkTopologyCommitV1, WorkTopologyPortError> {
+        (**self).compare_and_swap(request)
+    }
+
+    fn replay(
+        &self,
+        authority: &tracedecay_domain::WorkAuthority,
+        command_id: &WorkCommandId,
+        input_digest: &ManifestDigest,
+    ) -> Result<Option<WorkProductMutationReceiptV1>, WorkTopologyPortError> {
+        (**self).replay(authority, command_id, input_digest)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkEvidenceExpansionV1 {
@@ -365,6 +394,30 @@ pub trait WorkEvidencePort: Send + Sync {
         task_id: &TaskId,
         link_id: &TaskEvidenceLinkId,
     ) -> Result<WorkEvidenceExpansionV1, WorkProductApplicationError>;
+}
+
+impl<E> WorkEvidencePort for Arc<E>
+where
+    E: WorkEvidencePort + ?Sized,
+{
+    fn task_evidence(
+        &self,
+        authority: &tracedecay_domain::WorkAuthority,
+        task_id: &TaskId,
+        graph_version: WorkGraphVersionV1,
+        limit: u32,
+    ) -> Result<WorkTaskEvidenceV1, WorkProductApplicationError> {
+        (**self).task_evidence(authority, task_id, graph_version, limit)
+    }
+
+    fn expand(
+        &self,
+        authority: &tracedecay_domain::WorkAuthority,
+        task_id: &TaskId,
+        link_id: &TaskEvidenceLinkId,
+    ) -> Result<WorkEvidenceExpansionV1, WorkProductApplicationError> {
+        (**self).expand(authority, task_id, link_id)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]

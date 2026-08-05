@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod product;
+
 pub(super) fn application_problem(
     request_id: String,
     problem: ApplicationProblem,
@@ -27,6 +29,16 @@ pub(super) fn execute_work_application(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
+    if request.is_product_operation() {
+        return product::execute(
+            registered,
+            request_id,
+            request,
+            observed_at,
+            deadline,
+            cancellation,
+        );
+    }
     let operation_key = request.operation_key();
     let Some((_, capability, use_case)) = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
@@ -193,6 +205,14 @@ pub(super) fn execute_work_application(
             deadline,
             WorkApplicationOutcomeV1::AcceptTask,
         ),
+        WorkApplicationInvocationV1::ProductSnapshot(_)
+        | WorkApplicationInvocationV1::ProductProjections(_)
+        | WorkApplicationInvocationV1::TaskEvidence(_)
+        | WorkApplicationInvocationV1::ExpandTaskEvidence(_)
+        | WorkApplicationInvocationV1::GenerateWorkProposal(_)
+        | WorkApplicationInvocationV1::ApplyWorkCommand(_) => {
+            DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::InvalidRequest)
+        }
     }
 }
 
