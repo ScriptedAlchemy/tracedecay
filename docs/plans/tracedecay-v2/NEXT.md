@@ -5,7 +5,6 @@
 `00-plan-set-index.md` is the sole precedence, rejection, and acceptance
 authority. This file tracks only current product outcomes, blockers, and the
 next direct user journeys. Numbered plans own the detailed semantics.
-`GAP-LEDGER-PR8-PR14.md` is history, not a work queue.
 
 ## Current outcomes
 
@@ -39,7 +38,7 @@ next direct user journeys. Numbered plans own the detailed semantics.
 - The repository still has unresolved test and CI failures. Focused local
   success does not establish product acceptance; normal repository CI must
   execute the affected journeys non-vacuously.
-- PR14 remains open on the direct Plan 11 renderer fallback, real-browser,
+- The dashboard remains open on the direct Plan 11 renderer fallback, real-browser,
   assistive-technology, and usability journeys. The performance,
   sustained-update, and payload budgets were withdrawn by owner decision
   2026-07-31 and no longer block acceptance.
