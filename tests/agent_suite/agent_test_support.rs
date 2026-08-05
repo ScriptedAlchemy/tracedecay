@@ -296,19 +296,6 @@ pub fn codex_plugin_install_dir(home: &Path) -> std::path::PathBuf {
     home.join("plugins/tracedecay")
 }
 
-pub fn codex_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
-    home.join(".codex/plugins/cache/personal/tracedecay")
-        .join(env!("CARGO_PKG_VERSION"))
-}
-
-pub fn codex_stale_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
-    home.join(".codex/plugins/cache/personal/tracedecay/0.0.4")
-}
-
-pub fn codex_legacy_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
-    home.join(".codex/plugins/cache/caveman-home/tracedecay/0.0.4")
-}
-
 pub fn codex_personal_marketplace_path(home: &Path) -> std::path::PathBuf {
     home.join(".agents/plugins/marketplace.json")
 }
@@ -330,24 +317,6 @@ pub fn codex_repo_marketplace_path(project: &Path) -> std::path::PathBuf {
 
 pub fn codex_project_plugin_install_dir(project: &Path) -> std::path::PathBuf {
     project.join("plugins/tracedecay")
-}
-
-pub fn write_codex_plugin_manifest(plugin_dir: &Path, version: &str) {
-    std::fs::create_dir_all(plugin_dir.join(".codex-plugin")).unwrap();
-    std::fs::write(
-        plugin_dir.join(".codex-plugin/plugin.json"),
-        format!(r#"{{"name":"tracedecay","version":"{version}"}}"#),
-    )
-    .unwrap();
-}
-
-pub fn write_stale_codex_skill(plugin_dir: &Path) {
-    std::fs::create_dir_all(plugin_dir.join("skills/stale-skill")).unwrap();
-    std::fs::write(
-        plugin_dir.join("skills/stale-skill/SKILL.md"),
-        "---\nname: tracedecay:stale-skill\n---\n",
-    )
-    .unwrap();
 }
 
 pub fn assert_codex_plugin_bundle(

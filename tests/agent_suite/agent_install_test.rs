@@ -329,53 +329,6 @@ fn test_gemini_install_creates_config() {
 }
 
 #[test]
-fn test_kimi_uninstall_removes_legacy_global_install() {
-    // Migration shim: tracedecay versions before the Kimi Code CLI plugin
-    // became the global install wrote `~/.kimi/mcp.json` and
-    // `~/.kimi/AGENTS.md`. Current installs never write them, but uninstall
-    // must still clean up a pre-plugin install.
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-    let _agent_env = crate::common::AgentEnvLock::pin(home);
-    let _kimi_code_home = EnvVarGuard::set(
-        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
-        home.join(".kimi-code"),
-    );
-    let ctx = make_install_ctx(home);
-
-    let kimi_dir = home.join(".kimi");
-    std::fs::create_dir_all(&kimi_dir).unwrap();
-    let mcp_path = kimi_dir.join("mcp.json");
-    std::fs::write(
-        &mcp_path,
-        "{\n  \"mcpServers\": {\n    \"tracedecay\": { \"command\": \"/old/tracedecay\", \"args\": [\"serve\"] }\n  }\n}\n",
-    )
-    .unwrap();
-    let agents_md = kimi_dir.join("AGENTS.md");
-    std::fs::write(
-        &agents_md,
-        "## Prefer tracedecay MCP tools\n\nUse tracedecay MCP tools first.\n",
-    )
-    .unwrap();
-    assert!(
-        KimiIntegration.has_tracedecay(home),
-        "the legacy registration branch should still be noticed"
-    );
-
-    KimiIntegration.uninstall(&ctx).unwrap();
-
-    assert!(
-        !mcp_path.exists(),
-        "legacy mcp.json with only tracedecay should be removed on uninstall"
-    );
-    assert!(
-        !agents_md.exists(),
-        "legacy AGENTS.md holding only tracedecay rules should be removed on uninstall"
-    );
-    assert!(!KimiIntegration.has_tracedecay(home));
-}
-
-#[test]
 fn test_kimi_is_detected_and_has_tracedecay() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();

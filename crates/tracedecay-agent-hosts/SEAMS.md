@@ -163,7 +163,6 @@ before command dispatch.
 
 | Trait | Root implements for |
 |---|---|
-| `agents::InstalledAgentsConfig` | `user_config::UserConfig` |
 | `ports::session_store::AutomationSessionStore` | `global_db::RegisteredGlobalDb` (converting the analytics query/record field-for-field) |
 
 ### Downward moves (root deletes its copy and re-exports)

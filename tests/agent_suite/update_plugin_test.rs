@@ -14,7 +14,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::agents::{InstallContext, UpdatePluginOutcome, get_integration};
 
-use crate::common::{AgentEnvLock, EnvVarGuard, tracedecay_command_with_home};
+use crate::common::{AgentEnvLock, EnvVarGuard};
 use crate::plugin_validation_support::{assert_schema_valid, compile_schema, relative_files_under};
 
 const OLD_BIN: &str = "/old/bin/tracedecay";
@@ -48,19 +48,6 @@ fn text(path: &Path) -> String {
 fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_str(&text(path))
         .unwrap_or_else(|e| panic!("failed to parse JSON {}: {e}", path.display()))
-}
-
-fn assert_codex_marketplace_entry(marketplace_path: &Path, source_path: &str) {
-    let marketplace = read_json(marketplace_path);
-    let plugins = marketplace["plugins"]
-        .as_array()
-        .expect("marketplace plugins should be an array");
-    let entry = plugins
-        .iter()
-        .find(|entry| entry["name"] == "tracedecay")
-        .expect("marketplace should contain tracedecay");
-    assert_eq!(entry["source"]["source"], "local");
-    assert_eq!(entry["source"]["path"], source_path);
 }
 
 /// The scope contract a rendered Codex bundle must follow: global bundles
@@ -101,88 +88,6 @@ fn codex_bootstrap_dir(home: &Path) -> PathBuf {
 fn codex_cached_plugin_dir(home: &Path) -> PathBuf {
     home.join(".codex/plugins/cache/personal/tracedecay")
         .join(env!("CARGO_PKG_VERSION"))
-}
-
-fn codex_legacy_cached_plugin_dir(home: &Path) -> PathBuf {
-    home.join(".codex/plugins/cache/caveman-home/tracedecay/0.0.4")
-}
-
-fn codex_marketplace_path(home: &Path) -> PathBuf {
-    home.join(".agents/plugins/marketplace.json")
-}
-
-fn write_codex_marketplace(home: &Path, name: &str, display_name: &str) {
-    std::fs::create_dir_all(home.join(".agents/plugins")).unwrap();
-    std::fs::write(
-        codex_marketplace_path(home),
-        format!(
-            r#"{{"interface":{{"displayName":"{display_name}"}},"name":"{name}","plugins":[{{"name":"tracedecay","source":{{"source":"local","path":"./plugins/tracedecay"}}}}]}}"#
-        ),
-    )
-    .unwrap();
-}
-
-fn write_codex_plugin_manifest(plugin_dir: &Path, version: &str) {
-    std::fs::create_dir_all(plugin_dir.join(".codex-plugin")).unwrap();
-    std::fs::write(
-        plugin_dir.join(".codex-plugin/plugin.json"),
-        format!(r#"{{"name":"tracedecay","version":"{version}"}}"#),
-    )
-    .unwrap();
-}
-
-fn write_codex_legacy_config(home: &Path) -> PathBuf {
-    let codex_dir = home.join(".codex");
-    std::fs::create_dir_all(&codex_dir).unwrap();
-    let config_path = codex_dir.join("config.toml");
-    std::fs::write(
-        &config_path,
-        "[mcp_servers.tracedecay]\ncommand = \"/old/bin/tracedecay\"\nargs = [\"serve\"]\n",
-    )
-    .unwrap();
-    config_path
-}
-
-/// After a legacy-config migration, `config.toml` no longer holds a direct
-/// tracedecay MCP registration, but the installer now records hook trust there,
-/// so the file exists with `[hooks.state]` entries instead of being deleted.
-fn assert_codex_legacy_config_migrated(config_path: &Path) {
-    let migrated: toml::Value = toml::from_str(&text(config_path)).unwrap();
-    assert!(
-        migrated
-            .get("mcp_servers")
-            .and_then(|servers| servers.get("tracedecay"))
-            .is_none(),
-        "Codex update-plugin should sweep the legacy MCP server entry"
-    );
-    assert!(
-        migrated["hooks"]["state"]
-            .as_table()
-            .unwrap()
-            .keys()
-            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
-        "and record tracedecay hook trust in config.toml in its place"
-    );
-}
-
-fn write_stale_codex_skill(plugin_dir: &Path) {
-    std::fs::create_dir_all(plugin_dir.join("skills/stale-skill")).unwrap();
-    std::fs::write(
-        plugin_dir.join("skills/stale-skill/SKILL.md"),
-        "---\nname: tracedecay:stale-skill\n---\n",
-    )
-    .unwrap();
-}
-
-fn write_retired_codex_skill(plugin_dir: &Path, name: &str) {
-    std::fs::create_dir_all(plugin_dir.join("skills").join(name)).unwrap();
-    std::fs::write(
-        plugin_dir.join("skills").join(name).join("SKILL.md"),
-        format!(
-            "---\nname: {name}\ndescription: retired tracedecay skill\n---\n\nUse TraceDecay MCP tools for this workflow.\n"
-        ),
-    )
-    .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -342,8 +247,8 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
 
     // An unmanaged user file inside the plugin dir must survive the refresh.
     std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
-    // A pre-consolidation workflow skill must not survive alongside the new
-    // consolidated model-invoked skill catalog.
+    // An unreceipted historical skill directory must be preserved. Fresh V2
+    // installs do not assume ownership of prior source trees.
     std::fs::create_dir_all(plugin_dir.join("skills/reading-code-cheaply")).unwrap();
     std::fs::write(
         plugin_dir.join("skills/reading-code-cheaply/SKILL.md"),
@@ -368,8 +273,10 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     assert_eq!(bytes(&user_mcp), user_mcp_before);
     assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
     assert!(
-        !plugin_dir.join("skills/reading-code-cheaply").exists(),
-        "update-plugin must sweep retired Cursor skill dirs so stale workflows are not rediscovered"
+        plugin_dir
+            .join("skills/reading-code-cheaply/SKILL.md")
+            .exists(),
+        "update-plugin must preserve unreceipted historical Cursor skills"
     );
     assert!(
         plugin_dir.join("skills/project-status/SKILL.md").exists(),
@@ -419,10 +326,15 @@ fn claude_update_plugin_refreshes_bundle_and_preserves_user_config() {
     let user_json_before = bytes(&user_claude_json);
 
     let outcome = claude.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected claude update_plugin to refresh the deployed bundle");
+    let UpdatePluginOutcome::DeferredUserAction(deferred) = outcome else {
+        panic!("Claude update_plugin must defer its host-native cache refresh");
     };
-    assert_eq!(paths, vec![deploy_dir.clone()]);
+    assert_eq!(deferred.staged_paths, vec![deploy_dir.clone()]);
+    assert!(
+        deferred
+            .remediation
+            .contains("claude plugin update tracedecay@tracedecay")
+    );
 
     // Foreign user config is byte-identical after the refresh.
     assert_eq!(bytes(&user_claude_json), user_json_before);
@@ -435,11 +347,10 @@ fn claude_update_plugin_refreshes_bundle_and_preserves_user_config() {
     );
 }
 
-/// `update-plugin` must write the plugin-namespace tool permissions (so an
-/// install that predates them stops prompting) and refresh the managed
-/// CLAUDE.md steering block, without disturbing unrelated allowlist entries.
+/// `update-plugin` stages the source bundle without claiming it refreshed
+/// Claude's native cache or rewriting settings and steering owned by the host.
 #[test]
-fn claude_update_plugin_writes_plugin_permissions_and_refreshes_claude_md() {
+fn claude_update_plugin_defers_without_rewriting_settings_or_steering() {
     let home = TempDir::new().unwrap();
     let claude = get_integration("claude").unwrap();
 
@@ -467,44 +378,16 @@ fn claude_update_plugin_writes_plugin_permissions_and_refreshes_claude_md() {
         "# Project\n\n## MANDATORY: No Explore Agents When Tracedecay Is Available\n\nstale body\n",
     )
     .unwrap();
+    let settings_before = bytes(&settings_path);
+    let claude_md_before = bytes(&claude_md_path);
 
     let outcome = claude.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
-    assert!(matches!(outcome, UpdatePluginOutcome::Refreshed(_)));
-
-    // Plugin-namespace permissions are (re)written; unrelated perm preserved.
-    let settings = read_json(&settings_path);
-    let allow_strs: Vec<String> = settings["permissions"]["allow"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    for name in tracedecay::agents::tool_names() {
-        let perm = format!("mcp__plugin_tracedecay_graph__{name}");
-        assert!(
-            allow_strs.contains(&perm),
-            "update-plugin should write plugin-namespace permission {perm}"
-        );
-    }
-    assert!(
-        allow_strs.contains(&"Bash(*)".to_string()),
-        "update-plugin must preserve unrelated permissions"
-    );
-
-    // The stale CLAUDE.md block is refreshed to the current moment-trigger text.
-    let claude_md = text(&claude_md_path);
-    assert!(
-        !claude_md.contains("stale body"),
-        "stale managed block should be replaced"
-    );
-    assert!(
-        claude_md.contains("Before your FIRST"),
-        "refreshed CLAUDE.md should carry the moment-trigger lead"
-    );
-    assert!(
-        claude_md.contains("# Project"),
-        "user content outside the managed block must be preserved"
-    );
+    assert!(matches!(
+        outcome,
+        UpdatePluginOutcome::DeferredUserAction(_)
+    ));
+    assert_eq!(bytes(&settings_path), settings_before);
+    assert_eq!(bytes(&claude_md_path), claude_md_before);
 }
 
 #[test]
@@ -528,414 +411,7 @@ fn claude_update_plugin_reports_not_installed_without_a_bundle() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn codex_update_plugin_refreshes_bundle_and_records_hook_trust() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = AgentEnvLock::pin(&home);
-    let project_root = home.path().join("workspace");
-    let codex = get_integration("codex").unwrap();
-    codex.install(&ctx(home.path(), OLD_BIN)).unwrap();
-
-    let plugin_dir = codex_bootstrap_dir(home.path());
-    let agents_dir = home.path().join(".codex/agents");
-    std::fs::remove_dir_all(&agents_dir).unwrap();
-    let codex_config = home.path().join(".codex/config.toml");
-    std::fs::create_dir_all(codex_config.parent().unwrap()).unwrap();
-    std::fs::write(&codex_config, "model = \"gpt-5\"\n").unwrap();
-    std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
-    std::fs::create_dir_all(plugin_dir.join("skills/private-skill")).unwrap();
-    std::fs::write(
-        plugin_dir.join("skills/private-skill/SKILL.md"),
-        "---\nname: private-skill\n---\n",
-    )
-    .unwrap();
-    write_retired_codex_skill(&plugin_dir, "architecture-overview");
-    std::fs::create_dir_all(plugin_dir.join("skills/project-status")).unwrap();
-    std::fs::write(
-        plugin_dir.join("skills/project-status/SKILL.md"),
-        "---\nname: project-status\ndescription: My private project status workflow\n---\n",
-    )
-    .unwrap();
-
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
-        .unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to refresh the bundle");
-    };
-    assert_eq!(paths, vec![plugin_dir.clone()]);
-
-    // update-plugin auto-trusts the refreshed hooks by recording their content
-    // hashes in config.toml, while leaving the user's unrelated keys intact.
-    let updated: toml::Value = toml::from_str(&text(&codex_config)).unwrap();
-    assert_eq!(updated["model"].as_str().unwrap(), "gpt-5");
-    assert!(
-        updated["hooks"]["state"]
-            .as_table()
-            .unwrap()
-            .keys()
-            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
-        "update-plugin should record tracedecay hook trust entries"
-    );
-    assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
-    assert_eq!(
-        text(&plugin_dir.join("skills/private-skill/SKILL.md")),
-        "---\nname: private-skill\n---\n"
-    );
-    assert!(
-        !plugin_dir.join("skills/architecture-overview").exists(),
-        "update-plugin must remove retired bundled Codex skill dirs that lack tracedecay-prefixed names"
-    );
-    assert!(
-        plugin_dir.join("skills/project-status/SKILL.md").exists(),
-        "same-name user-authored Codex skills without TraceDecay markers must be preserved"
-    );
-    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::Global);
-    assert!(
-        text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))
-    );
-    assert!(
-        agents_dir.join("tracedecay-code-explorer.toml").is_file(),
-        "update-plugin must create missing Codex managed agents for existing installs"
-    );
-}
-
-#[test]
-fn codex_update_plugin_refreshes_cache_and_keeps_bootstrap_source_listable() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = AgentEnvLock::pin(&home);
-    let project_root = home.path().join("workspace");
-    let stale_plugin_dir = home
-        .path()
-        .join(".codex/plugins/cache/personal/tracedecay/0.0.4");
-    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
-    write_codex_plugin_manifest(&stale_plugin_dir, "0.0.0");
-
-    let bootstrap_dir = codex_bootstrap_dir(home.path());
-    write_codex_plugin_manifest(&bootstrap_dir, "0.0.0");
-    write_stale_codex_skill(&bootstrap_dir);
-    write_codex_marketplace(home.path(), "personal", "Personal");
-
-    let codex = get_integration("codex").unwrap();
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
-        .unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to refresh the installed cache");
-    };
-    assert_eq!(
-        paths,
-        vec![cached_plugin_dir.clone(), bootstrap_dir.clone()]
-    );
-
-    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN, CodexScope::Global);
-    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN, CodexScope::Global);
-    assert!(
-        !stale_plugin_dir.exists(),
-        "update-plugin should migrate managed Codex cache installs to the current plugin version"
-    );
-    assert!(
-        !bootstrap_dir.join("skills/stale-skill/SKILL.md").exists(),
-        "update-plugin should refresh the bootstrap source so plugin list/add sees current skills"
-    );
-    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
-}
-
-#[test]
-fn codex_update_plugin_migrates_legacy_caveman_home_cache_to_personal() {
-    let home = TempDir::new().unwrap();
-    let project_root = home.path().join("workspace");
-    let legacy_plugin_dir = codex_legacy_cached_plugin_dir(home.path());
-    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
-    write_codex_plugin_manifest(&legacy_plugin_dir, "0.0.0");
-    write_codex_marketplace(home.path(), "caveman-home", "Caveman Home");
-
-    let codex = get_integration("codex").unwrap();
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
-        .unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to migrate the legacy installed cache");
-    };
-    assert_eq!(
-        paths,
-        vec![cached_plugin_dir.clone(), codex_bootstrap_dir(home.path())]
-    );
-
-    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN, CodexScope::Global);
-    assert!(
-        !legacy_plugin_dir.exists(),
-        "update-plugin should remove the legacy caveman-home cache after migrating to personal"
-    );
-    assert_eq!(
-        read_json(&codex_marketplace_path(home.path()))["name"],
-        "personal"
-    );
-    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
-}
-
-#[test]
-fn codex_update_plugin_preserves_existing_marketplace_identity() {
-    let home = TempDir::new().unwrap();
-    let project_root = home.path().join("workspace");
-    let stale_personal_cache = codex_cached_plugin_dir(home.path());
-    write_codex_plugin_manifest(&stale_personal_cache, "0.0.0");
-    write_codex_marketplace(home.path(), "my-marketplace", "My Marketplace");
-    let cached_plugin_dir = home.path().join(format!(
-        ".codex/plugins/cache/my-marketplace/tracedecay/{}",
-        env!("CARGO_PKG_VERSION")
-    ));
-
-    let codex = get_integration("codex").unwrap();
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
-        .unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to refresh the installed cache");
-    };
-    assert_eq!(
-        paths,
-        vec![cached_plugin_dir.clone(), codex_bootstrap_dir(home.path())]
-    );
-    assert!(
-        !stale_personal_cache.exists(),
-        "a preserved marketplace identity must replace the stale personal cache"
-    );
-
-    assert_eq!(
-        read_json(&codex_marketplace_path(home.path()))["name"],
-        "my-marketplace"
-    );
-    assert_eq!(
-        read_json(&codex_marketplace_path(home.path()))["interface"]["displayName"],
-        "My Marketplace"
-    );
-    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
-}
-
-#[test]
-fn codex_update_plugin_recreates_bootstrap_source_from_cache_only_state() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = AgentEnvLock::pin(&home);
-    let project_root = home.path().join("workspace");
-    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
-    let bootstrap_dir = codex_bootstrap_dir(home.path());
-    write_codex_plugin_manifest(&cached_plugin_dir, "0.0.0");
-    write_stale_codex_skill(&cached_plugin_dir);
-    std::fs::write(cached_plugin_dir.join("user-note.txt"), "mine\n").unwrap();
-
-    let codex = get_integration("codex").unwrap();
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
-        .unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to refresh the installed cache");
-    };
-    assert_eq!(
-        paths,
-        vec![cached_plugin_dir.clone(), bootstrap_dir.clone()]
-    );
-
-    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN, CodexScope::Global);
-    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN, CodexScope::Global);
-    assert!(
-        !cached_plugin_dir
-            .join("skills/stale-skill/SKILL.md")
-            .exists(),
-        "update-plugin must prune obsolete skills from installed Codex plugin caches"
-    );
-    assert_eq!(text(&cached_plugin_dir.join("user-note.txt")), "mine\n");
-    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
-}
-
-#[test]
-fn codex_update_plugin_sweeps_legacy_config_when_cache_exists() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = AgentEnvLock::pin(&home);
-    let project_root = home.path().join("workspace");
-    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
-    let legacy_config = write_codex_legacy_config(home.path());
-    write_codex_plugin_manifest(&cached_plugin_dir, "0.0.0");
-
-    let codex = get_integration("codex").unwrap();
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
-        .unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to refresh the installed cache");
-    };
-    assert_eq!(
-        paths,
-        vec![cached_plugin_dir.clone(), codex_bootstrap_dir(home.path())]
-    );
-    assert_codex_legacy_config_migrated(&legacy_config);
-}
-
-#[test]
-fn codex_update_plugin_refreshes_global_cache_and_repo_local_bundle() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = AgentEnvLock::pin(&home);
-    let project = TempDir::new().unwrap();
-    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
-    write_codex_plugin_manifest(&cached_plugin_dir, "0.0.0");
-
-    let repo_plugin_dir = codex_bootstrap_dir(project.path());
-    write_codex_plugin_manifest(&repo_plugin_dir, "0.0.0");
-
-    let codex = get_integration("codex").unwrap();
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, project.path()))
-        .unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to refresh both detected bundles");
-    };
-    let bootstrap_dir = codex_bootstrap_dir(home.path());
-    assert_eq!(
-        paths,
-        vec![
-            cached_plugin_dir.clone(),
-            bootstrap_dir.clone(),
-            repo_plugin_dir.clone()
-        ]
-    );
-
-    assert_codex_bundle_contains_bin(&cached_plugin_dir, NEW_BIN, CodexScope::Global);
-    assert_codex_bundle_contains_bin(&bootstrap_dir, NEW_BIN, CodexScope::Global);
-    assert_codex_bundle_contains_bin(&repo_plugin_dir, NEW_BIN, CodexScope::RepoLocal);
-    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
-    assert_codex_marketplace_entry(
-        &codex_marketplace_path(project.path()),
-        "./plugins/tracedecay",
-    );
-}
-
-#[test]
-fn codex_update_plugin_repairs_personal_marketplace_for_bootstrap_bundle() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = AgentEnvLock::pin(&home);
-    let project_root = home.path().join("workspace");
-    let plugin_dir = codex_bootstrap_dir(home.path());
-    write_codex_plugin_manifest(&plugin_dir, "0.0.0");
-
-    let codex = get_integration("codex").unwrap();
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
-        .unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to refresh the bootstrap bundle");
-    };
-    assert_eq!(paths, vec![plugin_dir.clone()]);
-
-    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::Global);
-    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
-}
-
-#[test]
-fn codex_update_plugin_refreshes_repo_local_bundle_from_project_root() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = AgentEnvLock::pin(&home);
-    let project = TempDir::new().unwrap();
-    let codex = get_integration("codex").unwrap();
-    codex
-        .install_local(&ctx(home.path(), OLD_BIN), project.path())
-        .unwrap();
-    let plugin_dir = codex_bootstrap_dir(project.path());
-    std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
-
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, project.path()))
-        .unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to refresh the repo-local bundle");
-    };
-
-    assert_eq!(paths, vec![plugin_dir.clone()]);
-    assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
-    assert_codex_bundle_contains_bin(&plugin_dir, NEW_BIN, CodexScope::RepoLocal);
-    assert!(
-        text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))
-    );
-}
-
-#[test]
-fn codex_uninstall_removes_repo_local_bundle_from_project_root() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = AgentEnvLock::pin(&home);
-    let project = TempDir::new().unwrap();
-    let codex = get_integration("codex").unwrap();
-    let install_ctx = ctx_with_project(home.path(), OLD_BIN, project.path());
-    codex.install_local(&install_ctx, project.path()).unwrap();
-    let plugin_dir = codex_bootstrap_dir(project.path());
-    let marketplace = codex_marketplace_path(project.path());
-    assert!(plugin_dir.exists());
-
-    codex.uninstall(&install_ctx).unwrap();
-
-    assert!(!plugin_dir.exists());
-    assert!(!text(&marketplace).contains(r#""name":"tracedecay""#));
-    assert!(!text(&marketplace).contains(r#""name": "tracedecay""#));
-}
-
-#[test]
-fn codex_update_plugin_migrates_legacy_config_only_install_to_plugin() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = AgentEnvLock::pin(&home);
-    let project_root = home.path().join("workspace");
-    let legacy_config = write_codex_legacy_config(home.path());
-    let codex = get_integration("codex").unwrap();
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
-        .unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to migrate legacy config to plugin");
-    };
-    assert_eq!(paths, vec![home.path().join("plugins/tracedecay")]);
-    assert_codex_legacy_config_migrated(&legacy_config);
-    assert_codex_bundle_contains_bin(
-        &home.path().join("plugins/tracedecay"),
-        NEW_BIN,
-        CodexScope::Global,
-    );
-    assert_codex_marketplace_entry(&codex_marketplace_path(home.path()), "./plugins/tracedecay");
-}
-
-#[test]
-fn codex_update_plugin_migrates_legacy_config_even_when_repo_bundle_refreshes() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = AgentEnvLock::pin(&home);
-    let project = TempDir::new().unwrap();
-    let codex = get_integration("codex").unwrap();
-    // A repo-local bundle exists (so the refresh list is non-empty) alongside
-    // a legacy config-managed global install, but no personal/cached plugin.
-    codex
-        .install_local(&ctx(home.path(), OLD_BIN), project.path())
-        .unwrap();
-    let legacy_config = write_codex_legacy_config(home.path());
-
-    let outcome = codex
-        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, project.path()))
-        .unwrap();
-
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to refresh");
-    };
-    // The sweep removed the working legacy registration, so the personal
-    // bundle replacement must have been installed — not just the repo bundle.
-    assert!(
-        paths.contains(&home.path().join("plugins/tracedecay")),
-        "legacy migration must install the personal bundle even when a \
-         repo-local refresh already populated the refreshed list; got {paths:?}"
-    );
-    assert!(
-        codex_bootstrap_dir(home.path())
-            .join(".codex-plugin/plugin.json")
-            .exists(),
-        "personal plugin bundle must exist after migrating a legacy install"
-    );
-    assert_codex_legacy_config_migrated(&legacy_config);
-}
-
-#[test]
-fn codex_update_plugin_reports_not_installed_without_bundle_or_legacy_config() {
+fn codex_update_plugin_reports_not_installed_without_source_or_native_cache() {
     let home = TempDir::new().unwrap();
     let _agent_env = AgentEnvLock::pin(&home);
     let project_root = home.path().join("workspace");
@@ -980,45 +456,38 @@ trusted_hash = "sha256:post"
 }
 
 #[test]
-fn codex_update_plugin_refreshes_bundle_with_malformed_unrelated_legacy_config() {
+fn codex_update_plugin_stages_source_and_preserves_native_cache_and_config() {
     let home = TempDir::new().unwrap();
     let _agent_env = AgentEnvLock::pin(&home);
-    let codex = get_integration("codex").unwrap();
-    codex.install(&ctx(home.path(), OLD_BIN)).unwrap();
+    let cache = codex_cached_plugin_dir(home.path()).join("native-cache.txt");
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    let manifest = cache.parent().unwrap().join(".codex-plugin/plugin.json");
+    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    std::fs::write(&manifest, r#"{"name":"tracedecay"}"#).unwrap();
+    std::fs::write(&cache, "cache-owned-by-codex\n").unwrap();
+    let config = home.path().join(".codex/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "model = \"user-choice\"\n").unwrap();
+    let cache_before = bytes(&cache);
+    let config_before = bytes(&config);
 
-    let plugin_dir = codex_bootstrap_dir(home.path());
-    let codex_dir = home.path().join(".codex");
-    std::fs::create_dir_all(&codex_dir).unwrap();
-    let config = codex_dir.join("config.toml");
-    std::fs::write(
-        &config,
-        "[mcp_servers.tracedecay\ncommand = \"/old/bin/tracedecay\"\n",
-    )
-    .unwrap();
-    let before = bytes(&config);
-
-    let mut command = tracedecay_command_with_home(home.path());
-    command.env(
-        "PATH",
-        Path::new(env!("CARGO_BIN_EXE_tracedecay"))
-            .parent()
-            .expect("test binary should have a parent"),
+    let outcome = get_integration("codex")
+        .unwrap()
+        .update_plugin(&ctx(home.path(), NEW_BIN))
+        .unwrap();
+    let UpdatePluginOutcome::DeferredUserAction(deferred) = outcome else {
+        panic!("Codex cache refresh must be deferred to Codex");
+    };
+    assert!(
+        deferred
+            .remediation
+            .contains("codex plugin update tracedecay@personal")
     );
-    let output = command
-        .arg("update-plugin")
-        .output()
-        .expect("run tracedecay update-plugin");
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // The atomic update route re-runs the installer, whose legacy sweep
-    // reports the unparseable config without overwriting it.
-    assert!(stderr.contains("Could not inspect"));
-    assert!(stderr.contains("Codex MCP config at"));
-    assert!(stderr.contains("failed to parse"));
-    assert_eq!(bytes(&config), before);
+    assert_eq!(bytes(&cache), cache_before);
+    assert_eq!(bytes(&config), config_before);
     assert_codex_bundle_contains_bin(
-        &plugin_dir,
-        env!("CARGO_BIN_EXE_tracedecay"),
+        &codex_bootstrap_dir(home.path()),
+        NEW_BIN,
         CodexScope::Global,
     );
 }

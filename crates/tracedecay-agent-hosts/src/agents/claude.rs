@@ -109,41 +109,23 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        let claude_dir = ctx.home.join(".claude");
-        let settings_path = claude_dir.join("settings.json");
-        let claude_md_path = claude_dir.join("CLAUDE.md");
-
-        if !plugin_marketplace_manifest_path(&ctx.home).exists()
-            && !has_config_managed_leftovers(&ctx.home)
-        {
+        if !plugin_marketplace_manifest_path(&ctx.home).exists() {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
 
-        // Redeploy the bundle at the current version, refresh the marketplace
-        // path, ensure enablement, and re-run migration.
+        // The marketplace source is TraceDecay-owned, but Claude Code activates
+        // a versioned cache through its own CLI. Refreshing only this source
+        // cannot honestly report an activated plugin, so stage it and defer
+        // the host-native cache update to the operator.
         let deploy_dir = deploy_plugin_bundle(&ctx.home, &ctx.tracedecay_bin)?;
-        register_marketplace(&ctx.home, &deploy_dir)?;
-
-        let mut settings = load_json_file_strict(&settings_path)?;
-        enable_plugin(&mut settings);
-        // Write/refresh the plugin-namespace permission allowlist (and migrate
-        // legacy `mcp__tracedecay__*` entries to their plugin twins) so an
-        // `update-plugin` from an older install stops prompting on every tool
-        // call. Idempotent.
-        install_permissions(&mut settings, &ctx.tool_permissions);
-        write_json_file(&settings_path, &settings)?;
-
-        migrate_off_config_managed(&ctx.home)?;
-
-        // Refresh the managed CLAUDE.md steering block so an `update-plugin`
-        // rewrites a stale block to the current moment-trigger text. The block
-        // reaches subagents (they load the project/user CLAUDE.md), so keeping
-        // it current is how updated steering actually propagates.
-        install_claude_md_rules(&claude_md_path)?;
-
-        sync_claude_plugin_cache(&ctx.home, &ctx.tracedecay_bin);
-
-        Ok(UpdatePluginOutcome::Refreshed(vec![deploy_dir]))
+        Ok(UpdatePluginOutcome::DeferredUserAction(
+            super::DeferredUserAction {
+                remediation: format!(
+                    "Claude Code plugin source is staged. Run `claude plugin update {PLUGIN_IDENTIFIER}`, then restart Claude Code."
+                ),
+                staged_paths: vec![deploy_dir],
+            },
+        ))
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -505,13 +487,6 @@ fn known_marketplaces_path(home: &Path) -> PathBuf {
 /// Returns the deploy dir.
 fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let deploy_dir = plugin_deploy_dir(home);
-    super::sweep_superseded_plugin_siblings(
-        &deploy_dir,
-        &[
-            ".claude-plugin/plugin.json",
-            ".claude-plugin/marketplace.json",
-        ],
-    )?;
     // Clean-replace: wipe the tracedecay-owned deploy dir before writing the
     // fresh bundle, so a file the bundle no longer ships (e.g. a retired skill
     // dir) does not linger across upgrades. Only remove a directory we
@@ -658,13 +633,6 @@ fn set_mcp_command(raw: &str, tracedecay_bin: &str) -> Result<String> {
 /// marketplace dir).
 fn remove_deployed_bundle(home: &Path) -> Result<()> {
     let deploy_dir = plugin_deploy_dir(home);
-    super::sweep_superseded_plugin_siblings(
-        &deploy_dir,
-        &[
-            ".claude-plugin/plugin.json",
-            ".claude-plugin/marketplace.json",
-        ],
-    )?;
     match std::fs::remove_dir_all(&deploy_dir) {
         Ok(()) => {
             eprintln!(

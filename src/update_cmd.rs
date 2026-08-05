@@ -711,18 +711,11 @@ async fn run_post_update_mutations(
     // markers stay put, so the next ordinary command retries via the silent
     // reinstall.
     //
-    // Migrate first so a configured-but-untracked agent (has_tracedecay true,
-    // absent from `installed_agents`) is picked up and refreshed too — exactly
-    // what the canonical `handle_reinstall_command` does.
     let mut config = UserConfig::load();
-    if let Some(home) = tracedecay::agents::home_dir() {
-        tracedecay::agents::migrate_installed_agents(&home, &mut config);
-    }
     // Prune tracked ids that no longer resolve to an integration (a release
     // renamed/removed one, or a typo landed in `installed_agents`).
-    // `migrate_installed_agents` only ADDS ids, so without this the stale id
-    // would be retried on every command forever. The reinstall pass already
-    // skips such ids, but dropping them here stops the pointless retry churn.
+    // The reinstall pass skips such ids, but dropping them here stops the
+    // pointless retry churn.
     let before = config.installed_agents.len();
     config
         .installed_agents
