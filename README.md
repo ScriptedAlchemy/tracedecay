@@ -22,8 +22,8 @@ Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as
 ## Highlights
 
 - Typed MCP operations for discovery, call graphs, impact analysis, code health, test mapping, repository context, and anchored edits.
-- 50+ languages through Rust tree-sitter extractors, with lite/medium/full Cargo feature tiers.
-- Native integrations for Claude Code, Codex, Cursor, Gemini, Hermes, Kiro, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo, Kimi, and Vibe.
+- Rust tree-sitter extractors with lite/medium/full Cargo feature tiers; `Cargo.toml` is the exact language authority.
+- Native integrations for supported Claude Code, Codex, Cursor, Hermes, Kiro, Kimi Code, OpenCode, and Cline-family hosts.
 - Daemon-owned local storage through the `rusqlite` runtime and embedded Grafeo graph store. Local operation is the default; configured remote sources and authorities follow explicit policy rather than an implicit local-only guarantee.
 - On-demand freshness checks with exact repository, worktree, ref, commit, and generation provenance across linked git worktrees.
 - Project-wide facts, sessions, and lossless LCM history remain available across branches; historical host transcripts enter through the same sanitized daemon ingestion path.

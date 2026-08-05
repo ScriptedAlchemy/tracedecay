@@ -38,9 +38,8 @@ tracedecay init
 This enrolls the repository with the daemon-owned project store and indexes all
 supported files. Store locations are daemon-owned implementation details:
 clients, host integrations, and operators must not open, copy, edit, or query a
-TraceDecay database directly. The default `full` feature set covers 50+
-languages; `Cargo.toml` is the source of truth for exact membership of the
-`lite` / `medium` / `full` tiers.
+TraceDecay database directly. `Cargo.toml` is the source of truth for exact
+language membership of the `lite` / `medium` / `full` tiers.
 
 Check what was indexed:
 
