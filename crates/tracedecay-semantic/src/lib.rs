@@ -23,9 +23,13 @@ use tracedecay_query::retrieval::semantic::{
     SemanticQueryEmbeddingRequestV1,
 };
 
+#[cfg(any(test, feature = "test-helpers"))]
+pub use self::fastembed_adapter::AdmittedProjectionArtifactV1;
+#[cfg(not(any(test, feature = "test-helpers")))]
+use self::fastembed_adapter::AdmittedProjectionArtifactV1;
 use self::fastembed_adapter::{
-    AdmittedProjectionArtifactV1, BoundedSanitizedTextBatchV1, CancellationSignal,
-    EmbeddingRuntime, EmbeddingSession, FastEmbedEmbeddingRuntime,
+    BoundedSanitizedTextBatchV1, CancellationSignal, EmbeddingRuntime, EmbeddingSession,
+    FastEmbedEmbeddingRuntime,
 };
 use self::projector::{
     CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation,
@@ -59,16 +63,17 @@ pub use model_catalog::production_fastembed_catalog;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use model_catalog::{CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1};
 #[cfg(any(test, feature = "test-helpers"))]
-pub use model_lifecycle::{ModelLifecycleErrorV1, ModelMemberSourceV1};
+pub use model_lifecycle::ModelMemberSourceV1;
 pub use model_lifecycle::{
-    SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
-    apply_config_and_queue_startup, shared_lifecycle_owner,
+    ModelLifecycleErrorV1, SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1,
+    SemanticModelLifecycleStatusV1, apply_config_and_queue_startup, shared_lifecycle_owner,
 };
 
 pub use runtime_service::{
     PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1,
     SemanticRuntimeScheduleCancellationV1, SemanticRuntimeScheduleFailureV1,
-    SemanticRuntimeScheduleStatusV1, SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1,
+    SemanticRuntimeScheduleStatusV1, SemanticRuntimeSchedulingHandleV1,
+    SemanticRuntimeShutdownReceiptV1, SemanticRuntimeWorkV1,
 };
 
 /// Default `FastEmbed` catalog model selected on install (offline-safe).
@@ -156,6 +161,10 @@ pub enum SemanticFallbackReasonV1 {
     Loading,
     /// Model acquisition or load failed; exact/lexical/graph remain available.
     ModelFailed,
+    /// A complete prior activation exists but does not match the newest source.
+    Stale,
+    /// The semantic store schema must be explicitly reset before semantics run.
+    ResetRequired,
 }
 
 type SemanticProjectionStageFutureV1 = Pin<
@@ -595,8 +604,9 @@ impl DaemonSemanticRuntimeHandleV1 {
         let pool_config = self.pool_config.clone();
         let runtime = Arc::clone(&self.runtime);
         let query_in_flight = Arc::clone(&self.query_in_flight);
-        let work = SemanticRuntimeWorkV1::new(
+        let work = SemanticRuntimeWorkV1::new_with_projection(
             request.target_generation,
+            projection_key.clone(),
             total_units,
             move |progress| async move {
                 let authority = tokio::task::spawn_blocking(request.load_artifact)
@@ -701,6 +711,22 @@ impl DaemonSemanticRuntimeHandleV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.scheduling.cancel()
+    }
+
+    pub fn begin_shutdown(&self) -> bool {
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.scheduling.begin_shutdown()
+    }
+
+    pub async fn cancel_and_join_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> SemanticRuntimeShutdownReceiptV1 {
+        self.begin_shutdown();
+        self.scheduling.cancel_and_join_until(deadline).await
     }
 
     pub fn query_factory(
