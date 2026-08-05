@@ -30,7 +30,10 @@ fn codex_and_cursor_compaction_requests_delegate_summarization_to_the_daemon() {
             "compaction",
             None,
         );
-        assert_eq!(request.summarizer, LcmSummarizerMode::HermesAuxiliary);
+        assert_eq!(
+            request.summarizer,
+            crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary
+        );
     }
 }
 

@@ -386,9 +386,7 @@ fn idempotency_for_tool(
         }
         _ if matches!(
             tool_name,
-            "tracedecay_dashboard"
-                | "tracedecay_lcm_compress"
-                | "tracedecay_lcm_session_boundary"
+            "tracedecay_dashboard" | "tracedecay_lcm_compress" | "tracedecay_lcm_session_boundary"
         ) =>
         {
             McpIdempotencyContract::Idempotent

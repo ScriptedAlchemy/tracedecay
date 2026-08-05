@@ -104,8 +104,7 @@ pub(super) const TABLES: &[Table] = &[
         "project_aliases",
         [
             column("alias_path", "TEXT", false, None, 1),
-            column("scope_kind", "TEXT", true, None, 0),
-            column("scope_id", "TEXT", true, None, 0),
+            column("project_id", "TEXT", true, None, 0),
             column("last_seen_at", "INTEGER", true, None, 0),
         ],
         [foreign_key(

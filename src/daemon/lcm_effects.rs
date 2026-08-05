@@ -188,7 +188,6 @@ fn summary_unavailable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::engine::Executor;
     use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
     use crate::sessions::lcm::{LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode};
     use crate::sessions::{SessionMessageRecord, SessionRecord};
