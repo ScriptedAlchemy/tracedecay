@@ -62,6 +62,7 @@ pub(super) async fn install_final_schema(
                     AND capture_target_offset IS NULL
                     AND verify_byte_offset = reflog_byte_length
                     AND verify_digest = '{initial}'
+                    AND emitted_count = 0
                 )
                 OR
                 (
@@ -69,6 +70,7 @@ pub(super) async fn install_final_schema(
                     AND capture_target_offset IS NOT NULL
                     AND reflog_byte_offset = capture_target_offset
                     AND verify_byte_offset >= capture_target_offset
+                    AND emitted_count = 0
                 )
                 OR
                 (
@@ -353,10 +355,14 @@ pub(super) async fn compare_and_swap_progress(
                 AND source_head_oid = ?29
                 AND (
                     (scan_mode = 'reflog_capture'
-                        AND ?2 IN ('reflog_capture', 'reflog_verify'))
+                        AND ?2 IN ('reflog_capture', 'reflog_verify')
+                        AND ?3 <= reflog_byte_offset
+                        AND ?13 >= segment_cursor
+                        AND ?14 = 0)
                     OR
                     (scan_mode = 'reflog_verify'
                         AND ?2 IN ('reflog_verify', 'graph')
+                        AND ?6 <= verify_byte_offset
                         AND capture_target_offset IS ?5
                         AND reflog_digest = ?4
                         AND consulted_ref_seal_json = ?15
@@ -377,7 +383,9 @@ pub(super) async fn compare_and_swap_progress(
                         AND cursor_head_branch IS ?9
                         AND cursor_oid = ?10
                         AND segment_end = ?11
-                        AND segment_tip_oid = ?12)
+                        AND segment_tip_oid = ?12
+                        AND ?13 >= segment_cursor
+                        AND ?14 >= emitted_count)
                 )",
             params![
                 next.generation,
@@ -795,10 +803,12 @@ fn validate_progress(progress: &GitHistoryProgressRow) -> Result<(), GitCorrelat
         (GitHistoryScanMode::ReflogCapture, None) => {
             progress.verify_byte_offset == progress.reflog_byte_length
                 && progress.verify_digest == initial_reflog_content_chain()
+                && progress.emitted_count == 0
         }
         (GitHistoryScanMode::ReflogVerify, Some(target)) => {
             progress.reflog_byte_offset == target
                 && (target..=progress.reflog_byte_length).contains(&progress.verify_byte_offset)
+                && progress.emitted_count == 0
         }
         (GitHistoryScanMode::Graph, Some(target)) => {
             progress.reflog_byte_offset == target
