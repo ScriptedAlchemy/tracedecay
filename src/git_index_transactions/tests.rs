@@ -163,6 +163,58 @@ fn configured_openpgp_program_keeps_signing_preview_only() {
     );
 }
 
+#[test]
+fn configuration_and_filesystem_capability_digests_are_distinct() {
+    let directory = tempdir().expect("temporary repository");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init starts")
+            .success()
+    );
+    let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+    let configuration_before = runner.configuration_digest().expect("configuration");
+    let capabilities_before = runner
+        .filesystem_capabilities_digest()
+        .expect("filesystem capabilities");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["config", "--local", "tracedecay.fixture", "changed"])
+            .status()
+            .expect("git config starts")
+            .success()
+    );
+    assert_ne!(
+        configuration_before,
+        runner
+            .configuration_digest()
+            .expect("changed configuration")
+    );
+    assert_eq!(
+        capabilities_before,
+        runner
+            .filesystem_capabilities_digest()
+            .expect("unchanged filesystem capabilities")
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["config", "--local", "core.filemode", "false"])
+            .status()
+            .expect("git config starts")
+            .success()
+    );
+    assert_ne!(
+        capabilities_before,
+        runner
+            .filesystem_capabilities_digest()
+            .expect("changed filesystem capabilities")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn merge_and_reference_transaction_hooks_are_applicable() {

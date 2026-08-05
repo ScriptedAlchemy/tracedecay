@@ -469,6 +469,7 @@ fn git_requests() -> (ApplicationSurfaceRequest, ApplicationSurfaceRequest) {
             ignored_collision_digest: None,
         },
         tracedecay_domain::GitOperationStateV1::None,
+        Some(digest('0')),
         Some(digest('1')),
         Some(digest('2')),
         Some(digest('3')),
