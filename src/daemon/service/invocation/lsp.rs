@@ -790,7 +790,9 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         }
-        let reconnected_access = registry.reconnect_with_credential(&access, credential, now_ms);
+        let expires_at_ms = now_ms.saturating_add(LSP_SESSION_TTL_MS);
+        let reconnected_access =
+            registry.reconnect_with_credential(&access, credential, now_ms, expires_at_ms);
         let Ok(reconnected_access) = reconnected_access else {
             registry.reclaim(access.session_id());
             drop(registry);
@@ -827,6 +829,7 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         }
+        session.expires_at_ms = expires_at_ms;
         DaemonInvocationResponse::with_outcome(
             request_id,
             DaemonInvocationOutcome::LspReconnected {
