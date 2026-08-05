@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use tracedecay_application::{
     CancellationSignal, Deadline, InvocationTarget, PageRequest, RequestId,
 };
-use tracedecay_tool_catalog::BindingSurface;
+use tracedecay_tool_catalog::{BindingSurface, ProfileId};
 
 use crate::application_surface::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
@@ -33,6 +33,8 @@ pub enum McpDispatchMetadataError {
     Initialization(String),
     #[error("advertised MCP tool '{0}' has no dispatch contract")]
     MissingContract(String),
+    #[error("MCP discovery profile '{0}' is not registered")]
+    MissingProfile(ProfileId),
 }
 
 pub(crate) fn attach_dispatch_metadata(

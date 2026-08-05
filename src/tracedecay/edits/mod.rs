@@ -52,6 +52,7 @@
 //! ```
 
 mod api_migration;
+mod api_migration_verification;
 mod ast_grep;
 mod file_authority;
 mod plan;

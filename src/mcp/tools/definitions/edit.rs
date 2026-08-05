@@ -72,7 +72,9 @@ pub(super) fn def_source_edit_reconcile() -> ToolDefinition {
                         "ast_grep_rewrite",
                         "replace_symbol",
                         "insert_at_symbol",
-                        "move_symbol"
+                        "move_symbol",
+                        "rename_symbol",
+                        "api_migration_apply"
                     ],
                     "description": "Original source-edit operation kind retained in the uncertain journal."
                 },
@@ -564,12 +566,52 @@ pub(super) fn def_api_migration_apply() -> ToolDefinition {
     )
 }
 
+pub(super) fn def_rename_symbol() -> ToolDefinition {
+    def_rw(
+        "tracedecay_rename_symbol",
+        "Rename Symbol",
+        "Dry-run or atomically apply one accepted bound-symbol rename plan. The caller must \
+         provide the exact immutable plan and digest returned by the canonical rename planner. \
+         The journaled source-edit authority revalidates graph identity, callers, file preimages, \
+         cancellation, and rollback. This operation never accepts or publishes a raw WorkspaceEdit.",
+        {
+            let mut schema = source_edit_schema(json!({
+                "type": "object",
+                "properties": {
+                    "plan": {
+                        "type": "object",
+                        "description": "Exact immutable single-symbol rename plan."
+                    },
+                    "plan_digest": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$",
+                        "description": "Explicit acceptance of the exact immutable plan."
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Revalidate and preview with zero writes (default: true)."
+                    },
+                    "verify": {
+                        "type": "boolean",
+                        "description": "Must remain true; rename apply always verifies diagnostics and rollback (default: true)."
+                    }
+                },
+                "required": ["plan", "plan_digest"]
+            }));
+            schema["properties"]["dry_run"]["default"] = json!(true);
+            schema["properties"]["verify"]["default"] = json!(true);
+            schema["allOf"][0]["if"]["required"] = json!(["dry_run"]);
+            schema
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tracedecay_application::SourceEditKind;
 
-    fn source_edit_definitions() -> [(ToolDefinition, SourceEditKind); 8] {
+    fn source_edit_definitions() -> [(ToolDefinition, SourceEditKind); 9] {
         [
             (def_str_replace(), SourceEditKind::StrReplace),
             (def_multi_str_replace(), SourceEditKind::MultiStrReplace),
@@ -578,6 +620,7 @@ mod tests {
             (def_replace_symbol(), SourceEditKind::ReplaceSymbol),
             (def_insert_at_symbol(), SourceEditKind::InsertAtSymbol),
             (def_move_symbol(), SourceEditKind::MoveSymbol),
+            (def_rename_symbol(), SourceEditKind::RenameSymbol),
             (def_api_migration_apply(), SourceEditKind::ApiMigrationApply),
         ]
     }
@@ -601,7 +644,9 @@ mod tests {
                 schema["properties"]["dry_run"]["default"],
                 json!(matches!(
                     kind,
-                    SourceEditKind::MoveSymbol | SourceEditKind::ApiMigrationApply
+                    SourceEditKind::MoveSymbol
+                        | SourceEditKind::RenameSymbol
+                        | SourceEditKind::ApiMigrationApply
                 ))
             );
         }

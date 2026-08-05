@@ -92,38 +92,52 @@ pub(super) async fn run_source_edit(
                 .move_symbol(&symbol, &dest_file, dry_run, update_references)
                 .await?,
         ),
-        SourceEditRequest::ApiMigrationApply {
+        SourceEditRequest::RenameSymbol {
             plan,
             plan_digest,
             dry_run,
             ..
-        } => {
-            if plan.plan_digest != plan_digest {
-                return Err(config_error(
-                    "API migration apply digest does not match its immutable plan",
-                ));
-            }
-            let replanned = crate::api_migration::plan_api_migration(
-                graph,
-                ApiMigrationPlanRequestV1 {
-                    family_id: plan.family_id.clone(),
-                    operations: plan.operations.clone(),
-                },
-            )
-            .await?;
-            validate_replanned_api_migration(&plan, &replanned)?;
-            let mut is_cancelled = || {
-                control
-                    .and_then(|control| control.checkpoint(CancellationStage::EffectInFlight))
-                    .is_some()
-            };
-            SourceEditOutcome::ApiMigration(
-                graph
-                    .apply_api_migration_plan(&replanned, dry_run, &mut is_cancelled)
-                    .await?,
-            )
         }
+        | SourceEditRequest::ApiMigrationApply {
+            plan,
+            plan_digest,
+            dry_run,
+            ..
+        } => SourceEditOutcome::ApiMigration(
+            apply_api_migration_request(graph, plan, plan_digest, dry_run, control).await?,
+        ),
     })
+}
+
+async fn apply_api_migration_request(
+    graph: &TraceDecay,
+    plan: ApiMigrationPlanV1,
+    plan_digest: tracedecay_domain::ManifestDigest,
+    dry_run: bool,
+    control: Option<&SourceEditEffectControlV1>,
+) -> Result<tracedecay_application::ApiMigrationApplyResultV1> {
+    if plan.plan_digest != plan_digest {
+        return Err(config_error(
+            "API migration apply digest does not match its immutable plan",
+        ));
+    }
+    let replanned = crate::api_migration::plan_api_migration(
+        graph,
+        ApiMigrationPlanRequestV1 {
+            family_id: plan.family_id.clone(),
+            operations: plan.operations.clone(),
+        },
+    )
+    .await?;
+    validate_replanned_api_migration(&plan, &replanned)?;
+    let mut is_cancelled = || {
+        control
+            .and_then(|control| control.checkpoint(CancellationStage::EffectInFlight))
+            .is_some()
+    };
+    graph
+        .apply_api_migration_plan(&replanned, dry_run, &mut is_cancelled)
+        .await
 }
 
 fn validate_replanned_api_migration(

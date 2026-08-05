@@ -197,9 +197,15 @@ pub async fn plan_api_migration(
         .collect::<Result<Vec<_>>>()?;
     graph_evidence.sort();
     graph_evidence.dedup();
+    let canonical_worktree = std::fs::canonicalize(graph.project_root()).map_err(|error| {
+        config_error(format!(
+            "cannot bind API migration to its canonical worktree: {error}"
+        ))
+    })?;
     let graph_revision = canonical_sha256(&(
         "tracedecay.api-migration.graph-evidence.v1",
         &repository_revision,
+        canonical_worktree.as_os_str().as_encoded_bytes(),
         &graph_evidence,
     ))
     .map_err(domain_error)?;
@@ -323,6 +329,29 @@ async fn plan_bound_rename(
         }
     };
     graph_evidence.push(graph_tuple(&node));
+    let source = source_for(*graph, &node.file_path, sources)?;
+    let (definition_start, definition_end) = node_definition_span(source, &node)?;
+    let target_qualified_name = identity
+        .qualified_name
+        .strip_suffix(&identity.old_name)
+        .map_or_else(
+            || new_name.to_owned(),
+            |prefix| format!("{prefix}{new_name}"),
+        );
+    if graph
+        .get_nodes_by_qualified_name(&target_qualified_name)
+        .await?
+        .into_iter()
+        .any(|candidate| candidate.id != node.id)
+    {
+        sites.push(blocked_site(
+            operation_id,
+            &node.file_path,
+            definition_start,
+            "rename target collides with an existing canonical symbol",
+        ));
+        return Ok(());
+    }
     let incoming = graph.get_incoming_edges(&node.id).await?;
     let mut expected_calls = BTreeMap::<(String, u32), BTreeSet<String>>::new();
     for edge in incoming {
@@ -351,8 +380,6 @@ async fn plan_bound_rename(
             "AST rename planning exceeded its bounded match budget",
         ));
     }
-    let source = source_for(*graph, &node.file_path, sources)?;
-    let (definition_start, definition_end) = node_definition_span(source, &node)?;
     let declaration = matches
         .matches
         .iter()
@@ -414,6 +441,26 @@ async fn plan_bound_rename(
             ));
         }
         source_for(*graph, &path, sources)?;
+    }
+    for matched in matches.matches.iter().filter(|matched| {
+        is_identifier_kind(&matched.node_kind) && matched.matched_text == identity.old_name
+    }) {
+        let covered = sites.iter().any(|site| {
+            site.operation_id == operation_id
+                && site.path == matched.file
+                && site.start == matched.start_byte
+                && site.end == matched.end_byte
+                && site.disposition == ApiMigrationSiteDispositionV1::Changed
+        });
+        if !covered {
+            sites.push(blocked_site(
+                operation_id,
+                &matched.file,
+                matched.start_byte,
+                "rename found an identifier without canonical caller evidence",
+            ));
+            source_for(*graph, &matched.file, sources)?;
+        }
     }
     Ok(())
 }

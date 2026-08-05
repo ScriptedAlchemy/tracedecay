@@ -544,6 +544,32 @@ pub(super) async fn handle_api_migration_apply(
     .await
 }
 
+pub(super) async fn handle_rename_symbol(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
+    let plan = serde_json::from_value::<ApiMigrationPlanV1>(
+        args.get("plan")
+            .cloned()
+            .ok_or_else(|| missing_required_param("plan"))?,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("invalid rename symbol plan: {error}"),
+    })?;
+    let plan_digest = ManifestDigest::new(required_str(&args, "plan_digest")?)
+        .map_err(source_edit_identity_error)?;
+    if args.get("verify").and_then(Value::as_bool) == Some(false) {
+        return Err(TraceDecayError::Config {
+            message: "rename symbol verification cannot be disabled".to_owned(),
+        });
+    }
+    let dry_run = args.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
+    let request =
+        tracedecay_usecases::rename_symbol::tracedecay_rename_symbol(plan, plan_digest, dry_run)?;
+    source_edit_tool_result(cg, &args, request, invocation).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -740,7 +766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eight_source_edit_handlers_forward_exact_variants_defaults_and_controls() {
+    async fn nine_source_edit_handlers_forward_exact_variants_defaults_and_controls() {
         let project = tempdir().unwrap();
         let (graph, _database_scope) = fixture_graph(project.path()).await;
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -796,6 +822,31 @@ mod tests {
         .await
         .unwrap();
         let plan = api_migration_plan();
+        let mut rename_plan = plan.clone();
+        rename_plan.operations = vec![
+            tracedecay_application::ApiMigrationOperationRequestV1::RenameBoundSymbol {
+                operation_id: "rename-symbol".to_owned(),
+                depends_on: Vec::new(),
+                symbol: tracedecay_application::ApiMigrationSymbolV1 {
+                    node_id: "node.old".to_owned(),
+                    qualified_name: "fixture::old".to_owned(),
+                    kind: "function".to_owned(),
+                    file: "src/lib.rs".to_owned(),
+                    old_name: "old".to_owned(),
+                },
+                new_name: "new".to_owned(),
+            },
+        ];
+        handle_rename_symbol(
+            &graph,
+            json!({
+                "plan": rename_plan,
+                "plan_digest": PREDICTED_STATE
+            }),
+            invocation_context(Some(Arc::clone(&executor))),
+        )
+        .await
+        .unwrap();
         handle_api_migration_apply(
             &graph,
             json!({
@@ -820,6 +871,7 @@ mod tests {
                 SourceEditKind::ReplaceSymbol,
                 SourceEditKind::InsertAtSymbol,
                 SourceEditKind::MoveSymbol,
+                SourceEditKind::RenameSymbol,
                 SourceEditKind::ApiMigrationApply,
             ]
         );
@@ -848,7 +900,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            &seen[7].edit,
+            &seen[8].edit,
             SourceEditRequest::ApiMigrationApply {
                 plan,
                 plan_digest,

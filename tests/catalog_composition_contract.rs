@@ -166,22 +166,22 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
         (
             "profile.default",
             ProfileKind::Default,
-            ProfileBudget::new(320, 18_000).unwrap(),
+            ProfileBudget::new(320, 262_144, 18_000).unwrap(),
         ),
         (
             "profile.compact",
             ProfileKind::Compact,
-            ProfileBudget::new(22, 4_000).unwrap(),
+            ProfileBudget::new(22, 65_536, 4_000).unwrap(),
         ),
         (
             "profile.administrative",
             ProfileKind::Administrative,
-            ProfileBudget::new(40, 8_000).unwrap(),
+            ProfileBudget::new(40, 131_072, 8_000).unwrap(),
         ),
         (
             "profile.host-limited",
             ProfileKind::HostLimited,
-            ProfileBudget::new(17, 2_000).unwrap(),
+            ProfileBudget::new(17, 49_152, 2_000).unwrap(),
         ),
     ];
 

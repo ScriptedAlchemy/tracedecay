@@ -442,6 +442,9 @@ pub(super) async fn dispatch_edit_tools(
         "tracedecay_api_migration_apply" => {
             edit::handle_api_migration_apply(cg, args, invocation.clone()).await
         }
+        "tracedecay_rename_symbol" => {
+            edit::handle_rename_symbol(cg, args, invocation.clone()).await
+        }
         "tracedecay_source_edit_reconcile" => {
             edit::handle_source_edit_reconcile(cg, args, invocation).await
         }

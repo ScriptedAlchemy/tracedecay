@@ -133,6 +133,7 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_insert_at_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_move_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_api_migration_plan", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_rename_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_api_migration_apply", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_source_edit_reconcile", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_test_map", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -334,21 +335,22 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_fact_store"
             | "tracedecay_session_start"
             | "tracedecay_session_end"
+            | "tracedecay_str_replace"
+            | "tracedecay_multi_str_replace"
+            | "tracedecay_insert_at"
+            | "tracedecay_ast_grep_rewrite"
+            | "tracedecay_replace_symbol"
+            | "tracedecay_insert_at_symbol"
+            | "tracedecay_move_symbol"
     )
 }
 
 fn executable_handler_is_available(
     binding: &McpToolBinding,
     effect: EffectClass,
-    application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
+    _application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
 ) -> bool {
-    effect.is_read_only()
-        || verified_effect_journey(binding.name)
-        || matches!(binding.group, Some(McpToolDispatchGroup::Edit))
-            && application_capability.is_some_and(|capability| {
-                capability.effect() == EffectClass::SourceEdit
-                    && capability.availability().is_callable()
-            })
+    effect.is_read_only() || verified_effect_journey(binding.name)
 }
 
 fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract {

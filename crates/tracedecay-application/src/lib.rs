@@ -7,6 +7,7 @@
 
 pub mod advisory;
 pub mod api_migration;
+pub mod api_migration_verification;
 pub mod authorization;
 pub mod clock;
 pub mod configuration;
@@ -57,6 +58,7 @@ pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, s
 
 pub use advisory::*;
 pub use api_migration::*;
+pub use api_migration_verification::*;
 pub use authorization::{
     AuthorizationAdmission, AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome,
     AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,

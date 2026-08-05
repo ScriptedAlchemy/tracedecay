@@ -5,6 +5,7 @@ use tracedecay_application::{
     ApiMigrationOperationRequestV1, ApiMigrationPlanRequestV1, ApiMigrationSiteDispositionV1,
     SourceEditRequest, api_migration_definition_digest,
 };
+use tracedecay_lsp::{LspPosition, LspRange, RenameCandidate};
 
 use super::test_support::{
     api_migration_symbol, apply_api_migration_fixture, indexed_api_migration_fixture,
@@ -139,9 +140,169 @@ async fn api_migration_rename_bound_symbol_plans_and_applies_declaration_and_cal
     let result = apply_api_migration_fixture(&graph, plan).await;
     assert!(result.success);
     assert_eq!(result.changed_sites, 2);
+    assert_eq!(result.formatter.checked_files, ["src/lib.rs"]);
+    assert!(result.formatter.would_change_files.is_empty());
+    assert_eq!(result.diagnostic_delta, Default::default());
+    assert!(result.affected_tests.is_empty());
+    assert!(result.callers_verified);
     assert_eq!(
         fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
         expected
+    );
+}
+
+#[tokio::test]
+async fn lsp_rename_candidate_builds_an_accepted_plan_without_a_workspace_edit() {
+    let initial = "pub fn legacy_name() -> i32 {\n    1\n}\n";
+    let (project, graph, _database_scope) = indexed_api_migration_fixture(initial).await;
+    let candidate = RenameCandidate {
+        document_uri: url::Url::from_file_path(project.path().join("src/lib.rs"))
+            .unwrap()
+            .to_string(),
+        range: LspRange {
+            start: LspPosition {
+                line: 0,
+                character: 7,
+            },
+            end: LspPosition {
+                line: 0,
+                character: 18,
+            },
+        },
+        placeholder: "legacy_name".to_owned(),
+    };
+
+    let plan = tracedecay_usecases::rename_symbol::plan_lsp_rename_candidate(
+        &graph,
+        &candidate,
+        "current_name",
+    )
+    .await
+    .unwrap();
+    let accepted = tracedecay_usecases::rename_symbol::tracedecay_rename_symbol(
+        plan.clone(),
+        plan.plan_digest.clone(),
+        true,
+    )
+    .unwrap();
+
+    assert!(!plan.blocked);
+    assert!(matches!(
+        accepted,
+        SourceEditRequest::RenameSymbol {
+            dry_run: true,
+            verify: true,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn rename_symbol_conflict_is_blocked_before_any_workspace_write() {
+    let initial =
+        "pub fn legacy_name() -> i32 {\n    1\n}\n\npub fn current_name() -> i32 {\n    2\n}\n";
+    let (project, graph, _database_scope) = indexed_api_migration_fixture(initial).await;
+    let operation = ApiMigrationOperationRequestV1::RenameBoundSymbol {
+        operation_id: "rename-conflict".to_owned(),
+        depends_on: Vec::new(),
+        symbol: api_migration_symbol(&graph, "legacy_name").await,
+        new_name: "current_name".to_owned(),
+    };
+
+    let plan = plan_api_migration_fixture(&graph, "family.rename-conflict", operation).await;
+
+    assert!(plan.blocked);
+    assert!(plan.sites.iter().any(|site| {
+        site.disposition == ApiMigrationSiteDispositionV1::Blocked
+            && site
+                .reason
+                .contains("collides with an existing canonical symbol")
+    }));
+    assert_eq!(
+        fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+        initial
+    );
+}
+
+#[tokio::test]
+async fn rename_symbol_blocks_an_identifier_without_canonical_caller_evidence() {
+    let initial = "pub fn legacy_name() -> i32 {\n    1\n}\n\npub fn unrelated() -> i32 {\n    let legacy_name = 2;\n    legacy_name\n}\n";
+    let (_project, graph, _database_scope) = indexed_api_migration_fixture(initial).await;
+    let operation = ApiMigrationOperationRequestV1::RenameBoundSymbol {
+        operation_id: "rename-unbound-identifier".to_owned(),
+        depends_on: Vec::new(),
+        symbol: api_migration_symbol(&graph, "legacy_name").await,
+        new_name: "current_name".to_owned(),
+    };
+
+    let plan =
+        plan_api_migration_fixture(&graph, "family.rename-unbound-identifier", operation).await;
+
+    assert!(plan.blocked);
+    assert!(plan.sites.iter().any(|site| {
+        site.disposition == ApiMigrationSiteDispositionV1::Blocked
+            && site
+                .reason
+                .contains("identifier without canonical caller evidence")
+    }));
+}
+
+#[tokio::test]
+async fn rename_symbol_apply_rejects_a_dirty_target_without_writing() {
+    let initial = "pub fn legacy_name() -> i32 {\n    1\n}\n";
+    let dirty = "pub fn legacy_name() -> i32 {\n    7\n}\n";
+    let (project, graph, _database_scope) = indexed_api_migration_fixture(initial).await;
+    let operation = ApiMigrationOperationRequestV1::RenameBoundSymbol {
+        operation_id: "rename-dirty".to_owned(),
+        depends_on: Vec::new(),
+        symbol: api_migration_symbol(&graph, "legacy_name").await,
+        new_name: "current_name".to_owned(),
+    };
+    let plan = plan_api_migration_fixture(&graph, "family.rename-dirty", operation).await;
+    fs::write(project.path().join("src/lib.rs"), dirty).unwrap();
+
+    let error = preview_source_edit_expected_state(
+        &graph,
+        SourceEditRequest::ApiMigrationApply {
+            plan: plan.clone(),
+            plan_digest: plan.plan_digest.clone(),
+            dry_run: false,
+            verify: true,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("replan before apply"));
+    assert_eq!(
+        fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+        dirty
+    );
+}
+
+#[tokio::test]
+async fn rename_symbol_cancellation_before_publication_preserves_the_exact_preimage() {
+    let initial = "pub fn legacy_name() -> i32 {\n    1\n}\n";
+    let (project, graph, _database_scope) = indexed_api_migration_fixture(initial).await;
+    let operation = ApiMigrationOperationRequestV1::RenameBoundSymbol {
+        operation_id: "rename-cancelled".to_owned(),
+        depends_on: Vec::new(),
+        symbol: api_migration_symbol(&graph, "legacy_name").await,
+        new_name: "current_name".to_owned(),
+    };
+    let plan = plan_api_migration_fixture(&graph, "family.rename-cancelled", operation).await;
+    let mut cancelled = || true;
+
+    let result = graph
+        .apply_api_migration_plan(&plan, false, &mut cancelled)
+        .await
+        .unwrap();
+
+    assert!(!result.success);
+    assert!(result.rolled_back);
+    assert_eq!(
+        fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+        initial
     );
 }
 

@@ -22,15 +22,17 @@ pub enum ProfileKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct ProfileBudget {
     maximum_bindings: u32,
+    maximum_schema_bytes: u32,
     maximum_routing_tokens: u32,
 }
 
 impl ProfileBudget {
     pub fn new(
         maximum_bindings: u32,
+        maximum_schema_bytes: u32,
         maximum_routing_tokens: u32,
     ) -> Result<Self, CatalogValidationError> {
-        if maximum_bindings == 0 || maximum_routing_tokens == 0 {
+        if maximum_bindings == 0 || maximum_schema_bytes == 0 || maximum_routing_tokens == 0 {
             return Err(CatalogValidationError::InvalidValue {
                 field: "profile budget",
                 reason: "all ceilings must be greater than zero",
@@ -38,12 +40,17 @@ impl ProfileBudget {
         }
         Ok(Self {
             maximum_bindings,
+            maximum_schema_bytes,
             maximum_routing_tokens,
         })
     }
 
     pub const fn maximum_bindings(&self) -> u32 {
         self.maximum_bindings
+    }
+
+    pub const fn maximum_schema_bytes(&self) -> u32 {
+        self.maximum_schema_bytes
     }
 
     pub const fn maximum_routing_tokens(&self) -> u32 {

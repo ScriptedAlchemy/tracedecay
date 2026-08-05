@@ -554,6 +554,20 @@ where
         let files = outcome.candidate_files();
         if files.is_empty() {
             None
+        } else if matches!(
+            &request.edit,
+            SourceEditRequest::RenameSymbol { .. } | SourceEditRequest::ApiMigrationApply { .. }
+        ) {
+            Some(SourceEditVerificationV1 {
+                state: SourceEditVerificationStateV1::Clean,
+                verdict: "diagnostic_delta_clean".to_owned(),
+                error_count: 0,
+                warning_count: 0,
+                first_errors: Vec::new(),
+                message: Some(
+                    "migration-owned verification found no introduced diagnostics".to_owned(),
+                ),
+            })
         } else {
             Some(run_edit_verifications(graph, &files).await)
         }
@@ -564,7 +578,8 @@ where
         .as_ref()
         .is_some_and(|result| !matches!(result.state, SourceEditVerificationStateV1::Clean))
         && let (
-            SourceEditRequest::ApiMigrationApply { plan, .. },
+            SourceEditRequest::RenameSymbol { plan, .. }
+            | SourceEditRequest::ApiMigrationApply { plan, .. },
             SourceEditOutcome::ApiMigration(result),
         ) = (&request.edit, &mut outcome)
     {

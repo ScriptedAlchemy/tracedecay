@@ -16,7 +16,7 @@ use tracedecay_tool_catalog::{
     StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
 };
 
-use crate::api_migration::ApiMigrationPlanV1;
+use crate::api_migration::{ApiMigrationOperationRequestV1, ApiMigrationPlanV1};
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::{
@@ -186,6 +186,7 @@ pub enum SourceEditKind {
     ReplaceSymbol,
     InsertAtSymbol,
     MoveSymbol,
+    RenameSymbol,
     ApiMigrationApply,
 }
 
@@ -199,6 +200,7 @@ impl SourceEditKind {
             Self::ReplaceSymbol => "replace_symbol",
             Self::InsertAtSymbol => "insert_at_symbol",
             Self::MoveSymbol => "move_symbol",
+            Self::RenameSymbol => "rename_symbol",
             Self::ApiMigrationApply => "api_migration_apply",
         }
     }
@@ -254,6 +256,17 @@ pub enum SourceEditRequest {
         dry_run: bool,
         update_references: bool,
     },
+    /// Applies one immutable, graph-backed `RenameBoundSymbol` plan.
+    ///
+    /// The echoed digest is the caller's explicit acceptance. The request
+    /// never carries an LSP `WorkspaceEdit` and cannot be synthesized from a
+    /// raw analyzer response.
+    RenameSymbol {
+        plan: ApiMigrationPlanV1,
+        plan_digest: ManifestDigest,
+        dry_run: bool,
+        verify: bool,
+    },
     ApiMigrationApply {
         plan: ApiMigrationPlanV1,
         plan_digest: ManifestDigest,
@@ -272,6 +285,7 @@ impl SourceEditRequest {
             Self::ReplaceSymbol { .. } => SourceEditKind::ReplaceSymbol,
             Self::InsertAtSymbol { .. } => SourceEditKind::InsertAtSymbol,
             Self::MoveSymbol { .. } => SourceEditKind::MoveSymbol,
+            Self::RenameSymbol { .. } => SourceEditKind::RenameSymbol,
             Self::ApiMigrationApply { .. } => SourceEditKind::ApiMigrationApply,
         }
     }
@@ -285,6 +299,7 @@ impl SourceEditRequest {
             | Self::ReplaceSymbol { dry_run, .. }
             | Self::InsertAtSymbol { dry_run, .. }
             | Self::MoveSymbol { dry_run, .. }
+            | Self::RenameSymbol { dry_run, .. }
             | Self::ApiMigrationApply { dry_run, .. } => *dry_run,
         }
     }
@@ -298,6 +313,7 @@ impl SourceEditRequest {
             | Self::ReplaceSymbol { verify, .. }
             | Self::InsertAtSymbol { verify, .. } => *verify,
             Self::MoveSymbol { .. } => false,
+            Self::RenameSymbol { verify, .. } => *verify,
             Self::ApiMigrationApply { verify, .. } => *verify,
         }
     }
@@ -311,6 +327,7 @@ impl SourceEditRequest {
             | Self::ReplaceSymbol { dry_run: value, .. }
             | Self::InsertAtSymbol { dry_run: value, .. }
             | Self::MoveSymbol { dry_run: value, .. }
+            | Self::RenameSymbol { dry_run: value, .. }
             | Self::ApiMigrationApply { dry_run: value, .. } => *value = dry_run,
         }
         self
@@ -430,6 +447,9 @@ impl SourceEditEffectRequestV1 {
         self.proof.validate_for(&self.authority)?;
         if let SourceEditRequest::ApiMigrationApply {
             plan, plan_digest, ..
+        }
+        | SourceEditRequest::RenameSymbol {
+            plan, plan_digest, ..
         } = &self.edit
         {
             plan.validate()?;
@@ -437,6 +457,24 @@ impl SourceEditEffectRequestV1 {
             if plan.blocked || plan.plan_digest != *plan_digest {
                 return Err(ApplicationContractError::Inconsistent {
                     field: "API migration applicable plan digest",
+                });
+            }
+            if matches!(self.edit, SourceEditRequest::RenameSymbol { .. })
+                && !matches!(
+                    plan.operations.as_slice(),
+                    [ApiMigrationOperationRequestV1::RenameBoundSymbol { .. }]
+                )
+            {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "rename symbol plan operation",
+                });
+            }
+            if matches!(
+                self.edit,
+                SourceEditRequest::RenameSymbol { verify: false, .. }
+            ) {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "rename symbol mandatory verification",
                 });
             }
         }
@@ -603,7 +641,7 @@ pub struct SourceEditVerificationV1 {
     pub message: Option<String>,
 }
 
-const SOURCE_EDIT_KINDS: [SourceEditKind; 8] = [
+const SOURCE_EDIT_KINDS: [SourceEditKind; 9] = [
     SourceEditKind::StrReplace,
     SourceEditKind::MultiStrReplace,
     SourceEditKind::InsertAt,
@@ -611,6 +649,7 @@ const SOURCE_EDIT_KINDS: [SourceEditKind; 8] = [
     SourceEditKind::ReplaceSymbol,
     SourceEditKind::InsertAtSymbol,
     SourceEditKind::MoveSymbol,
+    SourceEditKind::RenameSymbol,
     SourceEditKind::ApiMigrationApply,
 ];
 
@@ -840,6 +879,12 @@ mod tests {
     #[test]
     fn source_edit_catalog_binds_every_typed_request_to_cli_and_mcp() {
         let contribution = source_edit_catalog_contribution().unwrap();
+        assert!(
+            SOURCE_EDIT_KINDS
+                .iter()
+                .any(|kind| kind.operation_name() == "rename_symbol"),
+            "the safe rename apply authority must have its own canonical operation"
+        );
         assert_eq!(
             contribution.capabilities().len(),
             SOURCE_EDIT_KINDS.len() + 1

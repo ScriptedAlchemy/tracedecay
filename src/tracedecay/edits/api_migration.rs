@@ -9,6 +9,9 @@ use std::path::Path;
 use crate::errors::{Result, TraceDecayError};
 
 use super::super::TraceDecay;
+use super::api_migration_verification::{
+    affected_tests, capture_diagnostics, diagnostic_delta, verify_formatter, verify_renamed_callers,
+};
 use super::file_authority::{SourceEditFileAuthority, read_source_edit_candidate};
 use super::plan::{
     capture_planned_source_edit, publish_planned_source_edit, rollback_planned_source_edit_files,
@@ -79,6 +82,10 @@ impl TraceDecay {
                 changed_sites: 0,
                 compatibility_sites: 0,
                 protected_values_verified: 0,
+                formatter: Default::default(),
+                diagnostic_delta: Default::default(),
+                affected_tests: Vec::new(),
+                callers_verified: false,
                 rolled_back: false,
                 message: "API migration plan contains blocked sites".to_owned(),
             });
@@ -168,6 +175,9 @@ impl TraceDecay {
             .iter()
             .filter(|site| protected_operations.contains(site.operation_id.as_str()))
             .count();
+        let formatter = verify_formatter(plan)?;
+        let affected_tests = affected_tests(self, &changed_files).await?;
+        let diagnostics_before = capture_diagnostics(self, &changed_files).await?;
         if dry_run {
             return Ok(tracedecay_application::ApiMigrationApplyResultV1 {
                 success: true,
@@ -178,6 +188,10 @@ impl TraceDecay {
                 changed_sites,
                 compatibility_sites,
                 protected_values_verified,
+                formatter,
+                diagnostic_delta: Default::default(),
+                affected_tests,
+                callers_verified: false,
                 rolled_back: false,
                 message: "API migration dry-run revalidated the immutable plan; no files changed"
                     .to_owned(),
@@ -197,6 +211,10 @@ impl TraceDecay {
                     changed_sites: 0,
                     compatibility_sites,
                     protected_values_verified,
+                    formatter,
+                    diagnostic_delta: Default::default(),
+                    affected_tests,
+                    callers_verified: false,
                     rolled_back: true,
                     message: "API migration cancelled; every published file was restored"
                         .to_owned(),
@@ -233,22 +251,121 @@ impl TraceDecay {
                 .reindex_file(&candidate.path, &candidate.intended_content, &file)
                 .await
             {
-                rollback_api_migration_files(&self.project_root, &published)?;
-                for restored in &published {
-                    if let Ok(file) =
-                        SourceEditFileAuthority::open(&self.project_root, Path::new(&restored.path))
-                    {
-                        let _ = self
-                            .reindex_file(&restored.path, &restored.expected_content, &file)
-                            .await;
-                    }
-                }
-                return Err(TraceDecayError::Config {
+                self.recover_source_edit_preimages(&planned_files(plan))
+                    .await?;
+                return Ok(tracedecay_application::ApiMigrationApplyResultV1 {
+                    success: false,
+                    dry_run: false,
+                    family_id: plan.family_id.clone(),
+                    plan_digest: plan.plan_digest.clone(),
+                    changed_files: Vec::new(),
+                    changed_sites: 0,
+                    compatibility_sites,
+                    protected_values_verified,
+                    formatter,
+                    diagnostic_delta: Default::default(),
+                    affected_tests,
+                    callers_verified: false,
+                    rolled_back: true,
                     message: format!(
-                        "API migration graph refresh failed and workspace bytes were restored: {error}"
+                        "API migration graph refresh failed and every changed file was restored: {error}"
                     ),
                 });
             }
+        }
+        let diagnostics_after = match capture_diagnostics(self, &changed_files).await {
+            Ok(diagnostics) => diagnostics,
+            Err(error) => {
+                self.recover_source_edit_preimages(&planned_files(plan))
+                    .await?;
+                return Ok(tracedecay_application::ApiMigrationApplyResultV1 {
+                    success: false,
+                    dry_run: false,
+                    family_id: plan.family_id.clone(),
+                    plan_digest: plan.plan_digest.clone(),
+                    changed_files: Vec::new(),
+                    changed_sites: 0,
+                    compatibility_sites,
+                    protected_values_verified,
+                    formatter,
+                    diagnostic_delta: Default::default(),
+                    affected_tests,
+                    callers_verified: false,
+                    rolled_back: true,
+                    message: format!(
+                        "API migration diagnostic verification failed and every changed file was restored: {error}"
+                    ),
+                });
+            }
+        };
+        let diagnostic_delta = diagnostic_delta(&diagnostics_before, &diagnostics_after);
+        if diagnostic_delta.introduced_errors > 0 || diagnostic_delta.introduced_warnings > 0 {
+            self.recover_source_edit_preimages(&planned_files(plan))
+                .await?;
+            return Ok(tracedecay_application::ApiMigrationApplyResultV1 {
+                success: false,
+                dry_run: false,
+                family_id: plan.family_id.clone(),
+                plan_digest: plan.plan_digest.clone(),
+                changed_files: Vec::new(),
+                changed_sites: 0,
+                compatibility_sites,
+                protected_values_verified,
+                formatter,
+                diagnostic_delta,
+                affected_tests,
+                callers_verified: false,
+                rolled_back: true,
+                message: "API migration introduced diagnostics; every changed file was restored"
+                    .to_owned(),
+            });
+        }
+        let callers_verified = match verify_renamed_callers(self, plan).await {
+            Ok(verified) => verified,
+            Err(error) => {
+                self.recover_source_edit_preimages(&planned_files(plan))
+                    .await?;
+                return Ok(tracedecay_application::ApiMigrationApplyResultV1 {
+                    success: false,
+                    dry_run: false,
+                    family_id: plan.family_id.clone(),
+                    plan_digest: plan.plan_digest.clone(),
+                    changed_files: Vec::new(),
+                    changed_sites: 0,
+                    compatibility_sites,
+                    protected_values_verified,
+                    formatter,
+                    diagnostic_delta,
+                    affected_tests,
+                    callers_verified: false,
+                    rolled_back: true,
+                    message: format!(
+                        "API migration caller verification failed and every changed file was restored: {error}"
+                    ),
+                });
+            }
+        };
+        if !callers_verified {
+            self.recover_source_edit_preimages(&planned_files(plan))
+                .await?;
+            return Ok(tracedecay_application::ApiMigrationApplyResultV1 {
+                success: false,
+                dry_run: false,
+                family_id: plan.family_id.clone(),
+                plan_digest: plan.plan_digest.clone(),
+                changed_files: Vec::new(),
+                changed_sites: 0,
+                compatibility_sites,
+                protected_values_verified,
+                formatter,
+                diagnostic_delta,
+                affected_tests,
+                callers_verified: false,
+                rolled_back: true,
+                message:
+                    "API migration caller verification failed; every changed file was restored"
+                        .to_owned(),
+            });
         }
         Ok(tracedecay_application::ApiMigrationApplyResultV1 {
             success: true,
@@ -259,6 +376,10 @@ impl TraceDecay {
             changed_sites,
             compatibility_sites,
             protected_values_verified,
+            formatter,
+            diagnostic_delta,
+            affected_tests,
+            callers_verified,
             rolled_back: false,
             message: "API migration applied atomically and refreshed graph evidence".to_owned(),
         })
@@ -282,6 +403,17 @@ impl TraceDecay {
         }
         Ok(())
     }
+}
+
+fn planned_files(plan: &tracedecay_application::ApiMigrationPlanV1) -> Vec<PlannedSourceEditFile> {
+    plan.files
+        .iter()
+        .map(|file| PlannedSourceEditFile {
+            relative_path: file.path.clone(),
+            expected: Some(file.expected_content.clone()),
+            intended: Some(file.intended_content.clone()),
+        })
+        .collect()
 }
 
 fn rollback_api_migration_files(

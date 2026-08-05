@@ -140,25 +140,25 @@ fn application_profiles(
         (
             APPLICATION_DEFAULT_PROFILE_ID,
             ProfileKind::Default,
-            ProfileBudget::new(320, 18_000)?,
+            ProfileBudget::new(320, 262_144, 18_000)?,
             true,
         ),
         (
             APPLICATION_COMPACT_PROFILE_ID,
             ProfileKind::Compact,
-            ProfileBudget::new(22, 4_000)?,
+            ProfileBudget::new(22, 65_536, 4_000)?,
             false,
         ),
         (
             APPLICATION_ADMINISTRATIVE_PROFILE_ID,
             ProfileKind::Administrative,
-            ProfileBudget::new(40, 8_000)?,
+            ProfileBudget::new(40, 131_072, 8_000)?,
             false,
         ),
         (
             APPLICATION_HOST_LIMITED_PROFILE_ID,
             ProfileKind::HostLimited,
-            ProfileBudget::new(17, 2_000)?,
+            ProfileBudget::new(17, 49_152, 2_000)?,
             false,
         ),
     ]

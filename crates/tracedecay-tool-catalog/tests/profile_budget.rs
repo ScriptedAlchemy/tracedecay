@@ -16,6 +16,19 @@ use common::{
 };
 
 #[test]
+fn profile_schema_budget_is_explicit_and_nonzero() {
+    let budget = ProfileBudget::new(8, 4_096, 2_000).unwrap();
+    assert_eq!(budget.maximum_schema_bytes(), 4_096);
+    assert_eq!(
+        ProfileBudget::new(8, 0, 2_000),
+        Err(CatalogValidationError::InvalidValue {
+            field: "profile budget",
+            reason: "all ceilings must be greater than zero",
+        })
+    );
+}
+
+#[test]
 fn profile_budgets_reject_overflow_without_a_universal_tool_ceiling() {
     let profile_id = profile_id("profile.host-limited");
     let capability_id = capability_id("capability.source.read");
@@ -57,7 +70,7 @@ fn profile_budgets_reject_overflow_without_a_universal_tool_ceiling() {
         capability_ids: vec![capability_id.clone()],
         enabled_surfaces: vec![BindingSurface::Cli],
         requires_cli_mcp_pairing: false,
-        budget: ProfileBudget::new(1, 100_000).unwrap(),
+        budget: ProfileBudget::new(1, 1_000_000, 100_000).unwrap(),
         routing_fixtures: vec![
             RoutingFixtureV1::new(
                 "read source",

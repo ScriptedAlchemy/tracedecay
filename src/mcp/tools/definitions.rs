@@ -342,6 +342,9 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
     registry_mode: ToolRegistryMode,
 ) -> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
     let catalog = crate::application_surface::application_surface_catalog_ref()?;
+    let profile = catalog.profile(profile_id).ok_or_else(|| {
+        super::dispatch::McpDispatchMetadataError::MissingProfile(profile_id.clone())
+    })?;
     let visible_operations = catalog
         .visible_bindings(
             profile_id,
@@ -372,8 +375,53 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
                 || visible_operations.contains(&definition.name)
         })
         .collect::<Vec<_>>();
+    enforce_profile_schema_budget(
+        profile_id,
+        profile.budget().maximum_schema_bytes(),
+        &definitions,
+    )?;
     super::dispatch::attach_dispatch_metadata(&mut definitions)?;
     Ok(definitions)
+}
+
+fn enforce_profile_schema_budget(
+    profile_id: &ProfileId,
+    maximum_schema_bytes: u32,
+    definitions: &[ToolDefinition],
+) -> Result<(), super::dispatch::McpDispatchMetadataError> {
+    // The transport-neutral catalog carries schema identities, not bodies.
+    // Enforce the profile ceiling here against the exact eager MCP schemas.
+    let schema_bytes = definitions.iter().try_fold(0_u64, |total, definition| {
+        let encoded = serde_json::to_vec(&definition.input_schema).map_err(|error| {
+            super::dispatch::McpDispatchMetadataError::Catalog(
+                tracedecay_tool_catalog::McpDispatchCatalogError::Serialization(error.to_string()),
+            )
+        })?;
+        let encoded_len = u64::try_from(encoded.len()).map_err(|error| {
+            super::dispatch::McpDispatchMetadataError::Catalog(
+                tracedecay_tool_catalog::McpDispatchCatalogError::Serialization(error.to_string()),
+            )
+        })?;
+        total.checked_add(encoded_len).ok_or_else(|| {
+            super::dispatch::McpDispatchMetadataError::Catalog(
+                tracedecay_tool_catalog::McpDispatchCatalogError::Serialization(
+                    "MCP tool schema byte total overflowed u64".to_owned(),
+                ),
+            )
+        })
+    })?;
+    if schema_bytes > u64::from(maximum_schema_bytes) {
+        return Err(
+            tracedecay_tool_catalog::CatalogValidationError::ProfileBudgetExceeded {
+                profile_id: profile_id.clone(),
+                budget: "schema bytes",
+                actual: schema_bytes,
+                maximum: u64::from(maximum_schema_bytes),
+            }
+            .into(),
+        );
+    }
+    Ok(())
 }
 
 pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
@@ -609,6 +657,7 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
         def_replace_symbol(),
         def_insert_at_symbol(),
         def_move_symbol(),
+        def_rename_symbol(),
         def_api_migration_apply(),
         def_source_edit_reconcile(),
         def_find_exact_symbol(),
@@ -869,6 +918,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_move_symbol",
     "tracedecay_ast_grep_rewrite",
     "tracedecay_api_migration_plan",
+    "tracedecay_rename_symbol",
     "tracedecay_api_migration_apply",
     "tracedecay_source_edit_reconcile",
     // git & info
@@ -1065,6 +1115,43 @@ mod tests {
         assert_eq!(dispatch["availability"]["state"], "unavailable");
         assert!(dispatch.get("receipt").is_none());
         assert!(dispatch.get("reconciliation").is_none());
+    }
+
+    #[test]
+    fn catalog_discovery_rejects_schema_budget_overflow() {
+        let profile_id = ProfileId::new("profile.test").unwrap();
+        let definitions = vec![def(
+            "tracedecay_test",
+            "Test",
+            "Test schema budget",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                }
+            }),
+        )];
+        let schema_bytes = serde_json::to_vec(&definitions[0].input_schema)
+            .unwrap()
+            .len() as u64;
+
+        assert!(matches!(
+            enforce_profile_schema_budget(
+                &profile_id,
+                u32::try_from(schema_bytes - 1).unwrap(),
+                &definitions,
+            ),
+            Err(super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
+                tracedecay_tool_catalog::CatalogValidationError::ProfileBudgetExceeded {
+                    profile_id: rejected_profile,
+                    budget: "schema bytes",
+                    actual,
+                    maximum,
+                }
+            )) if rejected_profile == profile_id
+                && actual == schema_bytes
+                && maximum == schema_bytes - 1
+        ));
     }
 
     #[test]

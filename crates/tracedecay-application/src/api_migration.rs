@@ -17,8 +17,9 @@ use tracedecay_tool_catalog::{
 
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use crate::{
-    ApplicationContractError, ApplicationHandlerDescriptor, ApplicationOperation,
-    ResultContractRef, current_bindings_with_slug,
+    ApiMigrationDiagnosticDeltaV1, ApiMigrationFormatterReportV1, ApplicationContractError,
+    ApplicationHandlerDescriptor, ApplicationOperation, ResultContractRef,
+    current_bindings_with_slug,
 };
 
 const API_MIGRATION_PLAN_DIGEST_DOMAIN_V1: &str = "tracedecay.application.api-migration-plan.v1";
@@ -696,6 +697,10 @@ pub struct ApiMigrationApplyResultV1 {
     pub changed_sites: usize,
     pub compatibility_sites: usize,
     pub protected_values_verified: usize,
+    pub formatter: ApiMigrationFormatterReportV1,
+    pub diagnostic_delta: ApiMigrationDiagnosticDeltaV1,
+    pub affected_tests: Vec<String>,
+    pub callers_verified: bool,
     pub rolled_back: bool,
     pub message: String,
 }
