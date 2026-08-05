@@ -239,10 +239,7 @@ impl SourceCanonicalCommitPortV1 for ScriptedPort {
                 SourceWholeRootStageV1::advance(
                     task.whole_root_stage(),
                     &page.envelope,
-                    page.mutations
-                        .iter()
-                        .map(|mutation| mutation.observation().native_object().clone())
-                        .collect(),
+                    page.present_objects,
                 )
                 .unwrap()
             });
@@ -315,6 +312,7 @@ fn page(
     .unwrap();
     SourceCanonicalRefetchPageV1 {
         envelope,
+        present_objects: [observation.native_object().clone()].into_iter().collect(),
         mutations: vec![
             SourceObjectMutationV1::new(
                 observation,

@@ -1,7 +1,5 @@
 //! Canonical store commit adapter for external-source acquisition.
 
-use std::collections::BTreeSet;
-
 use tracedecay_application::{SourceCanonicalRefetchAuthorityV1, SourceCaptureApplicationV1};
 use tracedecay_domain::{
     ComponentVersion, SourceAggregateFrontierV1, SourceDefinitionV1, SourceEnvelopeKindV1,
@@ -139,21 +137,12 @@ impl SourceCanonicalCommitPortV1 for crate::external_source_store::RuntimeExtern
                 Ok(frontier) => frontier,
                 Err(_) => return SourceCanonicalCommitOutcomeV1::Unavailable,
             };
-            let page_objects = page
-                .mutations
-                .iter()
-                .filter(|mutation| {
-                    mutation.observation().content_state()
-                        != tracedecay_domain::SourceContentStateV1::AuthoritativeDeleted
-                })
-                .map(|mutation| mutation.observation().native_object().clone())
-                .collect::<BTreeSet<_>>();
             let whole_root_stage = match page.envelope.kind() {
                 SourceEnvelopeKindV1::WholeRoot | SourceEnvelopeKindV1::WholeRootFallback => {
                     match SourceWholeRootStageV1::advance(
                         task.whole_root_stage(),
                         &page.envelope,
-                        page_objects,
+                        page.present_objects.clone(),
                     ) {
                         Ok(stage) => Some(stage),
                         Err(_) => return SourceCanonicalCommitOutcomeV1::Unavailable,
@@ -192,6 +181,7 @@ impl SourceCanonicalCommitPortV1 for crate::external_source_store::RuntimeExtern
                 task.refresh(),
                 &page.envelope,
                 &page.mutations,
+                &page.present_objects,
                 grant.configuration_revision,
                 &grant.configuration_digest,
                 grant.sink_revision,

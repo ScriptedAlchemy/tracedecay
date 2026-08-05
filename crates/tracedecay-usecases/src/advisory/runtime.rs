@@ -286,7 +286,7 @@ impl AdvisoryCycleOutcome {
 pub struct Pr13AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
     feedback_scope: FeedbackScopeV1,
     feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,
-    github: Option<GitHubReviewRuntimeOwnerV1<GR, GA>>,
+    github: Option<Arc<GitHubReviewRuntimeOwnerV1<GR, GA>>>,
     ci: ConcreteCiFailureLocalizationOwnerV1<CS, CE>,
     proximity: ConcretePr13ProximityRuntimeOwnerV1<PE, PC>,
     observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
@@ -332,7 +332,7 @@ where
                 github.database = database;
                 github.resolved_scope = resolved_scope;
                 github.feedback_scope = feedback_scope.clone();
-                Some(
+                Some(Arc::new(
                     build_github_review_runtime_owner_v1(
                         github,
                         providers.github_remapper,
@@ -340,7 +340,7 @@ where
                         github_source_access,
                     )
                     .map_err(|_| Pr13AdvisoryRuntimeOpenErrorV1::GitHubRuntimeUnavailable)?,
-                )
+                ))
             }
             None => None,
         };
@@ -377,6 +377,10 @@ where
         &self,
     ) -> Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync> {
         Arc::clone(&self.observations)
+    }
+
+    pub fn github_owner(&self) -> Option<Arc<GitHubReviewRuntimeOwnerV1<GR, GA>>> {
+        self.github.as_ref().map(Arc::clone)
     }
 
     pub async fn run_once(

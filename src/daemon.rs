@@ -218,6 +218,7 @@ use invocation_executor::{
     frozen_root_generation, invocation_is_git_operation, multi_root_family_allows,
     unavailable_root_generation,
 };
+mod external_acquisition;
 mod invocation_state;
 use invocation_state::DaemonInvocationState;
 mod lsp_sessions;
