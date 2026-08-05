@@ -100,20 +100,11 @@ impl GraphPathPreparation {
                 parent_file,
                 path,
             } => {
-                let file = match tracedecay_private_fs::create_private_file(&path) {
+                let file = match tracedecay_private_fs::create_private_file_retained(&path) {
                     Ok(file) => file,
-                    Err(error) => {
-                        return Err(GraphPathAcquisitionFailure {
-                            retained_file: None,
-                            error: if error.kind() == std::io::ErrorKind::AlreadyExists {
-                                GraphDbError::Conflict
-                            } else {
-                                GraphDbError::unavailable(format!(
-                                    "failed to create private graph database {}: {error}",
-                                    path.display()
-                                ))
-                            },
-                        });
+                    Err(failure) => {
+                        let (error, retained_file) = failure.into_parts();
+                        return Err(private_creation_failure(&path, error, retained_file));
                     }
                 };
                 let authority = match GraphPathAuthority::from_file(
@@ -223,6 +214,30 @@ impl GraphPathAuthority {
 
     pub(super) fn into_retained_file(self) -> RetainedGraphFile {
         RetainedGraphFile { _file: self.file }
+    }
+}
+
+fn private_creation_failure(
+    path: &Path,
+    error: std::io::Error,
+    retained_file: Option<std::fs::File>,
+) -> GraphPathAcquisitionFailure {
+    if let Some(file) = retained_file {
+        return GraphPathAcquisitionFailure {
+            retained_file: Some(RetainedGraphFile { _file: file }),
+            error: initialization_failure(error),
+        };
+    }
+    GraphPathAcquisitionFailure {
+        retained_file: None,
+        error: if error.kind() == std::io::ErrorKind::AlreadyExists {
+            GraphDbError::Conflict
+        } else {
+            GraphDbError::unavailable(format!(
+                "failed to create private graph database {}: {error}",
+                path.display()
+            ))
+        },
     }
 }
 
@@ -353,7 +368,7 @@ fn map_private_path_error(description: &str, error: std::io::Error) -> GraphDbEr
 mod tests {
     use tempfile::tempdir;
 
-    use super::{GraphPathPreparation, retained_initialization_failure};
+    use super::{GraphPathPreparation, private_creation_failure, retained_initialization_failure};
     use crate::GraphDbError;
 
     fn graph_path(temp: &tempfile::TempDir) -> std::path::PathBuf {
@@ -395,6 +410,29 @@ mod tests {
         };
         assert!(message.contains("injected initialization failure"));
         assert!(path.is_file(), "failed initialization must retain its file");
+    }
+
+    #[test]
+    fn post_creation_validation_failure_is_uncertain_and_retains_the_file() {
+        let temp = tempdir().unwrap();
+        let path = graph_path(&temp);
+        let file = tracedecay_private_fs::create_private_file(&path).unwrap();
+
+        let failure = private_creation_failure(
+            &path,
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected post-create validation failure",
+            ),
+            Some(file),
+        );
+
+        assert!(failure.retained_file.is_some());
+        assert!(matches!(
+            failure.error,
+            GraphDbError::DurabilityUncertain { .. }
+        ));
+        assert!(path.is_file(), "post-create failure must retain its file");
     }
 
     #[test]

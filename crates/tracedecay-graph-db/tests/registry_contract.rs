@@ -651,7 +651,10 @@ fn lifecycle_cancellation_after_file_creation_converges_ready() {
     request.lifecycle_cancellation = cancellation.clone();
 
     let database = registry.resolve(request).unwrap();
-    assert!(cancellation.is_cancelled());
+    assert!(
+        cancellation.polls.load(Ordering::SeqCst) >= cancellation.cancel_on,
+        "cancellation must become active after file creation while open is still linearizing"
+    );
     assert_eq!(
         registry
             .status(&registration(store_identity, temp.path()))

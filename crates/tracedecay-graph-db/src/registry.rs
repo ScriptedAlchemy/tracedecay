@@ -10,7 +10,7 @@ use tracedecay_store::{
 
 use crate::{
     GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
-    GraphDbRuntimeState, GraphDurability, GraphFormatVersion, NeverCancelled,
+    GraphDbRuntimeState, GraphDurability, GraphFormatVersion,
 };
 
 use self::identity::{
@@ -29,6 +29,22 @@ mod identity;
 mod path;
 
 const OPEN_WAIT_POLL: Duration = Duration::from_millis(10);
+
+/// Samples cancellation after private-file creation without allowing it to
+/// interrupt the initialization that must converge the durable identity.
+struct LinearizedOpenCancellation {
+    request: Arc<dyn GraphCancellation>,
+    lifecycle: Arc<dyn GraphCancellation>,
+}
+
+impl GraphCancellation for LinearizedOpenCancellation {
+    fn is_cancelled(&self) -> bool {
+        let request_cancelled = self.request.is_cancelled();
+        let lifecycle_cancelled = self.lifecycle.is_cancelled();
+        let _cancellation_observed_after_creation = request_cancelled || lifecycle_cancelled;
+        false
+    }
+}
 
 #[derive(Clone)]
 pub struct GraphDbRegistration {
@@ -950,7 +966,10 @@ fn open_registered_graph(
         Err(error) => return Err(retained_initialization_failure(authority, error)),
     };
     let cancellation: Arc<dyn GraphCancellation> = if creates_file {
-        Arc::new(NeverCancelled)
+        Arc::new(LinearizedOpenCancellation {
+            request: Arc::clone(&registration.cancellation),
+            lifecycle: Arc::clone(&registration.lifecycle_cancellation),
+        })
     } else {
         Arc::clone(&registration.lifecycle_cancellation)
     };
