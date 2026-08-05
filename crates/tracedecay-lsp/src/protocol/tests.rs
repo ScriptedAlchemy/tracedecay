@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use tracedecay_domain::ManifestDigest;
 
 mod diagnostic_publication;
+mod workspace_diagnostics;
 
 #[derive(Default)]
 pub(super) struct Feedback(RefCell<Vec<FeedbackCycleRequest>>);
@@ -60,6 +61,8 @@ impl DiagnosticSnapshotPort for Diagnostics {
         DiagnosticSnapshotOutcome::Ready {
             diagnostics: GenerationDiagnostics {
                 generation: 9,
+                authority_digest: ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                    .unwrap(),
                 upstream: vec![GatewayDiagnostic {
                     uri: uri.into(),
                     range: LspRange {
@@ -92,6 +95,7 @@ impl DiagnosticSnapshotPort for Diagnostics {
 
     fn workspace_diagnostics(
         &self,
+        workspace: &AuthorizedLspWorkspace,
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> WorkspaceDiagnosticSnapshotOutcome {
@@ -102,6 +106,21 @@ impl DiagnosticSnapshotPort for Diagnostics {
             };
         }
         let uri = format!("{}/src/lib.rs", root.uri().trim_end_matches('/'));
+        if workspace.resolve_document(&uri) != Ok(root) {
+            return WorkspaceDiagnosticSnapshotOutcome::Ready {
+                diagnostics: WorkspaceGenerationDiagnostics {
+                    code_generation_id: format!(
+                        "code-generation-{}",
+                        root.scope_digest().map_or("single", ManifestDigest::as_str)
+                    ),
+                    snapshot_digest: root.scope_digest().cloned().unwrap_or_else(|| {
+                        ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap()
+                    }),
+                    documents: Vec::new(),
+                },
+                completed_operation_id: None,
+            };
+        }
         let overlay = overlays.iter().find(|overlay| overlay.uri == uri);
         let DiagnosticSnapshotOutcome::Ready { diagnostics, .. } =
             self.document_diagnostics(root, &uri, overlay)

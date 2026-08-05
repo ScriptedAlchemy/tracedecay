@@ -267,6 +267,7 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
 
     fn workspace_diagnostics(
         &self,
+        workspace: &AuthorizedLspWorkspace,
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> WorkspaceDiagnosticSnapshotOutcome {
@@ -275,12 +276,13 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
                 code_generation_id: None,
                 failure_class: "root-not-authorized".to_owned(),
             },
-            |port| port.workspace_diagnostics(root, overlays),
+            |port| port.workspace_diagnostics(workspace, root, overlays),
         )
     }
 
     fn request_workspace_refresh(
         &self,
+        workspace: &AuthorizedLspWorkspace,
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> DiagnosticRefreshAdmission {
@@ -288,7 +290,7 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
             DiagnosticRefreshAdmission::Rejected {
                 failure_class: "root-not-authorized".to_owned(),
             },
-            |port| port.request_workspace_refresh(root, overlays),
+            |port| port.request_workspace_refresh(workspace, root, overlays),
         )
     }
 }

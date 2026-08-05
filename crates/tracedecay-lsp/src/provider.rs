@@ -14,7 +14,7 @@ use crate::gateway::{
     SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
 };
 use crate::overlay::OverlaySnapshot;
-use crate::session::LspRequestId;
+use crate::session::{AuthorizedLspWorkspace, LspRequestId};
 use crate::workspace_diagnostics::WorkspaceDiagnosticSnapshotOutcome;
 
 /// Restart exhaustion is a stable health state, not an invitation for a
@@ -237,6 +237,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenerationDiagnostics {
     pub generation: u64,
+    pub authority_digest: tracedecay_domain::ManifestDigest,
     pub upstream: Vec<GatewayDiagnostic>,
     pub tracedecay: Vec<GatewayDiagnostic>,
 }
@@ -304,6 +305,7 @@ pub trait DiagnosticSnapshotPort {
 
     fn workspace_diagnostics(
         &self,
+        _workspace: &AuthorizedLspWorkspace,
         _root: &AdmittedRoot,
         _overlays: &[OverlaySnapshot],
     ) -> WorkspaceDiagnosticSnapshotOutcome {
@@ -315,6 +317,7 @@ pub trait DiagnosticSnapshotPort {
 
     fn request_workspace_refresh(
         &self,
+        _workspace: &AuthorizedLspWorkspace,
         _root: &AdmittedRoot,
         _overlays: &[OverlaySnapshot],
     ) -> DiagnosticRefreshAdmission {
@@ -353,18 +356,20 @@ where
 
     fn workspace_diagnostics(
         &self,
+        workspace: &AuthorizedLspWorkspace,
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> WorkspaceDiagnosticSnapshotOutcome {
-        (**self).workspace_diagnostics(root, overlays)
+        (**self).workspace_diagnostics(workspace, root, overlays)
     }
 
     fn request_workspace_refresh(
         &self,
+        workspace: &AuthorizedLspWorkspace,
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> DiagnosticRefreshAdmission {
-        (**self).request_workspace_refresh(root, overlays)
+        (**self).request_workspace_refresh(workspace, root, overlays)
     }
 }
 

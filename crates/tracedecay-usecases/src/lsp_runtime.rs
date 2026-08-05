@@ -299,11 +299,8 @@ pub trait LspFeedbackProjectionScopePort: Send + Sync {
     ) -> LspRuntimeFuture<Result<LspFeedbackProjectionScope, LspRuntimeFailure>>;
 }
 
-/// Exact registered project/root authority used by production LSP sessions.
-///
-/// Project identity and authorization scope come from the already-registered
-/// feedback runtime. Current generation comes from the canonical diagnostics
-/// store and HEAD comes from the admitted repository root.
+/// Exact registered project/root authority used by production LSP sessions,
+/// bound to the admitted feedback scope and code-index generation.
 #[derive(Clone)]
 pub struct RegisteredProjectLspAuthority {
     feedback: Arc<Pr12FeedbackRuntime>,
@@ -1861,12 +1858,13 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
                 )
                 .await?;
             let scope = current.scope;
-            // `ManagedDiagnosticSnapshot` carries coverage only on individual
-            // diagnostics, so a read that produced no cycle has nowhere to say
-            // "unknown". Publishing an empty set would tell the editor the
-            // document is clean, so this one surface still declines rather
-            // than assert a health it cannot support. The context projection
-            // below has a coverage field and does report the degraded state.
+            let expected_content_digest =
+                request.expected_content_digest.as_ref().ok_or_else(|| {
+                    LspRuntimeFailure::new("managed-diagnostic-content-identity-unavailable")
+                })?;
+            if scope.document_content_digest.as_ref() != Some(expected_content_digest) {
+                return Err(LspRuntimeFailure::new("managed-diagnostic-content-stale"));
+            }
             let Some(result) = current.result else {
                 return Err(LspRuntimeFailure::new("feedback-read-incomplete"));
             };
@@ -1894,6 +1892,7 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
                 .await?;
             Ok(ManagedDiagnosticSnapshot {
                 generation: scope.generation,
+                authority_digest: crate::lsp_support::managed_diagnostic_authority_digest(&scope)?,
                 diagnostics,
             })
         })
