@@ -269,7 +269,7 @@ fn definitions_activate_and_reject_conflicting_payloads() {
         &authority,
         first.definition_id(),
         None,
-        1,
+        Some(1),
     )
     .unwrap();
     assert_eq!(
@@ -281,7 +281,7 @@ fn definitions_activate_and_reject_conflicting_payloads() {
             &authority,
             first.definition_id(),
             None,
-            2,
+            Some(2),
         )
         .unwrap_err(),
         WorkflowDefinitionAuthorityError::Conflict
@@ -290,16 +290,40 @@ fn definitions_activate_and_reject_conflicting_payloads() {
         &authority,
         first.definition_id(),
         Some(1),
-        2,
+        Some(2),
     )
     .unwrap();
     assert_eq!(
         WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
         Some(2)
     );
+    assert_eq!(
+        WorkflowDefinitionAuthorityPort::list(&authority, Some(first.definition_id()))
+            .unwrap()
+            .iter()
+            .map(WorkflowDefinition::definition_version)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
+        &authority,
+        first.definition_id(),
+        Some(2),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
+        None
+    );
+    assert_eq!(
+        WorkflowDefinitionAuthorityPort::list(&authority, None).unwrap(),
+        vec![first, second],
+        "retirement must preserve immutable definition history"
+    );
 
     assert_eq!(store.count("workflow_definitions"), 2);
-    assert_eq!(store.count("workflow_activations"), 1);
+    assert_eq!(store.count("workflow_activations"), 0);
 }
 
 #[test]
@@ -418,7 +442,7 @@ fn definition_and_handoff_survive_registered_store_restart() {
         &authority,
         first.definition_id(),
         None,
-        1,
+        Some(1),
     )
     .unwrap();
 

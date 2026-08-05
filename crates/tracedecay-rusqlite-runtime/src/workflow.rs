@@ -343,14 +343,39 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             .transpose()
     }
 
+    fn list(
+        &self,
+        definition_id: Option<&WorkflowDefinitionId>,
+    ) -> Result<Vec<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
+        let (sql, params) = match definition_id {
+            Some(definition_id) => (
+                "SELECT payload FROM workflow_definitions
+                 WHERE definition_id = ?1
+                 ORDER BY definition_id, definition_version",
+                vec![ExactSqlValue::Text(definition_id.as_str().to_owned())],
+            ),
+            None => (
+                "SELECT payload FROM workflow_definitions
+                 ORDER BY definition_id, definition_version",
+                Vec::new(),
+            ),
+        };
+        let rows = query_handle(&self.storage, sql, params).map_err(definition_unavailable)?;
+        rows.rows
+            .iter()
+            .map(|row| {
+                let payload = sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
+                decode_definition(payload)
+            })
+            .collect()
+    }
+
     fn compare_and_swap_activation(
         &self,
         definition_id: &WorkflowDefinitionId,
         expected_version: Option<u64>,
-        replacement_version: u64,
+        replacement_version: Option<u64>,
     ) -> Result<(), WorkflowDefinitionAuthorityError> {
-        let replacement =
-            version_i64(replacement_version).map_err(|_| definition_codec_unavailable())?;
         let transaction = self
             .storage
             .handle
@@ -375,18 +400,32 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             let _ = transaction.rollback();
             return Err(WorkflowDefinitionAuthorityError::Conflict);
         }
-        execute_tx(
-            &transaction,
-            "INSERT INTO workflow_activations (definition_id, active_version)
-             VALUES (?1, ?2)
-             ON CONFLICT(definition_id) DO UPDATE SET
-                 active_version = excluded.active_version",
-            vec![
-                ExactSqlValue::Text(definition_id.as_str().to_owned()),
-                ExactSqlValue::Integer(replacement),
-            ],
-        )
-        .map_err(definition_unavailable)?;
+        match replacement_version {
+            Some(replacement_version) => {
+                let replacement =
+                    version_i64(replacement_version).map_err(|_| definition_codec_unavailable())?;
+                execute_tx(
+                    &transaction,
+                    "INSERT INTO workflow_activations (definition_id, active_version)
+                     VALUES (?1, ?2)
+                     ON CONFLICT(definition_id) DO UPDATE SET
+                         active_version = excluded.active_version",
+                    vec![
+                        ExactSqlValue::Text(definition_id.as_str().to_owned()),
+                        ExactSqlValue::Integer(replacement),
+                    ],
+                )
+                .map_err(definition_unavailable)?;
+            }
+            None => {
+                execute_tx(
+                    &transaction,
+                    "DELETE FROM workflow_activations WHERE definition_id = ?1",
+                    vec![ExactSqlValue::Text(definition_id.as_str().to_owned())],
+                )
+                .map_err(definition_unavailable)?;
+            }
+        }
         transaction
             .commit()
             .map(|_| ())

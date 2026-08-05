@@ -125,7 +125,7 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
             &authority,
             definition.definition_id(),
             None,
-            1,
+            Some(1),
         )
         .unwrap();
         assert_eq!(

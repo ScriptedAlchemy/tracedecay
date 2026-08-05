@@ -4,6 +4,7 @@
 //! supplies the canonical Work and automation authorities through the ports
 //! defined here; this module does not create a second scheduler or Work store.
 
+use std::collections::BTreeSet;
 use std::fmt::{self, Display};
 
 use schemars::JsonSchema;
@@ -47,11 +48,16 @@ pub trait WorkflowDefinitionAuthorityPort: Send + Sync {
         definition_id: &WorkflowDefinitionId,
     ) -> Result<Option<u64>, WorkflowDefinitionAuthorityError>;
 
+    fn list(
+        &self,
+        definition_id: Option<&WorkflowDefinitionId>,
+    ) -> Result<Vec<WorkflowDefinition>, WorkflowDefinitionAuthorityError>;
+
     fn compare_and_swap_activation(
         &self,
         definition_id: &WorkflowDefinitionId,
         expected_version: Option<u64>,
-        replacement_version: u64,
+        replacement_version: Option<u64>,
     ) -> Result<(), WorkflowDefinitionAuthorityError>;
 }
 
@@ -60,6 +66,31 @@ pub trait WorkflowDefinitionAuthorityPort: Send + Sync {
 pub struct WorkflowActivation {
     pub definition_id: WorkflowDefinitionId,
     pub active_version: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRetirement {
+    pub definition_id: WorkflowDefinitionId,
+    pub active_version: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionValidation {
+    pub definition: WorkflowDefinition,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionDiff {
+    pub definition_id: WorkflowDefinitionId,
+    pub from_version: u64,
+    pub to_version: u64,
+    pub changed_steps: BTreeSet<WorkflowStepId>,
+    pub policy_changed: bool,
+    pub configuration_changed: bool,
+    pub catalog_changed: bool,
 }
 
 /// Wire request for [`WorkflowDefinitionService::register`].
@@ -152,6 +183,79 @@ where
         }
     }
 
+    pub fn validate(
+        &self,
+        definition: WorkflowDefinition,
+    ) -> Result<WorkflowDefinitionValidation, WorkflowCoordinationError> {
+        definition
+            .validate()
+            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+        Ok(WorkflowDefinitionValidation { definition })
+    }
+
+    pub fn get(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<WorkflowDefinition, WorkflowCoordinationError> {
+        if definition_version == 0 {
+            return Err(WorkflowCoordinationError::InvalidDefinition);
+        }
+        self.authority
+            .load(definition_id, definition_version)
+            .map_err(coordination_authority_error)?
+            .ok_or(WorkflowCoordinationError::DefinitionNotFound)
+    }
+
+    pub fn list(&self) -> Result<Vec<WorkflowDefinition>, WorkflowCoordinationError> {
+        self.authority
+            .list(None)
+            .map_err(coordination_authority_error)
+    }
+
+    pub fn history(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+    ) -> Result<Vec<WorkflowDefinition>, WorkflowCoordinationError> {
+        self.authority
+            .list(Some(definition_id))
+            .map_err(coordination_authority_error)
+    }
+
+    pub fn diff(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        from_version: u64,
+        to_version: u64,
+    ) -> Result<WorkflowDefinitionDiff, WorkflowCoordinationError> {
+        let from = self.get(definition_id, from_version)?;
+        let to = self.get(definition_id, to_version)?;
+        let step_ids = from
+            .steps()
+            .iter()
+            .chain(to.steps())
+            .map(|step| step.step_id.clone())
+            .collect::<BTreeSet<_>>();
+        let changed_steps = step_ids
+            .into_iter()
+            .filter(|step_id| {
+                let from_step = from.steps().iter().find(|step| &step.step_id == step_id);
+                let to_step = to.steps().iter().find(|step| &step.step_id == step_id);
+                from_step != to_step
+            })
+            .collect();
+        Ok(WorkflowDefinitionDiff {
+            definition_id: definition_id.clone(),
+            from_version,
+            to_version,
+            changed_steps,
+            policy_changed: from.pinned_policy_digest() != to.pinned_policy_digest(),
+            configuration_changed: from.pinned_configuration_digest()
+                != to.pinned_configuration_digest(),
+            catalog_changed: from.pinned_catalog_digest() != to.pinned_catalog_digest(),
+        })
+    }
+
     pub fn activate(
         &self,
         definition_id: &WorkflowDefinitionId,
@@ -193,12 +297,33 @@ where
             .compare_and_swap_activation(
                 definition_id,
                 expected_active_version,
-                replacement_version,
+                Some(replacement_version),
             )
             .map_err(coordination_authority_error)?;
         Ok(WorkflowActivation {
             definition_id: definition_id.clone(),
             active_version: replacement_version,
+        })
+    }
+
+    pub fn retire(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        expected_active_version: Option<u64>,
+    ) -> Result<WorkflowRetirement, WorkflowCoordinationError> {
+        let current = self
+            .authority
+            .active_version(definition_id)
+            .map_err(coordination_authority_error)?;
+        if current != expected_active_version || current.is_none() {
+            return Err(WorkflowCoordinationError::StaleActivation);
+        }
+        self.authority
+            .compare_and_swap_activation(definition_id, expected_active_version, None)
+            .map_err(coordination_authority_error)?;
+        Ok(WorkflowRetirement {
+            definition_id: definition_id.clone(),
+            active_version: None,
         })
     }
 }
