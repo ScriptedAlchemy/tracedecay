@@ -27,7 +27,7 @@ use crate::code_intelligence::{
 use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId, digest_id};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
-use crate::research::{DomainError, canonical_sha256};
+use crate::research::{DomainError, SessionId, canonical_sha256};
 use crate::session::TemporalModeV1;
 
 /// Schema/domain separator for the independently hashed query fallback
@@ -266,6 +266,49 @@ impl RetrieverKind {
     pub const fn is_query_fallback_lane(self) -> bool {
         matches!(self, Self::ExactLiteral | Self::Lexical | Self::Graph)
     }
+}
+
+/// Temporal sub-channel retained in evidence explanations.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TemporalCandidateChannelV1 {
+    Scope,
+    Anchor,
+    ExactMessage,
+    Phrase,
+    Entity,
+    Time,
+    Lexical,
+    Summary,
+    Span,
+    Burst,
+}
+
+/// One temporal ranking contribution retained for explanation and replay.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalCandidateContributionV1 {
+    pub channel: TemporalCandidateChannelV1,
+    pub source_occurrence: SourceOccurrenceId,
+    pub source_id: Option<String>,
+    pub retriever_ordinal: u64,
+    pub raw_score: i64,
+    pub calibrated_score_micros: u64,
+    pub exact_ranges: Vec<crate::session::ByteRangeV1>,
+}
+
+/// Compact temporal evidence. It contains no message or summary payload bytes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalLaneEvidenceV1 {
+    pub candidate_anchor: RetrievalAnchorId,
+    pub source_occurrence: SourceOccurrenceId,
+    pub authorization_revision: AuthorizationRevision,
+    pub participant_epoch: ManifestDigest,
+    pub session_id: SessionId,
+    pub source_id: String,
+    pub hydration_anchor: RetrievalAnchorId,
+    pub contributions: Vec<TemporalCandidateContributionV1>,
 }
 
 /// Deterministic fixed-point score in millionths (Plan 15: "deterministic

@@ -1,21 +1,26 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use tracedecay_application::CancellationSignal;
 use tracedecay_domain::{
-    CodeGenerationId, CursorPayloadDigest, FreshnessCompatibilityV1, ManifestDigest,
-    RetrievalFailure, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, UtcMicros,
+    CodeGenerationId, ComponentVersion, ContentDigest, CursorPayloadDigest,
+    DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
+    DiagnosticRecordStateV1, DiagnosticSeverityV1, FreshnessCompatibilityV1,
+    GenerationDiagnosticV1, ManifestDigest, ProviderId, RetrievalFailure, RetrieverBatch,
+    RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SourceSpan,
+    UtcMicros,
 };
 
+use crate::retrieval::evidence_lanes::score_diagnostic;
 use crate::retrieval::evidence_lanes::{
     DiagnosticCandidateReadPortV1, DiagnosticLaneEvidenceV1, DiagnosticLaneRequestV1,
-    DiagnosticLaneRetrieverV1, EvidenceLaneExecutionControlV1, TaskSessionCandidateReadPortV1,
-    TaskSessionLaneEvidenceV1, TaskSessionLaneRequestV1, TaskSessionLaneRetrieverV1,
-    TemporalCandidateChannelV1, TemporalCandidateExportPortV1, TemporalLaneEvidenceV1,
-    TemporalLaneRequestV1, TemporalLaneRetrieverV1,
+    DiagnosticLaneRetrieverV1, DiagnosticMatchReasonV1, EvidenceLaneExecutionControlV1,
+    TaskSessionCandidateReadPortV1, TaskSessionLaneEvidenceV1, TaskSessionLaneRequestV1,
+    TaskSessionLaneRetrieverV1, TemporalCandidateChannelV1, TemporalCandidateContributionV1,
+    TemporalCandidateExportPortV1, TemporalLaneEvidenceV1, TemporalLaneRequestV1,
+    TemporalLaneRetrieverV1,
 };
 use crate::retrieval::ports::RetrievalPortError;
 use crate::retrieval::request::RawRetrievalRequestV1;
@@ -82,6 +87,60 @@ impl TemporalCandidateExportPortV1 for FixedTemporalPort {
 
 struct FixedDiagnosticPort {
     outcome: RetrieverOutcome<RetrieverBatch<DiagnosticLaneEvidenceV1>>,
+}
+
+fn generation_diagnostic() -> GenerationDiagnosticV1 {
+    let mut diagnostic = GenerationDiagnosticV1 {
+        diagnostic_anchor: id("anchor.diagnostic.fixture"),
+        generation_id: id("generation.fixture"),
+        repository: id("repository.fixture"),
+        worktree: None,
+        reference: None,
+        source_revision: None,
+        file_occurrence_id: id("file.fixture"),
+        content_digest: id::<ContentDigest>(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        span: SourceSpan {
+            start_byte: 4,
+            end_byte: 12,
+        },
+        symbol_occurrence_id: None,
+        code: "E0308".to_owned(),
+        severity: DiagnosticSeverityV1::Error,
+        message: "mismatched types".to_owned(),
+        message_digest: id(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        provenance: DiagnosticProvenanceV1 {
+            producer_kind: DiagnosticProducerKindV1::UpstreamCompiler,
+            producer: id::<ProviderId>("provider.rustc"),
+            analyzer_revision: id::<ComponentVersion>("analyzer.rustc.v1"),
+            configuration_revision: id::<ComponentVersion>("configuration.rustc.v1"),
+            sanitization_receipt: None,
+        },
+        evidence_class: DiagnosticEvidenceClassV1::ProducerReported,
+        collected_at: UtcMicros(7),
+        state: DiagnosticRecordStateV1::Current,
+    };
+    diagnostic.message_digest = diagnostic.compute_message_digest().expect("message digest");
+    diagnostic
+}
+
+#[test]
+fn canonical_diagnostic_scoring_retains_the_match_reason_and_term_coverage() {
+    let diagnostic = generation_diagnostic();
+    let exact_terms = BTreeSet::from(["e0308"]);
+    assert_eq!(
+        score_diagnostic(&diagnostic, "e0308", &exact_terms).expect("exact score"),
+        Some((DiagnosticMatchReasonV1::CodeExact, 1, 1_000_000)),
+    );
+
+    let overlap_terms = BTreeSet::from(["mismatched", "result"]);
+    assert_eq!(
+        score_diagnostic(&diagnostic, "mismatched result", &overlap_terms).expect("overlap score"),
+        Some((DiagnosticMatchReasonV1::TokenOverlap, 1, 650_000)),
+    );
 }
 
 impl DiagnosticCandidateReadPortV1 for FixedDiagnosticPort {
@@ -188,9 +247,25 @@ fn temporal_lane_preserves_authenticated_epoch_continuation_and_explanation() {
         session_id: id("session.fixture"),
         source_id: "claude".to_owned(),
         hydration_anchor: compact.retriever_evidence_anchor.clone(),
-        channels: vec![
-            TemporalCandidateChannelV1::ExactMessage,
-            TemporalCandidateChannelV1::Summary,
+        contributions: vec![
+            TemporalCandidateContributionV1 {
+                channel: TemporalCandidateChannelV1::ExactMessage,
+                source_occurrence: compact.source_occurrence_id.clone(),
+                source_id: Some("claude".to_owned()),
+                retriever_ordinal: 0,
+                raw_score: 12,
+                calibrated_score_micros: 900_000,
+                exact_ranges: Vec::new(),
+            },
+            TemporalCandidateContributionV1 {
+                channel: TemporalCandidateChannelV1::Summary,
+                source_occurrence: compact.source_occurrence_id.clone(),
+                source_id: Some("claude".to_owned()),
+                retriever_ordinal: 1,
+                raw_score: 10,
+                calibrated_score_micros: 800_000,
+                exact_ranges: Vec::new(),
+            },
         ],
     };
     let port = FixedTemporalPort {
@@ -239,7 +314,10 @@ fn temporal_lane_preserves_authenticated_epoch_continuation_and_explanation() {
             .values()
             .next()
             .expect("evidence")
-            .channels,
+            .contributions
+            .iter()
+            .map(|contribution| contribution.channel)
+            .collect::<Vec<_>>(),
         [
             TemporalCandidateChannelV1::ExactMessage,
             TemporalCandidateChannelV1::Summary,
@@ -267,6 +345,9 @@ fn evidence_lanes_reject_authorization_epoch_and_lane_substitution() {
         provider: id("provider.rustc"),
         file: id("file.fixture"),
         diagnostic_anchor: compact.retriever_evidence_anchor.clone(),
+        match_reason: DiagnosticMatchReasonV1::CodeExact,
+        matched_query_terms: 1,
+        query_terms: 1,
     };
     let port = FixedDiagnosticPort {
         outcome: RetrieverOutcome::Complete(RetrieverBatch {
@@ -312,7 +393,15 @@ fn temporal_lane_rejects_non_authoritative_hydration_anchor() {
         session_id: id("session.fixture"),
         source_id: "claude".to_owned(),
         hydration_anchor: id("anchor.unrelated-payload"),
-        channels: vec![TemporalCandidateChannelV1::ExactMessage],
+        contributions: vec![TemporalCandidateContributionV1 {
+            channel: TemporalCandidateChannelV1::ExactMessage,
+            source_occurrence: compact.source_occurrence_id.clone(),
+            source_id: Some("claude".to_owned()),
+            retriever_ordinal: 0,
+            raw_score: 12,
+            calibrated_score_micros: 900_000,
+            exact_ranges: Vec::new(),
+        }],
     };
     let port = FixedTemporalPort {
         outcome: RetrieverOutcome::Complete(RetrieverBatch {

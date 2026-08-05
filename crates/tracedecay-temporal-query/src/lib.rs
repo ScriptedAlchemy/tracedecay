@@ -5,6 +5,9 @@ pub mod hydration;
 pub mod ports;
 pub mod ranking;
 pub mod resolution;
+mod retriever;
+
+pub use retriever::{hydrate_temporal_candidate_export, hydrate_temporal_candidate_selection};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -12,17 +15,17 @@ use std::fmt;
 use thiserror::Error;
 use tracedecay_domain::{
     CompactContextConflictV1, CompactContextLineageEdgeV1, CompactContextOmissionV1,
-    ContextOmissionReasonV1, HydrationStateV1, RetrievalAnchorId, SessionAuthorityClassV1,
-    SessionSummaryRecordV1, TemporalAssertionKindV1, TemporalCoverageCountsV1, TemporalModeV1,
+    ContextOmissionReasonV1, HydrationStateV1, RetrievalAnchorId, RetrieverCoverage,
+    SessionAuthorityClassV1, SessionSummaryRecordV1, TemporalAssertionKindV1,
+    TemporalCoverageCountsV1, TemporalModeV1,
 };
 use zeroize::Zeroizing;
 
-use self::context::assembly::assemble_context_with_frames_controlled;
 use self::context::{
     CompactContext, ContextBudget, ContextError, TemporalContextFrames, VersionedTokenEstimator,
 };
 use self::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
-use self::hydration::{HydrationBatch, HydrationError, TemporalHydrationPort, hydrate_selected};
+use self::hydration::{HydrationBatch, HydrationError, TemporalHydrationPort};
 use self::ports::{
     CandidateReadState, PageLimits, PageStatus, SessionCursorAuthenticator,
     TemporalExecutionSnapshot, TemporalPortError, TemporalReadPort, TemporalRecord,
@@ -220,6 +223,7 @@ pub struct TemporalCandidateExport {
     snapshot: TemporalExecutionSnapshot,
     ranked: Vec<RankedCandidate>,
     next_cursor: Option<String>,
+    coverage: RetrieverCoverage,
     all_candidate_anchors: BTreeSet<RetrievalAnchorId>,
     visible_anchors: BTreeSet<RetrievalAnchorId>,
     resolution: TemporalResolution,
@@ -239,6 +243,10 @@ impl TemporalCandidateExport {
     pub fn next_cursor(&self) -> Option<&str> {
         self.next_cursor.as_deref()
     }
+
+    pub const fn coverage(&self) -> RetrieverCoverage {
+        self.coverage
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -251,6 +259,8 @@ pub enum TemporalKernelError {
     DeadlineExceeded,
     #[error("temporal query exceeded its frozen execution limits")]
     BudgetExceeded,
+    #[error("temporal candidate export violated its compact contract: {0}")]
+    CandidateExportContract(String),
     #[error(transparent)]
     Port(#[from] TemporalPortError),
     #[error(transparent)]
@@ -399,6 +409,8 @@ pub async fn execute_temporal_candidate_export(
     visible_anchors.extend(summary_eligibility.eligible_anchor_ids.clone());
     check_control(snapshot)?;
     let all_candidates = candidates;
+    let examined =
+        u64::try_from(all_candidates.len()).map_err(|_| TemporalKernelError::BudgetExceeded)?;
     // Span/Burst candidates are derived-evidence group containers; their member
     // occurrences are enumerated (and counted) individually, so admitting the
     // group anchor into the coverage denominator would double-count every
@@ -449,6 +461,11 @@ pub async fn execute_temporal_candidate_export(
                 && visible_anchors.contains(&candidate.anchor_id)
         })
         .collect::<Vec<_>>();
+    let eligible =
+        u64::try_from(visible_candidates.len()).map_err(|_| TemporalKernelError::BudgetExceeded)?;
+    let excluded = examined
+        .checked_sub(eligible)
+        .ok_or(TemporalKernelError::BudgetExceeded)?;
     let mut ranked = rank_candidates(&visible_candidates, request.diversity)?;
     if let Some(after) = &after {
         ranked.retain(|candidate| is_after(candidate, after));
@@ -457,6 +474,8 @@ pub async fn execute_temporal_candidate_export(
     ranked.retain(|candidate| deduplicated_anchors.insert(candidate.anchor_id.clone()));
 
     let has_more = ranked.len() > request.limit;
+    let capped = u64::try_from(ranked.len().saturating_sub(request.limit))
+        .map_err(|_| TemporalKernelError::BudgetExceeded)?;
     ranked.truncate(request.limit);
     let next_cursor = if has_more {
         ranked
@@ -472,84 +491,19 @@ pub async fn execute_temporal_candidate_export(
         snapshot: snapshot.clone(),
         ranked,
         next_cursor,
+        coverage: RetrieverCoverage {
+            examined,
+            eligible,
+            excluded,
+            capped,
+            unknown: u64::try_from(resolved.iter().filter(|item| item.uncertain).count())
+                .map_err(|_| TemporalKernelError::BudgetExceeded)?,
+        },
         all_candidate_anchors,
         visible_anchors,
         resolution: resolved,
         summaries: records.summaries,
         summary_eligibility,
-    })
-}
-
-/// Hydrate one frozen candidate export through the canonical Plan-23
-/// authorization/redaction/content port without changing rank or cursor.
-pub async fn hydrate_temporal_candidate_export(
-    request: &TemporalKernelRequest,
-    export: TemporalCandidateExport,
-    hydration_port: &impl TemporalHydrationPort,
-    token_estimator: &impl VersionedTokenEstimator,
-) -> Result<TemporalKernelResult, TemporalKernelError> {
-    if export.snapshot != request.snapshot {
-        return Err(TemporalKernelError::Port(
-            TemporalPortError::InvalidBinding {
-                field: "temporal candidate export snapshot",
-            },
-        ));
-    }
-    let TemporalCandidateExport {
-        snapshot,
-        ranked,
-        next_cursor,
-        all_candidate_anchors,
-        visible_anchors,
-        resolution,
-        summaries,
-        summary_eligibility,
-    } = export;
-    check_control(&snapshot)?;
-    let ranked_anchors = ranked
-        .iter()
-        .map(|candidate| candidate.anchor_id.clone())
-        .collect::<BTreeSet<_>>();
-    let anchors = ranked
-        .iter()
-        .map(|candidate| candidate.anchor_id.clone())
-        .collect::<Vec<_>>();
-    let hydration = hydrate_selected(hydration_port, &snapshot, &anchors)
-        .await
-        .map_err(map_hydration_error)?;
-    check_control(&snapshot)?;
-    let frames = temporal_context_frames(
-        &all_candidate_anchors,
-        &visible_anchors,
-        &resolution,
-        &resolution.lineage_edges,
-        &hydration,
-        &summaries,
-        &ranked_anchors,
-        &summary_eligibility,
-    );
-    let context = assemble_context_with_frames_controlled(
-        &hydration,
-        snapshot.grain(),
-        frames,
-        request.context_budget.clone(),
-        token_estimator,
-        snapshot.request().execution_control(),
-    )
-    .map_err(map_context_error)?;
-    check_control(&snapshot)?;
-    let summary_omissions = public_summary_omissions(&summary_eligibility);
-    let hydrated = TemporalHydratedResult::from_batch(hydration, &ranked);
-    Ok(TemporalKernelResult {
-        coverage: context.bundle.coverage,
-        conflicts: context.bundle.conflicts.clone(),
-        lineage: context.bundle.lineage.clone(),
-        snapshot,
-        ranked,
-        hydrated,
-        context,
-        summary_omissions,
-        next_cursor,
     })
 }
 

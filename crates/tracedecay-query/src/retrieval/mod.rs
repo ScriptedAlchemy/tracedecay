@@ -43,8 +43,8 @@ pub use self::prepared_query::{
     authenticate_prepared_query_cursor_for_routing, route_authenticated_prepared_query_cursor,
 };
 pub use self::query_authority::{
-    AuthorizedQueryFallbackV1, QUERY_CURSOR_TTL_MICROS_V1, QUERY_RANKING_REVISION_V1,
-    QueryAuthorityErrorV1, QueryAuthorityV1,
+    AuthorizedFederatedRetrievalV1, AuthorizedQueryFallbackV1, QUERY_CURSOR_TTL_MICROS_V1,
+    QUERY_RANKING_REVISION_V1, QueryAuthorityErrorV1, QueryAuthorityV1,
 };
 pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
 
