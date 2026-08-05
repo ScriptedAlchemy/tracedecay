@@ -5,7 +5,8 @@ use std::path::Path;
 use tracedecay_application::framed_log::{append_durable, truncate_file as shared_truncate_file};
 use tracedecay_domain::{UtcMicros, framed_log::checksum as frame_checksum};
 
-use crate::{HookHostV1, MAX_HOOK_PAYLOAD_BYTES, decode_hook_event_envelope_compat};
+use crate::{HOOK_EVENT_SCHEMA_VERSION, HookEventEnvelopeV2, HookHostV1, MAX_HOOK_PAYLOAD_BYTES};
+use serde_json::Value;
 
 use super::types::{HookSpoolRecordV1, ScanResult};
 use super::{
@@ -177,12 +178,23 @@ pub(super) fn decode_complete_frame(
             .try_into()
             .map_err(|_| HookSpoolError::MetadataCorrupted)?,
     ) as usize;
-    if declared + FRAME_LENGTH_BYTES != frame.len()
-        || &frame[4..8] != SPOOL_MAGIC
-        || u16::from_le_bytes([frame[8], frame[9]]) != SPOOL_FORMAT_VERSION
-    {
+    if declared + FRAME_LENGTH_BYTES != frame.len() {
         return Err(HookSpoolError::Corrupted {
             at_offset: file_offset,
+        });
+    }
+    let found_magic: [u8; 4] = frame[4..8]
+        .try_into()
+        .map_err(|_| HookSpoolError::MetadataCorrupted)?;
+    let found_version = u16::from_le_bytes([frame[8], frame[9]]);
+    if found_magic != *SPOOL_MAGIC || found_version != SPOOL_FORMAT_VERSION {
+        return Err(HookSpoolError::ResetRequired {
+            reason: super::HookSpoolResetReasonV1::FrameFormat {
+                found_magic,
+                found_version,
+                expected_magic: *SPOOL_MAGIC,
+                expected_version: SPOOL_FORMAT_VERSION,
+            },
         });
     }
     let checksum_at = frame.len() - FRAME_CHECKSUM_BYTES;
@@ -222,10 +234,7 @@ pub(super) fn decode_complete_frame(
         });
     }
     let payload = &frame[62..checksum_at];
-    let envelope =
-        decode_hook_event_envelope_compat(payload).map_err(|_| HookSpoolError::Corrupted {
-            at_offset: file_offset,
-        })?;
+    let envelope = decode_exact_envelope(payload, file_offset)?;
     if envelope.producer != host || envelope.protected_session_id != protected_session_id {
         return Err(HookSpoolError::Corrupted {
             at_offset: file_offset,
@@ -242,24 +251,30 @@ pub(super) fn decode_complete_frame(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{HookEventV2, HookHostV1};
-
-    #[test]
-    fn replay_decoder_migrates_retained_authorization_era_frame() {
-        let payload = include_bytes!("../../fixtures/envelopes/authorization-era-saved-edit.json");
-        let frame = encode_frame(1, UtcMicros(10), [8; 32], payload).unwrap();
-        let record = decode_complete_frame(&frame, 0, HookHostV1::CursorDesktop).unwrap();
-
-        assert_eq!(record.sequence, 1);
-        assert_eq!(
-            record.envelope.event,
-            HookEventV2::SavedEdit {
-                file_id: [11; 16],
-                changed_range_count: 1,
-            }
-        );
+fn decode_exact_envelope(
+    payload: &[u8],
+    file_offset: u64,
+) -> Result<HookEventEnvelopeV2, HookSpoolError> {
+    let value: Value = serde_json::from_slice(payload).map_err(|_| HookSpoolError::Corrupted {
+        at_offset: file_offset,
+    })?;
+    let Some(found) = value.get("schema_version").and_then(Value::as_u64) else {
+        return Err(HookSpoolError::ResetRequired {
+            reason: super::HookSpoolResetReasonV1::EnvelopeShape,
+        });
+    };
+    let found = u16::try_from(found).map_err(|_| HookSpoolError::ResetRequired {
+        reason: super::HookSpoolResetReasonV1::EnvelopeShape,
+    })?;
+    if found != HOOK_EVENT_SCHEMA_VERSION {
+        return Err(HookSpoolError::ResetRequired {
+            reason: super::HookSpoolResetReasonV1::EnvelopeVersion {
+                found,
+                expected: HOOK_EVENT_SCHEMA_VERSION,
+            },
+        });
     }
+    serde_json::from_value(value).map_err(|_| HookSpoolError::ResetRequired {
+        reason: super::HookSpoolResetReasonV1::EnvelopeShape,
+    })
 }
