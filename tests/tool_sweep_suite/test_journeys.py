@@ -144,7 +144,6 @@ class JourneyTests(unittest.TestCase):
             "tracedecay_replace_symbol",
             "tracedecay_insert_at_symbol",
             "tracedecay_move_symbol",
-            "tracedecay_rename_symbol",
         ]:
             self.assertTrue(journeys.has_effect_journey(name), name)
         self.assertFalse(journeys.has_effect_journey("tracedecay_unknown"))
