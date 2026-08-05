@@ -22,7 +22,6 @@ pub mod remediation;
 pub mod remote;
 mod sse;
 pub mod work;
-pub mod work_product;
 pub mod workflow;
 
 use serde::Serialize;
@@ -52,11 +51,6 @@ pub use sse::sse_response;
 pub use work::{
     WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,
     WorkOperationFamily, work_application_router, work_core_router, work_invalid_request_response,
-};
-pub use work_product::{
-    WorkProductApplicationOwner, WorkProductHttpOperation, WorkProductHttpRequest,
-    WorkProductInvocationFuture, WorkProductOperationFamily, work_product_application_router,
-    work_product_invalid_request_response, work_product_router,
 };
 pub use workflow::{
     WorkflowApplicationOwner, WorkflowHttpRequest, WorkflowInvocationFuture, WorkflowOperation,
