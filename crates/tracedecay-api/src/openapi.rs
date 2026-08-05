@@ -6,12 +6,22 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{HeaderValue, header::CONTENT_TYPE};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
 use tracedecay_application::ApplicationWireSchemaRegistryV1;
+use tracedecay_tool_catalog::{BindingId, BindingSurface};
 
 use crate::HttpRouteDocumentV1;
+
+/// Relative endpoint installed by [`openapi_router`].
+pub const OPENAPI_DOCUMENT_ROUTE_PATH: &str = "/openapi.json";
 
 const HTTP_PROBLEM_STATUSES: [&str; 8] = ["400", "404", "408", "409", "422", "429", "503", "504"];
 const HTTP_JSON_ENVELOPE_REF: &str = "#/components/schemas/HttpJsonEnvelope";
@@ -46,6 +56,8 @@ struct OpenApiInfoV1 {
 /// A route-catalog conflict that prevents a truthful OpenAPI projection.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum OpenApiDocumentError {
+    #[error("HTTP route has invalid binding ID {binding_id}")]
+    InvalidBindingId { binding_id: String },
     #[error("duplicate HTTP route {method} {path}")]
     DuplicateRoute { method: String, path: String },
     #[error(
@@ -72,6 +84,43 @@ pub enum OpenApiDocumentError {
     MismatchedWireSchema { binding_id: String },
 }
 
+/// A failure detected before the OpenAPI endpoint can be mounted.
+#[derive(Debug, Error)]
+pub enum OpenApiRouterBuildError {
+    #[error(transparent)]
+    Document(#[from] OpenApiDocumentError),
+    #[error("canonical OpenAPI document could not be serialized")]
+    Encoding(#[source] serde_json::Error),
+}
+
+/// Build a relative OpenAPI endpoint from the authorized HTTP route snapshot
+/// and its canonical concrete wire schemas.
+///
+/// Projection and serialization complete before a router is returned. The
+/// composition root can therefore merge this router under its authenticated
+/// API prefix without admitting a route that might serve partial or drifted
+/// documentation.
+pub fn openapi_router(
+    route_documents: &[HttpRouteDocumentV1],
+    wire_schemas: &ApplicationWireSchemaRegistryV1,
+) -> Result<Router, OpenApiRouterBuildError> {
+    let document = openapi_document(route_documents, wire_schemas)?;
+    let bytes = document
+        .to_json_bytes()
+        .map_err(OpenApiRouterBuildError::Encoding)?;
+    Ok(Router::new()
+        .route(OPENAPI_DOCUMENT_ROUTE_PATH, get(serve_openapi))
+        .with_state(Bytes::from(bytes)))
+}
+
+async fn serve_openapi(State(document): State<Bytes>) -> Response {
+    (
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        document,
+    )
+        .into_response()
+}
+
 /// Project the supplied authorized route documents into OpenAPI 3.1.
 ///
 /// Input order is immaterial. Duplicate routes and reused operation IDs fail
@@ -83,13 +132,18 @@ pub fn openapi_document(
 ) -> Result<OpenApiDocumentV1, OpenApiDocumentError> {
     let mut schema_bodies = BTreeMap::new();
     for route in route_documents {
-        let schema = wire_schemas
-            .iter()
-            .find(|schema| schema.binding_id().as_str() == route.binding_id)
-            .ok_or_else(|| OpenApiDocumentError::MissingWireSchema {
+        let binding_id = BindingId::new(route.binding_id.clone()).map_err(|_| {
+            OpenApiDocumentError::InvalidBindingId {
                 binding_id: route.binding_id.clone(),
-            })?;
-        if schema.operation().as_str() != route.operation
+            }
+        })?;
+        let schema = wire_schemas.get(&binding_id).ok_or_else(|| {
+            OpenApiDocumentError::MissingWireSchema {
+                binding_id: route.binding_id.clone(),
+            }
+        })?;
+        if schema.surface() != BindingSurface::Http
+            || schema.operation().as_str() != route.operation
             || schema.capability_id().as_str() != route.capability_id
             || schema.request().schema_ref().schema_id().as_str() != route.request_schema
             || schema.request().schema_ref().revision() != route.request_schema_revision
@@ -436,6 +490,9 @@ fn string(value: impl Into<String>) -> Value {
 fn number(value: u32) -> Value {
     Value::Number(value.into())
 }
+
+#[cfg(test)]
+mod router_tests;
 
 #[cfg(test)]
 mod tests {

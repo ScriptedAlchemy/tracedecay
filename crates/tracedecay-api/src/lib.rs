@@ -46,7 +46,10 @@ pub use multi_root::{
     MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,
     MultiRootInvocationFuture, multi_root_application_router,
 };
-pub use openapi::{OpenApiDocumentError, OpenApiDocumentV1, openapi_document};
+pub use openapi::{
+    OPENAPI_DOCUMENT_ROUTE_PATH, OpenApiDocumentError, OpenApiDocumentV1, OpenApiRouterBuildError,
+    openapi_document, openapi_router,
+};
 pub use sse::sse_response;
 pub use work::{
     WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,
