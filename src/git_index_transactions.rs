@@ -115,6 +115,13 @@ pub(crate) struct NativeIndexLock {
     published: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NativeRefState {
+    name: String,
+    object: GitOidV1,
+    symbolic_target: Option<String>,
+}
+
 impl Drop for NativeIndexLock {
     fn drop(&mut self) {
         if !self.published {
@@ -459,6 +466,7 @@ impl FixedGitIndexRunner {
             return Err(NativeGitIndexError::CandidateTreeMismatch);
         }
         self.require_ref_value(&current_ref, commit)?;
+        let expected_refs = self.ref_snapshot()?;
 
         let mut command = self.command();
         command
@@ -490,24 +498,12 @@ impl FixedGitIndexRunner {
             self.verify_created_commit_signature(&created_commit, key_reference)?;
         }
 
-        let update = self
-            .run_git_output(&[
-                "update-ref",
-                &current_ref,
-                created_commit.as_str(),
-                commit.as_str(),
-            ])
-            .map_err(|error| error.into_commit_boundary_unknown("update-ref"))?;
-        if !update.status.success() {
-            // The old-value CAS prevents competing ref updates, but a killed
-            // or failing process can still report non-success after Git has
-            // crossed its ref publication boundary. Never classify the exit
-            // status alone as proof that the ref was unchanged.
-            return Err(NativeGitIndexError::GitFailed {
-                operation: "update-ref",
-                status: update.status.to_string(),
-            }
-            .into_commit_boundary_unknown("update-ref"));
+        self.update_ref_with_namespace_cas(&current_ref, &created_commit, commit, &expected_refs)?;
+        if self.ref_snapshot_excluding(&current_ref)?
+            != refs_excluding(&expected_refs, &current_ref)
+        {
+            return Err(NativeGitIndexError::StaleRepositoryState
+                .into_commit_boundary_unknown("update-ref verification"));
         }
         Ok(created_commit)
     }
@@ -659,6 +655,93 @@ impl FixedGitIndexRunner {
             return Err(NativeGitIndexError::StaleRepositoryState);
         }
         Ok(())
+    }
+
+    fn ref_snapshot(&self) -> Result<Vec<NativeRefState>, NativeGitIndexError> {
+        let output = self.run_git(
+            "for-each-ref",
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(objectname)%00%(symref)",
+            ],
+        )?;
+        let text = std::str::from_utf8(&output.stdout).map_err(|_| {
+            NativeGitIndexError::MalformedOutput {
+                operation: "for-each-ref",
+            }
+        })?;
+        let mut refs = Vec::new();
+        for line in text.lines().filter(|line| !line.is_empty()) {
+            let mut fields = line.split('\0');
+            let name = fields.next().filter(|name| !name.is_empty()).ok_or(
+                NativeGitIndexError::MalformedOutput {
+                    operation: "for-each-ref",
+                },
+            )?;
+            let object = fields.next().ok_or(NativeGitIndexError::MalformedOutput {
+                operation: "for-each-ref",
+            })?;
+            let object = GitOidV1::new(object)?;
+            let symbolic_target = fields
+                .next()
+                .filter(|target| !target.is_empty())
+                .map(str::to_owned);
+            if fields.next().is_some() {
+                return Err(NativeGitIndexError::MalformedOutput {
+                    operation: "for-each-ref",
+                });
+            }
+            refs.push(NativeRefState {
+                name: name.to_owned(),
+                object,
+                symbolic_target,
+            });
+        }
+        Ok(refs)
+    }
+
+    fn ref_snapshot_excluding(
+        &self,
+        excluded: &str,
+    ) -> Result<Vec<NativeRefState>, NativeGitIndexError> {
+        Ok(refs_excluding(&self.ref_snapshot()?, excluded))
+    }
+
+    fn update_ref_with_namespace_cas(
+        &self,
+        target: &str,
+        new_value: &GitOidV1,
+        old_value: &GitOidV1,
+        expected_refs: &[NativeRefState],
+    ) -> Result<(), NativeGitIndexError> {
+        let mut transaction = String::from("start\n");
+        for reference in expected_refs
+            .iter()
+            .filter(|reference| reference.name != target)
+        {
+            transaction.push_str("verify ");
+            transaction.push_str(&reference.name);
+            transaction.push(' ');
+            transaction.push_str(reference.object.as_str());
+            transaction.push('\n');
+        }
+        transaction.push_str("update ");
+        transaction.push_str(target);
+        transaction.push(' ');
+        transaction.push_str(new_value.as_str());
+        transaction.push(' ');
+        transaction.push_str(old_value.as_str());
+        transaction.push_str("\nprepare\ncommit\n");
+
+        let mut command = self.command();
+        command
+            .args(["update-ref", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        run_command_with_stdin(command, "update-ref", transaction.as_bytes())
+            .map(|_| ())
+            .map_err(|error| error.into_commit_boundary_unknown("update-ref"))
     }
 
     fn write_tree_durable_under_lock(
@@ -852,4 +935,11 @@ impl FixedGitIndexRunner {
             .output()
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))
     }
+}
+
+fn refs_excluding(refs: &[NativeRefState], excluded: &str) -> Vec<NativeRefState> {
+    refs.iter()
+        .filter(|reference| reference.name != excluded)
+        .cloned()
+        .collect()
 }
