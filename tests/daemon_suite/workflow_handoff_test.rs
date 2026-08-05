@@ -121,19 +121,6 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
             .expect("registered workflow authority must be mounted for a project runtime");
 
         WorkflowDefinitionAuthorityPort::insert(&authority, &definition).unwrap();
-        WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
-            &authority,
-            definition.definition_id(),
-            None,
-            Some(1),
-        )
-        .unwrap();
-        assert_eq!(
-            WorkflowDefinitionAuthorityPort::active_version(&authority, definition.definition_id())
-                .unwrap(),
-            Some(1),
-            "definition activation must be visible within the admitting runtime"
-        );
 
         TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
 
@@ -168,13 +155,6 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
         Some(&definition),
         "the registered definition must survive the restart byte-for-byte"
     );
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(&authority, definition.definition_id())
-            .unwrap(),
-        Some(1),
-        "activation must survive the restart"
-    );
-
     // A single-use token stays single-use across a restart: replay, not a
     // silent re-grant of Consumed's authority.
     assert_eq!(

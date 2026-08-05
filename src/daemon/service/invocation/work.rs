@@ -25,10 +25,11 @@ pub(super) async fn execute_workflow_application(
     project_root: &Path,
     request_id: String,
     request: WorkflowApplicationInvocation,
-    observed_at: UtcMicros,
+    _observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
+    let observed_at = crate::daemon_client::invocation_now_micros();
     let operation_key = request.operation_key();
     let Some((_, capability, use_case)) =
         tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS
@@ -82,7 +83,7 @@ pub(super) async fn execute_workflow_application(
             input_digest,
             services
                 .definitions()
-                .register(request.definition)
+                .register(&context, request.definition)
                 .map_err(workflow_coordination_problem),
             observed_at,
             deadline,
@@ -172,45 +173,6 @@ pub(super) async fn execute_workflow_application(
             deadline,
             WorkflowApplicationOutcome::DiffDefinition,
         ),
-        WorkflowApplicationInvocation::ActivateDefinition(request) => complete_workflow_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services
-                .definitions()
-                .activate(
-                    &request.definition_id,
-                    request.expected_active_version,
-                    request.replacement_version,
-                )
-                .map_err(workflow_coordination_problem),
-            observed_at,
-            deadline,
-            WorkflowApplicationOutcome::ActivateDefinition,
-        ),
-        WorkflowApplicationInvocation::RetireDefinition(request) => complete_workflow_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services
-                .definitions()
-                .retire(
-                    &request.definition_id,
-                    Some(request.expected_active_version),
-                )
-                .map_err(workflow_coordination_problem),
-            observed_at,
-            deadline,
-            WorkflowApplicationOutcome::RetireDefinition,
-        ),
         WorkflowApplicationInvocation::HandoffIssue(request) => {
             let result = TaskHandoffToken::new(request.secret)
                 .map_err(task_handoff_problem)
@@ -218,11 +180,11 @@ pub(super) async fn execute_workflow_application(
                     services
                         .handoffs()
                         .issue(
-                            &request.issuer,
+                            &context,
                             request.scope,
                             &token,
                             request.expires_at,
-                            request.issued_at,
+                            observed_at,
                         )
                         .map_err(task_handoff_problem)
                 });
@@ -247,7 +209,7 @@ pub(super) async fn execute_workflow_application(
                 .and_then(|token| {
                     services
                         .handoffs()
-                        .redeem(&token, &scope, &request.redeemer, request.consumed_at)
+                        .redeem(&context, &token, &scope, observed_at)
                         .map_err(task_handoff_problem)
                 })
                 .map(|()| TaskHandoffRedeemed { scope });
@@ -372,11 +334,13 @@ fn workflow_coordination_problem(error: WorkflowCoordinationError) -> DaemonInvo
         WorkflowCoordinationError::DefinitionNotFound => {
             DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
+        WorkflowCoordinationError::ScopeMismatch => {
+            DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
         WorkflowCoordinationError::InvalidDefinition
-        | WorkflowCoordinationError::ImmutableDefinitionConflict
-        | WorkflowCoordinationError::UnsupportedOperation
-        | WorkflowCoordinationError::CatalogDigestMismatch
-        | WorkflowCoordinationError::StaleActivation => DaemonInvocationProblem::InvalidRequest,
+        | WorkflowCoordinationError::ImmutableDefinitionConflict => {
+            DaemonInvocationProblem::InvalidRequest
+        }
     }
 }
 

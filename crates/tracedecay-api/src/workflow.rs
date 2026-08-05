@@ -14,11 +14,10 @@ use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
     ApplicationProblem, RequestId, RetryDirective, TaskHandoffGrant, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffRedeemed, WorkflowActivation,
-    WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest,
-    WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRetireRequest,
-    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation, WorkflowRetirement,
+    TaskHandoffRedeemRequest, TaskHandoffRedeemed, WorkflowDefinitionDiff,
+    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation,
 };
 use tracedecay_domain::WorkflowDefinition;
 
@@ -39,22 +38,18 @@ pub enum WorkflowOperation {
     ListDefinitions,
     DefinitionHistory,
     DiffDefinition,
-    ActivateDefinition,
-    RetireDefinition,
     HandoffIssue,
     HandoffRedeem,
 }
 
 impl WorkflowOperation {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 8] = [
         Self::RegisterDefinition,
         Self::ValidateDefinition,
         Self::GetDefinition,
         Self::ListDefinitions,
         Self::DefinitionHistory,
         Self::DiffDefinition,
-        Self::ActivateDefinition,
-        Self::RetireDefinition,
         Self::HandoffIssue,
         Self::HandoffRedeem,
     ];
@@ -67,8 +62,6 @@ impl WorkflowOperation {
             Self::ListDefinitions => "operation.workflow.list_definitions",
             Self::DefinitionHistory => "operation.workflow.definition_history",
             Self::DiffDefinition => "operation.workflow.diff_definition",
-            Self::ActivateDefinition => "operation.workflow.activate_definition",
-            Self::RetireDefinition => "operation.workflow.retire_definition",
             Self::HandoffIssue => "operation.workflow.handoff_issue",
             Self::HandoffRedeem => "operation.workflow.handoff_redeem",
         }
@@ -82,8 +75,6 @@ impl WorkflowOperation {
             Self::ListDefinitions => "list_definitions",
             Self::DefinitionHistory => "definition_history",
             Self::DiffDefinition => "diff_definition",
-            Self::ActivateDefinition => "activate_definition",
-            Self::RetireDefinition => "retire_definition",
             Self::HandoffIssue => "handoff_issue",
             Self::HandoffRedeem => "handoff_redeem",
         }
@@ -110,8 +101,6 @@ impl WorkflowOperation {
             Self::ListDefinitions => "list-definitions",
             Self::DefinitionHistory => "definition-history",
             Self::DiffDefinition => "diff-definition",
-            Self::ActivateDefinition => "activate-definition",
-            Self::RetireDefinition => "retire-definition",
             Self::HandoffIssue => "handoff-issue",
             Self::HandoffRedeem => "handoff-redeem",
         }
@@ -125,8 +114,6 @@ impl WorkflowOperation {
             Self::ListDefinitions => "/workflow/list-definitions",
             Self::DefinitionHistory => "/workflow/definition-history",
             Self::DiffDefinition => "/workflow/diff-definition",
-            Self::ActivateDefinition => "/workflow/activate-definition",
-            Self::RetireDefinition => "/workflow/retire-definition",
             Self::HandoffIssue => "/workflow/handoff-issue",
             Self::HandoffRedeem => "/workflow/handoff-redeem",
         }
@@ -140,8 +127,6 @@ impl WorkflowOperation {
             Self::ListDefinitions => "/application/workflow/list-definitions",
             Self::DefinitionHistory => "/application/workflow/definition-history",
             Self::DiffDefinition => "/application/workflow/diff-definition",
-            Self::ActivateDefinition => "/application/workflow/activate-definition",
-            Self::RetireDefinition => "/application/workflow/retire-definition",
             Self::HandoffIssue => "/application/workflow/handoff-issue",
             Self::HandoffRedeem => "/application/workflow/handoff-redeem",
         }
@@ -155,8 +140,6 @@ impl WorkflowOperation {
             Self::ListDefinitions => schema_name::<WorkflowDefinitionListRequest>(),
             Self::DefinitionHistory => schema_name::<WorkflowDefinitionHistoryRequest>(),
             Self::DiffDefinition => schema_name::<WorkflowDefinitionDiffRequest>(),
-            Self::ActivateDefinition => schema_name::<WorkflowDefinitionActivateRequest>(),
-            Self::RetireDefinition => schema_name::<WorkflowDefinitionRetireRequest>(),
             Self::HandoffIssue => schema_name::<TaskHandoffIssueRequest>(),
             Self::HandoffRedeem => schema_name::<TaskHandoffRedeemRequest>(),
         }
@@ -171,8 +154,6 @@ impl WorkflowOperation {
                 schema_name::<Vec<WorkflowDefinition>>()
             }
             Self::DiffDefinition => schema_name::<WorkflowDefinitionDiff>(),
-            Self::ActivateDefinition => schema_name::<WorkflowActivation>(),
-            Self::RetireDefinition => schema_name::<WorkflowRetirement>(),
             Self::HandoffIssue => schema_name::<TaskHandoffGrant>(),
             Self::HandoffRedeem => schema_name::<TaskHandoffRedeemed>(),
         }

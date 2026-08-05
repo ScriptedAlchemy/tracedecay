@@ -3,9 +3,9 @@
 use rusqlite::Connection;
 
 /// Stable description hashed into `workflow_schema.definition_digest`.
-const WORKFLOW_SCHEMA_DEFINITION_V1: &str = "workflow_definitions(definition_id text not null,definition_version integer not null check >0,payload text not null,payload_digest text not null,primary key(definition_id,definition_version));workflow_activations(definition_id text primary key,active_version integer not null check >0);workflow_handoffs(token_digest text primary key,scope_payload text not null,issued_at integer not null,expires_at integer not null check expires_at>issued_at,consumed integer not null check in(0,1));workflow_schema(singleton integer primary key check =1,schema_version integer check =1,definition_digest text not null);";
+const WORKFLOW_SCHEMA_DEFINITION_V1: &str = "workflow_definitions(definition_id text not null,definition_version integer not null check >0,payload text not null,payload_digest text not null,primary key(definition_id,definition_version));workflow_handoffs(token_digest text primary key,scope_payload text not null,issued_at integer not null,expires_at integer not null check expires_at>issued_at,consumed integer not null check in(0,1));workflow_schema(singleton integer primary key check =1,schema_version integer check =1,definition_digest text not null);";
 pub(crate) const WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1: &str =
-    "sha256:f6153b619fd39d63321d5188fee26d411eeda7aad18e8b36dc49d59644e70e97";
+    "sha256:4160b0bb90476a3e868774eef0a95d57b75bd6c586a577fcae693d2bbf1aca5c";
 
 pub const WORKFLOW_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS workflow_definitions (
@@ -14,11 +14,6 @@ CREATE TABLE IF NOT EXISTS workflow_definitions (
     payload TEXT NOT NULL,
     payload_digest TEXT NOT NULL,
     PRIMARY KEY (definition_id, definition_version)
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS workflow_activations (
-    definition_id TEXT NOT NULL PRIMARY KEY,
-    active_version INTEGER NOT NULL CHECK (active_version > 0)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS workflow_handoffs (
@@ -39,7 +34,7 @@ INSERT OR IGNORE INTO workflow_schema (singleton, schema_version, definition_dig
 VALUES (
     1,
     1,
-    'sha256:f6153b619fd39d63321d5188fee26d411eeda7aad18e8b36dc49d59644e70e97'
+    'sha256:4160b0bb90476a3e868774eef0a95d57b75bd6c586a577fcae693d2bbf1aca5c'
 );
 ";
 

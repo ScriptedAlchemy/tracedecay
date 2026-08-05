@@ -13,16 +13,15 @@ use tracedecay_tool_catalog::{
 
 use crate::{
     TaskHandoffGrant, TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed,
-    WorkflowActivation, WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff,
-    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
-    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation, WorkflowRetirement,
+    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
+    WorkflowDefinitionValidation,
 };
 
 const WORKFLOW_SERVICE_ID: &str = "service.workflow";
 
-pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 10] = [
+pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 8] = [
     (
         "register_definition",
         "capability.workflow.register_definition",
@@ -52,16 +51,6 @@ pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 10] = [
         "diff_definition",
         "capability.workflow.diff_definition",
         "use-case.workflow.diff_definition",
-    ),
-    (
-        "activate_definition",
-        "capability.workflow.activate_definition",
-        "use-case.workflow.activate_definition",
-    ),
-    (
-        "retire_definition",
-        "capability.workflow.retire_definition",
-        "use-case.workflow.retire_definition",
     ),
     (
         "handoff_issue",
@@ -107,18 +96,6 @@ pub fn workflow_executable_binding_registry()
                     WorkflowDefinitionDiffRequest,
                     WorkflowDefinitionDiff,
                 >(operation, "/application/workflow/diff-definition"),
-                "activate_definition" => {
-                    available::<WorkflowDefinitionActivateRequest, WorkflowActivation>(
-                        operation,
-                        "/application/workflow/activate-definition",
-                    )
-                }
-                "retire_definition" => {
-                    available::<WorkflowDefinitionRetireRequest, WorkflowRetirement>(
-                        operation,
-                        "/application/workflow/retire-definition",
-                    )
-                }
                 "handoff_issue" => available::<TaskHandoffIssueRequest, TaskHandoffGrant>(
                     operation,
                     "/application/workflow/handoff-issue",

@@ -12,9 +12,8 @@ use tracedecay_application::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationResult, CancellationSignal, Deadline, LegalAction, ResultContractRef,
     RetryDirective, SafeDiagnostic, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
-    WorkflowDefinitionActivateRequest, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
-    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRetireRequest,
+    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
     WorkflowDefinitionValidateRequest, workflow_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
@@ -70,10 +69,6 @@ fn decode_workflow_invocation(
             .map(WorkflowApplicationInvocation::DefinitionHistory),
         WorkflowOperation::DiffDefinition => decode::<WorkflowDefinitionDiffRequest>(body)
             .map(WorkflowApplicationInvocation::DiffDefinition),
-        WorkflowOperation::ActivateDefinition => decode::<WorkflowDefinitionActivateRequest>(body)
-            .map(WorkflowApplicationInvocation::ActivateDefinition),
-        WorkflowOperation::RetireDefinition => decode::<WorkflowDefinitionRetireRequest>(body)
-            .map(WorkflowApplicationInvocation::RetireDefinition),
         WorkflowOperation::HandoffIssue => {
             decode::<TaskHandoffIssueRequest>(body).map(WorkflowApplicationInvocation::HandoffIssue)
         }
@@ -106,12 +101,6 @@ fn workflow_outcome_matches(
         ) | (
             WorkflowOperation::DiffDefinition,
             WorkflowApplicationOutcome::DiffDefinition(_)
-        ) | (
-            WorkflowOperation::ActivateDefinition,
-            WorkflowApplicationOutcome::ActivateDefinition(_)
-        ) | (
-            WorkflowOperation::RetireDefinition,
-            WorkflowApplicationOutcome::RetireDefinition(_)
         ) | (
             WorkflowOperation::HandoffIssue,
             WorkflowApplicationOutcome::HandoffIssue(_)
@@ -216,8 +205,6 @@ fn erase_workflow_outcome(
         WorkflowApplicationOutcome::ListDefinitions(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::DefinitionHistory(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::DiffDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::ActivateDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::RetireDefinition(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::HandoffIssue(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::HandoffRedeem(outcome) => serde_json::to_value(outcome),
     }?;

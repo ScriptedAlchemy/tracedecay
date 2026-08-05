@@ -88,7 +88,6 @@ fn non_final_store_requires_reset_without_runtime_schema_mutation() {
             connection
                 .execute_batch(
                     "DROP TABLE workflow_handoffs;
-                 DROP TABLE workflow_activations;
                  DROP TABLE workflow_definitions;
                  DROP TABLE workflow_schema;",
                 )
@@ -147,7 +146,7 @@ fn attachment_rejects_wrong_schema_version_digest_and_definition() {
 }
 
 #[test]
-fn definitions_activate_and_reject_conflicting_payloads() {
+fn definitions_preserve_history_and_reject_conflicting_payloads() {
     let store = RegisteredWorkflowStore::start("workflow-definitions");
     let authority = authority(&store);
     let first = definition(1, "operation.prepare.v1");
@@ -172,43 +171,6 @@ fn definitions_activate_and_reject_conflicting_payloads() {
         Some(&first)
     );
     assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
-        None
-    );
-
-    WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
-        &authority,
-        first.definition_id(),
-        None,
-        Some(1),
-    )
-    .unwrap();
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
-        Some(1)
-    );
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
-            &authority,
-            first.definition_id(),
-            None,
-            Some(2),
-        )
-        .unwrap_err(),
-        WorkflowDefinitionAuthorityError::Conflict
-    );
-    WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
-        &authority,
-        first.definition_id(),
-        Some(1),
-        Some(2),
-    )
-    .unwrap();
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
-        Some(2)
-    );
-    assert_eq!(
         WorkflowDefinitionAuthorityPort::list(&authority, Some(first.definition_id()))
             .unwrap()
             .iter()
@@ -216,25 +178,13 @@ fn definitions_activate_and_reject_conflicting_payloads() {
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
-    WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
-        &authority,
-        first.definition_id(),
-        Some(2),
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
-        None
-    );
     assert_eq!(
         WorkflowDefinitionAuthorityPort::list(&authority, None).unwrap(),
         vec![first, second],
-        "retirement must preserve immutable definition history"
+        "definition reads must preserve immutable history"
     );
 
     assert_eq!(store.count("workflow_definitions"), 2);
-    assert_eq!(store.count("workflow_activations"), 0);
 }
 
 #[test]
@@ -349,13 +299,6 @@ fn definition_and_handoff_survive_registered_store_restart() {
     let authority = authority(&store);
     let first = definition(1, "operation.prepare.v1");
     WorkflowDefinitionAuthorityPort::insert(&authority, &first).unwrap();
-    WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
-        &authority,
-        first.definition_id(),
-        None,
-        Some(1),
-    )
-    .unwrap();
 
     let scope = handoff_scope();
     let grant = TaskHandoffGrant::new(
@@ -379,10 +322,6 @@ fn definition_and_handoff_survive_registered_store_restart() {
             .unwrap()
             .as_ref(),
         Some(&first)
-    );
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
-        Some(1)
     );
     assert_eq!(
         TaskHandoffAuthorityPort::consume(&authority, grant.token_digest(), &scope, UtcMicros(12),)
