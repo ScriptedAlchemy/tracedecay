@@ -129,11 +129,17 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         message_id: &str,
     ) -> Option<crate::sessions::lcm::LcmRawMessage> {
-        self.project_registered
+        let database = self
+            .project_registered
             .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .lcm_load_raw_message(provider, message_id)
+            .unwrap_or(self.profile_registered.as_ref());
+        let snapshot = database
+            .read_snapshot()
             .await
+            .expect("test raw-message snapshot must remain registered");
+        crate::sessions::lcm::schema::load_raw_message(&snapshot, provider, message_id)
+            .await
+            .expect("test raw-message load must not hide database or receipt failure")
     }
 
     #[doc(hidden)]

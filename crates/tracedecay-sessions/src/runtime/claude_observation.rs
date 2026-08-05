@@ -291,6 +291,11 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
             outcome,
             sanitized_record,
             ..
+        }
+        | CaptureClaudeObservationOutcome::AcceptedForReplay {
+            outcome,
+            sanitized_record,
+            ..
         } => {
             let receipt = outcome.receipt();
             if !frame.set_sanitized_record(*sanitized_record) {

@@ -900,14 +900,20 @@ fn capture_sanitizes_code_and_propagates_scan_evidence() {
     let source = format!("pub const TOKEN: &str = \"{secret}\";\n");
     let fixture = GitFixture::new(&[("src/lib.rs", &source)]);
     let store = TempDir::new().expect("store root");
-    let mut scheduler = scheduler(
+    let mut first_scheduler = scheduler(
         &fixture,
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
 
-    published(scheduler.reconcile_now().expect("publish sanitized code"));
-    let latest = scheduler.latest_complete().expect("latest generation");
+    published(
+        first_scheduler
+            .reconcile_now()
+            .expect("publish sanitized code"),
+    );
+    let latest = first_scheduler
+        .latest_complete()
+        .expect("latest generation");
     let snapshot = latest.generation.snapshot();
 
     assert_eq!(
@@ -935,6 +941,33 @@ fn capture_sanitizes_code_and_propagates_scan_evidence() {
             .chunks()
             .iter()
             .any(|chunk| chunk.sensitivity.level == SensitivityLevelV1::Redacted)
+    );
+
+    drop(latest);
+    drop(first_scheduler);
+    let restarted = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let restored = restarted
+        .latest_complete()
+        .expect("restart restores sanitized generation");
+    assert!(
+        restored
+            .generation
+            .chunks()
+            .chunks()
+            .iter()
+            .all(|chunk| !chunk.sanitized_text.as_str().contains(&secret))
+    );
+    assert!(
+        restored
+            .generation
+            .snapshot()
+            .sanitization_receipts
+            .iter()
+            .all(|receipt| receipt.as_str().starts_with("privacy.code-source.v1."))
     );
 }
 
@@ -1698,7 +1731,7 @@ fn generation_record_index_matches_linear_scan_lookups() {
 }
 
 #[tokio::test]
-async fn bundled_query_profile_composes_live_code_index_lanes() {
+async fn core_query_profile_composes_live_code_index_lanes() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -1718,45 +1751,24 @@ async fn bundled_query_profile_composes_live_code_index_lanes() {
         .expect("live generation");
     let snapshot = latest.generation.snapshot();
     let scope = ResolvedScope::new(
-        ProjectId::new("project.bundled-query.fixture").expect("project id"),
+        ProjectId::new("project.core-query.fixture").expect("project id"),
         snapshot.repository.clone(),
         snapshot.worktree.clone().expect("worktree id"),
         snapshot.reference.clone(),
     )
     .expect("resolved scope");
-    let (_, accepted, _) =
-        crate::application::semantic_runtime::bundled_query_authority().expect("bundled authority");
-    let keyring = RetrievalCursorKeyringV1::new(
-        latest.generation.manifest().privacy_domain.clone(),
-        RetrievalCursorKeyId::new("retrieval-key.bundled-query.fixture").expect("cursor key id"),
-        1,
-        vec![7_u8; 32],
-        1_000_000,
-    )
-    .expect("cursor keyring");
-    let authority = Arc::new(
-        QueryAuthorityV1::new(
-            accepted.profile().clone(),
-            accepted.diversity().clone(),
-            ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
-                .expect("ranking revision"),
-            keyring,
-        )
-        .expect("query authority"),
-    );
+    let authority = query_authority(latest.generation.manifest().privacy_domain.clone());
     registry
         .mount_query_authority(fixture.path(), &scope, authority)
         .await
-        .expect("mount bundled authority");
+        .expect("mount core query authority");
 
     let request = super::query_runtime::QuerySearchExecutionRequestV1::new(
         "main",
         super::query_runtime::QuerySearchExecutionPolicyV1 {
-            principal: PrincipalId::new("principal.bundled-query.fixture").expect("principal"),
-            authorization_revision: AuthorizationRevision::new(
-                "authorization.bundled-query.fixture",
-            )
-            .expect("authorization revision"),
+            principal: PrincipalId::new("principal.core-query.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new("authorization.core-query.fixture")
+                .expect("authorization revision"),
             sanitizer_revision: SanitizerRevision::new(
                 tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1,
             )
@@ -1787,7 +1799,7 @@ async fn bundled_query_profile_composes_live_code_index_lanes() {
     let executed = registry
         .execute_query_search(&scope, request)
         .await
-        .expect("bundled query composes live lanes");
+        .expect("core query composes live lanes");
     assert!(
         !executed.authorized.fallback.ordered_candidates.is_empty(),
         "live main symbol is returned"
@@ -1799,9 +1811,9 @@ async fn bundled_query_profile_composes_live_code_index_lanes() {
     registry.shutdown().await;
 }
 
-/// Build the bundled-authority search policy shared by the
+/// Build the core-authority search policy shared by the
 /// stale-while-revalidate tests.
-fn bundled_search_request(query: &str) -> super::query_runtime::QuerySearchExecutionRequestV1 {
+fn core_search_request(query: &str) -> super::query_runtime::QuerySearchExecutionRequestV1 {
     super::query_runtime::QuerySearchExecutionRequestV1::new(
         query,
         super::query_runtime::QuerySearchExecutionPolicyV1 {
@@ -1839,23 +1851,23 @@ fn bundled_search_request(query: &str) -> super::query_runtime::QuerySearchExecu
     )
 }
 
-/// Mount one worktree, publish an initial generation, and mount the bundled
+/// Mount one worktree, publish an initial generation, and mount the core
 /// query authority for its exact scope.
-async fn mounted_bundled_query_worktree(
+async fn mounted_core_query_worktree(
     fixture: &GitFixture,
     store: &TempDir,
 ) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
-    mounted_bundled_query_worktree_in(CodeIndexSchedulerRegistryV1::new(1), fixture, store).await
+    mounted_core_query_worktree_in(CodeIndexSchedulerRegistryV1::new(1), fixture, store).await
 }
 
-/// The same worktree as [`mounted_bundled_query_worktree`], mounted into a
+/// The same worktree as [`mounted_core_query_worktree`], mounted into a
 /// registry whose background-reconcile admission is bounded to one permit so a
 /// test can occupy it and hold the worker at its dequeue point.
-async fn mounted_bundled_query_worktree_with_one_permit(
+async fn mounted_core_query_worktree_with_one_permit(
     fixture: &GitFixture,
     store: &TempDir,
 ) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
-    mounted_bundled_query_worktree_in(
+    mounted_core_query_worktree_in(
         CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1),
         fixture,
         store,
@@ -1863,7 +1875,7 @@ async fn mounted_bundled_query_worktree_with_one_permit(
     .await
 }
 
-async fn mounted_bundled_query_worktree_in(
+async fn mounted_core_query_worktree_in(
     registry: CodeIndexSchedulerRegistryV1,
     fixture: &GitFixture,
     store: &TempDir,
@@ -1890,45 +1902,26 @@ async fn mounted_bundled_query_worktree_in(
         snapshot.reference.clone(),
     )
     .expect("resolved scope");
-    mount_bundled_query_authority(&registry, fixture.path(), &scope, &latest).await;
+    mount_core_query_authority(&registry, fixture.path(), &scope, &latest).await;
     (registry, scope)
 }
 
-/// Mount the bundled query authority for one exact scope against an
+/// Mount the core query authority for one exact scope against an
 /// already-mounted worktree. The authority slot is keyed by the scope digest,
 /// so remounting under a different reference is exactly what a daemon does when
 /// it opens a project whose HEAD has moved since the retained generation was
 /// sealed.
-async fn mount_bundled_query_authority(
+async fn mount_core_query_authority(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
     latest: &super::LatestCompleteCodeIndexV1,
 ) {
-    let (_, accepted, _) =
-        crate::application::semantic_runtime::bundled_query_authority().expect("bundled authority");
-    let keyring = RetrievalCursorKeyringV1::new(
-        latest.generation.manifest().privacy_domain.clone(),
-        RetrievalCursorKeyId::new("retrieval-key.stale-serving.fixture").expect("cursor key id"),
-        1,
-        vec![7_u8; 32],
-        1_000_000,
-    )
-    .expect("cursor keyring");
-    let authority = Arc::new(
-        QueryAuthorityV1::new(
-            accepted.profile().clone(),
-            accepted.diversity().clone(),
-            ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
-                .expect("ranking revision"),
-            keyring,
-        )
-        .expect("query authority"),
-    );
+    let authority = query_authority(latest.generation.manifest().privacy_domain.clone());
     registry
         .mount_query_authority(project_root, scope, authority)
         .await
-        .expect("mount bundled authority");
+        .expect("mount core query authority");
 }
 
 /// The same repository and worktree under a reference the admitted scope has
@@ -1958,11 +1951,11 @@ fn moved_reference_scope(scope: &ResolvedScope) -> ResolvedScope {
 async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_bundled_query_worktree(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
 
     // Baseline: the ready path, byte-for-byte, before anything is degraded.
     let fresh = registry
-        .execute_query_search(&scope, bundled_search_request("main"))
+        .execute_query_search(&scope, core_search_request("main"))
         .await
         .expect("ready generation serves the fresh path");
     assert!(!fresh.served_stale);
@@ -2000,7 +1993,7 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
     );
 
     let stale = registry
-        .execute_query_search(&scope, bundled_search_request("main"))
+        .execute_query_search(&scope, core_search_request("main"))
         .await
         .expect("search keeps serving through the rebuild instead of failing");
     assert!(
@@ -2050,11 +2043,11 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
 async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_bundled_query_worktree(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
 
     // Baseline: the ready path admits, byte-for-byte, before anything degrades.
     let fresh = registry
-        .execute_query_search(&scope, bundled_search_request("main"))
+        .execute_query_search(&scope, core_search_request("main"))
         .await
         .expect("ready generation serves the fresh path");
     assert!(!fresh.served_stale);
@@ -2090,7 +2083,7 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
 
     let stale = tokio::time::timeout(
         Duration::from_secs(30),
-        registry.execute_query_search(&scope, bundled_search_request("main")),
+        registry.execute_query_search(&scope, core_search_request("main")),
     )
     .await
     .expect("a servable generation must never queue on the decode barrier")
@@ -2127,7 +2120,7 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
 async fn search_fails_fast_when_no_complete_generation_exists() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_bundled_query_worktree(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
 
     let empty = CodeIndexSchedulerRegistryV1::new(1);
     assert!(
@@ -2140,7 +2133,7 @@ async fn search_fails_fast_when_no_complete_generation_exists() {
     // `ExecutedQuerySearchV1` intentionally omits `Debug` (it carries the
     // sanitized query), so assert on the error arm directly.
     match empty
-        .execute_query_search(&scope, bundled_search_request("main"))
+        .execute_query_search(&scope, core_search_request("main"))
         .await
     {
         Err(super::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable) => {}
@@ -2164,11 +2157,11 @@ async fn search_fails_fast_when_no_complete_generation_exists() {
 async fn search_serves_a_restored_generation_stale_across_a_moved_reference() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_bundled_query_worktree(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
 
     // Baseline under the sealed reference: the ready path, byte-for-byte.
     let fresh = registry
-        .execute_query_search(&scope, bundled_search_request("main"))
+        .execute_query_search(&scope, core_search_request("main"))
         .await
         .expect("ready generation serves the fresh path");
     assert!(!fresh.served_stale);
@@ -2184,7 +2177,7 @@ async fn search_serves_a_restored_generation_stale_across_a_moved_reference() {
         .latest_complete_fresh(fixture.path())
         .await
         .expect("retained generation");
-    mount_bundled_query_authority(&registry, fixture.path(), &moved, &latest).await;
+    mount_core_query_authority(&registry, fixture.path(), &moved, &latest).await;
 
     assert!(
         registry
@@ -2212,7 +2205,7 @@ async fn search_serves_a_restored_generation_stale_across_a_moved_reference() {
     );
 
     let stale = registry
-        .execute_query_search(&moved, bundled_search_request("main"))
+        .execute_query_search(&moved, core_search_request("main"))
         .await
         .expect("search survives restart-after-a-reference-move instead of failing");
     assert!(
@@ -2245,7 +2238,7 @@ async fn search_serves_a_restored_generation_stale_across_a_moved_reference() {
 async fn serving_arms_still_refuse_a_different_worktree_identity() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_bundled_query_worktree(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
 
     let foreign = ResolvedScope::new(
         scope.project_id.clone(),
@@ -2285,7 +2278,7 @@ async fn serving_arms_still_refuse_a_different_worktree_identity() {
 async fn search_requests_one_background_reconcile_when_nothing_is_servable() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_bundled_query_worktree_with_one_permit(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
 
     // Occupy the single background-reconcile permit so the worker parks at its
     // dequeue point and the pending wake stays observable for the whole test.
@@ -2313,7 +2306,7 @@ async fn search_requests_one_background_reconcile_when_nothing_is_servable() {
     registry.clear_pending_wake_for_scope(&scope).await;
 
     match registry
-        .execute_query_search(&scope, bundled_search_request("main"))
+        .execute_query_search(&scope, core_search_request("main"))
         .await
     {
         Err(super::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable) => {}
@@ -2333,7 +2326,7 @@ async fn search_requests_one_background_reconcile_when_nothing_is_servable() {
     // worker: the outstanding wake already is the remedy they would ask for.
     for _ in 0..4 {
         let _ = registry
-            .execute_query_search(&scope, bundled_search_request("main"))
+            .execute_query_search(&scope, core_search_request("main"))
             .await;
         assert!(
             !registry.request_query_background_reconcile(&scope).await,

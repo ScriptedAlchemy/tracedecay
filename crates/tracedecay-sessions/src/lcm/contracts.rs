@@ -28,6 +28,81 @@ pub struct LcmRawMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmRawMessageMetadata {
+    pub provider: String,
+    pub message_id: String,
+    pub session_id: String,
+    pub store_id: i64,
+    pub role: String,
+    pub ordinal: i64,
+    pub timestamp: Option<i64>,
+    pub content_hash: String,
+    pub storage_kind: LcmStorageKind,
+    pub payload_ref: Option<String>,
+    pub legacy_source: bool,
+    pub legacy_truncated: bool,
+    pub metadata_json: Option<String>,
+}
+
+impl LcmRawMessage {
+    pub fn into_metadata(self) -> LcmRawMessageMetadata {
+        LcmRawMessageMetadata {
+            provider: self.provider,
+            message_id: self.message_id,
+            session_id: self.session_id,
+            store_id: self.store_id,
+            role: self.role,
+            ordinal: self.ordinal,
+            timestamp: self.timestamp,
+            content_hash: self.content_hash,
+            storage_kind: self.storage_kind,
+            payload_ref: self.payload_ref,
+            legacy_source: self.legacy_source,
+            legacy_truncated: self.legacy_truncated,
+            metadata_json: self.metadata_json,
+        }
+    }
+}
+
+impl LcmRawMessageMetadata {
+    pub fn with_verified_content(self, content: String) -> Result<LcmRawMessage, LcmError> {
+        if crate::compatibility::projected_content_hash(&content) != self.content_hash {
+            return Err(LcmError::PayloadIntegrityMismatch);
+        }
+        Ok(self.with_content(content))
+    }
+
+    pub(crate) fn with_external_placeholder(
+        self,
+        content: String,
+    ) -> Result<LcmRawMessage, LcmError> {
+        if self.storage_kind != LcmStorageKind::External {
+            return Err(LcmError::PayloadIntegrityMismatch);
+        }
+        Ok(self.with_content(content))
+    }
+
+    fn with_content(self, content: String) -> LcmRawMessage {
+        LcmRawMessage {
+            provider: self.provider,
+            message_id: self.message_id,
+            session_id: self.session_id,
+            store_id: self.store_id,
+            role: self.role,
+            ordinal: self.ordinal,
+            timestamp: self.timestamp,
+            content,
+            content_hash: self.content_hash,
+            storage_kind: self.storage_kind,
+            payload_ref: self.payload_ref,
+            legacy_source: self.legacy_source,
+            legacy_truncated: self.legacy_truncated,
+            metadata_json: self.metadata_json,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmPayloadRef {
     pub payload_ref: String,
     pub provider: String,
@@ -196,6 +271,8 @@ pub struct LcmExpandResponse {
     pub content: String,
     pub content_range: LcmContentRange,
     pub raw_message: Option<LcmRawMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_message_metadata: Option<LcmRawMessageMetadata>,
     pub summary_node: Option<LcmSummaryNode>,
     pub summary_sources: Vec<LcmExpandedSummarySource>,
     pub payload_ref: Option<String>,
@@ -223,6 +300,8 @@ pub struct LcmExpandedSummarySource {
     #[serde(default)]
     pub content_truncated: bool,
     pub raw_message: Option<LcmRawMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_message_metadata: Option<LcmRawMessageMetadata>,
     pub summary_node: Option<Box<LcmSummaryNode>>,
 }
 
@@ -374,11 +453,16 @@ pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LcmError {
+    ProfileResetRequired {
+        found_version: Option<i64>,
+        required_version: i64,
+    },
     InvalidPayloadRef,
     PayloadNotFound,
     PayloadNotOwnedBySession,
     PayloadMissing,
     PayloadGcd,
+    PayloadLocked,
     PayloadIntegrityMismatch,
     StillReferenced,
     SummaryNodeNotFound,
@@ -416,11 +500,27 @@ pub enum LcmError {
 impl std::fmt::Display for LcmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ProfileResetRequired {
+                found_version,
+                required_version,
+            } => match found_version {
+                Some(found_version) => write!(
+                    f,
+                    "LCM profile schema {found_version} is incompatible with required schema \
+                     {required_version}; reset the profile"
+                ),
+                None => write!(
+                    f,
+                    "unversioned LCM profile data is incompatible with required schema \
+                     {required_version}; reset the profile"
+                ),
+            },
             Self::InvalidPayloadRef => write!(f, "invalid payload ref"),
             Self::PayloadNotFound => write!(f, "payload not found"),
             Self::PayloadNotOwnedBySession => write!(f, "payload not owned by session"),
             Self::PayloadMissing => write!(f, "payload file missing"),
             Self::PayloadGcd => write!(f, "payload already garbage collected"),
+            Self::PayloadLocked => write!(f, "payload is locked by quarantine policy"),
             Self::PayloadIntegrityMismatch => write!(f, "payload integrity mismatch"),
             Self::StillReferenced => write!(f, "payload still referenced"),
             Self::SummaryNodeNotFound => write!(f, "summary node not found"),

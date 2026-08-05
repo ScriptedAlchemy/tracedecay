@@ -1,6 +1,7 @@
 use serde_json::Value;
 use tracedecay_domain::{
-    ActorId, Confidence, DomainError, FactCategoryV1, FactEventId, FactOwnerV1, ProvenanceId,
+    ActorId, Confidence, DomainError, FactCategoryV1, FactEventId, FactOwnerV1, PayloadReferenceV1,
+    ProvenanceId, SanitizationReceiptV1, SanitizerDispositionV1,
 };
 
 use super::super::super::{
@@ -22,6 +23,7 @@ pub struct CompatibilityFactAddCommandV1 {
     tags: Vec<String>,
     entities: Vec<String>,
     metadata: Value,
+    sanitization_receipt: SanitizationReceiptV1,
     /// Durable automation identity. This is command metadata, deliberately
     /// separate from the fact payload metadata that passes through privacy
     /// sanitization.
@@ -41,6 +43,7 @@ impl CompatibilityFactAddCommandV1 {
         tags: Vec<String>,
         entities: Vec<String>,
         metadata: Value,
+        sanitization_receipt: SanitizationReceiptV1,
         default_trust: Confidence,
         actor: Option<ActorId>,
     ) -> FactStoreResult<Self> {
@@ -61,6 +64,31 @@ impl CompatibilityFactAddCommandV1 {
         if let Some(actor) = &actor {
             actor.validate()?;
         }
+        if !matches!(
+            sanitization_receipt.disposition(),
+            SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted
+        ) {
+            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                field: "compatibility fact add sanitization disposition",
+            }));
+        }
+        let payload_reference = PayloadReferenceV1::for_payload(&serde_json::json!({
+            "content": &content,
+            "category": category,
+            "tags": &tags,
+            "entities": &entities,
+            "metadata": &metadata,
+        }))
+        .map_err(|_| {
+            FactStoreError::Contract(DomainError::NonCanonical {
+                field: "compatibility fact add sanitized payload",
+            })
+        })?;
+        if sanitization_receipt.payload() != Some(&payload_reference) {
+            return Err(FactStoreError::Contract(DomainError::SnapshotMismatch {
+                field: "compatibility fact add sanitization receipt",
+            }));
+        }
         Ok(Self {
             owner,
             operation_id,
@@ -70,6 +98,7 @@ impl CompatibilityFactAddCommandV1 {
             tags,
             entities,
             metadata,
+            sanitization_receipt,
             automation_run_id: None,
             default_trust,
             actor,
@@ -99,6 +128,9 @@ impl CompatibilityFactAddCommandV1 {
     }
     pub fn metadata(&self) -> &Value {
         &self.metadata
+    }
+    pub fn sanitization_receipt(&self) -> &SanitizationReceiptV1 {
+        &self.sanitization_receipt
     }
     pub fn with_automation_run_id(mut self, run_id: String) -> FactStoreResult<Self> {
         validate_compatibility_text(&run_id, "compatibility fact automation run identity")?;

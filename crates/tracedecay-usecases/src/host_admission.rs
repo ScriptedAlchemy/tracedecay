@@ -19,7 +19,8 @@ use crate::memory::{
 };
 use crate::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
-    ObservationApplication, ObservationApplicationError, ObservationCancellation,
+    ExternalSourceProjectionRetryHandleV1, ExternalSourceProjectionStateV1, ObservationApplication,
+    ObservationApplicationError, ObservationCancellation,
 };
 use crate::store::observation::GlobalDbObservationStore;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -226,6 +227,14 @@ impl HostAdmissionOutcome {
 
     pub const fn accepted_for_replay() -> Self {
         Self::new(HostAdmissionStatus::AcceptedForReplay, false, None)
+    }
+
+    pub const fn external_source_projection_pending() -> Self {
+        Self::new(
+            HostAdmissionStatus::AcceptedForReplay,
+            false,
+            Some("external_source_projection_pending"),
+        )
     }
 
     pub const fn retained_backpressured(reason_code: &'static str) -> Self {
@@ -866,8 +875,11 @@ impl<'a> HostAdmissionFacade<'a> {
             )
             .await
             .map_err(|error| classify_error(&error))?;
-        if let CaptureObservationOutcome::Persisted { outcome, .. } = &outcome {
-            crate::external_source_store::RuntimeExternalSourceStore::new(
+        if let CaptureObservationOutcome::Persisted {
+            outcome: persisted, ..
+        } = &outcome
+        {
+            let projection = crate::external_source_store::RuntimeExternalSourceStore::new(
                 database.runtime().clone(),
                 database.authority().clone(),
             )
@@ -875,12 +887,27 @@ impl<'a> HostAdmissionFacade<'a> {
                 tracing::warn!(%error, "registered external-source adapter is unavailable");
                 HostAdmissionOutcome::registered_authority_unavailable()
             })?
-            .capture_host_observation(outcome.receipt())
+            .capture_host_observation(persisted.receipt())
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "registered external-source commit failed");
-                HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
+                match error {
+                    crate::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
+                        HostAdmissionOutcome::retained_unavailable(
+                            "external_source_runtime_unavailable",
+                        )
+                    }
+                    _ => {
+                        HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
+                    }
+                }
             })?;
+            if let crate::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(
+                receipt,
+            ) = projection
+            {
+                return accepted_for_external_source_replay(outcome, receipt);
+            }
         }
         Ok(outcome)
     }
@@ -915,6 +942,28 @@ impl<'a> HostAdmissionFacade<'a> {
         cancellation: &ObservationCancellation,
         max: usize,
     ) -> Result<HostProjectionDrainOutcome, HostAdmissionOutcome> {
+        if cancellation.is_cancelled() {
+            return Err(classify_error(&ObservationApplicationError::Cancelled));
+        }
+        let database = self
+            .authorities
+            .registered_database(host_scope(scope))?
+            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        let external_source = crate::external_source_store::RuntimeExternalSourceStore::new(
+            database.runtime().clone(),
+            database.authority().clone(),
+        )
+        .map_err(|error| {
+            tracing::warn!(%error, "registered external-source adapter is unavailable");
+            HostAdmissionOutcome::registered_authority_unavailable()
+        })?;
+        external_source
+            .drain_host_projection_replay(max, cancellation)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "external-source projection replay failed during host drain");
+                HostAdmissionOutcome::retained_unavailable("external_source_projection_unavailable")
+            })?;
         let store = self.store(provider, scope)?;
         let mut outcome = HostProjectionDrainOutcome::default();
         let mut session_ids = BTreeSet::new();
@@ -1206,6 +1255,18 @@ fn supported_provider(provider: &str) -> bool {
 
 fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome {
     match outcome {
+        CaptureObservationOutcome::AcceptedForReplay { outcome, .. }
+            if matches!(*outcome, ObservationPersistOutcome::ExactDuplicate(_)) =>
+        {
+            HostAdmissionOutcome::new(
+                HostAdmissionStatus::ExactDuplicate,
+                false,
+                Some("external_source_projection_pending"),
+            )
+        }
+        CaptureObservationOutcome::AcceptedForReplay { .. } => {
+            HostAdmissionOutcome::external_source_projection_pending()
+        }
         CaptureObservationOutcome::Persisted { outcome, .. } => match *outcome {
             ObservationPersistOutcome::Committed(_) => {
                 HostAdmissionOutcome::new(HostAdmissionStatus::Committed, false, None)
@@ -1230,6 +1291,37 @@ fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome 
             Some("sanitizer_quarantined"),
         ),
     }
+}
+
+fn accepted_for_external_source_replay(
+    outcome: CaptureObservationOutcome,
+    receipt: tracedecay_store::SourceCommitReceiptV1,
+) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
+    let CaptureObservationOutcome::Persisted {
+        outcome,
+        projection_status,
+        sanitized_record,
+        findings,
+    } = outcome
+    else {
+        return Err(HostAdmissionOutcome::retained_unavailable(
+            "external_source_projection_receipt_mismatch",
+        ));
+    };
+    let durable_observation_id = outcome.receipt().observation().observation_id().clone();
+    let retry_handle = ExternalSourceProjectionRetryHandleV1::new(
+        receipt.source_frontier().binding().clone(),
+        receipt.receipt_digest().clone(),
+    );
+    Ok(CaptureObservationOutcome::AcceptedForReplay {
+        durable_observation_id,
+        projection_state: ExternalSourceProjectionStateV1::Pending,
+        retry_handle,
+        outcome,
+        projection_status,
+        sanitized_record,
+        findings,
+    })
 }
 
 fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {

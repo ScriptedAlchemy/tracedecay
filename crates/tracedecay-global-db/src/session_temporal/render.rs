@@ -13,7 +13,7 @@
 use tracedecay_domain::HydrationStateV1;
 
 use tracedecay_sessions::lcm::contracts::{
-    LcmContentRange, LcmContentSlice, LcmExpandResponse, LcmSourceRef,
+    LcmContentRange, LcmContentSlice, LcmError, LcmExpandResponse, LcmSourceRef,
 };
 
 #[derive(Debug)]
@@ -28,13 +28,14 @@ pub enum CanonicalLcmSourceHydrationError {
     Cardinality,
     Identity,
     InvalidContentState,
+    PayloadIntegrity,
 }
 
 pub fn apply_canonical_content(
     mut expansion: LcmExpandResponse,
     slice: LcmContentSlice,
     canonical_content: &str,
-) -> LcmExpandResponse {
+) -> Result<LcmExpandResponse, LcmError> {
     let total_chars = canonical_content.chars().count();
     let offset = slice.offset.min(total_chars);
     let content = canonical_content
@@ -53,11 +54,15 @@ pub fn apply_canonical_content(
         offset > 0 || offset.saturating_add(returned_chars) < total_chars;
     if let Some(raw) = expansion.raw_message.as_mut() {
         raw.content.clone_from(&content);
+    } else if let Some(metadata) = expansion.raw_message_metadata.take() {
+        let mut raw = metadata.with_verified_content(canonical_content.to_string())?;
+        raw.content.clone_from(&content);
+        expansion.raw_message = Some(raw);
     }
     if let Some(summary) = expansion.summary_node.as_mut() {
         summary.summary_text = content;
     }
-    expansion
+    Ok(expansion)
 }
 
 pub fn apply_canonical_summary_source_content(
@@ -74,10 +79,10 @@ pub fn apply_canonical_summary_source_content(
         }
         source.state = canonical.state;
         match (canonical.state, canonical.content.as_deref()) {
-            (HydrationStateV1::Available, Some(content)) => {
-                let total_chars = content.chars().count();
+            (HydrationStateV1::Available, Some(canonical_content)) => {
+                let total_chars = canonical_content.chars().count();
                 let offset = slice.offset.min(total_chars);
-                let content = content
+                let content = canonical_content
                     .chars()
                     .skip(offset)
                     .take(slice.limit)
@@ -95,6 +100,12 @@ pub fn apply_canonical_summary_source_content(
                 source.content_range = Some(range);
                 if let Some(raw) = source.raw_message.as_mut() {
                     raw.content.clone_from(&content);
+                } else if let Some(metadata) = source.raw_message_metadata.take() {
+                    let mut raw = metadata
+                        .with_verified_content(canonical_content.to_string())
+                        .map_err(|_| CanonicalLcmSourceHydrationError::PayloadIntegrity)?;
+                    raw.content.clone_from(&content);
+                    source.raw_message = Some(raw);
                 }
                 if let Some(summary) = source.summary_node.as_mut() {
                     summary.summary_text.clone_from(&content);
@@ -107,8 +118,8 @@ pub fn apply_canonical_summary_source_content(
                 source.content.clear();
                 source.content_range = None;
                 source.content_truncated = false;
-                if let Some(raw) = source.raw_message.as_mut() {
-                    raw.content.clear();
+                if let Some(raw) = source.raw_message.take() {
+                    source.raw_message_metadata = Some(raw.into_metadata());
                 }
                 if let Some(summary) = source.summary_node.as_mut() {
                     summary.summary_text.clear();
@@ -149,6 +160,7 @@ mod tests {
                 legacy_truncated: false,
                 metadata_json: None,
             }),
+            raw_message_metadata: None,
             summary_node: None,
         }
     }
@@ -166,6 +178,7 @@ mod tests {
                 truncated: false,
             },
             raw_message: None,
+            raw_message_metadata: None,
             summary_node: None,
             summary_sources: vec![source(1), source(2), source(3), source(4)],
             payload_ref: None,
@@ -238,9 +251,45 @@ mod tests {
         ]) {
             assert_eq!(source.state, state);
             assert!(source.content.is_empty());
-            assert!(source.raw_message.as_ref().unwrap().content.is_empty());
+            assert!(source.raw_message.is_none());
+            assert!(source.raw_message_metadata.is_some());
             assert!(source.content_range.is_none());
             assert!(!source.content_truncated);
         }
+    }
+
+    #[test]
+    fn canonical_raw_hydration_rejects_metadata_hash_mismatch() {
+        let raw_message_metadata = source(1).raw_message.expect("raw fixture").into_metadata();
+        let expansion = LcmExpandResponse {
+            kind: "raw_message".to_string(),
+            content: String::new(),
+            content_range: LcmContentRange {
+                offset: 0,
+                limit: 32,
+                returned_chars: 0,
+                total_chars: 0,
+                truncated: false,
+            },
+            raw_message: None,
+            raw_message_metadata: Some(raw_message_metadata),
+            summary_node: None,
+            summary_sources: Vec::new(),
+            payload_ref: None,
+            from_current_session: None,
+            externalized_note: None,
+            source_pagination: None,
+        };
+
+        let result = apply_canonical_content(
+            expansion,
+            LcmContentSlice {
+                offset: 0,
+                limit: 32,
+            },
+            "canonical content",
+        );
+
+        assert!(matches!(result, Err(LcmError::PayloadIntegrityMismatch)));
     }
 }
