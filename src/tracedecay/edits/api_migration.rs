@@ -17,15 +17,31 @@ use super::plan::{
 use tracedecay_usecases::tracedecay::PlannedSourceEditFile;
 
 impl TraceDecay {
+    pub(crate) async fn apply_source_edit_rollback(
+        &self,
+        files: &[PlannedSourceEditFile],
+    ) -> Result<()> {
+        rollback_planned_source_edit_files(&self.project_root, files)?;
+        self.sync().await?;
+        Ok(())
+    }
+
     pub(crate) async fn recover_source_edit_preimages(
         &self,
         files: &[PlannedSourceEditFile],
     ) -> Result<()> {
         rollback_planned_source_edit_files(&self.project_root, files)?;
+        if files.iter().any(|file| file.expected.is_none()) {
+            self.sync().await?;
+            return Ok(());
+        }
         for file in files {
-            let Some(expected) = &file.expected else {
-                continue;
-            };
+            let expected = file
+                .expected
+                .as_ref()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "source edit recovery lost a required preimage".to_owned(),
+                })?;
             let authority =
                 SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
             self.reindex_file(&file.relative_path, expected, &authority)
@@ -44,10 +60,17 @@ impl TraceDecay {
         &self,
         files: &[PlannedSourceEditFile],
     ) -> Result<()> {
+        if files.iter().any(|file| file.intended.is_none()) {
+            self.sync().await?;
+            return Ok(());
+        }
         for file in files {
-            let Some(intended) = &file.intended else {
-                continue;
-            };
+            let intended = file
+                .intended
+                .as_ref()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "source edit recovery lost a required postimage".to_owned(),
+                })?;
             let authority =
                 SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
             self.reindex_file(&file.relative_path, intended, &authority)

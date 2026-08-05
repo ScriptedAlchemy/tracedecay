@@ -83,6 +83,56 @@ pub(super) struct SourceEditDurableRequestV1 {
     pub(super) verification_requested: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SourceEditRollbackRecordV1 {
+    pub(super) version: u8,
+    pub(super) effect_id: EffectId,
+    pub(super) input_digest: ManifestDigest,
+    pub(super) idempotency_key: tracedecay_application::IdempotencyKey,
+    pub(super) operation: tracedecay_tool_catalog::UseCaseId,
+    pub(super) actor: tracedecay_domain::ActorId,
+    pub(super) scope: tracedecay_application::ResolvedScope,
+    pub(super) expected_state: ManifestDigest,
+    pub(super) committed_state: ManifestDigest,
+    pub(super) recovery_files: Vec<crate::tracedecay::PlannedSourceEditFile>,
+    pub(super) recovery_digest: ManifestDigest,
+    pub(super) record_digest: ManifestDigest,
+}
+
+impl SourceEditRollbackRecordV1 {
+    fn digest(&self) -> Result<ManifestDigest> {
+        canonical_sha256(&(
+            "tracedecay.source-edit-rollback-record.v1",
+            self.version,
+            &self.effect_id,
+            &self.input_digest,
+            &self.idempotency_key,
+            &self.operation,
+            &self.actor,
+            &self.scope,
+            &self.expected_state,
+            &self.committed_state,
+            &self.recovery_files,
+            &self.recovery_digest,
+        ))
+        .map_err(domain_error)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.version != JOURNAL_VERSION
+            || self.recovery_files.is_empty()
+            || self.recovery_digest != source_edit_recovery_digest(&self.recovery_files)?
+            || self.record_digest != self.digest()?
+        {
+            return Err(config_error(
+                "source edit rollback record failed its private digest binding",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceEditDurableResultV1 {
@@ -153,6 +203,18 @@ impl SourceEditDurability {
         )))
     }
 
+    fn rollback_record_path(&self, effect_id: &EffectId) -> Result<PathBuf> {
+        let digest = canonical_sha256(&(
+            "tracedecay.source-edit-rollback-record-key.v1",
+            effect_id.as_str(),
+        ))
+        .map_err(domain_error)?;
+        Ok(self.root.join("rollback-records").join(format!(
+            "{}.json",
+            digest.as_str().trim_start_matches("sha256:")
+        )))
+    }
+
     pub(super) fn load_journal(&self) -> Result<Option<SourceEditJournalV1>> {
         let journal =
             load_record::<SourceEditJournalV1>(&self.journal_path(), "source edit journal")?;
@@ -168,6 +230,75 @@ impl SourceEditDurability {
 
     pub(super) fn persist_journal(&self, journal: &SourceEditJournalV1) -> Result<()> {
         persist_record(&self.journal_path(), "source-edit-journal", journal)
+    }
+
+    pub(super) fn load_rollback_record(
+        &self,
+        effect_id: &EffectId,
+    ) -> Result<Option<SourceEditRollbackRecordV1>> {
+        let record = load_record::<SourceEditRollbackRecordV1>(
+            &self.rollback_record_path(effect_id)?,
+            "source edit rollback record",
+        )?;
+        if let Some(record) = &record {
+            record.validate()?;
+            if &record.effect_id != effect_id {
+                return Err(config_error(
+                    "source edit rollback record effect identity does not match its key",
+                ));
+            }
+        }
+        Ok(record)
+    }
+
+    pub(super) fn persist_rollback_record(
+        &self,
+        journal: &SourceEditJournalV1,
+        committed_state: &ManifestDigest,
+        succeeded: bool,
+    ) -> Result<()> {
+        let move_operation = tracedecay_application::source_edit_operation(
+            tracedecay_application::SourceEditKind::MoveSymbol,
+        )
+        .map_err(application_contract_error)?;
+        if &journal.request.operation != move_operation.use_case_id()
+            || journal.recovery_files.is_empty()
+        {
+            return Ok(());
+        }
+        if !succeeded || journal.predicted_state.as_ref() != Some(committed_state) {
+            return Ok(());
+        }
+        let recovery_digest = source_edit_recovery_digest(&journal.recovery_files)?;
+        let mut record = SourceEditRollbackRecordV1 {
+            version: JOURNAL_VERSION,
+            effect_id: journal.effect_id.clone(),
+            input_digest: journal.input_digest.clone(),
+            idempotency_key: journal.request.idempotency_key.clone(),
+            operation: journal.request.operation.clone(),
+            actor: journal.request.actor.clone(),
+            scope: journal.request.scope.clone(),
+            expected_state: journal.expected_state.clone(),
+            committed_state: committed_state.clone(),
+            recovery_files: journal.recovery_files.clone(),
+            recovery_digest,
+            record_digest: canonical_sha256(&"tracedecay.source-edit-rollback-record.pending")
+                .map_err(domain_error)?,
+        };
+        record.record_digest = record.digest()?;
+        if let Some(stored) = self.load_rollback_record(&journal.effect_id)? {
+            if stored != record {
+                return Err(config_error(
+                    "source edit rollback record conflicts with retained effect material",
+                ));
+            }
+            return Ok(());
+        }
+        persist_record(
+            &self.rollback_record_path(&journal.effect_id)?,
+            "source-edit-rollback-record",
+            &record,
+        )
     }
 
     pub(super) fn clear_journal(&self) -> Result<()> {

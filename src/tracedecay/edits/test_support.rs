@@ -15,7 +15,7 @@ use tracedecay_application::{
     EffectTermination, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
     SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditEffectProofV1,
     SourceEditEffectRequestV1, SourceEditRequest, api_migration_definition_digest,
-    source_edit_operation, source_edit_reconciliation_operation,
+    source_edit_operation, source_edit_reconciliation_operation, source_edit_rollback_operation,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
@@ -230,6 +230,7 @@ pub(super) fn fixture_request_for_edit(
 ) -> SourceEditEffectRequestV1 {
     let operation = source_edit_operation(edit.kind()).unwrap();
     let reconciliation_operation = source_edit_reconciliation_operation().unwrap();
+    let rollback_operation = source_edit_rollback_operation().unwrap();
     let scope = ResolvedScope::new(
         ProjectId::new("project.edit.fixture").unwrap(),
         RepositoryId::new("repository.edit.fixture").unwrap(),
@@ -248,10 +249,12 @@ pub(super) fn fixture_request_for_edit(
         BTreeSet::from([
             operation.capability_id().clone(),
             reconciliation_operation.capability_id().clone(),
+            rollback_operation.capability_id().clone(),
         ]),
         BTreeSet::from([
             operation.use_case_id().clone(),
             reconciliation_operation.use_case_id().clone(),
+            rollback_operation.use_case_id().clone(),
         ]),
         DisclosureClass::Sensitive,
     )

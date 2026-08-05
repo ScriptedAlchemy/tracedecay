@@ -31,6 +31,8 @@ const SOURCE_EDIT_EFFECT_REQUEST_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.source-edit-effect-request.v1";
 const SOURCE_EDIT_RECONCILIATION_ATTEMPT_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.source-edit-reconciliation-attempt.v1";
+const SOURCE_EDIT_ROLLBACK_REQUEST_DIGEST_DOMAIN_V1: &str =
+    "tracedecay.application.source-edit-rollback-request.v1";
 
 /// `serde` `skip_serializing_if` predicate for default-off flags.
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -547,6 +549,73 @@ impl SourceEditReconciliationRequestV1 {
     }
 }
 
+/// Request to restore the exact private preimages retained for one completed
+/// source edit. Callers identify the original effect and its public digests;
+/// source bytes remain confined to the server-side rollback record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceEditRollbackRequestV1 {
+    pub context: RequestContext,
+    pub authority: AuthorityReceipt,
+    pub effect_id: EffectId,
+    pub original_idempotency_key: IdempotencyKey,
+    pub idempotency_key: IdempotencyKey,
+    pub original_input_digest: ManifestDigest,
+    pub expected_state: ManifestDigest,
+    pub proof: SourceEditEffectProofV1,
+    pub observed_at: UtcMicros,
+}
+
+impl SourceEditRollbackRequestV1 {
+    pub fn input_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
+        self.validate()?;
+        Ok(canonical_sha256(&(
+            SOURCE_EDIT_ROLLBACK_REQUEST_DIGEST_DOMAIN_V1,
+            self.context.actor(),
+            self.context.scope(),
+            &self.effect_id,
+            &self.original_idempotency_key,
+            &self.idempotency_key,
+            &self.original_input_digest,
+            &self.expected_state,
+            &self.proof.external_proof,
+        ))?)
+    }
+
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.context.validate()?;
+        self.authority.validate_for(self.context.scope())?;
+        self.original_input_digest.validate()?;
+        self.expected_state.validate()?;
+        if self.idempotency_key == self.original_idempotency_key {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "source edit rollback idempotency key",
+            });
+        }
+        self.proof.validate_for(&self.authority)?;
+        let operation = source_edit_rollback_operation()?;
+        if self.context.admission_at(self.observed_at) != RequestAdmission::Admitted
+            || !self
+                .context
+                .allows(operation.capability_id(), operation.use_case_id())
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "source edit rollback admission",
+            });
+        }
+        let grant = self.context.grant();
+        if self.authority.grant_id != grant.grant_id
+            || self.authority.grant_revision != grant.revision
+            || self.authority.grant_digest != grant.digest
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "source edit rollback current grant",
+            });
+        }
+        Ok(())
+    }
+}
+
 pub type SourceEditAuthorizationFuture<'a> = Pin<
     Box<
         dyn Future<Output = Result<SourceEditAuthorizationAdmissionV1, ApplicationProblem>>
@@ -651,14 +720,21 @@ pub fn source_edit_handler_descriptors()
         source_edit_reconciliation_schema("request")?,
         source_edit_reconciliation_schema("result")?,
     )?);
+    descriptors.push(ApplicationHandlerDescriptor::new(
+        source_edit_rollback_operation()?,
+        source_edit_rollback_schema("request")?,
+        source_edit_rollback_schema("result")?,
+    )?);
     Ok(descriptors)
 }
 
 pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError>
 {
-    let mut capabilities = Vec::with_capacity(SOURCE_EDIT_KINDS.len() + 1);
+    let rollback_operation = source_edit_rollback_operation()?;
+    let rollback_capability_id = rollback_operation.capability_id().clone();
+    let mut capabilities = Vec::with_capacity(SOURCE_EDIT_KINDS.len() + 2);
     let mut bindings =
-        Vec::with_capacity((SOURCE_EDIT_KINDS.len() + 1) * SOURCE_EDIT_SURFACES.len());
+        Vec::with_capacity((SOURCE_EDIT_KINDS.len() + 2) * SOURCE_EDIT_SURFACES.len());
     for kind in SOURCE_EDIT_KINDS {
         let operation_name = kind.operation_name();
         let capability_id = CapabilityId::new(format!(
@@ -702,8 +778,14 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
             deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
             pagination: None,
             idempotency: IdempotencyContract::Required,
-            inverse: tracedecay_tool_catalog::InverseContract::Unavailable {
-                reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+            inverse: if kind == SourceEditKind::MoveSymbol {
+                tracedecay_tool_catalog::InverseContract::Capability {
+                    capability_id: rollback_capability_id.clone(),
+                }
+            } else {
+                tracedecay_tool_catalog::InverseContract::Unavailable {
+                    reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+                }
             },
             authority_revalidation: RevalidationContract::required(vec![
                 RevalidationPoint::Authority,
@@ -792,6 +874,68 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
         required_features: Vec::new(),
     })?);
+    let (rollback_bindings, rollback_binding_ids) = current_bindings_with_slug(
+        rollback_operation.capability_id(),
+        "source_edit_rollback",
+        "source-edit-rollback",
+        SOURCE_EDIT_SURFACES,
+    )?;
+    bindings.extend(rollback_bindings);
+    capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
+        capability_id: rollback_operation.capability_id().clone(),
+        use_case_id: rollback_operation.use_case_id().clone(),
+        routing: RoutingContractV1::new(
+            1,
+            "Roll back a completed source edit",
+            "Restore the exact retained preimages of one completed source-edit effect.",
+            vec!["Roll back this completed source edit effect".to_owned()],
+        )?,
+        request_schema: source_edit_rollback_schema("request")?,
+        result_schema: source_edit_rollback_schema("result")?,
+        effect: EffectClass::SourceEdit,
+        scope: ScopeRequirement::new(vec![
+            ScopeDimension::Project,
+            ScopeDimension::Repository,
+            ScopeDimension::Worktree,
+        ])?,
+        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
+        denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+        privacy: PrivacyClass::Sensitive,
+        lifecycle: LifecycleClass::Resumable,
+        streaming: StreamingContract::Unsupported,
+        cancellation: CancellationContract::cooperative(vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::BeforeEffect,
+            CancellationPoint::EffectInFlight,
+            CancellationPoint::AfterCommit,
+        ])?,
+        deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
+        pagination: None,
+        idempotency: IdempotencyContract::Required,
+        inverse: tracedecay_tool_catalog::InverseContract::Unavailable {
+            reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+        },
+        authority_revalidation: RevalidationContract::required(vec![
+            RevalidationPoint::Authority,
+            RevalidationPoint::Scope,
+            RevalidationPoint::Policy,
+            RevalidationPoint::Configuration,
+            RevalidationPoint::ExpectedState,
+        ])?,
+        reconciliation: ReconciliationContract::Required,
+        receipt: ReceiptContract::DurableEffect,
+        terminal_states: TerminalStateContract::new(vec![
+            TerminalState::Completed,
+            TerminalState::Failed,
+            TerminalState::Cancelled,
+            TerminalState::TimedOut,
+            TerminalState::EffectUnknown,
+        ])?,
+        availability: AvailabilityContract::Available,
+        binding_ids: rollback_binding_ids,
+        profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
+        required_features: Vec::new(),
+    })?);
     Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.source-edit")?,
         depends_on: Vec::new(),
@@ -812,9 +956,26 @@ pub fn source_edit_reconciliation_operation()
     ))
 }
 
+pub fn source_edit_rollback_operation() -> Result<ApplicationOperation, ApplicationContractError> {
+    let result_schema = source_edit_rollback_schema("result")?;
+    Ok(ApplicationOperation::new(
+        CapabilityId::new("capability.application.source-edit.rollback")?,
+        UseCaseId::new("use-case.application.source-edit.rollback")?,
+        ResultContractRef::from_schema(&result_schema),
+        true,
+    ))
+}
+
 fn source_edit_reconciliation_schema(suffix: &str) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new(format!("schema.application.source-edit.reconcile.{suffix}"))?,
+        1,
+    )?)
+}
+
+fn source_edit_rollback_schema(suffix: &str) -> Result<SchemaRef, ApplicationContractError> {
+    Ok(SchemaRef::new(
+        SchemaId::new(format!("schema.application.source-edit.rollback.{suffix}"))?,
         1,
     )?)
 }
@@ -842,11 +1003,11 @@ mod tests {
         let contribution = source_edit_catalog_contribution().unwrap();
         assert_eq!(
             contribution.capabilities().len(),
-            SOURCE_EDIT_KINDS.len() + 1
+            SOURCE_EDIT_KINDS.len() + 2
         );
         assert_eq!(
             contribution.bindings().len(),
-            (SOURCE_EDIT_KINDS.len() + 1) * SOURCE_EDIT_SURFACES.len()
+            (SOURCE_EDIT_KINDS.len() + 2) * SOURCE_EDIT_SURFACES.len()
         );
         for kind in SOURCE_EDIT_KINDS {
             let operation = source_edit_operation(kind).unwrap();
@@ -875,6 +1036,31 @@ mod tests {
             assert!(contribution.bindings().iter().any(|binding| {
                 binding.surface() == surface
                     && binding.operation().as_str() == "source_edit_reconcile"
+            }));
+        }
+        let rollback = source_edit_rollback_operation().unwrap();
+        let move_operation = source_edit_operation(SourceEditKind::MoveSymbol).unwrap();
+        let move_capability = contribution
+            .capabilities()
+            .iter()
+            .find(|capability| capability.capability_id() == move_operation.capability_id())
+            .unwrap();
+        assert_eq!(
+            move_capability.inverse(),
+            &tracedecay_tool_catalog::InverseContract::Capability {
+                capability_id: rollback.capability_id().clone(),
+            }
+        );
+        assert!(
+            contribution
+                .capabilities()
+                .iter()
+                .any(|capability| capability.capability_id() == rollback.capability_id())
+        );
+        for surface in SOURCE_EDIT_SURFACES {
+            assert!(contribution.bindings().iter().any(|binding| {
+                binding.surface() == surface
+                    && binding.operation().as_str() == "source_edit_rollback"
             }));
         }
     }

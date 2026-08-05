@@ -20,6 +20,7 @@ mod journal;
 mod outcome;
 mod reconcile;
 mod records;
+mod rollback;
 mod verify;
 
 #[cfg(test)]
@@ -30,6 +31,7 @@ pub use outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, Sourc
 
 use execute::{execute_source_edit_inner, resolve_source_edit_preview};
 use reconcile::reconcile_source_edit_effect_unknown_inner;
+use rollback::execute_source_edit_rollback_inner;
 use verify::config_error;
 
 /// Capture the exact candidate-file CAS digest returned by a dry-run preview.
@@ -71,6 +73,32 @@ where
     A: SourceEditAuthorizationPort,
 {
     execute_source_edit_inner(graph, operation, request, authorization, Some(control)).await
+}
+
+pub async fn execute_source_edit_rollback<A>(
+    graph: &TraceDecay,
+    operation: &ApplicationOperation,
+    request: tracedecay_application::SourceEditRollbackRequestV1,
+    authorization: &A,
+) -> Result<SourceEditApplicationResult>
+where
+    A: SourceEditAuthorizationPort,
+{
+    execute_source_edit_rollback_inner(graph, operation, request, authorization, None).await
+}
+
+pub async fn execute_source_edit_rollback_with_control<A>(
+    graph: &TraceDecay,
+    operation: &ApplicationOperation,
+    request: tracedecay_application::SourceEditRollbackRequestV1,
+    authorization: &A,
+    control: &SourceEditEffectControlV1,
+) -> Result<SourceEditApplicationResult>
+where
+    A: SourceEditAuthorizationPort,
+{
+    execute_source_edit_rollback_inner(graph, operation, request, authorization, Some(control))
+        .await
 }
 
 /// Resolve one retained `EffectUnknown` only after an authorized inspection

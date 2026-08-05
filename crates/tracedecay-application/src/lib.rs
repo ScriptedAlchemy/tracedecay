@@ -219,8 +219,9 @@ pub use source_edit::{
     SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
     SourceEditDiagnosticV1, SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,
-    SourceEditVerificationStateV1, SourceEditVerificationV1, source_edit_catalog_contribution,
-    source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
+    SourceEditRollbackRequestV1, SourceEditVerificationStateV1, SourceEditVerificationV1,
+    source_edit_catalog_contribution, source_edit_handler_descriptors, source_edit_operation,
+    source_edit_reconciliation_operation, source_edit_rollback_operation,
 };
 pub use storage::{
     BranchRefV1, CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1,

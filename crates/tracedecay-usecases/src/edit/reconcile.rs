@@ -269,6 +269,7 @@ fn reconcile_prepared_source_edit_controlled(
                 success: true,
                 message: "source edit effect was independently confirmed committed".to_owned(),
             };
+            durability.persist_rollback_record(&journal, &committed_state, true)?;
             let record = applied_record(&journal, &outcome, committed_state, ended_at, None)?;
             (outcome, record)
         }
@@ -344,6 +345,7 @@ pub(super) async fn recover_source_edit_transaction(
         verification_state,
     } = &journal.state
     {
+        durability.persist_rollback_record(&journal, committed_state, outcome.success)?;
         let record = applied_durable_record(
             &journal,
             outcome.clone(),
