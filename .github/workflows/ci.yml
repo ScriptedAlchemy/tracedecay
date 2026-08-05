@@ -805,11 +805,6 @@ jobs:
 
       - uses: ./.github/actions/setup-linux-mold
 
-      - name: Test sweep harness contracts
-        run: |
-          python3 -m unittest discover -s tests/tool_sweep_suite -p 'test_*.py'
-          bash -n scripts/tool-sweep.sh
-
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
@@ -818,6 +813,14 @@ jobs:
 
       - name: Build production sweep binary
         run: cargo build --locked --release --bin tracedecay
+
+      - name: Test sweep harness and isolated release journey
+        env:
+          TRACEDECAY_SWEEP_LIVE: "1"
+          TRACEDECAY_SWEEP_RELEASE_BIN: ${{ github.workspace }}/target/release/tracedecay
+        run: |
+          python3 -m unittest discover -s tests/tool_sweep_suite -p 'test_*.py'
+          bash -n scripts/tool-sweep.sh
 
       - name: Sweep negotiated MCP surfaces
         run: scripts/tool-sweep.sh --whole-run-deadline-ms 1800000

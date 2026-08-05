@@ -83,6 +83,33 @@ class ProblemCodeTests(unittest.TestCase):
         self.assertEqual(row["problem_code"], "store.offline")
         self.assertEqual(row["verdict"], "FAIL")
 
+    def test_success_framed_markdown_not_found_is_not_coverage(self) -> None:
+        """A human-friendly not-found message cannot masquerade as a completed journey."""
+        runner = load_runner()
+
+        row = runner.response_row(
+            "tool",
+            "tracedecay_node",
+            {"result": {"content": [{"type": "text", "text": "## Node\n\nNode not found: fixture-node"}]}},
+            2,
+            30_000,
+        )
+
+        self.assertEqual(row["verdict"], "FAIL")
+        self.assertEqual(row["problem_code"], "tool_sweep.success_framed_not_found")
+
+    def test_markdown_fact_identity_is_consumable_by_rollback(self) -> None:
+        """The default Markdown renderer remains a valid producer for fact removal."""
+        runner = load_runner()
+        content = "catalog sweep temporary isolated fact"
+
+        fact_id = runner.fact_id_with_content(
+            {"result": {"content": [{"type": "text", "text": f"## Fact Store\n\n### Fact\n- #42 tool trust 0.500: {content}\n"}]}},
+            content,
+        )
+
+        self.assertEqual(fact_id, 42)
+
 
 class NegotiatedSurfaceTests(unittest.TestCase):
     def test_initialize_capabilities_control_optional_surface_discovery(self) -> None:

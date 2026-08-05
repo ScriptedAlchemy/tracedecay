@@ -63,8 +63,11 @@ BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 if [[ -z "$OUT" ]]; then
   OUT="$REPO_ROOT/target/tool-sweep/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
-mkdir -p "$OUT"
+TMPDIR="${TMPDIR:-$OUT/tmp}"
+mkdir -p "$OUT" "$TMPDIR"
 OUT="$(cd "$OUT" && pwd)"
+TMPDIR="$(cd "$TMPDIR" && pwd)"
+export TMPDIR TMP="$TMPDIR" TEMP="$TMPDIR"
 
 export PYTHONDONTWRITEBYTECODE=1
 set +e

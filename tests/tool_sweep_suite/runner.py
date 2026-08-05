@@ -13,50 +13,30 @@ from pathlib import Path
 import select
 import signal
 import subprocess
+import sys
 import time
-from typing import Any, Callable
+from typing import Any
 from xml.sax.saxutils import escape
 
+SUITE_DIR = Path(__file__).resolve().parent
+if str(SUITE_DIR) not in sys.path:
+    sys.path.insert(0, str(SUITE_DIR))
 
-def _objects(value: Any) -> list[dict[str, Any]]:
-    """Decode MCP structured/text payloads without trusting renderer prose."""
-    found: list[dict[str, Any]] = []
-    if isinstance(value, dict):
-        found.append(value)
-        for child in value.values():
-            found.extend(_objects(child))
-    elif isinstance(value, list):
-        for child in value:
-            found.extend(_objects(child))
-    elif isinstance(value, str):
-        try:
-            found.extend(_objects(json.loads(value)))
-        except json.JSONDecodeError:
-            pass
-    return found
-
-
-def response_problem_code(response: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Return the canonical problem kind/code from either MCP result framing."""
-    for value in _objects(response):
-        problem = value.get("problem")
-        if isinstance(problem, dict):
-            kind = problem.get("kind")
-            code = problem.get("code")
-            if isinstance(kind, str) and isinstance(code, str) and code:
-                return kind, code
-        kind = value.get("kind")
-        code = value.get("code")
-        if isinstance(kind, str) and isinstance(code, str) and code:
-            return kind, code
-        state = value.get("status", value.get("state"))
-        code = value.get("reason_code", value.get("problem_code"))
-        if isinstance(state, str) and isinstance(code, str) and code:
-            return state, code
-        if isinstance(code, str) and code:
-            return "failed", code
-    return None, None
-
+from outcomes import (
+    duration_us,
+    expected_state,
+    fact_id_with_content,
+    first_value,
+    has_status,
+    has_success_framed_not_found,
+    has_true,
+    objects as _objects,
+    response_problem_code,
+    response_handle,
+    search_node_id,
+    text_blocks,
+)
+from journeys import JourneyError, api_migration_plan_arguments, prepare as prepare_journey
 
 def response_row(
     kind: str, name: str, response: dict[str, Any], elapsed_ms: int, deadline_ms: int
@@ -67,8 +47,12 @@ def response_row(
         isinstance(response.get("result"), dict) and response["result"].get("isError") is True
     )
     failed_state = problem_kind in {"unavailable", "denied", "failed", "cancelled", "deadline_exceeded"}
-    verdict = "FAIL" if is_error or failed_state else "PASS"
+    not_found = has_success_framed_not_found(response)
+    verdict = "FAIL" if is_error or failed_state or not_found else "PASS"
     note = problem_kind or ("MCP error" if is_error else "completed")
+    if not_found and not (is_error or failed_state):
+        note = "success-framed not-found result"
+        problem_code = problem_code or "tool_sweep.success_framed_not_found"
     if verdict == "FAIL" and problem_code is None:
         problem_code = "tool_sweep.problem_code_missing" if problem_kind else "tool_sweep.untyped_error"
     return {
@@ -79,6 +63,7 @@ def response_row(
         "problem_code": problem_code,
         "elapsed_ms": elapsed_ms,
         "deadline_ms": deadline_ms,
+        "duration_us": duration_us(response),
     }
 
 
@@ -255,7 +240,7 @@ class McpClient:
     def __init__(self, binary: Path, project: Path, log: Path) -> None:
         self._stderr = log.open("wb")
         self._process = subprocess.Popen(
-            [str(binary), "serve", "--path", str(project)],
+            [str(binary), "serve", "--timings", "--path", str(project)],
             cwd=project,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -291,6 +276,15 @@ class McpClient:
                 self._process.kill()
                 self._process.wait(timeout=5)
         self._stderr.close()
+
+    def terminate_for_recovery_test(self) -> None:
+        """Stop only this disposable MCP child after its durable edit journal is observed."""
+        if self._process.poll() is None:
+            if os.name == "nt":
+                self._process.kill()
+            else:
+                os.killpg(os.getpgid(self._process.pid), signal.SIGKILL)
+            self._process.wait(timeout=5)
 
     def initialize(self, deadline_ms: int) -> set[str]:
         response, _ = self.request(
@@ -403,9 +397,13 @@ class McpClient:
             self._buffer += chunk
 
 
-def _run_checked(command: list[str], cwd: Path, stage: str, timeout_s: int = 120) -> subprocess.CompletedProcess[str]:
+def _run_checked(
+    command: list[str], cwd: Path, stage: str, timeout_s: int = 120, input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     try:
-        completed = subprocess.run(command, cwd=cwd, text=True, capture_output=True, timeout=timeout_s, check=False)
+        completed = subprocess.run(
+            command, cwd=cwd, text=True, input=input_text, capture_output=True, timeout=timeout_s, check=False,
+        )
     except subprocess.TimeoutExpired as error:
         raise SweepError(f"{stage} exceeded {timeout_s}s") from error
     if completed.returncode != 0:
@@ -431,6 +429,7 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, str]]:
         "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n"
         "pub fn sweep_peer() -> i32 { sweep_anchor().marker() }\n"
     )
+    (root / "src/relocated.rs").write_text("pub fn relocation_marker() -> i32 { 0 }\n")
     (root / "docs/large.md").write_text("catalog sweep handle source\n" * 8_192)
     _run_checked(["git", "init", "--initial-branch=main", "--quiet"], root, "fixture git init")
     _run_checked(["git", "config", "user.name", "TraceDecay Catalog Sweep"], root, "fixture git config")
@@ -438,6 +437,14 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, str]]:
     _run_checked(["git", "add", "."], root, "fixture git add")
     _run_checked(["git", "commit", "--quiet", "-m", "test: seed catalog sweep fixture"], root, "fixture git commit")
     _run_checked([str(binary), "init"], root, "fixture tracedecay init", timeout_s=180)
+    session_id = f"tool-sweep-session-{os.getpid()}-{time.monotonic_ns()}"
+    _run_checked(
+        [str(binary), "hook-codex-session-start"],
+        root,
+        "fixture Codex SessionStart producer",
+        timeout_s=60,
+        input_text=json.dumps({"cwd": str(root), "session_id": session_id}),
+    )
     return root, {
         "file": "src/lib.rs",
         "path": "src/lib.rs",
@@ -447,7 +454,6 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, str]]:
         "query": "sweep_anchor",
         "pattern": "sweep_anchor",
         "literal": "sweep_anchor",
-        "qualified_name": "src/lib.rs::sweep_anchor",
         "trait": "SweepTrait",
         "struct": "SweepType",
         "field": "value",
@@ -456,8 +462,67 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, str]]:
         "task": "inspect sweep_anchor",
         "prompt": "inspect sweep_anchor",
         "content": "catalog sweep isolated fact",
-        "idempotency_key": "catalog-sweep-idempotency",
+        "session_id": session_id,
+        "root": str(root),
     }
+
+
+def _producer_call(client: McpClient, tool: str, arguments: dict[str, Any], deadline_ms: int) -> dict[str, Any]:
+    response, elapsed_ms = client.call_tool(tool, arguments, deadline_ms)
+    row = response_row("tool", tool, response, elapsed_ms, deadline_ms)
+    if row["verdict"] != "PASS":
+        raise SweepError(f"{tool} producer failed: {row['problem_code'] or row['note']}")
+    if duration_us(response) is None:
+        raise SweepError(f"{tool} producer omitted the enabled _meta.duration_us receipt")
+    return response
+
+
+def prime_fixture_values(
+    client: McpClient, fixture: dict[str, str], policies: dict[str, ToolPolicy]
+) -> None:
+    """Mint node and retrieval identities from the release binary's normal output."""
+    def deadline(tool: str) -> int:
+        policy = policies.get(tool)
+        if policy is None or policy.availability != "available":
+            raise SweepError(f"required fixture producer is unavailable: {tool}")
+        return policy.deadline_ms
+
+    ends_at = time.monotonic() + 30
+    node_id: str | None = None
+    while node_id is None:
+        search, elapsed_ms = client.call_tool(
+            "tracedecay_search", {"query": fixture["query"], "semantic_mode": "fallback_allowed"}, deadline("tracedecay_search")
+        )
+        if search.get("error") is not None or (
+            isinstance(search.get("result"), dict) and search["result"].get("isError") is True
+        ):
+            row = response_row("tool", "tracedecay_search", search, elapsed_ms, deadline("tracedecay_search"))
+            raise SweepError(f"search producer failed: {row['problem_code'] or row['note']}")
+        if duration_us(search) is None:
+            raise SweepError("search producer omitted the enabled _meta.duration_us receipt")
+        node_id = search_node_id(search)
+        if node_id is None:
+            if time.monotonic() >= ends_at:
+                break
+            time.sleep(0.1)
+    if node_id is None:
+        raise SweepError("search producer did not publish the fixture node id")
+    node = _producer_call(client, "tracedecay_node", {"node_id": node_id}, deadline("tracedecay_node"))
+    qualified_name = first_value(node, {"qualified_name"})
+    if not isinstance(qualified_name, str) or not qualified_name:
+        raise SweepError("node producer did not publish the qualified symbol identity")
+    node_kind = first_value(node, {"kind"})
+    if not isinstance(node_kind, str) or not node_kind:
+        raise SweepError("node producer did not publish the symbol kind")
+
+    read = _producer_call(client, "tracedecay_read", {"file": "docs/large.md"}, deadline("tracedecay_read"))
+    handle = response_handle(read)
+    if handle is None:
+        raise SweepError("read producer did not mint a retrieval handle")
+    retrieved = _producer_call(client, "tracedecay_retrieve", {"handle": handle}, deadline("tracedecay_retrieve"))
+    if not any("catalog sweep handle source" in text for text in text_blocks(retrieved)):
+        raise SweepError("retrieve consumer did not return the producer's exact large response")
+    fixture.update({"node_id": node_id, "qualified_name": qualified_name, "node_kind": node_kind, "handle": handle})
 
 
 OPAQUE_FIELDS = frozenset(
@@ -470,15 +535,14 @@ OPAQUE_FIELDS = frozenset(
 
 def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, str]) -> dict[str, Any]:
     """Produce valid ordinary inputs from the negotiated schema; opaque values are never invented."""
+    if definition.get("name") == "tracedecay_api_migration_plan":
+        return api_migration_plan_arguments(fixture)
     schema = definition.get("inputSchema")
     if not isinstance(schema, dict) or schema.get("type") != "object":
         raise SweepError(f"{definition.get('name', '<unnamed>')}: inputSchema is not an object")
     value = _materialize(schema, fixture, None, schema)
     if not isinstance(value, dict):
         raise SweepError("tool input did not materialize an object")
-    properties = schema.get("properties")
-    if isinstance(properties, dict) and "format" in properties:
-        value["format"] = "json"
     return value
 
 
@@ -586,137 +650,135 @@ def missing_effect_journey_row(policy: ToolPolicy) -> dict[str, Any]:
     )
 
 
-def _has_completed_receipt(response: dict[str, Any]) -> bool:
-    for value in _objects(response):
-        receipt = value.get("tracedecay/execution_receipt")
-        if isinstance(receipt, dict) and receipt.get("terminal") == "completed":
-            return True
-    return False
-
-
-def _first_value(response: dict[str, Any], names: set[str]) -> Any | None:
-    for value in _objects(response):
-        for name in names:
-            candidate = value.get(name)
-            if isinstance(candidate, (str, int)) and not isinstance(candidate, bool):
-                return candidate
-    return None
-
-
-def _has_status(response: dict[str, Any], expected: str) -> bool:
-    return any(value.get("status") == expected for value in _objects(response))
-
-
-def _fact_id_with_content(response: dict[str, Any], content: str) -> int | None:
-    for value in _objects(response):
-        fact_id = value.get("fact_id")
-        if isinstance(fact_id, int) and not isinstance(fact_id, bool) and fact_id > 0 and value.get("content") == content:
-            return fact_id
-    return None
-
-
-def _completed_session_end(response: dict[str, Any]) -> bool:
-    return _first_value(response, {"before_watermark", "signal_before"}) is not None
-
-
 def _journey_call(client: McpClient, tool: str, arguments: dict[str, Any], deadline_ms: int) -> dict[str, Any]:
-    response, _ = client.call_tool(tool, arguments, deadline_ms)
-    row = response_row("tool", tool, response, 0, deadline_ms)
+    response, elapsed_ms = client.call_tool(tool, arguments, deadline_ms)
+    row = response_row("tool", tool, response, elapsed_ms, deadline_ms)
     if row["verdict"] != "PASS":
         raise SweepError(f"{tool} journey call failed: {row['problem_code'] or row['note']}")
-    if not _has_completed_receipt(response):
-        raise SweepError(f"{tool} journey call omitted a completed execution receipt")
+    if duration_us(response) is None:
+        raise SweepError(f"{tool} journey call omitted the enabled _meta.duration_us receipt")
     return response
 
 
-def _dashboard_effect(client: McpClient, policy: ToolPolicy) -> tuple[dict[str, Any], Callable[[dict[str, Any]], None]]:
-    def cleanup(response: dict[str, Any]) -> None:
-        url = _first_value(response, {"url", "dashboard_url"})
-        if not isinstance(url, str) or not url.startswith("http://"):
-            raise SweepError("dashboard start omitted its loopback URL")
-        stopped = _journey_call(client, policy.name, {"action": "stop"}, policy.deadline_ms)
-        if not _has_status(stopped, "stopped"):
-            raise SweepError("dashboard stop did not confirm listener termination")
-
-    return {"action": "start", "host": "127.0.0.1", "port": 0}, cleanup
-
-
-def _fact_store_effect(client: McpClient, policy: ToolPolicy) -> tuple[dict[str, Any], Callable[[dict[str, Any]], None]]:
-    content = "catalog sweep temporary isolated fact"
-
-    def cleanup(response: dict[str, Any]) -> None:
-        fact_id = _fact_id_with_content(response, content)
-        if fact_id is None:
-            raise SweepError("fact add omitted the stored fact id and content")
-        fetched = _journey_call(client, policy.name, {"action": "get", "fact_id": fact_id, "format": "json"}, policy.deadline_ms)
-        if _fact_id_with_content(fetched, content) != fact_id:
-            raise SweepError("fact get did not return the exact added fact")
-        removed = _journey_call(client, policy.name, {"action": "remove", "fact_id": fact_id, "format": "json"}, policy.deadline_ms)
-        if not any(value.get("removed") is True for value in _objects(removed)):
-            raise SweepError("fact removal did not confirm its inverse")
-        listed = _journey_call(client, policy.name, {"action": "list", "limit": 5, "format": "json"}, policy.deadline_ms)
-        if any(value.get("fact_id") == fact_id for value in _objects(listed)):
-            raise SweepError("fact removal did not verify fact absence")
-
-    return {"action": "add", "content": content, "category": "tool", "trust": 0.5, "source": "catalog_sweep", "format": "json"}, cleanup
-
-
-def _session_start_effect(client: McpClient, policy: ToolPolicy) -> tuple[dict[str, Any], Callable[[dict[str, Any]], None]]:
-    def cleanup(response: dict[str, Any]) -> None:
-        if not _has_status(response, "baseline_saved"):
-            raise SweepError("session start omitted baseline_saved status")
-        ended = _journey_call(client, "tracedecay_session_end", {}, policy.deadline_ms)
-        if not _completed_session_end(ended):
-            raise SweepError("session end did not consume the saved baseline")
-        absent = _journey_call(client, "tracedecay_session_end", {}, policy.deadline_ms)
-        if not _has_status(absent, "no_baseline"):
-            raise SweepError("session baseline removal was not verified")
-
-    return {}, cleanup
-
-
-def _session_end_effect(client: McpClient, policy: ToolPolicy) -> tuple[dict[str, Any], Callable[[dict[str, Any]], None]]:
-    started = _journey_call(client, "tracedecay_session_start", {}, policy.deadline_ms)
-    if not _has_status(started, "baseline_saved"):
-        raise SweepError("session start producer omitted baseline_saved status")
-
-    def cleanup(response: dict[str, Any]) -> None:
-        if not _completed_session_end(response):
-            ended = _journey_call(client, "tracedecay_session_end", {}, policy.deadline_ms)
-            if not _completed_session_end(ended):
-                raise SweepError("session-end cleanup did not consume producer baseline")
-        absent = _journey_call(client, "tracedecay_session_end", {}, policy.deadline_ms)
-        if not _has_status(absent, "no_baseline"):
-            raise SweepError("session baseline removal was not verified")
-
-    return {}, cleanup
-
-
-EFFECT_JOURNEYS: dict[str, Callable[[McpClient, ToolPolicy], tuple[dict[str, Any], Callable[[dict[str, Any]], None]]]] = {
-    "tracedecay_dashboard": _dashboard_effect,
-    "tracedecay_fact_store": _fact_store_effect,
-    "tracedecay_session_start": _session_start_effect,
-    "tracedecay_session_end": _session_end_effect,
-}
-
-
-def execute_effect(client: McpClient, policy: ToolPolicy) -> dict[str, Any]:
-    """Exercise a real effect and its inverse inside this phase's disposable profile."""
-    prepare = EFFECT_JOURNEYS.get(policy.name)
-    if prepare is None:
-        return missing_effect_journey_row(policy)
-    try:
-        arguments, cleanup = prepare(client, policy)
-        response, elapsed_ms = client.call_tool(policy.name, arguments, policy.deadline_ms)
-        row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
-        if row["verdict"] == "PASS" and not _has_completed_receipt(response):
-            row.update({"verdict": "FAIL", "problem_code": "tool_sweep.receipt_missing", "note": "effect omitted completed execution receipt"})
+def _prepared_reconciliation_journal(deadline_s: float) -> dict[str, Any]:
+    data_dir = os.environ.get("TRACEDECAY_DATA_DIR")
+    if not data_dir:
+        raise SweepError("isolated reconciliation journey has no TRACEDECAY_DATA_DIR")
+    path = Path(data_dir) / "source-edit-transactions-v1" / "active.json"
+    ends_at = time.monotonic() + deadline_s
+    while time.monotonic() < ends_at:
         try:
-            cleanup(response)
+            value = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            time.sleep(0.001)
+            continue
+        if isinstance(value, dict) and value.get("state") == "prepared":
+            return value
+    raise SweepError("source edit did not retain a prepared durable journal before recovery")
+
+
+def _reconcile_effect(
+    client: McpClient, policy: ToolPolicy, fixture: dict[str, str], policies: dict[str, ToolPolicy],
+) -> dict[str, Any]:
+    """Create a real crash-recovery prerequisite, then reconcile it through MCP."""
+    source = Path(fixture["root"]) / "reconciliation-source.txt"
+    original = "reconciliation anchor\n" + "x" * (2 * 1024 * 1024)
+    source.write_text(original)
+    preview = _journey_call(
+        client,
+        "tracedecay_str_replace",
+        {"path": source.name, "old_str": "reconciliation anchor", "new_str": "reconciled anchor", "dry_run": True},
+        policies["tracedecay_str_replace"].deadline_ms,
+    )
+    observed = expected_state(preview)
+    if observed is None:
+        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_preview_missing", "source-edit preview omitted expected_state")
+    arguments = {
+        "path": source.name,
+        "old_str": "reconciliation anchor",
+        "new_str": "reconciled anchor",
+        "dry_run": False,
+        "verify": False,
+        "idempotency_key": f"tool-sweep-reconcile-{time.monotonic_ns()}",
+        "expected_state": observed,
+    }
+    request_id = client._new_id()
+    client._send({"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": {"name": "tracedecay_str_replace", "arguments": arguments}})
+    try:
+        journal = _prepared_reconciliation_journal(5)
+    except Exception as error:
+        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_prerequisite_missing", str(error))
+    client.terminate_for_recovery_test()
+
+    effect_id = journal.get("effect_id")
+    input_digest = journal.get("input_digest")
+    request = journal.get("request")
+    idempotency_key = request.get("idempotency_key") if isinstance(request, dict) else None
+    if not all(isinstance(value, str) and value for value in (effect_id, input_digest, idempotency_key)):
+        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_journal_invalid", "prepared journal omitted reconciliation identity")
+    if source.read_text() != original:
+        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_preimage_changed", "crash prerequisite changed source before reconciliation")
+    recovery = McpClient(client._process.args[0], Path(fixture["root"]), Path(fixture["root"]) / "reconciliation-mcp.log")
+    try:
+        recovery.initialize(AUXILIARY_SURFACE_DEADLINE_MS)
+        response, elapsed_ms = recovery.call_tool(
+            policy.name,
+            {
+                "kind": "str_replace",
+                "effect_id": effect_id,
+                "idempotency_key": idempotency_key,
+                "attempt_idempotency_key": f"tool-sweep-reconcile-attempt-{time.monotonic_ns()}",
+                "input_digest": input_digest,
+                "disposition": "confirm_rolled_back",
+                "confirm": True,
+            },
+            policy.deadline_ms,
+        )
+        row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
+        if row["verdict"] == "PASS" and duration_us(response) is None:
+            row.update({"verdict": "FAIL", "problem_code": "tool_sweep.receipt_missing", "note": "reconciliation omitted _meta.duration_us with --timings"})
+    except Exception as error:
+        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_failed", str(error))
+    finally:
+        recovery.close()
+    if row["verdict"] == "PASS" and source.read_text() == original:
+        row["rollback"] = "verified"
+        row["rollback_note"] = "durable uncertain edit reconciled against its unchanged preimage"
+    elif row["verdict"] == "PASS":
+        row.update({"verdict": "FAIL", "problem_code": "tool_sweep.rollback_failed", "note": "reconciliation changed its expected rolled-back preimage"})
+    return row
+
+
+def execute_effect(
+    client: McpClient, policy: ToolPolicy, fixture: dict[str, str], policies: dict[str, ToolPolicy],
+) -> dict[str, Any]:
+    """Exercise a real effect and its inverse inside this phase's disposable profile."""
+    if policy.name == "tracedecay_source_edit_reconcile":
+        return _reconcile_effect(client, policy, fixture, policies)
+    try:
+        def deadline(tool: str) -> int:
+            candidate = policies.get(tool)
+            if candidate is None or candidate.availability != "available":
+                raise JourneyError(f"required journey tool is unavailable: {tool}")
+            return candidate.deadline_ms
+
+        prepared = prepare_journey(
+            policy.name, client, fixture, deadline,
+            lambda tool, arguments, deadline_ms: _journey_call(client, tool, arguments, deadline_ms),
+        )
+        if prepared is None:
+            return missing_effect_journey_row(policy)
+        response, elapsed_ms = client.call_tool(policy.name, prepared.arguments, policy.deadline_ms)
+        row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
+        if row["verdict"] == "PASS" and duration_us(response) is None:
+            row.update({"verdict": "FAIL", "problem_code": "tool_sweep.receipt_missing", "note": "effect omitted _meta.duration_us with --timings"})
+        try:
+            rollback_note = prepared.cleanup(response)
         except Exception as error:
             row.update({"verdict": "FAIL", "problem_code": "tool_sweep.rollback_failed", "note": f"{row['note']}; rollback failed: {error}"})
         else:
             row["rollback"] = "verified"
+            row["rollback_note"] = rollback_note
         return row
     except Exception as error:
         return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.effect_journey_failed", str(error))
@@ -759,8 +821,17 @@ def _write_phase_report(out: Path, report: dict[str, Any]) -> None:
     for row in report["entries"]:
         identifier = escape(f"{row['kind']}:{row['name']}", {'"': "&quot;"})
         note = escape(str(row["note"]), {'"': "&quot;"})
-        failure = "" if row["verdict"] == "PASS" else f'<failure message="{note}" />'
+        problem_code = row.get("problem_code")
+        code = escape(str(problem_code), {'"': "&quot;"}) if isinstance(problem_code, str) else ""
+        message = f"{code}: {note}" if code else note
+        failure = "" if row["verdict"] == "PASS" else f'<failure message="{message}" type="{code}" />'
         cases.append(f'<testcase name="{identifier}" time="{row["elapsed_ms"] / 1000:.3f}">{failure}</testcase>')
+    fatal = report.get("fatal")
+    if isinstance(fatal, str):
+        code = report.get("fatal_problem_code")
+        code = escape(code if isinstance(code, str) else "tool_sweep.phase_fatal", {'"': "&quot;"})
+        note = escape(fatal, {'"': "&quot;"})
+        cases.append(f'<testcase name="fatal:phase" time="0.000"><error message="{code}: {note}" type="{code}" /></testcase>')
     (out / "junit.xml").write_text(
         f'<testsuite name="mcp-catalog-sweep" tests="{len(cases)}">{"".join(cases)}</testsuite>\n'
     )
@@ -805,6 +876,7 @@ def run_phase(args: argparse.Namespace) -> int:
             except SweepError as error:
                 name = definition.get("name") if isinstance(definition.get("name"), str) else "<invalid>"
                 report["entries"].append(_failure_row("tool", name, 0, "tool_sweep.dispatch_metadata_invalid", str(error)))
+        prime_fixture_values(client, fixture, {policy.name: policy for _, policy in policies})
         if args.phase == "reads":
             for definition, policy in policies:
                 if policy.availability == "unavailable":
@@ -816,13 +888,16 @@ def run_phase(args: argparse.Namespace) -> int:
                     client, resources=resources, prompts=prompts, fixture=fixture, deadline_ms=AUXILIARY_SURFACE_DEADLINE_MS
                 )
             )
-        else:
+        elif args.phase == "effect":
             selected = [policy for _, policy in policies if policy.name == args.effect and policy.availability == "available" and policy.effect not in READ_EFFECTS]
             if len(selected) != 1:
                 raise SweepError(f"selected mutation is not uniquely available: {args.effect}")
-            report["entries"].append(execute_effect(client, selected[0]))
+            report["entries"].append(
+                execute_effect(client, selected[0], fixture, {policy.name: policy for _, policy in policies})
+            )
     except Exception as error:
         report["fatal"] = str(error)
+        report["fatal_problem_code"] = "tool_sweep.phase_failed"
     finally:
         if client is not None:
             client.close()
@@ -837,7 +912,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Exercise one isolated negotiated MCP surface phase.")
     parser.add_argument("--bin", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--phase", choices=("reads", "effect"), required=True)
+    parser.add_argument("--phase", choices=("discovery", "reads", "effect"), required=True)
     parser.add_argument("--effect")
     parser.add_argument("--catalog", type=Path)
     args = parser.parse_args(argv)
@@ -847,7 +922,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--bin must name an executable release binary")
     if args.phase == "effect" and (not args.effect or args.catalog is None):
         parser.error("--phase effect requires --effect and --catalog")
-    if args.phase == "reads" and (args.effect is not None or args.catalog is not None):
+    if args.phase in {"discovery", "reads"} and (args.effect is not None or args.catalog is not None):
         parser.error("--effect/--catalog are only valid for --phase effect")
     return args
 
