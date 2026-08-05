@@ -108,6 +108,10 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
             .all(|byte| byte.is_ascii_graphic() || byte == b' ')
 }
 
+fn valid_lsp_control(deadline: &Deadline, cancellation: &CancellationContext) -> bool {
+    deadline.expires_at.0 > 0 && cancellation.token_id.as_str().len() <= MAX_OPAQUE_HANDLE_BYTES
+}
+
 /// Stable discriminator for the closed post-handshake invocation protocol.
 pub(crate) const DAEMON_INVOCATION_PROTOCOL: &str = "tracedecay.daemon.invocation";
 /// Initial revision of the daemon-owned invocation wire shape.
@@ -494,22 +498,34 @@ pub(crate) enum DaemonInvocationPayload {
         client_revision: String,
         requested_root_uri: Option<String>,
         workspace_folders: Vec<String>,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     },
     LspFrame {
         session: DaemonLspSessionAccess,
         frame: String,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     },
     LspPoll {
         session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     },
     LspAcknowledge {
         session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     },
     LspReconnect {
         session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     },
     LspDetach {
         session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     },
 }
 
@@ -1141,6 +1157,8 @@ impl DaemonInvocationRequest {
         client_revision: impl Into<String>,
         requested_root_uri: Option<String>,
         workspace_folders: Vec<String>,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     ) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
@@ -1151,6 +1169,8 @@ impl DaemonInvocationRequest {
                 client_revision: client_revision.into(),
                 requested_root_uri,
                 workspace_folders,
+                deadline,
+                cancellation,
             },
         }
     }
@@ -1159,6 +1179,8 @@ impl DaemonInvocationRequest {
         request_id: impl Into<String>,
         session: DaemonLspSessionAccess,
         frame: impl Into<String>,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     ) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
@@ -1168,56 +1190,85 @@ impl DaemonInvocationRequest {
             payload: DaemonInvocationPayload::LspFrame {
                 session,
                 frame: frame.into(),
+                deadline,
+                cancellation,
             },
         }
     }
 
-    pub(crate) fn lsp_poll(request_id: impl Into<String>, session: DaemonLspSessionAccess) -> Self {
+    pub(crate) fn lsp_poll(
+        request_id: impl Into<String>,
+        session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
             revision: DAEMON_INVOCATION_REVISION,
             request_id: request_id.into(),
             delivery_route: None,
-            payload: DaemonInvocationPayload::LspPoll { session },
+            payload: DaemonInvocationPayload::LspPoll {
+                session,
+                deadline,
+                cancellation,
+            },
         }
     }
 
     pub(crate) fn lsp_acknowledge(
         request_id: impl Into<String>,
         session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     ) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
             revision: DAEMON_INVOCATION_REVISION,
             request_id: request_id.into(),
             delivery_route: None,
-            payload: DaemonInvocationPayload::LspAcknowledge { session },
+            payload: DaemonInvocationPayload::LspAcknowledge {
+                session,
+                deadline,
+                cancellation,
+            },
         }
     }
 
     pub(crate) fn lsp_detach(
         request_id: impl Into<String>,
         session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     ) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
             revision: DAEMON_INVOCATION_REVISION,
             request_id: request_id.into(),
             delivery_route: None,
-            payload: DaemonInvocationPayload::LspDetach { session },
+            payload: DaemonInvocationPayload::LspDetach {
+                session,
+                deadline,
+                cancellation,
+            },
         }
     }
 
     pub(crate) fn lsp_reconnect(
         request_id: impl Into<String>,
         session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     ) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
             revision: DAEMON_INVOCATION_REVISION,
             request_id: request_id.into(),
             delivery_route: None,
-            payload: DaemonInvocationPayload::LspReconnect { session },
+            payload: DaemonInvocationPayload::LspReconnect {
+                session,
+                deadline,
+                cancellation,
+            },
         }
     }
 
@@ -1731,6 +1782,8 @@ impl DaemonInvocationRequest {
                 client_revision,
                 requested_root_uri,
                 workspace_folders,
+                deadline,
+                cancellation,
             } => {
                 if !valid_printable(client_revision, MAX_CLIENT_REVISION_BYTES)
                     || requested_root_uri
@@ -1740,21 +1793,46 @@ impl DaemonInvocationRequest {
                     || workspace_folders
                         .iter()
                         .any(|folder| !valid_printable(folder, MAX_ROOT_HINT_BYTES))
+                    || !valid_lsp_control(deadline, cancellation)
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
-            DaemonInvocationPayload::LspFrame { session, frame } => {
+            DaemonInvocationPayload::LspFrame {
+                session,
+                frame,
+                deadline,
+                cancellation,
+            } => {
                 let _ = session.clone().into_access()?;
-                if frame.len() > MAX_LSP_FRAME_BYTES {
+                if frame.len() > MAX_LSP_FRAME_BYTES || !valid_lsp_control(deadline, cancellation) {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
-            DaemonInvocationPayload::LspPoll { session }
-            | DaemonInvocationPayload::LspAcknowledge { session }
-            | DaemonInvocationPayload::LspReconnect { session }
-            | DaemonInvocationPayload::LspDetach { session } => {
+            DaemonInvocationPayload::LspPoll {
+                session,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::LspAcknowledge {
+                session,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::LspReconnect {
+                session,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::LspDetach {
+                session,
+                deadline,
+                cancellation,
+            } => {
                 let _ = session.clone().into_access()?;
+                if !valid_lsp_control(deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
             }
         }
         Ok(())

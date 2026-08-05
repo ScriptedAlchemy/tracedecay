@@ -46,6 +46,7 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7.19"
 tracing = "0.1"
 tree-sitter = "0.26"
 
