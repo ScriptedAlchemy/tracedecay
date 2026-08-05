@@ -19,7 +19,7 @@
       "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs",
       "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs"
     ],
-    "content_digest": "sha256:17b99edc856108ded994daed7b29d6dd383b2f0890c94867eed5cf2ba903427f",
+    "content_digest": "sha256:3324bc97a9dab89365bc6f7d8a24172ebe358448bf8c3208dd6f97ea4d2f0a73",
     "descriptor_digest": "sha256:5aecc3b0c4b0d2c7dce830c192ef7267c4792586d6cb11fbd3e2f2e321a424b0",
     "language_strata": [
       {

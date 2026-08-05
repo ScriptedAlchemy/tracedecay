@@ -1038,7 +1038,7 @@ fn parse_json<T: for<'de> Deserialize<'de>>(bytes: &[u8], path: &str) -> Result<
 }
 
 fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn load_base_sources(paths: &[String]) -> Result<Vec<WorkloadFile>, String> {
