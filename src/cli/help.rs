@@ -290,12 +290,11 @@ Related: tracedecay doctor (detects daemon problems), tracedecay serve.";
 pub(crate) const UPGRADE_AFTER_HELP: &str = "\
 Examples:
   tracedecay upgrade                             Install the newest release
-  tracedecay upgrade --no-heal                   Skip the post-update health pass
   tracedecay upgrade --no-reinstall              Skip refreshing configured agents
 
 After a real install, upgrade re-runs install for every configured agent
 integration so a separate `tracedecay reinstall` is not needed. --no-reinstall
-skips that refresh; --no-heal (independent) skips only the health pass.
+skips that refresh.
 
 Related: tracedecay update (refresh even when current), tracedecay channel
 (switch stable/beta).";
@@ -303,12 +302,10 @@ Related: tracedecay update (refresh even when current), tracedecay channel
 pub(crate) const UPDATE_AFTER_HELP: &str = "\
 Examples:
   tracedecay update                              Upgrade if needed, then refresh
-  tracedecay update --no-heal                    Skip the post-update health pass
   tracedecay update --no-reinstall               Skip refreshing configured agents
 
 Update re-runs install for every configured agent integration so a separate
-`tracedecay reinstall` is not needed. --no-reinstall skips that refresh;
---no-heal (independent) skips only the health pass.
+`tracedecay reinstall` is not needed. --no-reinstall skips that refresh.
 
 Related: tracedecay upgrade (refresh only after a real install),
 tracedecay update-plugin (plugins only), tracedecay channel.";
@@ -399,7 +396,6 @@ upgrade behaves unexpectedly.";
 pub(crate) const DOCTOR_AFTER_HELP: &str = "\
 Examples:
   tracedecay doctor                              Check everything
-  tracedecay doctor --agent cursor               Check one agent integration
 
 Related: tracedecay install (fix missing integration), tracedecay daemon
 status, tracedecay status (index health).";

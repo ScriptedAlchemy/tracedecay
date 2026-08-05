@@ -38,7 +38,6 @@ pub mod diagnose;
 pub mod diagnostics_publication;
 pub mod diagnostics_query;
 pub mod diagnostics_store;
-pub mod doctor_remediation;
 pub mod edit;
 // Widened from `pub(crate)`: the root shim re-exports this crate, and root
 // adapters (`src/mcp`, `src/daemon`, `src/store`) publish onto the event lane.

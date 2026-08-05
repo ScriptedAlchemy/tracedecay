@@ -126,7 +126,7 @@ export const RECENCY_COLUMNS: ReadonlyArray<{
 /** How much TraceDecay holds for a project. Every term is a real registry
  * count; nothing here is weighted or invented. */
 export function indexedMass(project: ProjectRegistryEntry): number {
-  return project.store_count + project.graph_scope_count + project.artifact_count;
+  return project.store_count + project.artifact_count;
 }
 
 /** Age in days, floored at zero so a clock skew never reads as the future. */
@@ -470,7 +470,6 @@ export interface HoldingChannel {
 export interface HoldingsSummary {
   total: number;
   stores: HoldingChannel;
-  scopes: HoldingChannel;
   artifacts: HoldingChannel;
   /** The channels that carry no information because every project agrees, as a
    * sentence — or null when they all vary. */
@@ -494,9 +493,7 @@ function channel(label: string, values: readonly number[]): HoldingChannel {
  *
  * Every row printed "1 st · 4 art", and on a real registry that is very nearly
  * literal: `store_count` is 1 for all forty-four projects and `artifact_count`
- * is 3, 4 or 5. Forty-four repetitions of a constant is not density. The one
- * count that genuinely varies is `graph_scope_count`, which spans 0 to 242 and
- * was not on the row at all.
+ * is 3, 4 or 5. Forty-four repetitions of a constant is not density.
  *
  * So the constant channels are stated once for the whole rail and the rows
  * carry the channel that differs — plus, per row, any other channel that
@@ -509,11 +506,10 @@ export function summarizeHoldings(
 ): HoldingsSummary | null {
   if (projects.length === 0) return null;
   const stores = channel('store', projects.map((project) => project.store_count));
-  const scopes = channel('scope', projects.map((project) => project.graph_scope_count));
   const artifacts = channel('artifact', projects.map((project) => project.artifact_count));
 
   const parts: string[] = [];
-  for (const entry of [stores, scopes, artifacts]) {
+  for (const entry of [stores, artifacts]) {
     if (entry.uniform != null) {
       parts.push(
         `exactly ${entry.uniform} ${entry.label}${entry.uniform === 1 ? '' : 's'}`,
@@ -525,7 +521,6 @@ export function summarizeHoldings(
   return {
     total: projects.length,
     stores,
-    scopes,
     artifacts,
     uniformLine:
       parts.length > 0

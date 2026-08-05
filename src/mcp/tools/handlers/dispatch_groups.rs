@@ -704,7 +704,6 @@ pub(super) async fn dispatch_session_workflow_tools(
                 options.automation_scheduler_reconciler.clone(),
                 options.automation_writer.clone(),
                 options.doctor_report_reader.clone(),
-                options.doctor_remediation_dispatcher.clone(),
                 options.code_index_freshness_reader.clone(),
                 options.feedback_status_reader.clone(),
                 options.diagnostics_lsp.clone(),

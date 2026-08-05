@@ -175,7 +175,7 @@ impl SemanticModelLifecycleStateV1 {
     }
 }
 
-/// Safe remediation actions Doctor/status may expose.
+/// Read-only lifecycle guidance exposed by status surfaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticModelRemediationV1 {

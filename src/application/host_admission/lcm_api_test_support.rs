@@ -36,15 +36,11 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: Option<&str>,
-        mode: &str,
-        apply: bool,
-        clean_config: crate::sessions::lcm::LcmCleanConfig,
-        gc_config: crate::sessions::lcm::LcmGcConfig,
     ) -> std::result::Result<serde_json::Value, crate::sessions::lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
-            .lcm_doctor(provider, session_id, mode, apply, clean_config, gc_config)
+            .lcm_doctor(provider, session_id)
             .await
     }
 

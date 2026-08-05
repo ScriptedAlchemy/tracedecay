@@ -1,28 +1,25 @@
-//! Doctor kernel composition, coverage, remediation resolution, and regression behavior.
+//! Doctor kernel composition, coverage, and regression behavior.
 //!
 //! These drive the real composition entry point over seeded source ports with
 //! mixed healthy/degraded/unavailable families, assert the coverage statement is
-//! truthful, resolve remediation references (including unknown-ref rejection),
-//! and exercise every finding family supported by the kernel.
+//! truthful, and exercise every finding family supported by the kernel.
 
 mod common;
 
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
-use tracedecay_application::doctor::operations;
 use tracedecay_application::{
     CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
     ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
     DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
-    DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorRemediationKindV1,
-    DoctorRemediationRefV1, DoctorRemediationRegistryV1, DoctorRemediationResolutionErrorV1,
-    DoctorReportComposerV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
-    DoctorStorageFindingKindV1, HostConformanceV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, OperationalAuditDoctorPort, OperationalAuditReadV1, OrphanStoreRecordV1,
-    ProfileAuthorityReadV1, RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
-    RequestContext, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
-    StorageByteSizeV1, StorageDoctorPort, StoreKeyV1, orphan_store_finding,
+    DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorReportComposerV1,
+    DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, HostConformanceV1,
+    HostIntegrationDoctorPort, HostIntegrationReadV1, OperationalAuditDoctorPort,
+    OperationalAuditReadV1, OrphanStoreRecordV1, ProfileAuthorityReadV1, RemoteAuthorityReadV1,
+    RemoteListenerReadV1, RemoteOperationalReadV1, RequestContext, RuntimeHealthDoctorPort,
+    RuntimeHealthReadV1, RuntimeLivenessV1, StorageByteSizeV1, StorageDoctorPort, StoreKeyV1,
+    orphan_store_finding,
 };
 use tracedecay_domain::UtcMicros;
 
@@ -195,6 +192,39 @@ fn doctor_report_composes_all_families_from_mixed_sources() {
     assert_eq!(
         report.coverage().completeness(),
         DoctorCoverageCompletenessV1::Partial
+    );
+}
+
+#[test]
+fn doctor_report_wire_round_trip_revalidates_canonical_invariants() {
+    let report = block_on(DoctorReportComposerV1::new().compose(&context())).expect("compose");
+    let encoded = serde_json::to_value(&report).expect("serialize report");
+    let decoded = serde_json::from_value(encoded).expect("deserialize canonical report");
+    assert_eq!(report, decoded);
+}
+
+#[test]
+fn doctor_report_wire_rejects_contradictory_coverage() {
+    let report = block_on(DoctorReportComposerV1::new().compose(&context())).expect("compose");
+    let mut encoded = serde_json::to_value(&report).expect("serialize report");
+    encoded["coverage"]["completeness"] = serde_json::json!("complete");
+    assert!(
+        serde_json::from_value::<tracedecay_application::DoctorReportV1>(encoded).is_err(),
+        "wire decode must not accept coverage that contradicts its consultations"
+    );
+}
+
+#[test]
+fn doctor_report_wire_rejects_a_missing_required_family() {
+    let report = block_on(DoctorReportComposerV1::new().compose(&context())).expect("compose");
+    let mut encoded = serde_json::to_value(&report).expect("serialize report");
+    encoded["coverage"]["families"]
+        .as_array_mut()
+        .expect("coverage families")
+        .pop();
+    assert!(
+        serde_json::from_value::<tracedecay_application::DoctorReportV1>(encoded).is_err(),
+        "wire decode must not accept an incomplete family set"
     );
 }
 
@@ -417,65 +447,10 @@ fn doctor_report_healthy_only_under_genuinely_complete_coverage() {
     }
 }
 
-// --- Remediation resolution --------------------------------------------------
+// --- Doctor regression families ---------------------------------------------
 
-#[test]
-fn doctor_report_remediation_references_resolve_against_default_registry() {
-    let ctx = context();
-    let configuration = StaticConfiguration(ConfigurationAuthorityReadV1::Resolved {
-        drift: ConfigurationDriftV1::Drifted,
-        coverage: DoctorCoverageCompletenessV1::Complete,
-    });
-    let storage = StaticStorage(orphan_storage_read());
-    let report = block_on(
-        DoctorReportComposerV1::new()
-            .with_configuration(&configuration)
-            .with_storage(&storage)
-            .compose(&ctx),
-    )
-    .expect("compose");
-
-    let registry = DoctorRemediationRegistryV1::default_registry();
-    // Every remediation reference the composed report carries resolves to a
-    // typed descriptor without executing anything.
-    let mut resolved = 0usize;
-    for finding in report.findings() {
-        if let Some(reference) = finding.remediation() {
-            let descriptor = registry.resolve(reference).expect("remediation resolves");
-            assert!(!descriptor.summary().is_empty());
-            assert_eq!(descriptor.operation(), reference.owning_operation());
-            resolved += 1;
-        }
-    }
-    assert!(resolved >= 2, "expected drift + orphan remediation refs");
-}
-
-#[test]
-fn doctor_remediation_registry_rejects_unknown_reference() {
-    let registry = DoctorRemediationRegistryV1::default_registry();
-    let unknown = DoctorRemediationRefV1::new(
-        tracedecay_application::DoctorOwningOperationRefV1::new(
-            "use-case.application.unknown.made-up",
-        )
-        .expect("operation"),
-        DoctorRemediationKindV1::Action,
-    );
-    let error = registry
-        .resolve(&unknown)
-        .expect_err("unknown reference rejected");
-    assert_eq!(
-        error,
-        DoctorRemediationResolutionErrorV1::UnknownOperation {
-            operation: "use-case.application.unknown.made-up".to_string(),
-        }
-    );
-}
-
-// --- Plan 14 PR14 regression families ---------------------------------------
-
-// Plan 14 "finding to verified remediation" enumerates observable classes the
-// Doctor kernel must represent. Each case below maps one class onto the landed
-// contract. Classes owned by transport/dashboard (deep-link scope, SSE churn,
+// These cases enumerate observable classes the Doctor kernel must represent.
+// Classes owned by transport/dashboard (deep-link scope, SSE churn,
 // renderer fallback) or by not-yet-wired advisory sub-sources (GitHub item
 // lifecycle, CI provenance, proximity) are noted in the crate report as
 // unmapped-in-this-slice rather than asserted here.
@@ -596,30 +571,4 @@ fn doctor_regression_unauthorized_read_maps_to_denied_not_absent() {
         .find(|f| f.family() == DoctorFindingFamilyV1::Configuration)
         .expect("configuration finding");
     assert_eq!(finding.state(), DoctorEvidenceStateV1::Denied);
-    assert!(finding.remediation().is_none());
-}
-
-#[test]
-fn doctor_regression_preview_reference_resolution_is_kind_checked() {
-    // A remediation reference offered as a preview must resolve only when the
-    // owning operation actually offers one; daemon recovery offers none.
-    let registry = DoctorRemediationRegistryV1::default_registry();
-    let preview = DoctorRemediationRefV1::new(
-        tracedecay_application::DoctorOwningOperationRefV1::new(operations::RUNTIME_RECOVER_DAEMON)
-            .expect("operation"),
-        DoctorRemediationKindV1::Preview,
-    );
-    assert!(matches!(
-        registry.resolve(&preview),
-        Err(DoctorRemediationResolutionErrorV1::PreviewUnavailable { .. })
-    ));
-    // Configuration apply offers a preview.
-    let config_preview = DoctorRemediationRefV1::new(
-        tracedecay_application::DoctorOwningOperationRefV1::new(
-            operations::CONFIGURATION_PROTECTED_APPLY,
-        )
-        .expect("operation"),
-        DoctorRemediationKindV1::Preview,
-    );
-    assert!(registry.resolve(&config_preview).is_ok());
 }

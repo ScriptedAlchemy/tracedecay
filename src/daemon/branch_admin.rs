@@ -448,6 +448,7 @@ pub(super) struct StoreAdministration {
     host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
     session_sync_service: Arc<crate::daemon::session_sync::DaemonSessionSyncService>,
+    store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
@@ -477,6 +478,7 @@ impl Default for StoreAdministration {
             session_sync_service: Arc::new(
                 crate::daemon::session_sync::DaemonSessionSyncService::default(),
             ),
+            store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry::default(),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(unix)]
@@ -496,6 +498,12 @@ impl Default for StoreAdministration {
 }
 
 impl StoreAdministration {
+    pub(super) fn store_telemetry_sampling(
+        &self,
+    ) -> super::maintenance::StoreTelemetrySamplingRegistry {
+        self.store_telemetry_sampling.clone()
+    }
+
     pub(super) fn project_routes(&self) -> crate::mcp::project_route::SharedHookProjectRouteCache {
         self.project_routes.clone()
     }

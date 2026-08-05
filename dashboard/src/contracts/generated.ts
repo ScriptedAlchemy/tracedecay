@@ -29,10 +29,6 @@ export const AcceptTaskCommandSchema = z.object({
 });
 export type AcceptTaskCommand = z.infer<typeof AcceptTaskCommandSchema>;
 
-/** Strongly typed canonical identity: `AccessRuleId`. */
-export const AccessRuleIdSchema = z.string();
-export type AccessRuleId = z.infer<typeof AccessRuleIdSchema>;
-
 /** Strongly typed canonical identity: `ActorId`. */
 export const ActorIdSchema = z.string();
 export type ActorId = z.infer<typeof ActorIdSchema>;
@@ -45,18 +41,130 @@ export const AdmitExecutionCommandSchema = z.object({
 });
 export type AdmitExecutionCommand = z.infer<typeof AdmitExecutionCommandSchema>;
 
+export const AnalyticsAgentsPayloadV1Schema = z.object({
+  available: z.boolean(),
+  by_agent: z.array(z.lazy(() => AnalyticsAgentUsageV1Schema)),
+  source: z.string(),
+});
+export type AnalyticsAgentsPayloadV1 = z.infer<typeof AnalyticsAgentsPayloadV1Schema>;
+
+export const AnalyticsAgentUsageV1Schema = z.object({
+  agent: z.string(),
+  sessions: z.number().int(),
+});
+export type AnalyticsAgentUsageV1 = z.infer<typeof AnalyticsAgentUsageV1Schema>;
+
+export const AnalyticsDiagnosticsPayloadV1Schema = z.object({
+  available: z.boolean(),
+  by_event_kind: z.array(z.lazy(() => AnalyticsEventKindCountV1Schema)),
+  by_mcp_tool: z.array(z.lazy(() => AnalyticsToolCountV1Schema)),
+  by_outcome: z.array(z.lazy(() => AnalyticsOutcomeCountV1Schema)),
+  by_tool: z.array(z.lazy(() => AnalyticsToolCountV1Schema)),
+  event_count: z.number().int(),
+  events_per_hour: z.number().nullable(),
+  hook_call_count: z.number().int(),
+  hook_window: z.lazy(() => AnalyticsHookWindowV1Schema),
+  mcp_tool_call_count: z.number().int(),
+  message_count: z.number().int(),
+  ratios: z.lazy(() => AnalyticsDiagnosticsRatiosV1Schema),
+  recent_events: z.array(z.lazy(() => AnalyticsRecentEventV1Schema)),
+  source: z.string(),
+  tool_call_count: z.number().int(),
+  tracedecay_call_count: z.number().int(),
+});
+export type AnalyticsDiagnosticsPayloadV1 = z.infer<typeof AnalyticsDiagnosticsPayloadV1Schema>;
+
+export const AnalyticsDiagnosticsRatiosV1Schema = z.object({
+  events_per_message: z.number(),
+  hook_calls_per_message: z.number(),
+  mcp_tool_calls_per_message: z.number(),
+  tool_calls_per_message: z.number(),
+});
+export type AnalyticsDiagnosticsRatiosV1 = z.infer<typeof AnalyticsDiagnosticsRatiosV1Schema>;
+
+export const AnalyticsEventKindCountV1Schema = z.object({
+  count: z.number().int(),
+  event_kind: z.string(),
+});
+export type AnalyticsEventKindCountV1 = z.infer<typeof AnalyticsEventKindCountV1Schema>;
+
+export const AnalyticsHintCategoryV1Schema = z.object({
+  category: z.string(),
+  emitted: z.number().int(),
+  followed: z.number().int(),
+  ignored: z.number().int(),
+  suppressed: z.number().int(),
+});
+export type AnalyticsHintCategoryV1 = z.infer<typeof AnalyticsHintCategoryV1Schema>;
+
+export const AnalyticsHintsPayloadV1Schema = z.object({
+  available: z.boolean(),
+  by_category: z.array(z.lazy(() => AnalyticsHintCategoryV1Schema)),
+  error: z.string().nullable(),
+  source: z.string(),
+});
+export type AnalyticsHintsPayloadV1 = z.infer<typeof AnalyticsHintsPayloadV1Schema>;
+
+export const AnalyticsHookWindowV1Schema = z.object({
+  newest_ts_unix_ms: z.number().int().nullable(),
+  oldest_ts_unix_ms: z.number().int().nullable(),
+  rows_included: z.number().int(),
+  rows_scanned: z.number().int(),
+  total_rows_known: z.boolean(),
+  truncated: z.boolean(),
+  window_rows: z.number().int(),
+});
+export type AnalyticsHookWindowV1 = z.infer<typeof AnalyticsHookWindowV1Schema>;
+
+export const AnalyticsOutcomeCountV1Schema = z.object({
+  count: z.number().int(),
+  outcome: z.string(),
+});
+export type AnalyticsOutcomeCountV1 = z.infer<typeof AnalyticsOutcomeCountV1Schema>;
+
 export const AnalyticsOverviewPayloadV1Schema = z.object({
-  agents: z.unknown(),
+  agents: z.lazy(() => AnalyticsAgentsPayloadV1Schema),
   available: z.boolean(),
   db: z.string(),
-  diagnostics: z.unknown(),
-  hints: z.unknown(),
+  diagnostics: z.lazy(() => AnalyticsDiagnosticsPayloadV1Schema),
+  hints: z.lazy(() => AnalyticsHintsPayloadV1Schema),
   observatory: z.union([z.lazy(() => ObservatoryReadModelV1Schema), z.null()]),
   scope: z.string(),
-  underused_tool_families: z.unknown(),
+  underused_tool_families: z.array(z.lazy(() => AnalyticsUnderusedFamilyV1Schema)),
   usage: z.lazy(() => AnalyticsUsageSummaryV1Schema),
 });
 export type AnalyticsOverviewPayloadV1 = z.infer<typeof AnalyticsOverviewPayloadV1Schema>;
+
+export const AnalyticsRecentEventV1Schema = z.object({
+  event_kind: z.string(),
+  hook_name: z.string(),
+  outcome: z.string(),
+  timestamp: z.number().int().nullable(),
+  tool_name: z.string(),
+});
+export type AnalyticsRecentEventV1 = z.infer<typeof AnalyticsRecentEventV1Schema>;
+
+export const AnalyticsToolCountV1Schema = z.object({
+  count: z.number().int(),
+  tool_name: z.string(),
+});
+export type AnalyticsToolCountV1 = z.infer<typeof AnalyticsToolCountV1Schema>;
+
+export const AnalyticsUnderusedFamilyV1Schema = z.object({
+  family: z.string(),
+  missed_events: z.number().int(),
+  relevant_events: z.number().int(),
+  underused: z.boolean(),
+  usage_events: z.number().int(),
+});
+export type AnalyticsUnderusedFamilyV1 = z.infer<typeof AnalyticsUnderusedFamilyV1Schema>;
+
+export const AnalyticsUnderusedPayloadV1Schema = z.object({
+  available: z.boolean(),
+  db: z.string(),
+  families: z.array(z.lazy(() => AnalyticsUnderusedFamilyV1Schema)),
+});
+export type AnalyticsUnderusedPayloadV1 = z.infer<typeof AnalyticsUnderusedPayloadV1Schema>;
 
 export const AnalyticsUsageCategoryV1Schema = z.object({
   category: z.string(),
@@ -83,36 +191,28 @@ export const AttachRuntimeEvidenceCommandSchema = z.object({
 });
 export type AttachRuntimeEvidenceCommand = z.infer<typeof AttachRuntimeEvidenceCommandSchema>;
 
-/** Authoritative scope of a source binding. A mutable path, label, or host
-profile cannot be represented as authority. */
-export const AuthorityRefSchema = z.discriminatedUnion("kind", [z.object({
-  id: z.lazy(() => ProjectIdSchema),
-  kind: z.literal("project"),
-}), z.object({
-  id: z.lazy(() => UserProfileIdSchema),
-  kind: z.literal("projectless_hermes"),
-})]);
-export type AuthorityRef = z.infer<typeof AuthorityRefSchema>;
+/** One exact application scope paired with its registered physical locator.
+
+The scope remains the identity authority. The locator is retained only so
+a later read or restart can reopen the exact registered root without an
+active-graph or CWD fallback. */
+export const AuthorizedRootSchema = z.object({
+  locator: z.union([z.lazy(() => RegisteredRootLocatorV1Schema), z.null()]),
+  scope: z.lazy(() => ResolvedScopeSchema),
+});
+export type AuthorizedRoot = z.infer<typeof AuthorizedRootSchema>;
 
 /** Immutable canonical set of exact roots admitted by their existing request
-contexts. Paths and mutable aliases never participate in this authority. */
+contexts. A registered locator participates only as frozen reopening
+evidence; its paired [`ResolvedScope`] remains the root identity authority. */
 export const AuthorizedScopeSetSchema = z.object({
   actor_id: z.lazy(() => ActorIdSchema),
   digest: z.lazy(() => ManifestDigestSchema),
   revision: z.lazy(() => ScopeSetRevisionSchema),
-  roots: z.array(z.lazy(() => ResolvedScopeSchema)),
+  roots: z.array(z.lazy(() => AuthorizedRootSchema)),
   scope_set_id: z.lazy(() => ScopeSetIdSchema),
 });
 export type AuthorizedScopeSet = z.infer<typeof AuthorizedScopeSetSchema>;
-
-export const AutomaticWorktreeGcV1Schema = z.discriminatedUnion("kind", [z.object({
-  kind: z.literal("disabled"),
-}), z.object({
-  kind: z.literal("eligible_only"),
-  maximum_per_run: z.number().int(),
-  minimum_idle_seconds: z.number().int(),
-})]);
-export type AutomaticWorktreeGcV1 = z.infer<typeof AutomaticWorktreeGcV1Schema>;
 
 /** One human-review queue: a count, or the reason there is no count.
 
@@ -191,46 +291,6 @@ export const AutomationTaskStatusV1Schema = z.object({
 });
 export type AutomationTaskStatusV1 = z.infer<typeof AutomationTaskStatusV1Schema>;
 
-export const BranchCollisionPolicyV1Schema = z.discriminatedUnion("kind", [z.object({
-  kind: z.literal("append_monotonic_ordinal"),
-  maximum_attempts: z.number().int(),
-}), z.object({
-  kind: z.literal("reject"),
-})]);
-export type BranchCollisionPolicyV1 = z.infer<typeof BranchCollisionPolicyV1Schema>;
-
-export const BranchNameComponentV1Schema = z.discriminatedUnion("kind", [z.object({
-  kind: z.literal("monotonic_collision_ordinal"),
-}), z.object({
-  kind: z.literal("repository_slug"),
-}), z.object({
-  bytes: z.number().int(),
-  kind: z.literal("task_id_digest_prefix"),
-}), z.object({
-  kind: z.literal("work_class"),
-})]);
-export type BranchNameComponentV1 = z.infer<typeof BranchNameComponentV1Schema>;
-
-export const BranchNameSeparatorV1Schema = z.enum(["hyphen", "slash", "underscore"]);
-export type BranchNameSeparatorV1 = z.infer<typeof BranchNameSeparatorV1Schema>;
-
-export const BranchNamingPolicyV1Schema = z.object({
-  collision: z.lazy(() => BranchCollisionPolicyV1Schema),
-  components: z.array(z.lazy(() => BranchNameComponentV1Schema)),
-  maximum_bytes: z.number().int(),
-  prefix: z.lazy(() => CanonicalGitRefPrefixSchema),
-  separator: z.lazy(() => BranchNameSeparatorV1Schema),
-});
-export type BranchNamingPolicyV1 = z.infer<typeof BranchNamingPolicyV1Schema>;
-
-export const BranchTopologyKindV1Schema = z.enum(["independent_branches", "local_stack", "no_branches", "unbranched"]);
-export type BranchTopologyKindV1 = z.infer<typeof BranchTopologyKindV1Schema>;
-
-export const BranchTopologyPolicyV1Schema = z.object({
-  allowed: z.array(z.lazy(() => BranchTopologyKindV1Schema)),
-});
-export type BranchTopologyPolicyV1 = z.infer<typeof BranchTopologyPolicyV1Schema>;
-
 export const CallChainMeasurementV1Schema = z.object({
   directed: z.boolean(),
   edge_kind: z.string(),
@@ -249,34 +309,6 @@ export const CallChainStepV1Schema = z.object({
   node: z.lazy(() => NodeRefV1Schema),
 });
 export type CallChainStepV1 = z.infer<typeof CallChainStepV1Schema>;
-
-export const CancellationObservationSchema = z.object({
-  observed_at: z.lazy(() => UtcMicrosSchema),
-  stage: z.lazy(() => CancellationStageSchema),
-});
-export type CancellationObservation = z.infer<typeof CancellationObservationSchema>;
-
-/** Exact stage at which cancellation or deadline state was observed. */
-export const CancellationStageSchema = z.enum(["after_commit", "before_admission", "before_effect", "before_read", "during_read", "effect_in_flight", "reconciling"]);
-export type CancellationStage = z.infer<typeof CancellationStageSchema>;
-
-/** A validated full native Git ref name, such as `refs/heads/main`. */
-export const CanonicalGitRefNameV1Schema = z.string();
-export type CanonicalGitRefNameV1 = z.infer<typeof CanonicalGitRefNameV1Schema>;
-
-/** A validated ref/branch prefix. Branch naming accepts a short branch prefix
-(for example `tracedecay/`) while protected-ref selectors use full
-`refs/.../` prefixes. */
-export const CanonicalGitRefPrefixSchema = z.string();
-export type CanonicalGitRefPrefix = z.infer<typeof CanonicalGitRefPrefixSchema>;
-
-/** Strongly typed canonical identity: `CapabilityId`. */
-export const CapabilityIdSchema = z.string();
-export type CapabilityId = z.infer<typeof CapabilityIdSchema>;
-
-/** Strongly typed canonical identity: `ChangePlanId`. */
-export const ChangePlanIdSchema = z.string();
-export type ChangePlanId = z.infer<typeof ChangePlanIdSchema>;
 
 export const CodeIndexFreshnessPayloadV1Schema = z.object({
   note: z.string(),
@@ -299,28 +331,6 @@ export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   worktree_root: z.string(),
 });
 export type CodeIndexWorktreeFreshnessV1 = z.infer<typeof CodeIndexWorktreeFreshnessV1Schema>;
-
-/** Strongly typed canonical identity: `ConfigurationIdempotencyKey`. */
-export const ConfigurationIdempotencyKeySchema = z.string();
-export type ConfigurationIdempotencyKey = z.infer<typeof ConfigurationIdempotencyKeySchema>;
-
-export const ConfigurationProtectedApplySurfaceRequestSchema = z.object({
-  expected_base_revision_id: z.lazy(() => ConfigurationRevisionIdSchema),
-  idempotency_key: z.lazy(() => ConfigurationIdempotencyKeySchema),
-  operation_digest: z.lazy(() => ManifestDigestSchema),
-  plan_id: z.lazy(() => ChangePlanIdSchema),
-});
-export type ConfigurationProtectedApplySurfaceRequest = z.infer<typeof ConfigurationProtectedApplySurfaceRequestSchema>;
-
-export const ConfigurationProtectedPreviewSurfaceRequestSchema = z.object({
-  change: z.lazy(() => ProtectedChangeSchema),
-  expected_revision: z.lazy(() => ConfigurationRevisionIdSchema),
-});
-export type ConfigurationProtectedPreviewSurfaceRequest = z.infer<typeof ConfigurationProtectedPreviewSurfaceRequestSchema>;
-
-/** Strongly typed canonical identity: `ConfigurationRevisionId`. */
-export const ConfigurationRevisionIdSchema = z.string();
-export type ConfigurationRevisionId = z.infer<typeof ConfigurationRevisionIdSchema>;
 
 export const CostsReadModelV1Schema = z.object({
   authorized_scope_ref: z.string(),
@@ -354,16 +364,6 @@ export const CreateWorkCommandSchema = z.object({
   title: z.string(),
 });
 export type CreateWorkCommand = z.infer<typeof CreateWorkCommandSchema>;
-
-export const CrossMergeModeV1Schema = z.enum(["cherry_pick_exact_commits", "disabled", "fast_forward_only", "manual_receipt_only", "merge_commit"]);
-export type CrossMergeModeV1 = z.infer<typeof CrossMergeModeV1Schema>;
-
-export const CrossMergePolicyV1Schema = z.object({
-  allow_cross_repository: z.boolean(),
-  allowed_modes: z.array(z.lazy(() => CrossMergeModeV1Schema)),
-  default_mode: z.lazy(() => CrossMergeModeV1Schema),
-});
-export type CrossMergePolicyV1 = z.infer<typeof CrossMergePolicyV1Schema>;
 
 /** Authorization outcome for the read. On the loopback single-user dashboard a
 legal local read is [`Self::Authorized`]; the other variants are retained so
@@ -403,20 +403,6 @@ export const DashboardCoverageV1Schema = z.object({
   unknown: z.number().int().nullable(),
 });
 export type DashboardCoverageV1 = z.infer<typeof DashboardCoverageV1Schema>;
-
-/** A typed description of what an owner-supplied remediation operation would do.
-
-This is a *description*, not an effect. It never carries argv, a path, or an
-inline action, and resolving it performs no work. */
-export const DashboardDoctorRemediationDescriptorV1Schema = z.object({
-  action_confirmation: z.lazy(() => DoctorConfirmationRequirementV1Schema),
-  operation: z.lazy(() => DoctorOwningOperationRefV1Schema),
-  preview_available: z.boolean(),
-  summary: z.string(),
-  surface: z.lazy(() => DoctorOwningSurfaceV1Schema),
-  target: z.union([z.lazy(() => DoctorRemediationTargetV1Schema), z.null()]),
-});
-export type DashboardDoctorRemediationDescriptorV1 = z.infer<typeof DashboardDoctorRemediationDescriptorV1Schema>;
 
 /** The normative dashboard domain-state union.
 
@@ -528,12 +514,6 @@ export const DashboardWatermarkV1Schema = z.object({
   watermark: z.string(),
 });
 export type DashboardWatermarkV1 = z.infer<typeof DashboardWatermarkV1Schema>;
-
-/** One immutable deadline supplied by the caller or upstream admission layer. */
-export const DeadlineSchema = z.object({
-  expires_at: z.lazy(() => UtcMicrosSchema),
-});
-export type Deadline = z.infer<typeof DeadlineSchema>;
 
 export const DeliveryCiTimelineV1Schema = z.object({
   items: z.array(z.unknown()),
@@ -749,11 +729,6 @@ export const DeliveryReviewTimelineV1Schema = z.object({
 });
 export type DeliveryReviewTimelineV1 = z.infer<typeof DeliveryReviewTimelineV1Schema>;
 
-/** Whether an owning operation requires an explicit human confirmation before it
-may perform its admitted mutating effect. */
-export const DoctorConfirmationRequirementV1Schema = z.union([z.literal("required"), z.literal("not_required")]);
-export type DoctorConfirmationRequirementV1 = z.infer<typeof DoctorConfirmationRequirementV1Schema>;
-
 /** Whether Doctor observed all of a family's evidence sources. */
 export const DoctorCoverageCompletenessV1Schema = z.union([z.literal("complete"), z.literal("partial"), z.literal("unknown")]);
 export type DoctorCoverageCompletenessV1 = z.infer<typeof DoctorCoverageCompletenessV1Schema>;
@@ -808,7 +783,7 @@ export const DoctorFamilyCoverageV1Schema = z.object({
 });
 export type DoctorFamilyCoverageV1 = z.infer<typeof DoctorFamilyCoverageV1Schema>;
 
-/** Why a finding family could not be consulted from an observed source. */
+/** Why complete coverage of a finding family was unavailable. */
 export const DoctorFamilyUnavailableReasonV1Schema = z.union([z.literal("unwired"), z.literal("unsupported"), z.literal("absent"), z.literal("denied"), z.literal("unknown")]);
 export type DoctorFamilyUnavailableReasonV1 = z.infer<typeof DoctorFamilyUnavailableReasonV1Schema>;
 
@@ -824,15 +799,12 @@ than by widening the meaning of an existing variant. */
 export const DoctorFindingFamilyV1Schema = z.union([z.literal("advisory"), z.literal("configuration"), z.literal("storage_runtime"), z.literal("storage"), z.literal("language_server"), z.literal("semantic_index"), z.literal("observability")]);
 export type DoctorFindingFamilyV1 = z.infer<typeof DoctorFindingFamilyV1Schema>;
 
-/** The canonical Doctor report projection. `entries` retains the storage
-subclass attached by the kernel; remediation descriptors are emitted only
-after the kernel registry resolves the finding's owner-supplied reference. */
+/** The canonical Doctor report projection for the read-only dashboard. */
 export const DoctorFindingsPayloadV1Schema = z.object({
   entries: z.array(z.lazy(() => DoctorReportEntryV1Schema)),
   family_filter: z.union([z.lazy(() => DoctorFindingFamilyV1Schema), z.null()]),
   known_families: z.array(z.lazy(() => DoctorFindingFamilyV1Schema)),
   note: z.string(),
-  remediations: z.array(z.lazy(() => DashboardDoctorRemediationDescriptorV1Schema)),
   report_coverage: z.union([z.lazy(() => DoctorReportCoverageV1Schema), z.null()]),
 });
 export type DoctorFindingsPayloadV1 = z.infer<typeof DoctorFindingsPayloadV1Schema>;
@@ -840,151 +812,16 @@ export type DoctorFindingsPayloadV1 = z.infer<typeof DoctorFindingsPayloadV1Sche
 /** One canonical Doctor finding.
 
 A finding pins its diagnosis `family`, its evidence `state`, the typed
-evidence it composed, a coverage statement, and an optional reference to an
-owner-supplied remediation. Construction enforces the Plan 09 §PR14
-invariants that keep unknown/partial evidence from collapsing into a healthy
-or clean result. */
+evidence it composed, and a coverage statement. Construction enforces the
+invariants that keep unknown/partial evidence from collapsing into a
+healthy or clean result. */
 export const DoctorFindingV1Schema = z.object({
   coverage: z.lazy(() => DoctorCoverageStatementV1Schema),
   evidence: z.array(z.lazy(() => DoctorEvidenceRefV1Schema)),
   family: z.lazy(() => DoctorFindingFamilyV1Schema),
-  remediation: z.union([z.lazy(() => DoctorRemediationRefV1Schema), z.null()]),
   state: z.lazy(() => DoctorEvidenceStateV1Schema),
 });
 export type DoctorFindingV1 = z.infer<typeof DoctorFindingV1Schema>;
-
-/** Reference to the owning application operation that would perform a
-remediation (its capability or use-case identity). Doctor names the
-operation; it never embeds argv, a path, or an inline effect. */
-export const DoctorOwningOperationRefV1Schema = z.string();
-export type DoctorOwningOperationRefV1 = z.infer<typeof DoctorOwningOperationRefV1Schema>;
-
-/** The application surface that owns dispatch of a remediation operation.
-
-The kernel names the owner so a transport can route confirmation and dispatch
-to the correct surface; it never dispatches itself. */
-export const DoctorOwningSurfaceV1Schema = z.union([z.literal("configuration_control_plane"), z.literal("storage_runtime"), z.literal("daemon_runtime"), z.literal("host_integration"), z.literal("semantic_index_runtime")]);
-export type DoctorOwningSurfaceV1 = z.infer<typeof DoctorOwningSurfaceV1Schema>;
-
-/** Request DTO for a confirmed remediation apply. The executable supplies the
-owner-specific target type while the preview and idempotency contracts stay
-canonical application values. */
-export const DoctorRemediationApplyRequestV1Schema = z.object({
-  confirmed: z.boolean(),
-  idempotency_key: z.string(),
-  operation: z.lazy(() => DoctorOwningOperationRefV1Schema),
-  preview_id: z.string().nullable(),
-  target: z.lazy(() => DoctorRemediationTargetV1Schema),
-});
-export type DoctorRemediationApplyRequestV1 = z.infer<typeof DoctorRemediationApplyRequestV1Schema>;
-
-export const DoctorRemediationDispatchErrorV1Schema = z.enum(["confirmation_required", "denied", "invalid_reference", "owner_unavailable", "unsupported"]);
-export type DoctorRemediationDispatchErrorV1 = z.infer<typeof DoctorRemediationDispatchErrorV1Schema>;
-
-/** Preview-versus-action distinction for an owner-supplied remediation.
-
-Doctor never repairs; it references an owning application operation. A
-preview pins expected state without mutating; an action is the owning
-operation's admitted effect. Both are invoked through the owning operation,
-never inline. */
-export const DoctorRemediationKindV1Schema = z.union([z.literal("preview"), z.literal("action")]);
-export type DoctorRemediationKindV1 = z.infer<typeof DoctorRemediationKindV1Schema>;
-
-export const DoctorRemediationOperationPhaseV1Schema = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "previewed", "running", "timed_out"]);
-export type DoctorRemediationOperationPhaseV1 = z.infer<typeof DoctorRemediationOperationPhaseV1Schema>;
-
-export const DoctorRemediationOperationV1Schema = z.object({
-  effect_receipt: z.union([z.lazy(() => EffectReceiptSchema), z.null()]),
-  execution: z.union([z.lazy(() => OperationReceiptSchema), z.null()]),
-  operation_id: z.lazy(() => OperationIdSchema),
-  owner_effect_receipt: z.union([z.lazy(() => EffectReceiptSchema), z.null()]).optional(),
-  owner_result_digest: z.union([z.lazy(() => ManifestDigestSchema), z.null()]).optional(),
-  owning_operation: z.lazy(() => DoctorOwningOperationRefV1Schema),
-  phase: z.lazy(() => DoctorRemediationOperationPhaseV1Schema),
-  preview_id: z.string().nullable(),
-  verification: z.lazy(() => DoctorRemediationVerificationV1Schema),
-});
-export type DoctorRemediationOperationV1 = z.infer<typeof DoctorRemediationOperationV1Schema>;
-
-/** Wire payload for one remediation response. */
-export const DoctorRemediationPayloadV1Schema = z.discriminatedUnion("status", [z.object({
-  operation: z.lazy(() => DoctorRemediationOperationV1Schema),
-  status: z.literal("operation"),
-}), z.object({
-  reason: z.lazy(() => DoctorRemediationDispatchErrorV1Schema),
-  status: z.literal("unavailable"),
-})]);
-export type DoctorRemediationPayloadV1 = z.infer<typeof DoctorRemediationPayloadV1Schema>;
-
-/** Request DTO for a remediation preview. The executable supplies the
-owner-specific target type while this crate owns the stable outer shape. */
-export const DoctorRemediationPreviewRequestV1Schema = z.object({
-  operation: z.lazy(() => DoctorOwningOperationRefV1Schema),
-  target: z.lazy(() => DoctorRemediationTargetV1Schema),
-});
-export type DoctorRemediationPreviewRequestV1 = z.infer<typeof DoctorRemediationPreviewRequestV1Schema>;
-
-/** A reference to an owner-supplied remediation.
-
-Doctor never repairs directly; it names the owning application operation
-and whether a preview or action is offered. The caller invokes that owning
-operation through its normal admitted path. */
-export const DoctorRemediationRefV1Schema = z.object({
-  kind: z.lazy(() => DoctorRemediationKindV1Schema),
-  owning_operation: z.lazy(() => DoctorOwningOperationRefV1Schema),
-});
-export type DoctorRemediationRefV1 = z.infer<typeof DoctorRemediationRefV1Schema>;
-
-export const DoctorRemediationTargetV1Schema = z.discriminatedUnion("owner_operation", [z.object({
-  owner_operation: z.literal("code_index_remount"),
-}), z.object({
-  owner_operation: z.literal("configuration_pin_authority"),
-}), z.object({
-  owner_operation: z.literal("configuration_protected_apply"),
-  target: z.lazy(() => ConfigurationProtectedApplySurfaceRequestSchema),
-}), z.object({
-  owner_operation: z.literal("configuration_protected_preview"),
-  target: z.lazy(() => ConfigurationProtectedPreviewSurfaceRequestSchema),
-}), z.object({
-  owner_operation: z.literal("host_repair_integration"),
-  target: z.object({
-  components: z.array(z.lazy(() => HostBundleComponentV1Schema)),
-  host: z.lazy(() => HostKindV1Schema),
-}),
-}), z.object({
-  owner_operation: z.literal("runtime_recover_daemon"),
-}), z.object({
-  owner_operation: z.literal("storage_branch_gc"),
-}), z.object({
-  owner_operation: z.literal("storage_collect_orphan_store"),
-}), z.object({
-  owner_operation: z.literal("storage_quarantine_and_collect_debris"),
-}), z.object({
-  owner_operation: z.literal("storage_retention_collect"),
-})]);
-export type DoctorRemediationTargetV1 = z.infer<typeof DoctorRemediationTargetV1Schema>;
-
-/** Independent post-effect observation. Owner execution cannot set this state;
-only the separately admitted observation callback can. */
-export const DoctorRemediationVerificationV1Schema = z.discriminatedUnion("state", [z.object({
-  state: z.literal("denied"),
-}), z.object({
-  observation_digest: z.union([z.lazy(() => ManifestDigestSchema), z.null()]).optional(),
-  state: z.literal("failed"),
-}), z.object({
-  state: z.literal("not_required"),
-}), z.object({
-  observation_digest: z.union([z.lazy(() => ManifestDigestSchema), z.null()]).optional(),
-  state: z.literal("partial"),
-}), z.object({
-  state: z.literal("pending"),
-}), z.object({
-  state: z.literal("unavailable"),
-}), z.object({
-  observation_digest: z.lazy(() => ManifestDigestSchema),
-  state: z.literal("verified"),
-})]);
-export type DoctorRemediationVerificationV1 = z.infer<typeof DoctorRemediationVerificationV1Schema>;
 
 /** The report-wide coverage statement: which families were consulted versus
 unavailable, plus an overall completeness and a bounded human statement. */
@@ -1011,40 +848,8 @@ The storage family never reports a silent overage: each subclass names one
 observable retention/size condition Doctor surfaces over the Plan 26 size
 observability read models. The set is closed and grows only through a future
 versioned enum, never by widening an existing subclass. */
-export const DoctorStorageFindingKindV1Schema = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("stale_branch_dbs"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth")]);
+export const DoctorStorageFindingKindV1Schema = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth")]);
 export type DoctorStorageFindingKindV1 = z.infer<typeof DoctorStorageFindingKindV1Schema>;
-
-/** The stable effect classification of one application operation.
-
-Git index writes remain separate classes so policy cannot accidentally
-substitute one index mutation for another. */
-export const EffectClassSchema = z.enum(["administrative", "configuration_write", "git_index_commit", "git_index_stage", "git_index_unstage", "preview", "read", "source_edit"]);
-export type EffectClass = z.infer<typeof EffectClassSchema>;
-
-/** Durable effect proof. It records identities and receipts, never credentials
-or arbitrary command text. */
-export const EffectReceiptSchema = z.object({
-  actor: z.lazy(() => ActorIdSchema),
-  catalog_digest: z.lazy(() => ManifestDigestSchema),
-  committed_state: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
-  configuration_digest: z.lazy(() => ManifestDigestSchema),
-  effect_class: z.lazy(() => EffectClassSchema),
-  expected_state: z.lazy(() => ManifestDigestSchema),
-  external_proof: z.union([z.lazy(() => RetrievalAnchorIdSchema), z.null()]),
-  idempotency_key: z.string(),
-  input_digest: z.lazy(() => ManifestDigestSchema),
-  operation: z.lazy(() => UseCaseIdSchema),
-  outcome: z.lazy(() => EffectTerminationSchema),
-  policy_digest: z.lazy(() => ManifestDigestSchema),
-  privacy_digest: z.lazy(() => ManifestDigestSchema),
-  request_id: z.string(),
-  scope: z.lazy(() => ResolvedScopeSchema),
-});
-export type EffectReceipt = z.infer<typeof EffectReceiptSchema>;
-
-/** Durable effect receipt terminal state. */
-export const EffectTerminationSchema = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out"]);
-export type EffectTermination = z.infer<typeof EffectTerminationSchema>;
 
 export const EnvironmentSettingsPayloadV1Schema = z.object({
   global_accounting_enabled: z.boolean(),
@@ -1251,9 +1056,6 @@ export const FeedbackSystemQualityReadModelV1Schema = z.object({
 });
 export type FeedbackSystemQualityReadModelV1 = z.infer<typeof FeedbackSystemQualityReadModelV1Schema>;
 
-export const GitHubStackedPullRequestPolicyV1Schema = z.enum(["disabled", "probe_private_preview"]);
-export type GitHubStackedPullRequestPolicyV1 = z.infer<typeof GitHubStackedPullRequestPolicyV1Schema>;
-
 export const GraphCappedV1Schema = z.object({
   edges: z.boolean(),
   nodes: z.boolean(),
@@ -1364,18 +1166,6 @@ export const GraphPathPayloadV1Schema = z.object({
 });
 export type GraphPathPayloadV1 = z.infer<typeof GraphPathPayloadV1Schema>;
 
-export const GraphScopeRecordSchema = z.object({
-  branch_name: z.string(),
-  db_relpath: z.string(),
-  graph_scope_id: z.string(),
-  last_synced_at: z.number().int().nullable(),
-  parent_scope_id: z.string().nullable(),
-  project_id: z.string(),
-  store_id: z.string(),
-  writable: z.boolean(),
-});
-export type GraphScopeRecord = z.infer<typeof GraphScopeRecordSchema>;
-
 export const GraphSearchPayloadV1Schema = z.object({
   count: z.number().int(),
   limit: z.number().int(),
@@ -1412,18 +1202,6 @@ export const GraphTotalsV1Schema = z.object({
 });
 export type GraphTotalsV1 = z.infer<typeof GraphTotalsV1Schema>;
 
-export const HistoryRewritePolicyV1Schema = z.literal("forbid_force_and_rebase");
-export type HistoryRewritePolicyV1 = z.infer<typeof HistoryRewritePolicyV1Schema>;
-
-export const HostBundleComponentV1Schema = z.enum(["agent", "context_mcp", "core", "operator_mcp"]);
-export type HostBundleComponentV1 = z.infer<typeof HostBundleComponentV1Schema>;
-
-/** Canonical stock host surfaces shared by catalog, packaging, delivery, and
-conformance consumers. A host surface is not itself evidence that the PR6
-observation-capture capability is fixture-backed. */
-export const HostKindV1Schema = z.enum(["claude_code", "cline", "cline_family", "codex", "cursor_cloud", "cursor_desktop", "hermes", "kilo", "kimi_code", "kiro", "open_code", "roo_code"]);
-export type HostKindV1 = z.infer<typeof HostKindV1Schema>;
-
 export const IncomingCallEdgeV1Schema = z.object({
   kind: z.string(),
   line: z.number().int().nullable(),
@@ -1431,6 +1209,34 @@ export const IncomingCallEdgeV1Schema = z.object({
   target: z.string(),
 });
 export type IncomingCallEdgeV1 = z.infer<typeof IncomingCallEdgeV1Schema>;
+
+export const LcmCompressionSummaryV1Schema = z.object({
+  node_count: z.number().int(),
+  ratio: z.number(),
+  source_token_count: z.number().int(),
+  token_count: z.number().int(),
+});
+export type LcmCompressionSummaryV1 = z.infer<typeof LcmCompressionSummaryV1Schema>;
+
+export const LcmDepthCountV1Schema = z.object({
+  count: z.number().int(),
+  depth: z.number().int(),
+});
+export type LcmDepthCountV1 = z.infer<typeof LcmDepthCountV1Schema>;
+
+export const LcmLatestSessionV1Schema = z.object({
+  last_store_id: z.number().int().nullable(),
+  last_timestamp: z.number().int().nullable(),
+  message_count: z.number().int(),
+  session_id: z.string(),
+});
+export type LcmLatestSessionV1 = z.infer<typeof LcmLatestSessionV1Schema>;
+
+export const LcmMatchesV1Schema = z.object({
+  messages: z.array(z.lazy(() => LcmMessageV1Schema)),
+  summary_nodes: z.array(z.lazy(() => LcmSummaryNodeV1Schema)),
+});
+export type LcmMatchesV1 = z.infer<typeof LcmMatchesV1Schema>;
 
 export const LcmMessageV1Schema = z.object({
   content: z.string().nullable(),
@@ -1440,15 +1246,84 @@ export const LcmMessageV1Schema = z.object({
   pinned: z.number().int().nullable(),
   role: z.string().nullable(),
   session_id: z.string(),
+  snippet: z.string().nullable(),
   source: z.string().nullable(),
   storage_kind: z.string().nullable(),
   store_id: z.number().int().nullable(),
-  summary_node_ids: z.array(z.unknown()),
+  summary_node_ids: z.array(z.string()),
   timestamp: z.number().int().nullable(),
   token_estimate: z.number().int().nullable(),
   tool_name: z.string().nullable(),
 });
 export type LcmMessageV1 = z.infer<typeof LcmMessageV1Schema>;
+
+export const LcmOverviewPayloadV1Schema = z.object({
+  exists: z.boolean(),
+  latest_sessions: z.array(z.lazy(() => LcmLatestSessionV1Schema)),
+  latest_summary_nodes: z.array(z.lazy(() => LcmSummaryNodeV1Schema)),
+  limit: z.number().int(),
+  matches: z.lazy(() => LcmMatchesV1Schema),
+  overview: z.lazy(() => LcmOverviewStatsV1Schema),
+  path: z.string(),
+  query: z.string(),
+  storage_scope: z.string(),
+});
+export type LcmOverviewPayloadV1 = z.infer<typeof LcmOverviewPayloadV1Schema>;
+
+export const LcmOverviewStatsV1Schema = z.object({
+  compression: z.lazy(() => LcmCompressionSummaryV1Schema),
+  depth_counts: z.array(z.lazy(() => LcmDepthCountV1Schema)),
+  max_summary_depth: z.number().int(),
+  messages_total: z.number().int(),
+  role_counts: z.array(z.lazy(() => LcmRoleCountV1Schema)),
+  sessions_total: z.number().int(),
+  source_counts: z.array(z.lazy(() => LcmSourceCountV1Schema)),
+  summary_node_sessions_total: z.number().int(),
+  summary_nodes_total: z.number().int(),
+});
+export type LcmOverviewStatsV1 = z.infer<typeof LcmOverviewStatsV1Schema>;
+
+export const LcmRoleCountV1Schema = z.object({
+  count: z.number().int(),
+  role: z.string().nullable(),
+});
+export type LcmRoleCountV1 = z.infer<typeof LcmRoleCountV1Schema>;
+
+export const LcmSearchEngineDetailV1Schema = z.object({
+  messages: z.string(),
+  summary_nodes: z.string(),
+});
+export type LcmSearchEngineDetailV1 = z.infer<typeof LcmSearchEngineDetailV1Schema>;
+
+export const LcmSearchFiltersV1Schema = z.object({
+  role: z.string().nullable(),
+  session_id: z.string().nullable(),
+  since: z.number().nullable(),
+  source: z.string().nullable(),
+  until: z.number().nullable(),
+});
+export type LcmSearchFiltersV1 = z.infer<typeof LcmSearchFiltersV1Schema>;
+
+export const LcmSearchPayloadV1Schema = z.object({
+  engine: z.string(),
+  engine_detail: z.lazy(() => LcmSearchEngineDetailV1Schema),
+  exists: z.boolean(),
+  filters: z.lazy(() => LcmSearchFiltersV1Schema),
+  limit: z.number().int(),
+  matches: z.lazy(() => LcmMatchesV1Schema),
+  offset: z.number().int(),
+  path: z.string(),
+  query: z.string(),
+  storage_scope: z.string(),
+  total: z.lazy(() => LcmSearchTotalsV1Schema),
+});
+export type LcmSearchPayloadV1 = z.infer<typeof LcmSearchPayloadV1Schema>;
+
+export const LcmSearchTotalsV1Schema = z.object({
+  messages: z.number().int(),
+  summary_nodes: z.number().int(),
+});
+export type LcmSearchTotalsV1 = z.infer<typeof LcmSearchTotalsV1Schema>;
 
 export const LcmSessionCountsV1Schema = z.object({
   message_count: z.number().int(),
@@ -1476,6 +1351,12 @@ export const LcmSessionPayloadV1Schema = z.object({
 });
 export type LcmSessionPayloadV1 = z.infer<typeof LcmSessionPayloadV1Schema>;
 
+export const LcmSourceCountV1Schema = z.object({
+  count: z.number().int(),
+  source: z.string(),
+});
+export type LcmSourceCountV1 = z.infer<typeof LcmSourceCountV1Schema>;
+
 export const LcmSummaryNodeV1Schema = z.object({
   category: z.string(),
   created_at: z.number().int(),
@@ -1483,7 +1364,9 @@ export const LcmSummaryNodeV1Schema = z.object({
   expand_hint: z.string(),
   latest_at: z.number().int().nullable(),
   node_id: z.string(),
+  recency: z.number().int().nullable(),
   session_id: z.string(),
+  snippet: z.string().nullable(),
   source_token_count: z.number().int(),
   source_type: z.string(),
   summary: z.string(),
@@ -1508,22 +1391,30 @@ export const LcmTimelineCoverageV1Schema = z.object({
 });
 export type LcmTimelineCoverageV1 = z.infer<typeof LcmTimelineCoverageV1Schema>;
 
+export const LcmTimelineNodeBucketV1Schema = z.object({
+  bucket: z.string().nullable(),
+  count: z.number().int(),
+});
+export type LcmTimelineNodeBucketV1 = z.infer<typeof LcmTimelineNodeBucketV1Schema>;
+
 export const LcmTimelinePayloadV1Schema = z.object({
   bucket: z.string(),
   buckets: z.array(z.lazy(() => LcmTimelineBucketV1Schema)),
   coverage: z.union([z.lazy(() => LcmTimelineCoverageV1Schema), z.null()]),
   exists: z.boolean(),
-  node_buckets: z.array(z.record(z.unknown())),
+  node_buckets: z.array(z.lazy(() => LcmTimelineNodeBucketV1Schema)),
   path: z.string(),
   session_id: z.string().nullable(),
   storage_scope: z.string(),
-  undated: z.record(z.unknown()),
+  undated: z.lazy(() => LcmTimelineUndatedV1Schema),
 });
 export type LcmTimelinePayloadV1 = z.infer<typeof LcmTimelinePayloadV1Schema>;
 
-/** Strongly typed algorithm-tagged integrity digest: `LocatorDigest`. */
-export const LocatorDigestSchema = z.string();
-export type LocatorDigest = z.infer<typeof LocatorDigestSchema>;
+export const LcmTimelineUndatedV1Schema = z.object({
+  count: z.number().int(),
+  token_estimate: z.number().int(),
+});
+export type LcmTimelineUndatedV1 = z.infer<typeof LcmTimelineUndatedV1Schema>;
 
 export const LoomBranchSpanV1Schema = z.object({
   branch: z.string().nullable(),
@@ -1972,11 +1863,11 @@ export const MultiRootQueryReadModelV1Schema = z.lazy(() => MultiRootQueryPageV1
 export type MultiRootQueryReadModelV1 = z.infer<typeof MultiRootQueryReadModelV1Schema>;
 
 /** Canonical external selector for creating or updating an authorized scope
-set. Callers select registered projects only; filesystem roots, CWD hints,
-actor ids, and grants are resolved and minted by the daemon. */
+set. Every member names one exact registered root; project-only selection
+cannot silently widen to an active or first-mounted graph. */
 export const MultiRootScopeSetCasRequestV1Schema = z.object({
   expected_revision: z.union([z.lazy(() => ScopeSetRevisionSchema), z.null()]),
-  project_ids: z.array(z.lazy(() => ProjectIdSchema)),
+  roots: z.array(z.lazy(() => RegisteredRootSelectorV1Schema)),
   scope_set_id: z.lazy(() => ScopeSetIdSchema),
 });
 export type MultiRootScopeSetCasRequestV1 = z.infer<typeof MultiRootScopeSetCasRequestV1Schema>;
@@ -2030,35 +1921,6 @@ export const ObservatoryReadModelV1Schema = z.object({
 });
 export type ObservatoryReadModelV1 = z.infer<typeof ObservatoryReadModelV1Schema>;
 
-/** Bounded work accounting supplied by an owning port or transaction. */
-export const OperationBudgetUsageSchema = z.object({
-  bytes_consumed: z.number().int(),
-  elapsed_micros: z.number().int(),
-  units_consumed: z.number().int(),
-});
-export type OperationBudgetUsage = z.infer<typeof OperationBudgetUsageSchema>;
-
-/** Stable operation identity. The originating authorized request owns the
-identity; paths, labels, and client-selected payloads never participate. */
-export const OperationIdSchema = z.string();
-export type OperationId = z.infer<typeof OperationIdSchema>;
-
-/** Canonical operation evidence. An admitted failure remains represented here
-rather than being replaced by a transport exception. */
-export const OperationReceiptSchema = z.object({
-  budget: z.lazy(() => OperationBudgetUsageSchema),
-  cancellation: z.union([z.lazy(() => CancellationObservationSchema), z.null()]),
-  effective_deadline: z.lazy(() => DeadlineSchema),
-  ended_at: z.lazy(() => UtcMicrosSchema),
-  started_at: z.lazy(() => UtcMicrosSchema),
-  termination: z.lazy(() => OperationTerminationSchema),
-});
-export type OperationReceipt = z.infer<typeof OperationReceiptSchema>;
-
-/** Terminal state after an operation has been admitted. */
-export const OperationTerminationSchema = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out"]);
-export type OperationTermination = z.infer<typeof OperationTerminationSchema>;
-
 export const Plan26CoverageV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
 export type Plan26CoverageV1 = z.infer<typeof Plan26CoverageV1Schema>;
 
@@ -2087,7 +1949,6 @@ export const ProjectContextPayloadV1Schema = z.object({
   is_active: z.boolean().nullable().optional(),
   project: z.union([z.lazy(() => PublicCodeProjectSchema), z.null()]),
   status: z.string(),
-  stores: z.array(z.lazy(() => ProjectStoreContextSchema)),
 });
 export type ProjectContextPayloadV1 = z.infer<typeof ProjectContextPayloadV1Schema>;
 
@@ -2117,7 +1978,6 @@ export const ProjectRegistryEntrySchema = z.object({
   branches: z.array(z.string()),
   canonical_root: z.string(),
   default_branch: z.string().nullable(),
-  graph_scope_count: z.number().int(),
   is_active: z.boolean().nullable().optional(),
   kind: z.string(),
   label: z.string(),
@@ -2183,63 +2043,9 @@ export const ProjectsPayloadV1Schema = z.object({
 });
 export type ProjectsPayloadV1 = z.infer<typeof ProjectsPayloadV1Schema>;
 
-export const ProjectStoreContextSchema = z.object({
-  artifacts: z.array(z.lazy(() => StoreArtifactRecordSchema)),
-  graph_scopes: z.array(z.lazy(() => GraphScopeRecordSchema)),
-  store: z.lazy(() => StoreInstanceRecordSchema),
-});
-export type ProjectStoreContext = z.infer<typeof ProjectStoreContextSchema>;
-
 /** Strongly typed canonical identity: `ProposalId`. */
 export const ProposalIdSchema = z.string();
 export type ProposalId = z.infer<typeof ProposalIdSchema>;
-
-/** The protected configuration operation set. Ordinary scalar mutations are
-intentionally absent; they activate directly after validation. */
-export const ProtectedChangeSchema = z.discriminatedUnion("kind", [z.object({
-  kind: z.literal("bind_source"),
-  value: z.lazy(() => ScopeSourceBindingSchema),
-}), z.object({
-  kind: z.literal("rebind_source"),
-  value: z.lazy(() => ScopeSourceBindingSchema),
-}), z.object({
-  kind: z.literal("remove_access_rule"),
-  value: z.object({
-  rule_id: z.lazy(() => AccessRuleIdSchema),
-}),
-}), z.object({
-  kind: z.literal("replace_work_topology_policy"),
-  value: z.lazy(() => WorkTopologyPolicyV1Schema),
-}), z.object({
-  kind: z.literal("unbind_source"),
-  value: z.object({
-  binding_id: z.lazy(() => SourceBindingIdSchema),
-}),
-}), z.object({
-  kind: z.literal("upsert_access_rule"),
-  value: z.lazy(() => ScopeAccessRuleSchema),
-})]);
-export type ProtectedChange = z.infer<typeof ProtectedChangeSchema>;
-
-export const ProtectedRefDispositionV1Schema = z.enum(["reject", "require_human_approval_and_independent_review"]);
-export type ProtectedRefDispositionV1 = z.infer<typeof ProtectedRefDispositionV1Schema>;
-
-export const ProtectedRefRuleV1Schema = z.object({
-  disposition: z.lazy(() => ProtectedRefDispositionV1Schema),
-  selector: z.lazy(() => ProtectedRefSelectorV1Schema),
-});
-export type ProtectedRefRuleV1 = z.infer<typeof ProtectedRefRuleV1Schema>;
-
-export const ProtectedRefSelectorV1Schema = z.discriminatedUnion("kind", [z.object({
-  kind: z.literal("exact"),
-  value: z.lazy(() => CanonicalGitRefNameV1Schema),
-}), z.object({
-  kind: z.literal("native_default_branch"),
-}), z.object({
-  kind: z.literal("prefix"),
-  value: z.lazy(() => CanonicalGitRefPrefixSchema),
-})]);
-export type ProtectedRefSelectorV1 = z.infer<typeof ProtectedRefSelectorV1Schema>;
 
 export const PublicCodeProjectSchema = z.object({
   canonical_root: z.string(),
@@ -2259,6 +2065,24 @@ export type PublicCodeProject = z.infer<typeof PublicCodeProjectSchema>;
 export const RefIdSchema = z.string();
 export type RefId = z.infer<typeof RefIdSchema>;
 
+/** Exact registered root locator retained with an authorized scope.
+
+`canonical_root` is routing evidence for the already-resolved
+[`ResolvedScope`]. It cannot replace or manufacture that scope identity. */
+export const RegisteredRootLocatorV1Schema = z.object({
+  canonical_root: z.string(),
+  profile: z.lazy(() => SharedProfileStoreLocatorV1Schema),
+  project_id: z.lazy(() => ProjectIdSchema),
+});
+export type RegisteredRootLocatorV1 = z.infer<typeof RegisteredRootLocatorV1Schema>;
+
+/** Exact registered-root selector accepted by scope-set CAS. */
+export const RegisteredRootSelectorV1Schema = z.object({
+  project_id: z.lazy(() => ProjectIdSchema),
+  root: z.string(),
+});
+export type RegisteredRootSelectorV1 = z.infer<typeof RegisteredRootSelectorV1Schema>;
+
 export const ReplanDependenciesCommandSchema = z.object({
   command_id: z.lazy(() => WorkCommandIdSchema),
   dependencies: z.array(z.lazy(() => TaskIdSchema)),
@@ -2272,24 +2096,6 @@ export type ReplanDependenciesCommand = z.infer<typeof ReplanDependenciesCommand
 export const RepositoryIdSchema = z.string();
 export type RepositoryId = z.infer<typeof RepositoryIdSchema>;
 
-export const RepositoryPlacementScopeV1Schema = z.discriminatedUnion("kind", [z.object({
-  kind: z.literal("all_authorized"),
-}), z.object({
-  kind: z.literal("allowlist"),
-  repositories: z.array(z.lazy(() => RepositoryIdSchema)),
-})]);
-export type RepositoryPlacementScopeV1 = z.infer<typeof RepositoryPlacementScopeV1Schema>;
-
-export const RequiredCheckExpectationV1Schema = z.literal("successful_terminal");
-export type RequiredCheckExpectationV1 = z.infer<typeof RequiredCheckExpectationV1Schema>;
-
-export const RequiredCheckV1Schema = z.object({
-  capability_id: z.lazy(() => CapabilityIdSchema),
-  expectation: z.lazy(() => RequiredCheckExpectationV1Schema),
-  maximum_age_seconds: z.number().int(),
-});
-export type RequiredCheckV1 = z.infer<typeof RequiredCheckV1Schema>;
-
 /** The resolved PR11 scope is one exact project/repository/worktree root.
 
 Paths, CWDs, labels, and mutable branch spellings are deliberately absent. */
@@ -2302,10 +2108,6 @@ export const ResolvedScopeSchema = z.object({
 });
 export type ResolvedScope = z.infer<typeof ResolvedScopeSchema>;
 
-/** Strongly typed canonical identity: `RetrievalAnchorId`. */
-export const RetrievalAnchorIdSchema = z.string();
-export type RetrievalAnchorId = z.infer<typeof RetrievalAnchorIdSchema>;
-
 export const ReviewProposalCommandSchema = z.object({
   command_id: z.lazy(() => WorkCommandIdSchema),
   expected_version: z.number().int(),
@@ -2316,9 +2118,7 @@ export const ReviewProposalCommandSchema = z.object({
 });
 export type ReviewProposalCommand = z.infer<typeof ReviewProposalCommandSchema>;
 
-/** A proposal review records a non-accepting disposition. Acceptance remains a
-separate command so callers cannot accidentally collapse review into
-approval. */
+/** A proposal review records a non-accepting disposition. */
 export const ReviewProposalDispositionV1Schema = z.enum(["rejected", "superseded"]);
 export type ReviewProposalDispositionV1 = z.infer<typeof ReviewProposalDispositionV1Schema>;
 
@@ -2327,25 +2127,6 @@ export const ReviewProposalRequestV1Schema = z.object({
   review: z.lazy(() => ReviewProposalCommandSchema),
 });
 export type ReviewProposalRequestV1 = z.infer<typeof ReviewProposalRequestV1Schema>;
-
-export const ReviewRequirementV1Schema = z.discriminatedUnion("kind", [z.object({
-  kind: z.literal("code_owner_and_independent_review"),
-}), z.object({
-  count: z.number().int(),
-  kind: z.literal("independent_review_count"),
-}), z.object({
-  kind: z.literal("none"),
-})]);
-export type ReviewRequirementV1 = z.infer<typeof ReviewRequirementV1Schema>;
-
-export const ReviewTopologyKindV1Schema = z.enum(["git_hub_stacked_pull_requests", "independent_review", "no_review", "standard_pull_requests"]);
-export type ReviewTopologyKindV1 = z.infer<typeof ReviewTopologyKindV1Schema>;
-
-export const ReviewTopologyPolicyV1Schema = z.object({
-  allowed: z.array(z.lazy(() => ReviewTopologyKindV1Schema)),
-  github_stacked_prs: z.lazy(() => GitHubStackedPullRequestPolicyV1Schema),
-});
-export type ReviewTopologyPolicyV1 = z.infer<typeof ReviewTopologyPolicyV1Schema>;
 
 /** Immutable collection and stack revisions for one exact resolved root. */
 export const RootGenerationV1Schema = z.object({
@@ -2369,9 +2150,6 @@ export const RootScopeOutcomeV1_for_RootGenerationV1Schema = z.object({
   scope_digest: z.lazy(() => ManifestDigestSchema),
 });
 export type RootScopeOutcomeV1_for_RootGenerationV1 = z.infer<typeof RootScopeOutcomeV1_for_RootGenerationV1Schema>;
-
-export const RuleEffectSchema = z.enum(["allow", "deny"]);
-export type RuleEffect = z.infer<typeof RuleEffectSchema>;
 
 /** Strongly typed canonical identity: `RunId`. */
 export const RunIdSchema = z.string();
@@ -2502,31 +2280,6 @@ export const SavingsSumV1Schema = z.object({
 });
 export type SavingsSumV1 = z.infer<typeof SavingsSumV1Schema>;
 
-/** Restrictive policy input. An allow never grants capabilities absent from
-the independently authorized capability set passed to the resolver. */
-export const ScopeAccessRuleSchema = z.object({
-  authority: z.lazy(() => AuthorityRefSchema),
-  capabilities: z.array(z.lazy(() => CapabilityIdSchema)),
-  effect: z.lazy(() => RuleEffectSchema),
-  expires_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
-  rule_id: z.lazy(() => AccessRuleIdSchema),
-  subject: z.lazy(() => ScopeAccessSubjectV1Schema),
-});
-export type ScopeAccessRule = z.infer<typeof ScopeAccessRuleSchema>;
-
-/** Typed rule selectors. Unset dimensions match all values at that dimension,
-but at least one dimension must be constrained. Free-form paths, labels,
-collection names, and branch names are deliberately absent. */
-export const ScopeAccessSubjectV1Schema = z.object({
-  actor: z.union([z.lazy(() => ActorIdSchema), z.null()]),
-  operation: z.union([z.lazy(() => ScopeControlOperationV1Schema), z.null()]),
-  source_kind: z.union([z.lazy(() => SourceKindV1Schema), z.null()]),
-});
-export type ScopeAccessSubjectV1 = z.infer<typeof ScopeAccessSubjectV1Schema>;
-
-export const ScopeControlOperationV1Schema = z.enum(["access_rule_remove", "access_rule_upsert", "read", "replace_topology_policy", "rollback", "set_default_collection", "source_bind", "source_rebind", "source_unbind"]);
-export type ScopeControlOperationV1 = z.infer<typeof ScopeControlOperationV1Schema>;
-
 /** Truthful outcome for one authorized root or an aggregate over roots.
 
 `Denied` and `Unavailable` carry no value and therefore cannot be confused
@@ -2585,28 +2338,9 @@ export type ScopeSetId = z.infer<typeof ScopeSetIdSchema>;
 export const ScopeSetRevisionSchema = z.number().int();
 export type ScopeSetRevision = z.infer<typeof ScopeSetRevisionSchema>;
 
-/** A source-to-authority binding. It stores only the source kind, a redacted
-locator digest, and the pre-resolved authority reference. */
-export const ScopeSourceBindingSchema = z.object({
-  authority: z.lazy(() => AuthorityRefSchema),
-  binding_id: z.lazy(() => SourceBindingIdSchema),
-  source_kind: z.lazy(() => SourceKindV1Schema),
-  source_locator_digest: z.lazy(() => LocatorDigestSchema),
-});
-export type ScopeSourceBinding = z.infer<typeof ScopeSourceBindingSchema>;
-
 /** Typed explanation for a root that could not return usable data. */
 export const ScopeUnavailableReasonV1Schema = z.enum(["authority_unavailable", "root_missing", "store_unavailable"]);
 export type ScopeUnavailableReasonV1 = z.infer<typeof ScopeUnavailableReasonV1Schema>;
-
-/** Reference-only filesystem locator. The raw path is sealed outside this
-contract; only the privacy-bound locator digest and sealed-value digest are
-representable here. */
-export const SensitiveFilesystemLocatorV1Schema = z.object({
-  locator_digest: z.lazy(() => LocatorDigestSchema),
-  sealed_value_digest: z.lazy(() => ManifestDigestSchema),
-});
-export type SensitiveFilesystemLocatorV1 = z.infer<typeof SensitiveFilesystemLocatorV1Schema>;
 
 export const SettingsAvailabilityV1Schema = z.object({
   available: z.boolean(),
@@ -2627,6 +2361,16 @@ export const SettingsPayloadV1Schema = z.object({
 });
 export type SettingsPayloadV1 = z.infer<typeof SettingsPayloadV1Schema>;
 
+/** Shared physical profile-store locator supplied by the profile authority.
+
+The typed profile and store IDs select this locator. It never derives an
+identity from a path, CWD, active graph, or mutable project alias. */
+export const SharedProfileStoreLocatorV1Schema = z.object({
+  profile_id: z.lazy(() => UserProfileIdSchema),
+  store_id: z.string(),
+});
+export type SharedProfileStoreLocatorV1 = z.infer<typeof SharedProfileStoreLocatorV1Schema>;
+
 /** One significant table-growth sample exposed to the dashboard. */
 export const SignificantTableGrowthSampleV1Schema = z.object({
   current_bytes: z.number().int(),
@@ -2637,13 +2381,6 @@ export const SignificantTableGrowthSampleV1Schema = z.object({
   table: z.string(),
 });
 export type SignificantTableGrowthSampleV1 = z.infer<typeof SignificantTableGrowthSampleV1Schema>;
-
-/** Strongly typed canonical identity: `SourceBindingId`. */
-export const SourceBindingIdSchema = z.string();
-export type SourceBindingId = z.infer<typeof SourceBindingIdSchema>;
-
-export const SourceKindV1Schema = z.enum(["claude", "codex", "cursor", "git_hub", "hermes", "kiro"]);
-export type SourceKindV1 = z.infer<typeof SourceKindV1Schema>;
 
 /** A byte size measurement. A newtype keeps sizes from being confused with
 counts, ratios, or timestamps in the read models and producers. */
@@ -2662,7 +2399,7 @@ export type StorageFindingKindStatusV1 = z.infer<typeof StorageFindingKindStatus
 /** Whether one Plan 38 producer had enough source evidence to report a real
 result. This is source coverage, not a health grade: `Real` can describe a
 clean observation or a problem finding. */
-export const StorageFindingSourceStateV1Schema = z.enum(["partial", "real", "unset", "unsupported"]);
+export const StorageFindingSourceStateV1Schema = z.enum(["partial", "real", "unsupported"]);
 export type StorageFindingSourceStateV1 = z.infer<typeof StorageFindingSourceStateV1Schema>;
 
 /** Route-specific payload for `/api/storage/findings`.
@@ -2676,7 +2413,6 @@ export const StorageFindingsPayloadV1Schema = z.object({
   kind_statuses: z.array(z.lazy(() => StorageFindingKindStatusV1Schema)),
   known_families: z.array(z.lazy(() => DoctorFindingFamilyV1Schema)),
   note: z.string(),
-  remediations: z.array(z.lazy(() => DashboardDoctorRemediationDescriptorV1Schema)),
   report_coverage: z.union([z.lazy(() => DoctorReportCoverageV1Schema), z.null()]),
 });
 export type StorageFindingsPayloadV1 = z.infer<typeof StorageFindingsPayloadV1Schema>;
@@ -2732,16 +2468,6 @@ export const StorageTelemetryReadV1Schema = z.discriminatedUnion("kind", [z.obje
 })]);
 export type StorageTelemetryReadV1 = z.infer<typeof StorageTelemetryReadV1Schema>;
 
-export const StoreArtifactRecordSchema = z.object({
-  artifact_kind: z.string(),
-  relpath: z.string(),
-  schema_version: z.string().nullable(),
-  size_bytes: z.number().int().nullable(),
-  store_id: z.string(),
-  updated_at: z.number().int().nullable(),
-});
-export type StoreArtifactRecord = z.infer<typeof StoreArtifactRecordSchema>;
-
 /** The budget-evaluation dimension, sourced from owner configuration. */
 export const StoreBudgetDimensionV1Schema = z.discriminatedUnion("state", [z.object({
   evaluation: z.lazy(() => StoreBudgetEvaluationV1Schema),
@@ -2778,19 +2504,6 @@ export const StoreGrowthDimensionV1Schema = z.discriminatedUnion("state", [z.obj
   state: z.literal("unknown"),
 })]);
 export type StoreGrowthDimensionV1 = z.infer<typeof StoreGrowthDimensionV1Schema>;
-
-export const StoreInstanceRecordSchema = z.object({
-  created_at: z.number().int(),
-  last_verified_at: z.number().int().nullable(),
-  last_write_at: z.number().int().nullable(),
-  manifest_relpath: z.string().nullable(),
-  project_id: z.string(),
-  storage_mode: z.string(),
-  store_id: z.string(),
-  store_kind: z.string(),
-  store_relpath: z.string(),
-});
-export type StoreInstanceRecord = z.infer<typeof StoreInstanceRecordSchema>;
 
 /** Logical name of one owner-profile store (for example `sessions.db`,
 `graph.db`, or `branches/feature-x`). Never an absolute on-disk path. */
@@ -3059,29 +2772,6 @@ export const TokenPairV1Schema = z.object({
 });
 export type TokenPairV1 = z.infer<typeof TokenPairV1Schema>;
 
-export const TopologyConcurrencyPolicyV1Schema = z.object({
-  maximum_active_per_repository: z.number().int(),
-  maximum_global_active: z.number().int(),
-  maximum_parallel_per_task: z.number().int(),
-  maximum_stack_depth: z.number().int(),
-});
-export type TopologyConcurrencyPolicyV1 = z.infer<typeof TopologyConcurrencyPolicyV1Schema>;
-
-export const TopologyEscalationPolicyV1Schema = z.enum(["reject", "require_explicit_human_approval", "require_human_approval_and_independent_review"]);
-export type TopologyEscalationPolicyV1 = z.infer<typeof TopologyEscalationPolicyV1Schema>;
-
-export const TopologyGatePolicyV1Schema = z.object({
-  cleanliness: z.lazy(() => WorktreeCleanlinessRequirementV1Schema),
-  maximum_preflight_age_seconds: z.number().int(),
-  require_fresh_preflight: z.boolean(),
-  review: z.lazy(() => ReviewRequirementV1Schema),
-  tests: z.array(z.lazy(() => RequiredCheckV1Schema)),
-});
-export type TopologyGatePolicyV1 = z.infer<typeof TopologyGatePolicyV1Schema>;
-
-export const TopologyNotificationLevelV1Schema = z.enum(["critical_only", "lifecycle", "verbose"]);
-export type TopologyNotificationLevelV1 = z.infer<typeof TopologyNotificationLevelV1Schema>;
-
 export const TurnsSummaryV1Schema = z.object({
   available: z.boolean(),
   cost_basis: z.string().nullable(),
@@ -3092,10 +2782,6 @@ export const TurnsSummaryV1Schema = z.object({
   turn_count: z.number().int().nullable(),
 });
 export type TurnsSummaryV1 = z.infer<typeof TurnsSummaryV1Schema>;
-
-/** Stable, canonical catalog identity for `UseCaseId`. */
-export const UseCaseIdSchema = z.string();
-export type UseCaseId = z.infer<typeof UseCaseIdSchema>;
 
 /** Strongly typed canonical identity: `UserProfileId`. */
 export const UserProfileIdSchema = z.string();
@@ -3222,57 +2908,6 @@ export const WorkProjectionSnapshotV1Schema = z.object({
 });
 export type WorkProjectionSnapshotV1 = z.infer<typeof WorkProjectionSnapshotV1Schema>;
 
-/** Complete V1 policy. Partial values are intentionally impossible: callers
-must provide the entire policy and validation rejects adapter-local defaults. */
-export const WorkTopologyPolicyV1Schema = z.object({
-  branch_naming: z.lazy(() => BranchNamingPolicyV1Schema),
-  branch_topology: z.lazy(() => BranchTopologyPolicyV1Schema),
-  concurrency: z.lazy(() => TopologyConcurrencyPolicyV1Schema),
-  cross_merge: z.lazy(() => CrossMergePolicyV1Schema),
-  escalation: z.lazy(() => TopologyEscalationPolicyV1Schema),
-  gates: z.lazy(() => TopologyGatePolicyV1Schema),
-  history_rewrite: z.lazy(() => HistoryRewritePolicyV1Schema),
-  notifications: z.lazy(() => TopologyNotificationLevelV1Schema),
-  placement: z.lazy(() => WorktreePlacementModeV1Schema),
-  protected_refs: z.array(z.lazy(() => ProtectedRefRuleV1Schema)),
-  retention: z.lazy(() => WorktreeRetentionPolicyV1Schema),
-  review_topology: z.lazy(() => ReviewTopologyPolicyV1Schema),
-  roots: z.array(z.lazy(() => WorktreeRootPolicyV1Schema)),
-  schema_version: z.number().int(),
-});
-export type WorkTopologyPolicyV1 = z.infer<typeof WorkTopologyPolicyV1Schema>;
-
-export const WorktreeCleanlinessRequirementV1Schema = z.enum(["allow_untracked_only_for_preflight", "read_only_preflight_only", "require_clean"]);
-export type WorktreeCleanlinessRequirementV1 = z.infer<typeof WorktreeCleanlinessRequirementV1Schema>;
-
 /** Strongly typed canonical identity: `WorktreeId`. */
 export const WorktreeIdSchema = z.string();
 export type WorktreeId = z.infer<typeof WorktreeIdSchema>;
-
-export const WorktreePlacementModeV1Schema = z.discriminatedUnion("kind", [z.object({
-  kind: z.literal("configured_root"),
-  root_id: z.string(),
-}), z.object({
-  kind: z.literal("existing_worktree_only"),
-}), z.object({
-  kind: z.literal("repository_local_root"),
-}), z.object({
-  kind: z.literal("sibling_of_primary_checkout"),
-})]);
-export type WorktreePlacementModeV1 = z.infer<typeof WorktreePlacementModeV1Schema>;
-
-export const WorktreeRetentionPolicyV1Schema = z.object({
-  abandoned_retention_seconds: z.number().int().nullable(),
-  automatic_gc: z.lazy(() => AutomaticWorktreeGcV1Schema),
-  maximum_retained_per_repository: z.number().int().nullable(),
-  terminal_retention_seconds: z.number().int().nullable(),
-});
-export type WorktreeRetentionPolicyV1 = z.infer<typeof WorktreeRetentionPolicyV1Schema>;
-
-export const WorktreeRootPolicyV1Schema = z.object({
-  locator: z.lazy(() => SensitiveFilesystemLocatorV1Schema),
-  maximum_active_worktrees: z.number().int(),
-  repository_scope: z.lazy(() => RepositoryPlacementScopeV1Schema),
-  root_id: z.string(),
-});
-export type WorktreeRootPolicyV1 = z.infer<typeof WorktreeRootPolicyV1Schema>;

@@ -50,7 +50,6 @@ function findingsBody() {
       family_filter: 'storage',
       entries: [],
       report_coverage: null,
-      remediations: [],
       known_families: ['storage'],
       note: 'canonical Doctor storage family contained no entries',
       kind_statuses: [],

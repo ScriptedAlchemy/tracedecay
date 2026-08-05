@@ -41,7 +41,7 @@ this sensitive-value setting.
   is conditional on the named owner setting above.
 - Safe audit records and incident evidence.
 - Existing-data scanning, quarantine, remediation, and derivative rebuilds.
-- Doctor diagnostics and healing guidance.
+- Read-only Doctor diagnostics and evidence.
 - Operator UI for safety state, incidents, and remediation progress.
 
 ## Does not own

@@ -196,18 +196,19 @@ comprehension and function rather than novelty.
 The detailed contracts below remain binding and are delivered through two real
 product journeys rather than as contract, fixture, or route milestones.
 
-**PR14 finding → evidence → Doctor → confirmed remediation:** a user enters
+**PR14 finding → evidence → read-only Doctor diagnosis:** a user enters
 from Brain, Explorer, Loom, or Code with exact scope; follows a canonical
 finding into citations, provenance, coverage, and source progress; opens the
-one Doctor application diagnosis; previews and confirms an owner-supplied
-configuration, host, or runtime remediation; resumes the durable operation
-receipt after reload or restart; and sees an independent post-operation
-observation confirm recovery or retain a truthful partial/unavailable/failing
-state. Sessions, Agents, Knowledge, Delivery, and Automations provide the
-linked context for that investigation. Settings shows effective layered
-configuration and validated CAS changes. Observatory and Costs render the same
-Plan 26 production observations with denominator, horizon, coverage,
-censoring, evidence class, and unavailable reason intact.
+one Doctor application diagnosis; and receives typed evidence and recovery
+guidance without a preview, apply, cleanup, GC, retention, relink, or repair
+control. If the user separately enters an owning product workflow such as
+Settings or host lifecycle, that workflow supplies its own authorization,
+confirmation, durable receipt, and post-operation observation. Sessions,
+Agents, Knowledge, Delivery, and Automations provide the linked context for
+the investigation. Settings shows effective layered configuration and
+validated CAS changes. Observatory and Costs render the same Plan 26
+production observations with denominator, horizon, coverage, censoring,
+evidence class, and unavailable reason intact.
 
 **PR17 work item → admitted execution → observed outcome → reviewed
 replanning:** a user creates or selects one Plan 24 work item; moves through
@@ -232,9 +233,9 @@ deferred by this framing.
 - Typed API consumption, query caching, optimism only for the closed
   presentation-state allowlist below, and SSE-driven refresh.
 - Linked visual exploration across product data and provenance.
-- Rendering typed configuration, diagnostics, Doctor findings, legal
-  remediation choices, recovery guidance, and operation progress supplied by
-  daemon/application owners.
+- Rendering typed configuration, diagnostics, read-only Doctor findings, and
+  operation progress supplied by each operation's
+  daemon/application owner.
 - A renderer-neutral graph/timeline view model with stable node/edge IDs,
   typed relations, selection, filters, clusters, layouts, temporal frames,
   provenance, coverage, and accessible table/text equivalents. Renderer
@@ -247,9 +248,9 @@ deferred by this framing.
   diagnostics, or infers health; it only consumes typed daemon APIs defined by
   [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - Doctor finding identity, diagnosis, aggregation, severity, health state, or
-  remediation orchestration. The canonical Doctor application kernel shipped
-  by the PR14 product slice owns those concerns; this dashboard only renders
-  its findings and legal actions.
+  mutation orchestration. The canonical Doctor application kernel shipped by
+  the product kernel owns diagnosis; this dashboard renders its findings but
+  exposes no Doctor mutation action.
   [Plan 14](14-historical-failure-regression-matrix.md) is the direct
   regression contract for that kernel, not a runtime source of findings.
 - An independent Kanban database, developer plan parser/executor, browser-side

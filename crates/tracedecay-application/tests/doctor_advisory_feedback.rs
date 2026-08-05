@@ -118,10 +118,6 @@ fn advisory_feedback_preserves_canonical_identity_lifecycle_and_coverage() {
             "missing evidence {expected}"
         );
     }
-    assert!(
-        finding.remediation().is_none(),
-        "reading a finding is navigation, not a remediation effect"
-    );
 }
 
 #[test]
@@ -166,10 +162,6 @@ fn advisory_feedback_keeps_omitted_only_result_distinct_from_absence() {
     assert_eq!(
         finding.coverage().statement(),
         "feedback coverage returned 0/3 findings; omitted 3"
-    );
-    assert!(
-        finding.remediation().is_none(),
-        "omitted feedback is evidence, not a dispatchable remediation"
     );
 }
 

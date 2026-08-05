@@ -3,8 +3,8 @@ import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
 import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
-import { FigureRail, Readout } from '../../ui/instrument.tsx';
-import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
+import { FigureRail } from '../../ui/instrument.tsx';
+import { elideStart, splitCount } from '../../ui/format.ts';
 import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
 import { PROJECT_NOT_FOUND, useProjectEntry } from '../../data/query/projectRegistry.ts';
 import { type EnvelopeResult } from '../../data/query/envelope.ts';
@@ -18,7 +18,6 @@ import {
   MemoryStatusPayloadV1Schema,
   type GraphSubgraphPayloadV1,
   type ProjectContextPayloadV1,
-  type ProjectStoreContext,
 } from '../../contracts/generated.ts';
 
 function envelopePayload<T>(result: EnvelopeResult<T> | undefined): T | null {
@@ -34,10 +33,10 @@ function envelopePayload<T>(result: EnvelopeResult<T> | undefined): T | null {
  * detailed view produced the least. It is composed from exactly two tiers of
  * real daemon reads, and it never blurs them together:
  *
- *   The registry backbone, `GET /api/projects/{id}`, resolves for every
- *   registered project. It carries the stores, the graph scopes (branches)
- *   inside them, the artifacts on disk with their byte sizes, and every path
- *   the project has been checked out at.
+ *   The registry backbone, `GET /api/projects/{id}`, resolves the canonical
+ *   project identity and registered checkout aliases for every project.
+ *   Store health is intentionally absent until its production authority can
+ *   provide exact revision and generation provenance.
  *
  *   The project-scoped gateway, `/api/projects/{id}/…`, supplies the code graph,
  *   memory bank and session analytics when those reads resolve. Their envelope
@@ -130,7 +129,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
       ? `Memory: ${memoryRead.error || 'this project has no memory bank.'}`
       : null,
     analyticsRead !== null && analyticsRead.available !== true
-      ? 'Analytics: this project has no analytics store, so no activity has been counted.'
+      ? 'Analytics: no session or event source is available, so activity could not be counted.'
       : null,
     analyticsRead?.available === true && !analyticsRead.usage.available
       ? 'Analytics: the store is present but reported no usage summary.'
@@ -197,8 +196,8 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                   fill
                   canvasClassName="min-h-[70vw] md:min-h-[58vh] lg:min-h-0"
                   activation={activationRef.current}
-                  ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The stores and branches listed alongside are the accessible equivalent.`}
-                  fallbackDescription="the project holdings beside this field remain available as a text alternative"
+                  ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The project identity and checkouts listed alongside remain available as context.`}
+                  fallbackDescription="the project identity and checkouts beside this field remain available as a text alternative"
                   encoding={{
                     body: 'symbol',
                     size: 'connectedness',
@@ -352,12 +351,11 @@ function ScopedReadout({
   );
 }
 
-/** The registry backbone, rendered: stores, the branches indexed inside each,
- * the artifacts they weigh, and the paths this project has been checked out
- * at. Available for every registered project, mounted or not. */
+/** The registry backbone, rendered as canonical project identity and checkout
+ * aliases. Available for every registered project, mounted or not. */
 function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
   // The route's own discriminant, honoured before its arrays are read. A
-  // non-`ok` body sends `project: null` with empty `stores`/`aliases`, which
+  // non-`ok` body sends `project: null` with empty `aliases`, which
   // rendered as a project that simply holds nothing — the same picture a real
   // empty project draws, for a response that measured nothing at all.
   if (data.status !== 'ok') {
@@ -370,9 +368,9 @@ function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
     );
   }
   const project = data.project;
-  // `aliases` and `stores` are required arrays in the generated contract, so
-  // they are read as arrays. A `?? []` here would absorb a contract change
-  // into an empty rail rather than surfacing it.
+  // `aliases` is a required array in the generated contract, so it is read as
+  // an array. A `?? []` here would absorb a contract change into an empty rail
+  // rather than surfacing it.
   const aliases = [...data.aliases].sort((a, b) => b.last_seen_at - a.last_seen_at);
   return (
     <>
@@ -409,9 +407,6 @@ function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
           </div>
         </section>
       ) : null}
-      {data.stores.map((store) => (
-        <StoreCard key={store.store.store_id} store={store} />
-      ))}
       {aliases.length > 0 ? (
         <section className="rounded-[var(--radius-card)] border border-edge-subtle bg-surface-1">
           <header className="flex items-center gap-2 border-b border-edge-subtle px-3 py-2">
@@ -450,100 +445,6 @@ function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
         </section>
       ) : null}
     </>
-  );
-}
-
-function StoreCard({ store }: { store: ProjectStoreContext }) {
-  const scopes = store.graph_scopes;
-  const artifacts = store.artifacts;
-  const bytes = artifacts.reduce((sum, a) => sum + (a.size_bytes ?? 0), 0);
-  const weight = splitBytes(bytes || null);
-  const heaviest = artifacts.reduce((max, a) => Math.max(max, a.size_bytes ?? 0), 0);
-  return (
-    <section className="rounded-[var(--radius-card)] border border-edge-subtle bg-surface-1">
-      <header className="flex items-center gap-2 border-b border-edge-subtle px-3 py-2">
-        <h2 className="min-w-0 truncate text-xs font-semibold" title={store.store.store_id}>
-          {store.store.store_kind ?? 'store'}
-        </h2>
-        <span aria-hidden className="td-rule" />
-        <span className="td-legend shrink-0 text-text-muted">
-          {store.store.storage_mode ?? '—'}
-        </span>
-      </header>
-      {/* Three cells across a 296px rail gave each legend about 60px, which
-        * clipped "branches" and "artifacts" to "BRANCH…" and "ARTIFAC…" — the
-        * two words that say what the numbers are. On disk is the headline (it
-        * is the quantity that grows without anyone asking) and the two counts
-        * share the row beneath it, where each has half the rail. */}
-      <div className="border-b border-edge-subtle px-3 py-2">
-        <Readout
-          label="on disk"
-          value={weight.value}
-          unit={weight.unit}
-          size="lg"
-          note={`${artifacts.length} ${artifacts.length === 1 ? 'artifact' : 'artifacts'}`}
-        />
-      </div>
-      <div className="flex border-b border-edge-subtle">
-        <div className="min-w-0 flex-1 px-3 py-2">
-          <Readout label="branches" value={scopes.length} size="sm" />
-        </div>
-        <div className="min-w-0 flex-1 border-l border-edge-subtle px-3 py-2">
-          <Readout label="artifacts" value={artifacts.length} size="sm" />
-        </div>
-      </div>
-      {scopes.length > 0 ? (
-        <ul className="flex flex-col">
-          {scopes.slice(0, 8).map((scope) => (
-            <li
-              key={scope.graph_scope_id}
-              className="flex items-baseline gap-2 border-b border-edge-subtle px-3 py-1.5 last:border-b-0"
-            >
-              <GitBranch aria-hidden size={11} className="shrink-0 text-text-muted" />
-              <span className="td-value min-w-0 flex-1 truncate text-2xs text-text-secondary">
-                {scope.branch_name}
-              </span>
-              {scope.last_synced_at != null ? (
-                <span
-                  className="td-legend shrink-0 text-text-muted"
-                  data-cell="numeric"
-                >
-                  {relativeTime(scope.last_synced_at)}
-                </span>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {artifacts.length > 0 && heaviest > 0 ? (
-        <ul className="flex flex-col border-t border-edge-subtle">
-          {[...artifacts]
-            .sort((a, b) => (b.size_bytes ?? 0) - (a.size_bytes ?? 0))
-            .slice(0, 4)
-            .map((artifact) => {
-              const size = splitBytes(artifact.size_bytes ?? null);
-              return (
-                <li
-                  key={artifact.relpath}
-                  className="flex items-center gap-2 px-3 py-1.5"
-                >
-                  <span
-                    className="td-legend min-w-0 flex-1 truncate text-text-muted"
-                    title={artifact.relpath}
-                  >
-                    {artifact.artifact_kind}
-                  </span>
-                  <FigureRail
-                    value={size.value}
-                    unit={size.unit}
-                    fraction={(artifact.size_bytes ?? 0) / heaviest}
-                  />
-                </li>
-              );
-            })}
-        </ul>
-      ) : null}
-    </section>
   );
 }
 

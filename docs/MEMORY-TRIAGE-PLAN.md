@@ -1,15 +1,13 @@
 # Holographic Memory — Prioritized Triage & Implementation Plan
 
-> **Historical record — not implementation authority.** This document preserves
-> historical audit synthesis and follow-up rationale. Current requirements come
-> only from the `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts,
-> source-string checks, snapshots, receipts, PR packets, and task ordering below
-> are not rebuild instructions; validate current memory behavior directly.
-> The schema/backfill items below are historical audit evidence only. Current
-> memory persistence accepts only the exact final shape; any other database,
-> store, file, journal, checkpoint, or receipt returns typed `ResetRequired`
-> and requires explicit reset or recreation. No storage reader, migration,
-> backfill, dual write, or census path remains.
+> **V2 planning note.** Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
+> checks, snapshots, receipts, PR packets, and task ordering below are not
+> rebuild instructions; validate current memory behavior directly. Memory
+> persistence accepts only the exact final shape; any other database, store,
+> file, journal, checkpoint, or receipt returns typed `ResetRequired` and
+> requires explicit reset or recreation. No storage reader, migration, backfill,
+> dual write, or census path remains.
 
 Status: synthesis of four upstream audits on the `master` working tree. This is
 the single actionable summary the root triage (`t_fd962a8a`) consumes. Every
@@ -17,8 +15,12 @@ recommendation is grounded in a source audit that carries its own `file:line`
 evidence; this doc cross-references them and resolves the overlaps, conflicts,
 and dependency ordering between them.
 
-Current-status note: this plan is partly historical. Q1/Q2 have since landed by
-adopting Option 1 (dynamic-only decay): the former
+**Doctor boundary:** the memory Doctor is read-only diagnosis/evidence. It never
+repairs, applies, cleans, garbage-collects, retains, relinks, or migrates. Any
+maintenance write belongs to daemon ownership or an explicitly authorized owner
+operation with its own dry-run, authorization, and rollback requirements.
+
+Current status: Q1/Q2 adopted Option 1 (dynamic-only decay): the former
 `trust.rs::temporal_decay` function and its direct unit test were removed. In
 the current checkout, only `retrieval.rs::temporal_decay_factor` remains.
 
@@ -33,9 +35,7 @@ the current checkout, only `retrieval.rs::temporal_decay_factor` remains.
 
 All four audited the same live checkout (`.tracedecay/tracedecay.db`, 129 facts,
 memory subsystem 2.43 MiB of a 78.5 MiB DB) and agree on the headline numbers.
-Load-bearing anchors were re-verified for this synthesis. The historical
-`src/memory/trust.rs:46` anchor named the now-removed persisted-aging routine;
-current live anchors are `src/memory/retrieval.rs:698-718`,
+Load-bearing anchors for this synthesis are `src/memory/retrieval.rs:698-718`,
 `src/memory/entities.rs:153`, and `src/cli.rs:338`.
 
 ---
@@ -65,30 +65,30 @@ retention sweep before deciding whether persisted trust ages, you are
 hard-deleting facts against semantics that may change. Decide policy first
 (§"Larger design decisions", D-A).
 
-### X2 — Visibility must precede the destructive maintenance actions
+### X2 — Visibility must precede owner maintenance actions
 Every "suggested maintenance action" in the visibility audit (reap orphans,
-prune oplog, retention sweep, FTS rebuild, VACUUM) is a *write*. The cheapest,
-highest-value gaps were *read* paths for data that already existed but was
-unreachable at triage time — the two highest-value ones (MemoryStatus and the
-feedback-history read API) have since landed via Q3/Q6; the rest remain open:
+prune oplog, retention sweep, FTS rebuild, VACUUM) is a *write* owned by the
+daemon or an explicitly authorized owner operation. Doctor is strictly read-only
+diagnosis/evidence and never performs those writes. The cheapest, highest-value
+gaps are *read* paths for data that already exists but is unreachable — the two
+highest-value ones (MemoryStatus and the feedback-history read API) have landed
+via Q3/Q6; the remaining read gaps stay open:
 
 - `MemoryStatus` (capacity 269/bank, missing vectors, below-threshold count,
   repair stats) is **now surfaced** (Q3 landed): `tracedecay memory status` CLI
   (`MemoryAction::Status`), `GET /api/plugins/holographic/status`, and a
-  dashboard Memory Health card. (Historical: at triage time it was computed but
-  MCP-only — not in the dashboard, not in the CLI; `MemoryAction` had no
-  `Status` arm.)
+  dashboard Memory Health card.
 - `memory_feedback_events` is **now readable** (Q6 landed): `fact_trust_history`
   (store + MCP `get` field + dashboard route), so "why did this fact's trust
-  change?" is answerable without raw SQL. (Historical: at triage time it was
-  write-only — no SELECT path in any handler/dashboard/MCP.)
+  change?" is answerable without raw SQL.
 - **129/129 facts have `last_recalled_at IS NULL`** (never recalled) and **5
   orphan entities** exist in a 129-fact checkout; the never-recalled count is now
   reachable via Q3's status output, though there is still no standing stale-memory
   card or orphan badge (M7).
 
-Ship the read surfaces (T1/T2) **before** exposing any destructive action, so
-operators can see what a retention sweep would delete before they click it.
+Ship the read surfaces (T1/T2) **before** exposing any owner maintenance
+operation, so operators can see what a retention sweep would delete before an
+authorized owner applies it.
 
 ### X3 — Retrieval tuning is gated by an eval harness that does not exist
 `tests/memory_suite/memory_eval_test.rs` + `eval/scenarios/*` cover **hygiene contracts only**
@@ -128,7 +128,7 @@ subsystem).
   module-doc "aging" headline were rewritten to match the trust-decay audit's
   §8-B-1 wording.
 - **Depends on:** nothing.
-- **Historical acceptance:** direct retrieval tests demonstrated that ranking
+- **Acceptance:** direct retrieval tests demonstrated that ranking
   applies the current retrieval-time decay once and does not mutate persisted
   trust through the removed aging path; documentation wording is not proof.
 - **Tier:** T1. **Done.**
@@ -140,7 +140,7 @@ subsystem).
   factor.
 - **Depends on:** resolved by the D-A dynamic-only decision.
 - **Acceptance:** current `temporal_decay` references are the live retrieval
-  factor plus historical docs; the remaining live decay is unambiguously
+  factor; the remaining live decay is unambiguously
   `retrieval.rs::temporal_decay_factor`.
 - **Tier:** T1. **Done.**
 
@@ -245,35 +245,36 @@ subsystem).
   tokenizer change succeeds (see M5 FTS-rebuild action).
 - **Tier:** T2. **Go.** Closes retrieval Risk B.
 
-#### M5 — The missing memory doctor (visibility §5.3)
-- **What:** A `gather_diagnostics → plan_and_apply_repairs` module modeled on
-  `src/sessions/lcm/doctor.rs`, with `mode ∈ {diagnose, repair, clean}` +
-  `apply: bool` + pre-apply DB backup (reuse LCM's `backup_database`/
-  `checkpoint_wal_for_backup`). Diagnostics are cheap read-only SQL (the full
-  list is visibility §5.3: schema version, counts, vector health, orphan-entity
-  count, FTS sync, staleness, bank freshness, compaction state). This is the
-  home for the four new repair primitives below.
+#### M5 — The read-only memory doctor (visibility §5.3)
+- **What:** A `gather_diagnostics` module modeled on
+  `src/sessions/lcm/doctor.rs`, returning typed evidence and candidate counts.
+  It has no `repair`, `clean`, `gc`, retention, relink, migration, or `apply`
+  mode, and it never takes a backup. Diagnostics are cheap read-only SQL (the
+  full list is visibility §5.3: schema version, counts, vector health,
+  orphan-entity count, FTS sync, staleness, bank freshness, compaction state).
+  Daemon-owned maintenance and explicitly authorized owner operations consume
+  this evidence through separate entry points.
 - **Depends on:** Q3 (status surfacing) for the read side; M6/M7/M8 are its
   actions.
-- **Acceptance / observability:** `diagnose` returns the diagnostics bundle
-  matching the live-DB numbers (129 facts, 5 orphans, 3 dirty banks, 129/129
-  never recalled, 2.11 MiB vectors); every `plan` action carries
-  `safe: bool`, `description`, `candidate_count`; `apply` with `mode=diagnose`
-  mutates nothing.
+- **Acceptance / observability:** the read-only diagnosis returns the diagnostics
+  bundle matching the live-DB numbers (129 facts, 5 orphans, 3 dirty banks,
+  129/129 never recalled, 2.11 MiB vectors); every maintenance candidate carries
+  `description` and `candidate_count`; invoking Doctor never mutates anything.
 - **Tier:** T3. **Go — this is what brings memory to parity with LCM's
   operational story** and closes G1, G9.
 
-#### M6 — Safe cleanup primitives the doctor calls
-- **What:** `reap_orphan_entities` (one `DELETE ... WHERE NOT EXISTS`),
+#### M6 — Safe cleanup primitives owned separately from Doctor
+- **What:** Daemon/authorized owner operations for `reap_orphan_entities` (one
+  `DELETE ... WHERE NOT EXISTS`),
   `prune_oplog` (cap `memory_oplog` by age/count — no prune path exists today),
   `rebuild_memory_fts` (`INSERT INTO memory_facts_fts(...) VALUES('rebuild')`,
   mirroring LCM `rebuild_summary_fts`), and `vacuum_reclaim` (report freelist;
   apply `VACUUM`/`incremental_vacuum`). All go through `MemoryStore` canonical
-  paths (hard-delete + FK-cascade + oplog).
-- **Depends on:** M5 (doctor entry point).
-- **Acceptance / observability:** dry-run reports the 5 orphans / oplog row
-  count; apply removes them; a second dry-run shows 0; idempotent. FTS rebuild
-  fixes any `memory_facts` vs `memory_facts_fts` row-count drift.
+  paths (hard-delete + FK-cascade + oplog); Doctor only reports their candidates.
+- **Depends on:** M5 (read-only evidence) and the owner authorization boundary.
+- **Acceptance / observability:** owner dry-run reports the 5 orphans / oplog row
+  count; an authorized apply removes them; a second dry-run shows 0; idempotent.
+  FTS rebuild fixes any `memory_facts` vs `memory_facts_fts` row-count drift.
 - **Tier:** T2. **Go.** Closes visibility G4, G6, G11 and retrieval's supersession
   half once paired with D-C.
 
@@ -281,7 +282,8 @@ subsystem).
 - **What:** D3 (FTS sync + bank freshness + dirty-queue depth + journal/auto_vacuum
   state), D4 (stale-memory card: `last_recalled_at IS NULL` and
   `last_recalled_at < now − 180d` with a drill-in list), D5 (orphan-entity badge
-  + reap action wired to M6). Extend `tracedecay doctor` and `status --runtime`
+  + link to the owner operation from M6). Extend read-only `tracedecay doctor`
+  and `status --runtime`
   (`RuntimeSnapshot`: add `fact_count`, `memory_bytes`, `vector_bytes`).
 - **Depends on:** Q3 (status route), M5 (doctor diagnostics).
 - **Acceptance / observability:** index-health strip shows FTS sync + 3 dirty
@@ -289,14 +291,14 @@ subsystem).
   has a Memory section; `--runtime` carries the new memory counts.
 - **Tier:** T2. **Go.** Closes G4, G5, G6, G11 (read side).
 
-#### M8 — Retention sweep (the destructive one)
+#### M8 — Retention sweep (explicit owner operation)
 - **What:** Hard-delete facts with `trust_score < MIN_TRUST AND updated_at <
   now − MAX_AGE`. Add the thresholds to `config.rs` (currently has zero memory
-  settings). Surfaced as a doctor action with dry-run-first + backup, mirroring
-  LCM.
+  settings). Surfaced through a separate owner operation with dry-run-first +
+  backup. Doctor only reports the candidate set.
 - **Depends on:** **D-A (trust policy decision)** + Q3 (visibility, so operators
-  see what it deletes) + M5 (doctor). **Conditional Go.**
-- **Acceptance / observability:** dry-run lists candidate facts; apply hard-deletes
+  see what it deletes) + M5 (read-only Doctor). **Conditional Go.**
+- **Acceptance / observability:** owner dry-run lists candidate facts; authorized apply hard-deletes
   them via canonical `remove_fact`/`delete_facts` (FK-cascade + oplog entry); a
   `source='retention'` row is logged; re-running the sweep is idempotent; on this
   checkout it deletes 0 (0 facts below threshold) — the sweep is forward-looking.
@@ -449,10 +451,11 @@ Three critical paths:
 3. **f32 is a one-way door on disk format.** It needs the backfill path (mirror
    the existing legacy-vector repair) and a rollback story. FHRR phase-cosine
    tolerance must be measured and documented, not assumed.
-4. **Retention sweep hard-deletes.** It must reuse the LCM doctor's
+4. **Retention sweep hard-deletes.** It must use the daemon/authorized owner's
    dry-run → backup → apply shape. On this checkout it deletes 0 (no facts below
-   threshold), so it is forward-looking — but the operator affordance must make
-   the candidate list visible *before* apply (hence Q3/M5 before M8).
+   threshold), so it is forward-looking — but the owner affordance must make the
+   candidate list visible *before* apply (hence Q3/M5 before M8). Doctor only
+   reports the list.
 5. **"confidence" naming collision** (code-graph resolver score vs. memory trust)
    is a documentation/disambiguation issue, not a code change — but worth a doc
    note so nobody wires the two together by accident.
@@ -472,8 +475,8 @@ Three critical paths:
 - The retrieval changes (M2/M3) are pinned to M1 scenarios; they cannot ship
   before the guard exists.
 - The destructive actions (M6 reap/prune, M8 retention) are gated behind the
-  doctor's dry-run → backup → apply flow and are idempotent by construction.
+  owner's dry-run → backup → apply flow and are idempotent by construction;
+  Doctor remains read-only evidence.
 - Source-audit anchors re-checked for this synthesis: the former
-  `src/memory/trust.rs:46` persisted-aging anchor is historical and removed;
   current live anchors are `src/memory/retrieval.rs:698-718`,
   `src/memory/entities.rs:153`, and `src/cli.rs:338`.

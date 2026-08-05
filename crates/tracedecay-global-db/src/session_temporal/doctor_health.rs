@@ -1,8 +1,6 @@
 //! Session-temporal Doctor health lane.
 //!
-//! Diagnosis is production-mounted; repair helpers remain available for Doctor
-//! tests and exclusive-maintenance callers that are still landing.
-#![allow(dead_code)] // Doctor repair lane still landing; see module doc (Plan 23)
+//! Diagnosis is production-mounted and strictly read-only.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -13,7 +11,7 @@ use rusqlite::{Connection as RusqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::RegisteredGlobalDb;
-use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, QueryExecutor};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, QueryExecutor};
 
 use super::schema::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
@@ -706,20 +704,6 @@ impl SessionTemporalHealthReport {
     pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
     }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub const fn is_fts_virtual_table_error_code_for_test(code: i32) -> bool {
-        code == SQLITE_CORRUPT_VTAB
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn is_allowed_fts_quick_check_for_test(
-        message: &str,
-        repair_occurrences: bool,
-        repair_summaries: bool,
-    ) -> bool {
-        is_allowed_fts_quick_check(message, repair_occurrences, repair_summaries)
-    }
 }
 
 struct HealthCheck {
@@ -814,105 +798,6 @@ impl RegisteredGlobalDb {
             *cached = None;
         }
         report
-    }
-
-    /// Rebuilds only temporal FTS derived indexes after an explicit request.
-    ///
-    /// Diagnosis remains non-mutating. A dry run reports the bounded plan
-    /// without acquiring the writer lane. Apply mode is the sole effectful
-    /// path: it refuses ambiguous database, schema, trigger, or authority
-    /// failures and verifies both source preservation and FTS integrity before
-    /// committing the single writer-lane transaction.
-    pub async fn repair_session_temporal_fts(
-        &self,
-        apply: bool,
-    ) -> tracedecay_runtime_core::db::engine::Result<(usize, usize)> {
-        let report = self.session_temporal_doctor_health().await;
-        if report.status != SessionTemporalHealthStatus::Complete {
-            return Err(repair_refused(
-                "temporal health is unavailable, partial, or locked",
-            ));
-        }
-        if report.findings.iter().any(|finding| {
-            !matches!(
-                finding.kind,
-                SessionTemporalHealthFindingKind::OccurrenceFtsCorruption
-                    | SessionTemporalHealthFindingKind::SummaryFtsCorruption
-            )
-        }) {
-            return Err(repair_refused(
-                "non-FTS temporal findings require daemon-owned recovery",
-            ));
-        }
-
-        let repair_occurrences = report.findings.iter().any(|finding| {
-            finding.kind == SessionTemporalHealthFindingKind::OccurrenceFtsCorruption
-        });
-        let repair_summaries = report
-            .findings
-            .iter()
-            .any(|finding| finding.kind == SessionTemporalHealthFindingKind::SummaryFtsCorruption);
-        let planned = usize::from(repair_occurrences) + usize::from(repair_summaries);
-        if !apply || planned == 0 {
-            return Ok((planned, 0));
-        }
-
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| EngineError::Runtime(error.to_string()))?;
-        require_quick_check(&transaction, repair_occurrences, repair_summaries).await?;
-        let occurrence_sources = connection_count(&transaction, "session_occurrences").await?;
-        let summary_sources = connection_count(&transaction, "session_summary_nodes").await?;
-
-        if repair_occurrences {
-            Executor::execute(
-                &transaction,
-                "INSERT INTO session_occurrences_fts(session_occurrences_fts)
-                     VALUES ('rebuild')",
-                (),
-            )
-            .await?;
-            verify_fts_repair(
-                &transaction,
-                "INSERT INTO session_occurrences_fts(session_occurrences_fts, rank)
-                 VALUES ('integrity-check', 1)",
-                OCCURRENCE_FTS_CHECK_SQL,
-            )
-            .await?;
-        }
-        if repair_summaries {
-            Executor::execute(
-                &transaction,
-                "INSERT INTO session_summary_nodes_fts(session_summary_nodes_fts)
-                     VALUES ('rebuild')",
-                (),
-            )
-            .await?;
-            verify_fts_repair(
-                &transaction,
-                "INSERT INTO session_summary_nodes_fts(session_summary_nodes_fts, rank)
-                 VALUES ('integrity-check', 1)",
-                SUMMARY_FTS_CHECK_SQL,
-            )
-            .await?;
-        }
-
-        if occurrence_sources != connection_count(&transaction, "session_occurrences").await?
-            || summary_sources != connection_count(&transaction, "session_summary_nodes").await?
-        {
-            return Err(repair_refused(
-                "authoritative temporal sources changed during FTS repair",
-            ));
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| EngineError::Runtime(error.to_string()))?;
-        self.checkpoint_result()
-            .await
-            .map_err(|_| repair_refused("temporal FTS repair checkpoint did not complete"))?;
-        Ok((planned, planned))
     }
 }
 
@@ -1379,104 +1264,6 @@ fn is_rusqlite_fts_virtual_table_corruption(error: &rusqlite::Error) -> bool {
     error
         .sqlite_error()
         .is_some_and(|err| err.extended_code == SQLITE_CORRUPT_VTAB)
-}
-
-async fn require_quick_check(
-    conn: &impl Executor,
-    repair_occurrences: bool,
-    repair_summaries: bool,
-) -> tracedecay_runtime_core::db::engine::Result<()> {
-    let mut rows = match conn.query("PRAGMA quick_check", ()).await {
-        Ok(rows) => rows,
-        Err(error) if is_fts_virtual_table_corruption(&error) => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let mut saw_result = false;
-    while let Some(row) = match rows.next().await {
-        Ok(row) => row,
-        Err(error) if is_fts_virtual_table_corruption(&error) => return Ok(()),
-        Err(error) => return Err(error),
-    } {
-        saw_result = true;
-        let message = row.get::<String>(0)?;
-        if message != "ok"
-            && !is_allowed_fts_quick_check(&message, repair_occurrences, repair_summaries)
-        {
-            return Err(repair_refused(&format!(
-                "whole-database quick check failed; FTS repair is unsafe: {message}"
-            )));
-        }
-    }
-    if saw_result {
-        Ok(())
-    } else {
-        Err(repair_refused("database quick check returned no result"))
-    }
-}
-
-fn is_allowed_fts_quick_check(
-    message: &str,
-    repair_occurrences: bool,
-    repair_summaries: bool,
-) -> bool {
-    (repair_occurrences
-        && (message == "malformed inverted index for FTS5 table main.session_occurrences_fts"
-            || is_exact_fts_blob_corruption(message, "session_occurrences_fts")))
-        || (repair_summaries
-            && (message
-                == "malformed inverted index for FTS5 table main.session_summary_nodes_fts"
-                || is_exact_fts_blob_corruption(message, "session_summary_nodes_fts")))
-}
-
-fn is_exact_fts_blob_corruption(message: &str, expected_table: &str) -> bool {
-    let Some(message) = message.strip_prefix("fts5: corruption found reading blob ") else {
-        return false;
-    };
-    let Some((blob, table)) = message.split_once(" from table \"") else {
-        return false;
-    };
-    blob.parse::<u64>().is_ok() && table.strip_suffix('"') == Some(expected_table)
-}
-
-async fn connection_count(
-    conn: &impl Executor,
-    table: &str,
-) -> tracedecay_runtime_core::db::engine::Result<i64> {
-    let sql = match table {
-        "session_occurrences" => "SELECT COUNT(*) FROM session_occurrences",
-        "session_summary_nodes" => "SELECT COUNT(*) FROM session_summary_nodes",
-        _ => return Err(repair_refused("unrecognized temporal source table")),
-    };
-    let mut rows = conn.query(sql, ()).await?;
-    let Some(row) = rows.next().await? else {
-        return Err(repair_refused("temporal source count returned no result"));
-    };
-    row.get(0)
-}
-
-async fn verify_fts_repair(
-    conn: &impl Executor,
-    integrity_sql: &str,
-    drift_sql: &str,
-) -> tracedecay_runtime_core::db::engine::Result<()> {
-    conn.execute(integrity_sql, ()).await?;
-    let mut rows = conn.query(drift_sql, ()).await?;
-    let Some(row) = rows.next().await? else {
-        return Err(repair_refused(
-            "temporal FTS verification returned no result",
-        ));
-    };
-    if row.get::<i64>(0)? == 0 {
-        Ok(())
-    } else {
-        Err(repair_refused(
-            "temporal FTS verification still reports derived-index drift",
-        ))
-    }
-}
-
-fn repair_refused(message: &str) -> EngineError {
-    EngineError::invalid_operation(message)
 }
 
 fn classify_rusqlite_error(

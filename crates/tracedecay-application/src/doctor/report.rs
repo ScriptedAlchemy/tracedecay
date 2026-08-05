@@ -10,7 +10,7 @@
 //! which families were consulted versus unavailable.
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::RequestContext;
 use crate::error::ApplicationContractError;
@@ -18,22 +18,22 @@ use crate::storage::findings::truncate_at_char_boundary;
 
 use super::sources::{
     AdvisoryFeedbackDoctorPort, CodeIndexMountDoctorPort, ConfigurationAuthorityDoctorPort,
-    DoctorStorageFamilyReadV1, HostIntegrationDoctorPort, LanguageServerDoctorPort,
-    ObservabilityDoctorPort, OperationalAuditDoctorPort, RuntimeHealthDoctorPort,
-    StorageDoctorPort, advisory_feedback_findings, code_index_finding, configuration_finding,
-    host_integration_finding, language_server_finding, observability_finding,
-    operational_audit_findings, runtime_health_finding,
+    DoctorStorageFamilyReadV1, DoctorStorageIncompleteReasonV1, HostIntegrationDoctorPort,
+    LanguageServerDoctorPort, ObservabilityDoctorPort, OperationalAuditDoctorPort,
+    RuntimeHealthDoctorPort, StorageDoctorPort, advisory_feedback_findings, code_index_finding,
+    configuration_finding, host_integration_finding, language_server_finding,
+    observability_finding, operational_audit_findings, runtime_health_finding,
 };
 use super::types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
     DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
-    DoctorStorageFindingKindV1,
+    DoctorStorageFindingKindV1, DoctorStorageFindingV1,
 };
 
 /// Every finding family the Doctor report is contracted to consult, in a stable
 /// order. A family absent from a composed report would be a silent omission; the
 /// composer always emits an entry and a coverage record for each of these.
-const REPORT_FAMILIES: [DoctorFindingFamilyV1; 7] = [
+pub const DOCTOR_FINDING_FAMILIES: [DoctorFindingFamilyV1; 7] = [
     DoctorFindingFamilyV1::Advisory,
     DoctorFindingFamilyV1::Configuration,
     DoctorFindingFamilyV1::StorageRuntime,
@@ -44,7 +44,7 @@ const REPORT_FAMILIES: [DoctorFindingFamilyV1; 7] = [
 ];
 
 /// The stable snake_case slug for a finding family, matching its serde encoding.
-const fn family_slug(family: DoctorFindingFamilyV1) -> &'static str {
+pub const fn doctor_finding_family_label(family: DoctorFindingFamilyV1) -> &'static str {
     match family {
         DoctorFindingFamilyV1::Advisory => "advisory",
         DoctorFindingFamilyV1::Configuration => "configuration",
@@ -56,8 +56,10 @@ const fn family_slug(family: DoctorFindingFamilyV1) -> &'static str {
     }
 }
 
-/// Why a finding family could not be consulted from an observed source.
-#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Why complete coverage of a finding family was unavailable.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorFamilyUnavailableReasonV1 {
     /// No source port is wired for this family in this composition.
@@ -97,12 +99,13 @@ impl DoctorFamilyUnavailableReasonV1 {
 }
 
 /// Whether a family was consulted from an observed source or is unavailable.
-#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum DoctorFamilyConsultationV1 {
     /// A source produced observed evidence for this family.
     Consulted,
-    /// No observed evidence; the family is carried as unavailable.
+    /// Complete family coverage was unavailable. Storage may still carry
+    /// findings from resolved producers when an independent producer failed.
     Unavailable {
         reason: DoctorFamilyUnavailableReasonV1,
     },
@@ -258,6 +261,87 @@ impl DoctorReportV1 {
     }
 }
 
+impl<'de> Deserialize<'de> for DoctorReportV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct EntryWire {
+            finding: DoctorFindingV1,
+            storage_kind: Option<DoctorStorageFindingKindV1>,
+        }
+
+        #[derive(Deserialize)]
+        struct FamilyCoverageWire {
+            family: DoctorFindingFamilyV1,
+            consultation: DoctorFamilyConsultationV1,
+        }
+
+        #[derive(Deserialize)]
+        struct CoverageWire {
+            families: Vec<FamilyCoverageWire>,
+            completeness: DoctorCoverageCompletenessV1,
+            statement: DoctorCoverageStatementV1,
+        }
+
+        #[derive(Deserialize)]
+        struct ReportWire {
+            entries: Vec<EntryWire>,
+            coverage: CoverageWire,
+        }
+
+        let wire = ReportWire::deserialize(deserializer)?;
+        let entries = wire
+            .entries
+            .into_iter()
+            .map(|entry| DoctorReportEntryV1::new(entry.finding, entry.storage_kind))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        let families = wire
+            .coverage
+            .families
+            .into_iter()
+            .map(|coverage| DoctorFamilyCoverageV1 {
+                family: coverage.family,
+                consultation: coverage.consultation,
+            })
+            .collect::<Vec<_>>();
+
+        if families.len() != DOCTOR_FINDING_FAMILIES.len()
+            || families
+                .iter()
+                .zip(DOCTOR_FINDING_FAMILIES)
+                .any(|(coverage, expected)| coverage.family != expected)
+            || entries.is_empty()
+            || DOCTOR_FINDING_FAMILIES.iter().any(|expected| {
+                !entries
+                    .iter()
+                    .any(|entry| entry.finding.family() == *expected)
+            })
+        {
+            return Err(serde::de::Error::custom(
+                "Doctor report omitted, duplicated, or reordered a required family",
+            ));
+        }
+
+        let expected_coverage =
+            build_coverage(families, &entries).map_err(serde::de::Error::custom)?;
+        if expected_coverage.completeness != wire.coverage.completeness
+            || expected_coverage.statement != wire.coverage.statement
+        {
+            return Err(serde::de::Error::custom(
+                "Doctor report coverage contradicted its findings or consultations",
+            ));
+        }
+
+        Ok(Self {
+            entries,
+            coverage: expected_coverage,
+        })
+    }
+}
+
 /// Compose one [`DoctorReportV1`] from the wired source ports.
 ///
 /// Each source port is optional. A family whose port is absent (or whose source
@@ -356,7 +440,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         let mut entries: Vec<DoctorReportEntryV1> = Vec::new();
         let mut coverage: Vec<DoctorFamilyCoverageV1> = Vec::new();
 
-        for family in REPORT_FAMILIES {
+        for family in DOCTOR_FINDING_FAMILIES {
             let (family_entries, consultation) = match family {
                 DoctorFindingFamilyV1::Advisory => self.compose_advisory(context).await?,
                 DoctorFindingFamilyV1::Configuration => self.compose_configuration(context).await?,
@@ -609,19 +693,25 @@ impl<'a> DoctorReportComposerV1<'a> {
         };
         let read = port.storage_findings(context).await;
         match read {
-            DoctorStorageFamilyReadV1::Observed { findings } if !findings.is_empty() => {
-                let mut family_entries = Vec::with_capacity(findings.len());
-                for typed in findings {
-                    let kind = typed.kind();
-                    family_entries
-                        .push(DoctorReportEntryV1::new(typed.into_finding(), Some(kind))?);
-                }
-                Ok((family_entries, DoctorFamilyConsultationV1::Consulted))
+            DoctorStorageFamilyReadV1::Observed { findings } if !findings.is_empty() => Ok((
+                storage_entries(findings)?,
+                DoctorFamilyConsultationV1::Consulted,
+            )),
+            DoctorStorageFamilyReadV1::ObservedIncomplete { findings, reason }
+                if !findings.is_empty() =>
+            {
+                Ok((
+                    storage_entries(findings)?,
+                    unavailable(storage_incomplete_reason(reason)),
+                ))
             }
             // An empty observed read means the runtime produced no storage
             // findings; that is an absent family, not a healthy claim.
             DoctorStorageFamilyReadV1::Observed { .. } | DoctorStorageFamilyReadV1::Absent => {
                 storage_unavailable(DoctorFamilyUnavailableReasonV1::Absent)
+            }
+            DoctorStorageFamilyReadV1::ObservedIncomplete { reason, .. } => {
+                storage_unavailable(storage_incomplete_reason(reason))
             }
             DoctorStorageFamilyReadV1::Unsupported => {
                 storage_unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
@@ -633,6 +723,30 @@ impl<'a> DoctorReportComposerV1<'a> {
                 storage_unavailable(DoctorFamilyUnavailableReasonV1::Unknown)
             }
         }
+    }
+}
+
+fn storage_entries(
+    findings: Vec<DoctorStorageFindingV1>,
+) -> Result<Vec<DoctorReportEntryV1>, ApplicationContractError> {
+    findings
+        .into_iter()
+        .map(|typed| {
+            let kind = typed.kind();
+            DoctorReportEntryV1::new(typed.into_finding(), Some(kind))
+        })
+        .collect()
+}
+
+const fn storage_incomplete_reason(
+    reason: DoctorStorageIncompleteReasonV1,
+) -> DoctorFamilyUnavailableReasonV1 {
+    match reason {
+        DoctorStorageIncompleteReasonV1::Unsupported => {
+            DoctorFamilyUnavailableReasonV1::Unsupported
+        }
+        DoctorStorageIncompleteReasonV1::Denied => DoctorFamilyUnavailableReasonV1::Denied,
+        DoctorStorageIncompleteReasonV1::Unknown => DoctorFamilyUnavailableReasonV1::Unknown,
     }
 }
 
@@ -702,11 +816,15 @@ fn placeholder_finding(
     family: DoctorFindingFamilyV1,
     reason: DoctorFamilyUnavailableReasonV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
-    let reference = format!("doctor.{}.{}", family_slug(family), reason.slug());
+    let reference = format!(
+        "doctor.{}.{}",
+        doctor_finding_family_label(family),
+        reason.slug()
+    );
     let evidence = DoctorEvidenceRefV1::new(family, DoctorEvidenceReferenceV1::new(reference)?);
     let statement = format!(
         "{} family source unavailable ({})",
-        family_slug(family),
+        doctor_finding_family_label(family),
         reason.slug()
     );
     DoctorFindingV1::new(
@@ -714,7 +832,6 @@ fn placeholder_finding(
         reason.evidence_state(),
         vec![evidence],
         DoctorCoverageStatementV1::new(DoctorCoverageCompletenessV1::Unknown, statement)?,
-        None,
     )
 }
 
@@ -757,7 +874,7 @@ fn build_statement(families: &[DoctorFamilyCoverageV1], consulted: usize, total:
             if !unavailable_list.is_empty() {
                 unavailable_list.push_str(", ");
             }
-            unavailable_list.push_str(family_slug(record.family));
+            unavailable_list.push_str(doctor_finding_family_label(record.family));
             unavailable_list.push('(');
             unavailable_list.push_str(reason.slug());
             unavailable_list.push(')');

@@ -16,9 +16,9 @@ use crate::sessions::git_correlation::{
 };
 use crate::sessions::lcm::compression_decision::{self, AssemblyCapInput};
 use crate::sessions::lcm::{
-    LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmCleanConfig, LcmCompressionRequest,
-    LcmContentSlice, LcmDescribeTarget, LcmExpandQueryRequest, LcmExpandTarget, LcmGcConfig,
-    LcmGrepSort, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest, LcmSummarizerMode,
+    LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmCompressionRequest, LcmContentSlice,
+    LcmDescribeTarget, LcmExpandQueryRequest, LcmExpandTarget, LcmGcConfig, LcmGrepSort,
+    LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest, LcmSummarizerMode,
 };
 use crate::sessions::shared::{content_storage_text_and_tools, preview_title};
 use crate::sessions::{

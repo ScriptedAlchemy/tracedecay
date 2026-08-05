@@ -50,7 +50,6 @@ compile.
 | `crate::application::{evidence_assembly, external_source_store}`, `crate::store::observation`, `crate::daemon::work_runtime` | 8 | **Inverted**: the four factories that returned root-owned adapters are gone; `RegisteredGlobalDb::{runtime, authority}` expose the ingredients so root builds what root owns. |
 | `crate::retention::…` | 8 | **Inverted**: `prune_global_retention` / `global_retention_report` are gone; both were three lines over the public transaction API. |
 | `crate::daemon::{store_runtime::session_registry, profile_identity}` | 4 | **Inverted** behind `host_ports::profile_sessions`. |
-| `crate::doctor::heal` | 1 | Prose comment only; left as a cross-reference. |
 
 ### Visibility widened outside this crate
 

@@ -5,7 +5,7 @@
 //! commit be3a113f). It never redefines that contract; it produces its findings.
 //!
 //! Layout:
-//! - [`identity`]: bounded store/table/branch/path identifiers plus byte-size
+//! - [`identity`]: bounded store/table/path identifiers plus byte-size
 //!   and free-page-ratio primitives.
 //! - [`telemetry`] (§7): per-store size, per-table growth, free-page ratio, soft
 //!   budgets, and the [`telemetry::StoreSizeTelemetryPort`] seam over
@@ -14,7 +14,7 @@
 //!   contract, and debris scan read models.
 //! - [`compaction`] (§6): the free-page-ratio compaction trigger policy, off the
 //!   hot path by construction.
-//! - [`inventory`]: orphan / stale-branch / retention-backlog read models.
+//! - [`inventory`]: orphan / retention-backlog read models.
 //! - [`findings`]: pure producers mapping the read models onto
 //!   [`crate::doctor::DoctorFindingV1`] with honest evidence states.
 //!
@@ -35,15 +35,14 @@ pub use debris::{
 };
 pub use findings::{
     code_generation_retention_finding, incident_debris_finding, orphan_store_finding,
-    over_budget_finding, retention_backlog_finding, stale_branch_dbs_finding, table_growth_finding,
+    over_budget_finding, retention_backlog_finding, table_growth_finding,
 };
 pub use identity::{
-    BranchRefV1, FreePageRatioV1, QuarantineLocationV1, RelativeArtifactPathV1, StorageByteSizeV1,
-    StoreKeyV1, TableNameV1,
+    FreePageRatioV1, QuarantineLocationV1, RelativeArtifactPathV1, StorageByteSizeV1, StoreKeyV1,
+    TableNameV1,
 };
 pub use inventory::{
     CodeGenerationRetentionRecordV1, OrphanStoreRecordV1, RetentionBacklogRecordV1,
-    StaleBranchDbRecordV1,
 };
 pub use telemetry::{
     SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES, SIGNIFICANT_TABLE_GROWTH_PERCENT,

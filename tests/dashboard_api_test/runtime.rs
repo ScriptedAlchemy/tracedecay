@@ -430,13 +430,9 @@ impl DashboardTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: Option<&str>,
-        mode: &str,
-        apply: bool,
-        clean_config: tracedecay::sessions::lcm::LcmCleanConfig,
-        gc_config: tracedecay::sessions::lcm::LcmGcConfig,
     ) -> std::result::Result<Value, tracedecay::sessions::lcm::LcmError> {
         self.primary_session_database()
-            .lcm_doctor(provider, session_id, mode, apply, clean_config, gc_config)
+            .lcm_doctor(provider, session_id)
             .await
     }
 }

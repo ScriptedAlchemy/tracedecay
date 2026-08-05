@@ -61,7 +61,6 @@ function entryAt(
     branches: ['master'],
     canonical_root: root,
     default_branch: 'master',
-    graph_scope_count: 1,
     kind: 'repo',
     label,
     last_seen_at: 2,

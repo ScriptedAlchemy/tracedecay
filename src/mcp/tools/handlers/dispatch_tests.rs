@@ -1532,16 +1532,8 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
 }
 
 #[test]
-fn unavailable_effect_contract_fails_before_handler_dispatch() {
-    let error = super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").unwrap_err();
-    assert_eq!(
-        error.project_route_context(),
-        Some((
-            "mcp_dispatch_effect_journey_unverified",
-            false,
-            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
-        ))
-    );
+fn read_only_lcm_doctor_is_available_for_dispatch() {
+    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").is_ok());
     assert!(super::ensure_mcp_dispatch_available("tracedecay_dashboard").is_ok());
     assert!(super::ensure_mcp_dispatch_available("tracedecay_search").is_ok());
 }
@@ -1599,7 +1591,7 @@ async fn unavailable_application_effect_is_rejected_before_canonical_executor_in
 }
 
 #[tokio::test]
-async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
+async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
     let _env = SelectorEnv::new(dir.path());
@@ -1615,14 +1607,12 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     let profile_root = dir.path().join("unavailable-user-lcm-profile");
     let sessions_db = crate::sessions::user_sessions_db_path(&profile_root);
 
-    let error = handle_tool_call_with_registry_and_implicit_project(
+    let result = handle_tool_call_with_registry_and_implicit_project(
         &cg,
         "tracedecay_lcm_doctor",
         json!({
             "storage_scope": "user",
             "provider": "codex",
-            "mode": "repair",
-            "apply": true,
         }),
         None,
         None,
@@ -1632,19 +1622,18 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
         },
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(
-        error.project_route_context(),
-        Some((
-            "mcp_dispatch_effect_journey_unverified",
-            false,
-            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
-        ))
-    );
+    let payload: serde_json::Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("LCM Doctor text response"),
+    )
+    .expect("LCM Doctor unavailable payload");
+    assert_eq!(payload["status"], "unavailable");
     assert!(
         !sessions_db.exists(),
-        "unavailable LCM must not open its profile store"
+        "read-only LCM Doctor must not open a missing profile store"
     );
     cg.close();
 }

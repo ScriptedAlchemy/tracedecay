@@ -23,7 +23,7 @@ uninstall, run this in Kimi Code:
 /plugins remove tracedecay
 ```
 
-Then use `tracedecay doctor --agent kimi` to inspect the host-native registration.
+Then use `tracedecay doctor` to inspect all host-native registrations.
 `KIMI_CODE_HOME` resolves to the environment variable when set and
 `~/.kimi-code` otherwise. The staged manifest rewrites the MCP server command
 to the resolved absolute `tracedecay` executable path so Kimi Code does not

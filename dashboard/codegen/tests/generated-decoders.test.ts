@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   DashboardDomainStateV1Schema,
   DashboardEnvelopeV1Schema,
+  DoctorFindingsPayloadV1Schema,
   StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
   WIRE_SCHEMA_REVISION,
@@ -122,6 +123,39 @@ describe("wire envelope decoder", () => {
     const bad = readyEnvelope();
     delete bad.authorization;
     expect(Envelope.safeParse(bad).success).toBe(false);
+  });
+});
+
+describe("Doctor findings decoder", () => {
+  it("does not admit remediation controls into the read-only dashboard payload", () => {
+    const parsed = DoctorFindingsPayloadV1Schema.parse({
+      family_filter: null,
+      entries: [
+        {
+          finding: {
+            family: "configuration",
+            state: "degraded",
+            evidence: [],
+            coverage: {
+              completeness: "complete",
+              statement: "configuration authority was consulted",
+            },
+            remediation: {
+              owning_operation: "use-case.application.configuration.pin-authority",
+              kind: "action",
+            },
+          },
+          storage_kind: null,
+        },
+      ],
+      report_coverage: null,
+      remediations: [],
+      known_families: ["configuration"],
+      note: "configuration drift observed",
+    });
+
+    expect(parsed).not.toHaveProperty("remediations");
+    expect(parsed.entries[0]!.finding).not.toHaveProperty("remediation");
   });
 });
 
@@ -253,7 +287,6 @@ describe("wire storage payload decoders", () => {
       family_filter: "storage",
       entries: [],
       report_coverage: null,
-      remediations: [],
       known_families: ["storage"],
       kind_statuses: [
         {

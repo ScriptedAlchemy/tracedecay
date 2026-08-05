@@ -28,14 +28,7 @@ import {
   type DashboardScope,
 } from '../scope/store.ts';
 import { useSchedulerControl } from './automation.ts';
-import { applyDoctorRemediation, previewDoctorRemediation } from './doctor.ts';
 
-const ACTIVE: DashboardScope = {
-  kind: 'project',
-  projectId: 'proj_active',
-  label: 'Active project',
-  activation: 'active',
-};
 const SELECTED: DashboardScope = {
   kind: 'project',
   projectId: 'proj_other',
@@ -54,20 +47,6 @@ const BLOCKED = [
   ['a selected non-active project', SELECTED],
   ['an unresolved deep-link project', UNRESOLVED],
 ] as const;
-
-/** A wire-legal request, so a rejection here is the scope gate rather than the
- * contract parse the gate sits in front of. */
-const PREVIEW_REQUEST = {
-  operation: 'use-case.application.storage.retention-collect',
-  target: { owner_operation: 'storage_retention_collect' },
-} as const;
-
-const APPLY_REQUEST = {
-  ...PREVIEW_REQUEST,
-  preview_id: null,
-  idempotency_key: 'idem-scope-test',
-  confirmed: true,
-} as const;
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -112,24 +91,6 @@ describe('writes under a scope that does not accept them', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    it('does not dispatch a Doctor remediation preview', async () => {
-      const result = await previewDoctorRemediation(scope, PREVIEW_REQUEST);
-
-      expect(result.outcome).toBe('not_dispatched');
-      if (result.outcome !== 'not_dispatched') throw new Error('unreachable');
-      expect(result.writability.reason).toBe(blockedReason(scope));
-      expect(fetchMock).not.toHaveBeenCalled();
-    });
-
-    it('does not dispatch a Doctor remediation apply', async () => {
-      const result = await applyDoctorRemediation(scope, APPLY_REQUEST);
-
-      expect(result.outcome).toBe('not_dispatched');
-      if (result.outcome !== 'not_dispatched') throw new Error('unreachable');
-      expect(result.writability.reason).toBe(blockedReason(scope));
-      expect(fetchMock).not.toHaveBeenCalled();
-    });
-
     /**
      * Settings refuses before its *refresh*, not merely before its PATCH. The
      * mutation re-reads settings to recheck the held revision, and once the
@@ -155,19 +116,6 @@ describe('writes under a scope that does not accept them', () => {
 });
 
 describe('writes under a scope that accepts them', () => {
-  it.each([
-    ['the active project', ACTIVE],
-    ['the all-projects aggregate', { kind: 'all' } as DashboardScope],
-  ])('dispatches a Doctor remediation under %s', async (_name, scope) => {
-    const dispatched = vi.fn(async () => new Response('{}', { status: 503 }));
-    vi.stubGlobal('fetch', dispatched);
-
-    const result = await previewDoctorRemediation(scope, PREVIEW_REQUEST);
-
-    expect(result.outcome).not.toBe('not_dispatched');
-    expect(dispatched).toHaveBeenCalledTimes(1);
-  });
-
   /** The aggregate is writable and a write under it lands on one project, so
    * the target it reports has to say that rather than name a project. */
   it('states that an aggregate write targets only the active project', () => {

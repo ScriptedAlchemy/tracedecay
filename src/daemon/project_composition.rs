@@ -810,6 +810,40 @@ pub(super) async fn production_project_server(
                 dyn tracedecay_application::session_sync::SessionSyncServicePort,
             > = session_sync_owner;
             let session_sync_service = Arc::downgrade(&session_sync_port);
+            let store_telemetry_sampling = store_administration.store_telemetry_sampling();
+            let record_telemetry_registration = |path: &Path, registered: bool| {
+                if !registered {
+                    log_daemon_event(
+                        "store_telemetry_registration",
+                        &[
+                            ("store", path.display().to_string()),
+                            ("outcome", "unavailable".to_owned()),
+                        ],
+                    );
+                }
+            };
+            record_telemetry_registration(
+                cg.db().database_path(),
+                store_telemetry_sampling.register_port(
+                    cg.db().database_path(),
+                    &code_search_scope,
+                    || cg.storage_telemetry_handle(),
+                ),
+            );
+            for database in [
+                registry_db.as_ref(),
+                user_session_db.as_ref(),
+                session_db.as_ref(),
+            ] {
+                record_telemetry_registration(
+                    database.db_path(),
+                    store_telemetry_sampling.register_port(
+                        database.db_path(),
+                        &code_search_scope,
+                        || database.storage_telemetry_handle(),
+                    ),
+                );
+            }
             let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
                 canonical_project_path.to_path_buf(),
                 code_search_project_id.clone(),
@@ -825,32 +859,8 @@ pub(super) async fn production_project_server(
                 invocation.code_index_schedulers.clone(),
                 Arc::clone(&diagnostic_broker),
                 invocation.feedback_runtime_registrar(),
+                store_telemetry_sampling,
             );
-            let doctor_remediation_dispatcher =
-                doctor_kernel::production_doctor_remediation_dispatcher(
-                    doctor_kernel::ProductionDoctorRemediationOwnersV1 {
-                        project_root: canonical_project_path.to_path_buf(),
-                        project_id: code_search_project_id.clone(),
-                        layout: cg.store_layout().clone(),
-                        registry: Arc::clone(&registry_db),
-                        profile_sessions: Arc::clone(&user_session_db),
-                        project_sessions: Arc::clone(&session_db),
-                        profile_root: profile_identity.profile_root().to_path_buf(),
-                        config: cg.get_config().clone(),
-                        global_retention: crate::user_config::UserConfig::load()
-                            .automation
-                            .retention,
-                        store_administration: store_administration.clone(),
-                        invocation: invocation.clone(),
-                        code_index_store_root: code_index_store_root.clone(),
-                        semantic_runtime: semantic_runtime.clone(),
-                        semantic_database: Arc::clone(&semantic_database),
-                        semantic_lifecycle: semantic_lifecycle.clone(),
-                        semantic_resources: *semantic_resources,
-                        route_registered: Arc::clone(&route_registered),
-                    },
-                    Arc::clone(&doctor_report_reader),
-                );
             let mut full_context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
                 Arc::clone(&cg),
                 handshake.scope_prefix.clone(),
@@ -879,7 +889,6 @@ pub(super) async fn production_project_server(
                 },
             )
             .with_dashboard_doctor_report_reader(doctor_report_reader)
-            .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
             .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
             .with_dashboard_feedback_status_reader(dashboard_feedback_status_reader)
             .with_diagnostics_lsp(diagnostic_broker)

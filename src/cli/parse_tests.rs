@@ -332,14 +332,12 @@ fn update_upgrade_and_update_plugin_parse_to_distinct_commands() {
     assert!(matches!(
         update.command,
         Some(Commands::Update {
-            no_heal: false,
             no_reinstall: false
         })
     ));
     assert!(matches!(
         upgrade.command,
         Some(Commands::Upgrade {
-            no_heal: false,
             no_reinstall: false
         })
     ));
@@ -529,63 +527,6 @@ fn host_bundle_artifact_commands_parse_explicit_scope_and_confirmation() {
 }
 
 #[test]
-fn update_and_post_update_parse_no_heal_flag() {
-    let update = Cli::try_parse_from(["tracedecay", "update", "--no-heal"])
-        .expect("update --no-heal should parse");
-    let post_update = Cli::try_parse_from(["tracedecay", "post-update", "--no-heal"])
-        .expect("post-update --no-heal should parse");
-    let post_update_default = Cli::try_parse_from(["tracedecay", "post-update"])
-        .expect("post-update should parse without --no-heal");
-
-    assert!(matches!(
-        update.command,
-        Some(Commands::Update {
-            no_heal: true,
-            no_reinstall: false
-        })
-    ));
-    assert!(matches!(
-        post_update.command,
-        Some(Commands::PostUpdate {
-            no_heal: true,
-            no_reinstall: false,
-            lifecycle_lease_token: None,
-        })
-    ));
-    assert!(matches!(
-        post_update_default.command,
-        Some(Commands::PostUpdate {
-            no_heal: false,
-            no_reinstall: false,
-            lifecycle_lease_token: None,
-        })
-    ));
-}
-
-#[test]
-fn upgrade_parses_no_heal_flag() {
-    let upgrade = Cli::try_parse_from(["tracedecay", "upgrade", "--no-heal"])
-        .expect("upgrade --no-heal should parse");
-    let upgrade_default =
-        Cli::try_parse_from(["tracedecay", "upgrade"]).expect("upgrade should parse");
-
-    assert!(matches!(
-        upgrade.command,
-        Some(Commands::Upgrade {
-            no_heal: true,
-            no_reinstall: false
-        })
-    ));
-    assert!(matches!(
-        upgrade_default.command,
-        Some(Commands::Upgrade {
-            no_heal: false,
-            no_reinstall: false
-        })
-    ));
-}
-
-#[test]
 fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
     let upgrade = Cli::try_parse_from(["tracedecay", "upgrade", "--no-reinstall"])
         .expect("upgrade --no-reinstall should parse");
@@ -596,35 +537,17 @@ fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
 
     assert!(matches!(
         upgrade.command,
-        Some(Commands::Upgrade {
-            no_heal: false,
-            no_reinstall: true
-        })
+        Some(Commands::Upgrade { no_reinstall: true })
     ));
     assert!(matches!(
         update.command,
-        Some(Commands::Update {
-            no_heal: false,
-            no_reinstall: true
-        })
+        Some(Commands::Update { no_reinstall: true })
     ));
     assert!(matches!(
         post_update.command,
         Some(Commands::PostUpdate {
-            no_heal: false,
             no_reinstall: true,
             lifecycle_lease_token: None,
-        })
-    ));
-
-    // --no-heal and --no-reinstall are independent and may combine.
-    let both = Cli::try_parse_from(["tracedecay", "upgrade", "--no-heal", "--no-reinstall"])
-        .expect("upgrade --no-heal --no-reinstall should parse");
-    assert!(matches!(
-        both.command,
-        Some(Commands::Upgrade {
-            no_heal: true,
-            no_reinstall: true
         })
     ));
 }

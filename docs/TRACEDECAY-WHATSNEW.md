@@ -113,7 +113,7 @@ Version 1.8.0 introduced a trait-based `AgentIntegration` abstraction with three
 
 The install experience evolved accordingly. Running `tracedecay install` without specifying an agent now auto-detects which ones are present by checking their config directories. If it finds exactly one, it installs directly. If it finds several, it presents an interactive checkbox selector. An `installed_agents` list in `~/.tracedecay/config.toml` tracks which integrations are active, and upgrading from older versions backfills the list by scanning existing configs.
 
-The Claude Code integration deepened further in v3.5.0 with two additional hooks. Beyond the original PreToolUse hook that blocks Explore agents, tracedecay now registers a UserPromptSubmit hook (runs at prompt submission for lifecycle tracking) and a Stop hook (flushes token counters when the session ends). Three hooks, each implemented as a native Rust subcommand, no bash or jq required. The doctor command validates that each hook uses the correct subcommand and auto-repairs broken ones.
+The Claude Code integration deepened further in v3.5.0 with two additional hooks. Beyond the original PreToolUse hook that blocks Explore agents, tracedecay now registers a UserPromptSubmit hook (runs at prompt submission for lifecycle tracking) and a Stop hook (flushes token counters when the session ends). Three hooks, each implemented as a native Rust subcommand, no bash or jq required. The read-only doctor validates that each hook uses the correct subcommand and reports broken configuration; an explicit installer or owner maintenance command performs any authorized repair.
 
 ## The Daemon Gets Smarter
 
@@ -189,7 +189,14 @@ The zip handling in `tracedecay upgrade` hit a memorable bug. Users on v3.4.4 co
 
 Some features don't fit neatly into "languages" or "tools." They're the connective tissue.
 
-**The doctor command** (1.5.1, expanded continuously) runs a comprehensive health check: binary version, project index integrity, global database, user config, daemon status, agent integrations, MCP server registration, hook configuration (now validating that each hook uses the correct subcommand), permissions, prompt rules, and network connectivity. When it finds a broken hook, it auto-repairs it. As TraceDecay grew more complex, this became essential.
+**The doctor command** (1.5.1, expanded continuously) runs a comprehensive,
+read-only health check: binary version, project index integrity, global database,
+user config, daemon status, agent integrations, MCP server registration, hook
+configuration (now validating that each hook uses the correct subcommand),
+permissions, prompt rules, and network connectivity. It reports typed findings and
+evidence; it never auto-repairs hooks or mutates installation, storage, retention,
+GC, links, or migrations. Installation and daemon-owner maintenance commands own
+those explicitly authorized writes.
 
 **The worldwide counter** (1.4.0) aggregates anonymous token-savings counts across all TraceDecay users via a Cloudflare Worker. `tracedecay status` shows three tiers: project, all local projects, and worldwide. The counter is opt-out. Getting the accounting right took a few iterations: 1.5.4 fixed an inflation bug, and the periodic flush interval moved from shutdown-only to every 30 seconds during MCP sessions.
 

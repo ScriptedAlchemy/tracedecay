@@ -79,9 +79,9 @@ const DOCTOR_HEALTH: Record<
  *
  * A producer only counts as health when it actually looked (`real`) and found
  * nothing. Anything it did observe is a finding. Everything else — a source the
- * owner never configured, a partial sweep, a producer unsupported on this store
- * — established nothing either way, and reporting "no evidence" as a clean bill
- * of health is the whole defect this dot exists to avoid.
+ * canonical report only partially observed, or a producer unsupported on this
+ * store established nothing either way, and reporting "no evidence" as a clean
+ * bill of health is the whole defect this dot exists to avoid.
  */
 function kindHealth(status: StorageFindingKindStatusV1): DoctorHealth {
   if (status.observed_entries > 0) return 'attention';
@@ -89,7 +89,6 @@ function kindHealth(status: StorageFindingKindStatusV1): DoctorHealth {
     case 'real':
       return 'healthy';
     case 'partial':
-    case 'unset':
     case 'unsupported':
       return 'unknown';
     default: {

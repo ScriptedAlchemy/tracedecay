@@ -425,7 +425,7 @@ pub(crate) async fn handle_sync(
         resolved.project_path.display()
     );
     if doctor {
-        tracedecay::doctor::run_doctor(None).await?;
+        tracedecay::doctor::run_doctor().await?;
     }
     Ok(())
 }

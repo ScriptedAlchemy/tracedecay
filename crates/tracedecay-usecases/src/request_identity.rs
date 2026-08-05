@@ -27,6 +27,7 @@ pub enum GlobalRequestSurface {
     ProjectOpenFeedbackCycle,
     ProjectOpenGithubDiscovery,
     DaemonDoctor,
+    DaemonStorageTelemetry,
     LspFeedbackDiagnostics,
     LspFeedbackGet,
     LspFeedbackExpand,
@@ -49,6 +50,7 @@ impl GlobalRequestSurface {
             Self::ProjectOpenFeedbackCycle => "request.project-open.cycle",
             Self::ProjectOpenGithubDiscovery => "request.project-open.github-discovery",
             Self::DaemonDoctor => "request.daemon.doctor",
+            Self::DaemonStorageTelemetry => "request.daemon.storage-telemetry",
             Self::LspFeedbackDiagnostics => "request.lsp.feedback-diagnostics",
             Self::LspFeedbackGet => "request.lsp.feedback-get",
             Self::LspFeedbackExpand => "request.lsp.feedback-expand",
@@ -101,8 +103,6 @@ pub enum LogicalEffectIdempotencyDomain {
     FeedbackObservation,
     FeedbackSourceEvent,
     ConfigurationEffect,
-    DoctorRemediationPreviewOperation,
-    DoctorRemediationApplyOperation,
 }
 
 impl LogicalEffectIdempotencyDomain {
@@ -112,12 +112,6 @@ impl LogicalEffectIdempotencyDomain {
             Self::FeedbackObservation => "tracedecay.feedback.observation.plan26.v1",
             Self::FeedbackSourceEvent => "tracedecay.feedback.source-event.plan26.v1",
             Self::ConfigurationEffect => "tracedecay.configuration.effect-idempotency.v1",
-            Self::DoctorRemediationPreviewOperation => {
-                "tracedecay.doctor-remediation-preview-operation.v1"
-            }
-            Self::DoctorRemediationApplyOperation => {
-                "tracedecay.doctor-remediation-apply-operation.v1"
-            }
         }
     }
 }
@@ -281,41 +275,6 @@ where
     .map_err(|_| RequestIdentityError::InvalidLogicalEffectIdentity)
 }
 
-pub fn derive_doctor_remediation_preview_operation<Operation, Target>(
-    operation: &Operation,
-    target_digest: &Target,
-) -> Result<ManifestDigest, RequestIdentityError>
-where
-    Operation: Serialize + ?Sized,
-    Target: Serialize + ?Sized,
-{
-    canonical_sha256(&(
-        LogicalEffectIdempotencyDomain::DoctorRemediationPreviewOperation.domain(),
-        operation,
-        target_digest,
-    ))
-    .map_err(|_| RequestIdentityError::InvalidLogicalEffectIdentity)
-}
-
-pub fn derive_doctor_remediation_apply_operation<Operation, Target, Idempotency>(
-    operation: &Operation,
-    target_digest: &Target,
-    idempotency_key: &Idempotency,
-) -> Result<ManifestDigest, RequestIdentityError>
-where
-    Operation: Serialize + ?Sized,
-    Target: Serialize + ?Sized,
-    Idempotency: Serialize + ?Sized,
-{
-    canonical_sha256(&(
-        LogicalEffectIdempotencyDomain::DoctorRemediationApplyOperation.domain(),
-        operation,
-        target_digest,
-        idempotency_key,
-    ))
-    .map_err(|_| RequestIdentityError::InvalidLogicalEffectIdentity)
-}
-
 /// Derives a content-bound preview identity.
 ///
 /// A preview is not an effect replay key: its material includes the request
@@ -468,6 +427,10 @@ mod tests {
                 "request.daemon.doctor.42.100000000.0",
             ),
             (
+                GlobalRequestSurface::DaemonStorageTelemetry,
+                "request.daemon.storage-telemetry.42.100000000.0",
+            ),
+            (
                 GlobalRequestSurface::LspFeedbackDiagnostics,
                 "lsp-feedback-diagnostics-1",
             ),
@@ -608,48 +571,6 @@ mod tests {
         assert_eq!(
             derive_feedback_source_event_idempotency(&subject, UtcMicros(7), &source_event,)
                 .unwrap(),
-            legacy
-        );
-    }
-
-    #[test]
-    fn doctor_preview_identity_preserves_flat_persisted_derivation() {
-        let operation = "operation.fixture";
-        let target = "target.fixture";
-        let legacy = canonical_sha256(&(
-            "tracedecay.doctor-remediation-preview-operation.v1",
-            operation,
-            target,
-        ))
-        .unwrap();
-        assert_eq!(
-            legacy.as_str(),
-            "sha256:524d23ebc43a3f8709fe3f7d9084f7760981d9030d4d54975a8272c392cfca7d"
-        );
-        assert_eq!(
-            derive_doctor_remediation_preview_operation(&operation, &target).unwrap(),
-            legacy
-        );
-    }
-
-    #[test]
-    fn doctor_apply_identity_preserves_flat_persisted_derivation() {
-        let operation = "operation.fixture";
-        let target = "target.fixture";
-        let idempotency = "idempotency.fixture";
-        let legacy = canonical_sha256(&(
-            "tracedecay.doctor-remediation-apply-operation.v1",
-            operation,
-            target,
-            idempotency,
-        ))
-        .unwrap();
-        assert_eq!(
-            legacy.as_str(),
-            "sha256:b246429413e9f005bec08fe146d8678936875ab73c77fc698205d3a6841445aa"
-        );
-        assert_eq!(
-            derive_doctor_remediation_apply_operation(&operation, &target, &idempotency).unwrap(),
             legacy
         );
     }

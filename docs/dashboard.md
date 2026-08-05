@@ -34,7 +34,7 @@ configuration stay together:
 
 ```bash
 tracedecay install --agent hermes
-tracedecay doctor --agent hermes
+tracedecay doctor
 ```
 
 The installer writes the plugin under `~/.hermes/plugins/tracedecay/` and

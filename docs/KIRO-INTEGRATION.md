@@ -62,7 +62,7 @@ Kiro can also load workspace MCP settings from `.kiro/settings/mcp.json`. A
 workspace `mcpServers.tracedecay` entry takes precedence over the global
 `~/.kiro/settings/mcp.json` entry installed by tracedecay.
 
-`tracedecay doctor --agent kiro` checks the current workspace for that override.
+`tracedecay doctor` checks the current workspace and all configured host integrations.
 It reports a problem when the workspace entry disables tracedecay, omits the
 `serve` argument, or points at a different command than the global install.
 

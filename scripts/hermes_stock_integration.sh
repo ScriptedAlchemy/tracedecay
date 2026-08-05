@@ -45,9 +45,9 @@ run_integration() {
     echo "$plugins_list" | grep tracedecay | grep -q enabled
     echo "ok - hermes plugins list shows tracedecay enabled"
 
-    echo "== tracedecay doctor --agent hermes"
+    echo "== tracedecay doctor"
     set +e
-    doctor_out="$(cd "$project" && "$TRACEDECAY_BIN" doctor --agent hermes 2>&1)"
+    doctor_out="$(cd "$project" && "$TRACEDECAY_BIN" doctor 2>&1)"
     doctor_status=$?
     set -e
     if [[ $doctor_status -ne 0 ]]; then

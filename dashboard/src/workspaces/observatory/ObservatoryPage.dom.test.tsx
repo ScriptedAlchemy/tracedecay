@@ -219,31 +219,24 @@ describe('ObservatoryPage store telemetry', () => {
     expect((await screen.findAllByText('Over-budget stores')).length).toBeGreaterThan(0);
     for (const label of [
       'Orphan stores',
-      'Stale branch databases',
       'Incident debris',
       'Retention backlog',
       'Table growth',
     ]) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
-    expect(document.querySelectorAll('[data-storage-finding-kind]')).toHaveLength(5);
+    expect(document.querySelectorAll('[data-storage-finding-kind]')).toHaveLength(4);
     expect(
       document.querySelector('[data-storage-finding-kind="over_budget_store"]')?.textContent,
     ).toContain('Degraded');
-    expect(
-      document.querySelector('[data-storage-finding-kind="stale_branch_dbs"]')?.textContent,
-    ).toContain('Stale');
     expect(screen.getByText('store size observed against soft budget')).toBeTruthy();
     expect(
       screen.getByText('storage.over_budget_store.sessions.db.observed-8388608b.overage-4194304b'),
     ).toBeTruthy();
-    expect(
-      screen.getAllByText('use-case.application.storage.retention-collect'),
-    ).toHaveLength(2);
-    expect(screen.queryByText(/requires:/)).toBeNull();
+    expect(screen.queryByText(/use-case\.application\.storage/)).toBeNull();
   });
 
-  it('renders every finding producer source state without treating unset or partial as clean', async () => {
+  it('renders every finding producer source state without treating partial as clean', async () => {
     stubTelemetry(telemetryPayload(), sourceStatusFindingsPayload());
     renderObservatory();
 
@@ -251,14 +244,13 @@ describe('ObservatoryPage store telemetry', () => {
     const statusFor = (kind: string) =>
       document.querySelector(`[data-storage-source-kind="${kind}"]`);
 
-    expect(statusFor('over_budget_store')?.getAttribute('data-storage-source-state')).toBe('unset');
+    expect(statusFor('over_budget_store')?.getAttribute('data-storage-source-state')).toBe(
+      'partial',
+    );
     expect(statusFor('over_budget_store')?.textContent).toContain(
-      'No owner budget configured · sync.retention.v1 store_soft_budgets_bytes',
+      'the canonical report did not carry per-producer completion evidence',
     );
     expect(statusFor('orphan_store')?.getAttribute('data-storage-source-state')).toBe('partial');
-    expect(statusFor('stale_branch_dbs')?.getAttribute('data-storage-source-state')).toBe(
-      'unsupported',
-    );
     expect(statusFor('incident_debris_present')?.getAttribute('data-storage-source-state')).toBe(
       'real',
     );
@@ -298,7 +290,6 @@ function stubTelemetry(
             family_filter: null,
             entries: [],
             report_coverage: null,
-            remediations: [],
             known_families: ['storage'],
             note: 'no admitted Doctor report source is available for this dashboard scope',
           }),
@@ -314,7 +305,6 @@ function emptyStorageFindingsPayload() {
     family_filter: 'storage',
     entries: [],
     report_coverage: null,
-    remediations: [],
     known_families: ['storage'],
     note: 'canonical Doctor storage family contained no entries',
     kind_statuses: sourceStatuses(),
@@ -322,30 +312,21 @@ function emptyStorageFindingsPayload() {
 }
 
 function storageFindingsPayload() {
-  const operation = {
-    retention: 'use-case.application.storage.retention-collect',
-    orphan: 'use-case.application.storage.collect-orphan-store',
-    branch: 'use-case.application.storage.branch-gc',
-    debris: 'use-case.application.storage.quarantine-and-collect-debris',
-  } as const;
   const entry = (
     storageKind:
       | 'over_budget_store'
       | 'orphan_store'
-      | 'stale_branch_dbs'
       | 'incident_debris_present'
       | 'retention_backlog',
     state: 'degraded' | 'stale',
     reference: string,
     statement: string,
-    owningOperation: string,
   ) => ({
     finding: {
       family: 'storage',
       state,
       evidence: [{ family: 'storage', reference }],
       coverage: { completeness: 'complete', statement },
-      remediation: { owning_operation: owningOperation, kind: 'action' },
     },
     storage_kind: storageKind,
   });
@@ -357,35 +338,24 @@ function storageFindingsPayload() {
         'degraded',
         'storage.over_budget_store.sessions.db.observed-8388608b.overage-4194304b',
         'store size observed against soft budget',
-        operation.retention,
       ),
       entry(
         'orphan_store',
         'degraded',
         'storage.orphan_store.orphan.db.age-86400000000us.size-1048576b',
         'store identity no longer resolves to a live repository root',
-        operation.orphan,
-      ),
-      entry(
-        'stale_branch_dbs',
-        'stale',
-        'storage.stale_branch_dbs.branch.db.branch-feature.size-2097152b',
-        "branch-scoped store whose git ref is gone awaits lifecycle removal",
-        operation.branch,
       ),
       entry(
         'incident_debris_present',
         'degraded',
         'storage.incident_debris_present.graph.db.count-2.bytes-3145728b',
         'quarantine-eligible incident artifacts present beside a live store',
-        operation.debris,
       ),
       entry(
         'retention_backlog',
         'stale',
         'storage.retention_backlog.sessions.db.table-lcm_raw_messages.bytes-4194304b',
         'retention-eligible rows are past their window awaiting collection',
-        operation.retention,
       ),
     ],
     report_coverage: {
@@ -396,40 +366,6 @@ function storageFindingsPayload() {
         statement: 'storage retention and size authorities were consulted',
       },
     },
-    remediations: [
-      {
-        operation: operation.retention,
-        surface: 'storage_runtime',
-        preview_available: true,
-        action_confirmation: 'required',
-        target: null,
-        summary: 'collect retention-eligible rows or reclaim an over-budget store',
-      },
-      {
-        operation: operation.orphan,
-        surface: 'storage_runtime',
-        preview_available: true,
-        action_confirmation: 'required',
-        target: null,
-        summary: 'collect a store whose project identity no longer resolves',
-      },
-      {
-        operation: operation.branch,
-        surface: 'storage_runtime',
-        preview_available: true,
-        action_confirmation: 'required',
-        target: null,
-        summary: 'remove branch-scoped databases whose git refs are gone',
-      },
-      {
-        operation: operation.debris,
-        surface: 'storage_runtime',
-        preview_available: true,
-        action_confirmation: 'required',
-        target: null,
-        summary: 'quarantine and collect incident debris beside a live store',
-      },
-    ],
     known_families: [
       'advisory',
       'configuration',
@@ -447,11 +383,6 @@ function storageFindingsPayload() {
         reason: '2 stores evaluated; 1 unset; 2 undetermined',
       },
       orphan_store: {
-        state: 'real',
-        observed_entries: 1,
-        reason: 'canonical Doctor producer returned observed evidence',
-      },
-      stale_branch_dbs: {
         state: 'real',
         observed_entries: 1,
         reason: 'canonical Doctor producer returned observed evidence',
@@ -475,20 +406,14 @@ function sourceStatusFindingsPayload() {
     ...emptyStorageFindingsPayload(),
     kind_statuses: sourceStatuses({
       over_budget_store: {
-        state: 'unset',
+        state: 'partial',
         observed_entries: 0,
-        reason:
-          'No owner budget configured · sync.retention.v1 store_soft_budgets_bytes',
+        reason: 'the canonical report did not carry per-producer completion evidence',
       },
       orphan_store: {
         state: 'partial',
         observed_entries: 0,
         reason: 'the canonical report did not carry per-producer completion evidence',
-      },
-      stale_branch_dbs: {
-        state: 'unsupported',
-        observed_entries: 0,
-        reason: 'no admitted Doctor report source is available for this dashboard scope',
       },
       incident_debris_present: {
         state: 'real',
@@ -514,7 +439,6 @@ function sourceStatuses(overrides: Partial<Record<string, SourceStatus>> = {}) {
   return [
     'over_budget_store',
     'orphan_store',
-    'stale_branch_dbs',
     'incident_debris_present',
     'retention_backlog',
     'table_growth',

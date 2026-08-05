@@ -477,14 +477,11 @@ pub enum Commands {
     /// Install the latest version; refreshes plugins only after a real install
     ///
     /// Downloads and installs the newest release. When a new binary was
-    /// installed, also refreshes generated plugins and the daemon service and
-    /// runs the post-update health pass on the new version. When already up
-    /// to date it stops there — use `tracedecay update` to refresh regardless.
+    /// installed, also refreshes generated plugins, configured agent
+    /// integrations, and the daemon service. When already up to date it stops
+    /// there — use `tracedecay update` to refresh regardless.
     #[command(after_help = UPGRADE_AFTER_HELP)]
     Upgrade {
-        /// Skip the post-update health pass (safe repairs + doctor summary)
-        #[arg(long)]
-        no_heal: bool,
         /// Skip refreshing already-configured agent integrations
         #[arg(long)]
         no_reinstall: bool,
@@ -492,13 +489,10 @@ pub enum Commands {
     /// Refresh generated plugins and the daemon, even when already up to date
     ///
     /// Upgrades the binary first when a newer release exists, then always
-    /// refreshes generated plugins and the daemon service and runs the
-    /// post-update health pass — even when the binary was already current.
+    /// refreshes generated plugins, configured agent integrations, and the
+    /// daemon service — even when the binary was already current.
     #[command(after_help = UPDATE_AFTER_HELP)]
     Update {
-        /// Skip the post-update health pass (safe repairs + doctor summary)
-        #[arg(long)]
-        no_heal: bool,
         /// Skip refreshing already-configured agent integrations
         #[arg(long)]
         no_reinstall: bool,
@@ -506,9 +500,6 @@ pub enum Commands {
     /// Refresh plugins and daemon after the binary has been updated.
     #[command(name = "post-update", hide = true)]
     PostUpdate {
-        /// Skip the post-update health pass (safe repairs + doctor summary)
-        #[arg(long)]
-        no_heal: bool,
         /// Skip refreshing already-configured agent integrations
         #[arg(long)]
         no_reinstall: bool,
@@ -579,11 +570,7 @@ pub enum Commands {
     },
     /// Check tracedecay installation, configuration, and agent integration
     #[command(long_about = DOCTOR_LONG_ABOUT, after_help = DOCTOR_AFTER_HELP)]
-    Doctor {
-        /// Check only this agent (default: all agents)
-        #[arg(long, value_parser = agent_value_parser())]
-        agent: Option<String>,
-    },
+    Doctor,
     /// Token cost summary from Claude Code sessions
     #[command(long_about = COST_LONG_ABOUT, after_help = COST_AFTER_HELP)]
     Cost {

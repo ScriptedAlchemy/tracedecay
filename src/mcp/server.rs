@@ -289,8 +289,6 @@ pub struct McpServer {
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     doctor_report_published: AtomicBool,
-    dashboard_doctor_remediation_dispatcher:
-        Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     dashboard_feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
@@ -682,7 +680,6 @@ impl McpServer {
             database_owner_reconciler,
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
-            dashboard_doctor_remediation_dispatcher,
             dashboard_code_index_freshness_reader,
             dashboard_feedback_status_reader,
             diagnostics_lsp,
@@ -878,7 +875,6 @@ impl McpServer {
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
             doctor_report_published: AtomicBool::new(false),
-            dashboard_doctor_remediation_dispatcher,
             dashboard_code_index_freshness_reader,
             dashboard_feedback_status_reader,
             hook_branch_writer,

@@ -180,9 +180,9 @@ measurements, not inferred table sizes.
   without collecting" entry was stale). Collection is liveness-based
   mark-and-sweep inside one scope root, transactional through a journal,
   quarantine, and durable receipt, with crash replay on the next pass. It runs
-  from the daemon maintenance cadence, semantic-runtime publication, the Doctor
-  kernel, and the storage report, each under a lease and each pinning the vector
-  inventory before any sweep.
+  from the daemon maintenance cadence and semantic-runtime publication, under a
+  lease and with the vector inventory pinned before any sweep. Doctor and the
+  storage report observe its state but never trigger a sweep.
 - Code-index *scope-root* reconciliation is implemented and engaged. It is the
   only pass that reaches a scope directory whose canonical project root no
   longer exists. It runs beside generation retention on the maintenance cadence,

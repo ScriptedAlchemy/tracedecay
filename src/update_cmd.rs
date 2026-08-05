@@ -1,7 +1,7 @@
 //! The `upgrade` / `update` / `post-update` / `update-plugin` flow: binary
 //! upgrade via subprocess re-exec, generated-plugin refresh, daemon service
-//! refresh, the post-update health pass, and the full tracked-agent
-//! reinstall that keeps config-managed integrations in sync.
+//! refresh, and the full tracked-agent reinstall that keeps config-managed
+//! integrations in sync.
 //!
 //! The post-update pass refreshes every already-configured agent integration
 //! through its canonical lifecycle transaction and post-install action, so a
@@ -352,7 +352,7 @@ where
                     eprintln!(
                         "  \x1b[33mwarning:\x1b[0m post-upgrade refresh failed: {error}\n  \
                          The new binary is installed; run {retry} to retry the \
-                         plugin refresh and health pass."
+                         plugin and agent-integration refresh."
                     );
                 }
                 Ok(())
@@ -368,34 +368,22 @@ where
     }
 }
 
-pub(crate) fn run_update_command(
-    no_heal: bool,
-    no_reinstall: bool,
-) -> tracedecay::errors::Result<()> {
-    run_update_flow("update", RefreshPolicy::Always, no_heal, no_reinstall)
+pub(crate) fn run_update_command(no_reinstall: bool) -> tracedecay::errors::Result<()> {
+    run_update_flow("update", RefreshPolicy::Always, no_reinstall)
 }
 
-pub(crate) fn run_upgrade_command(
-    no_heal: bool,
-    no_reinstall: bool,
-) -> tracedecay::errors::Result<()> {
-    run_update_flow(
-        "upgrade",
-        RefreshPolicy::AfterInstall,
-        no_heal,
-        no_reinstall,
-    )
+pub(crate) fn run_upgrade_command(no_reinstall: bool) -> tracedecay::errors::Result<()> {
+    run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
 }
 
 fn run_update_flow(
     operation: &str,
     refresh_policy: RefreshPolicy,
-    no_heal: bool,
     no_reinstall: bool,
 ) -> tracedecay::errors::Result<()> {
     tracedecay::daemon::with_exclusive_maintenance_window(operation, |lease_token| {
         run_install_then_refresh(refresh_policy, tracedecay::upgrade::run_upgrade, |binary| {
-            run_post_update_subcommand(no_heal, no_reinstall, binary, lease_token)
+            run_post_update_subcommand(no_reinstall, binary, lease_token)
         })
     })
 }
@@ -420,7 +408,6 @@ fn combine_operation_and_restore<T>(
 }
 
 pub(crate) async fn run_post_update_command(
-    no_heal: bool,
     no_reinstall: bool,
     lifecycle_lease_token: Option<&str>,
 ) -> tracedecay::errors::Result<()> {
@@ -429,12 +416,12 @@ pub(crate) async fn run_post_update_command(
             "post-update",
             Some(token),
         )?;
-        return run_post_update_tasks(no_heal, no_reinstall, &lifecycle_lease).await;
+        return run_post_update_tasks(no_reinstall, &lifecycle_lease).await;
     }
 
     let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire("post-update")?;
     let operation_result = match guard.lifecycle_lease() {
-        Ok(lifecycle_lease) => run_post_update_tasks(no_heal, no_reinstall, lifecycle_lease).await,
+        Ok(lifecycle_lease) => run_post_update_tasks(no_reinstall, lifecycle_lease).await,
         Err(error) => Err(error),
     };
     let restore_result = guard.finish();
@@ -474,7 +461,6 @@ fn post_update_binary_from(installed: Option<&Path>, current: Option<&Path>) -> 
 }
 
 fn run_post_update_subcommand(
-    no_heal: bool,
     no_reinstall: bool,
     installed: Option<&Path>,
     lifecycle_lease_token: &str,
@@ -485,9 +471,6 @@ fn run_post_update_subcommand(
         .arg("post-update")
         .arg("--lifecycle-lease-token")
         .arg(lifecycle_lease_token);
-    if no_heal {
-        command.arg("--no-heal");
-    }
     if no_reinstall {
         command.arg("--no-reinstall");
     }
@@ -640,7 +623,6 @@ async fn reinstall_tracked_agents_with_lease(
 }
 
 pub(crate) async fn run_post_update_tasks(
-    no_heal: bool,
     no_reinstall: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
@@ -649,22 +631,16 @@ pub(crate) async fn run_post_update_tasks(
     let previous_daemon_state =
         tracedecay::daemon::verify_installed_service_quiesced_under_lease()?;
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
-    let mutation_result = run_post_update_mutations(no_heal, no_reinstall, lifecycle_lease).await;
+    let mutation_result = run_post_update_mutations(no_reinstall, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
     combine_operation_and_restore("post-update maintenance", mutation_result, restart_result)
 }
 
 async fn run_post_update_mutations(
-    no_heal: bool,
     no_reinstall: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
     refresh_generated_plugins().await?;
-    if no_heal {
-        eprintln!("Skipping post-update health pass (--no-heal).");
-    } else {
-        tracedecay::doctor::heal::run_post_update_health_pass_under_lease(lifecycle_lease).await;
-    }
 
     if no_reinstall {
         eprintln!("Skipping agent integration refresh (--no-reinstall).");

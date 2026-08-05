@@ -136,10 +136,10 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tracedecay_lcm_describe",
         "tracedecay_lcm_expand",
         "tracedecay_lcm_expand_query",
+        "tracedecay_lcm_doctor",
         "tracedecay_lcm_preflight",
         "tracedecay_lcm_compress",
         "tracedecay_lcm_session_boundary",
-        "tracedecay_lcm_doctor",
     ] {
         assert!(names.contains(expected), "missing {expected}");
     }
@@ -151,6 +151,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tracedecay_lcm_describe",
         "tracedecay_lcm_expand",
         "tracedecay_lcm_expand_query",
+        "tracedecay_lcm_doctor",
     ] {
         let tool = tools
             .iter()
@@ -175,7 +176,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tracedecay_lcm_preflight",
         "tracedecay_lcm_compress",
         "tracedecay_lcm_session_boundary",
-        "tracedecay_lcm_doctor",
     ] {
         let tool = tools
             .iter()
@@ -292,25 +292,20 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .iter()
         .find(|tool| tool.name == "tracedecay_lcm_doctor")
         .expect("tracedecay_lcm_doctor definition");
+    assert_eq!(doctor.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    assert_eq!(doctor.input_schema["required"], json!(["provider"]));
     assert_eq!(
-        doctor.input_schema["properties"]["mode"]["enum"],
-        json!(["diagnose", "repair", "retention", "clean", "gc"])
-    );
-    assert_eq!(
-        doctor.input_schema["properties"]["apply"]["type"],
-        json!("boolean")
-    );
-    assert_eq!(
-        doctor.input_schema["properties"]["doctor_clean_apply_enabled"]["type"],
-        json!("boolean")
-    );
-    assert_eq!(
-        doctor.input_schema["properties"]["lcm_gc_apply_enabled"]["type"],
-        json!("boolean")
-    );
-    assert_eq!(
-        doctor.input_schema["properties"]["gc_config"]["type"],
-        json!("object")
+        doctor.input_schema["properties"],
+        json!({
+            "provider": {
+                "type": "string",
+                "description": "Specific provider id to inspect. Required; 'all' is not accepted."
+            },
+            "session_id": {
+                "type": "string",
+                "description": "Optional provider-local session id filter."
+            }
+        })
     );
 }
 

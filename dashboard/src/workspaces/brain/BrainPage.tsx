@@ -291,9 +291,8 @@ function RegistryFieldView({
       (acc, p) => ({
         stores: acc.stores + p.store_count,
         artifacts: acc.artifacts + p.artifact_count,
-        scopes: acc.scopes + p.graph_scope_count,
       }),
-      { stores: 0, artifacts: 0, scopes: 0 },
+      { stores: 0, artifacts: 0 },
     );
 
   return (
@@ -322,7 +321,6 @@ function RegistryFieldView({
             { label: 'repos', value: groups.length },
             { label: 'projects', value: nodes.length - field.sharedRepoCount },
             { label: 'stores', value: totals.stores },
-            { label: 'scopes', value: totals.scopes },
             { label: 'artifacts', value: totals.artifacts },
           ]}
         />
@@ -619,9 +617,6 @@ function holdingsLabel(
     return `${project.store_count} st · ${project.artifact_count} art`;
   }
   const parts: string[] = [];
-  if (holdings.scopes.uniform == null) {
-    parts.push(`${project.graph_scope_count} sc`);
-  }
   if (holdings.artifacts.uniform == null && project.artifact_count !== holdings.artifacts.mode) {
     parts.push(`${project.artifact_count} art`);
   }

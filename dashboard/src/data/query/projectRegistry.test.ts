@@ -285,7 +285,6 @@ function context(overrides: Partial<ProjectContextPayloadV1>): ProjectContextPay
     is_active: false,
     project: null,
     aliases: [],
-    stores: [],
     ...overrides,
   } as ProjectContextPayloadV1;
 }

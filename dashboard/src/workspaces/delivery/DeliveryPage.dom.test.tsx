@@ -27,7 +27,6 @@ function checkout(over: Record<string, unknown> = {}) {
     default_branch: 'main',
     branches: [],
     store_count: 1,
-    graph_scope_count: 1,
     artifact_count: 2,
     alias_count: 1,
     last_seen_at: NOW - 3600,

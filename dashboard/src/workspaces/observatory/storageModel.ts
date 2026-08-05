@@ -11,22 +11,20 @@ import type {
   DashboardLegalActionRefV1,
 } from '../../contracts/generated.ts';
 
-const FINDING_LABELS: Record<DoctorStorageFindingKindV1, string> = {
+const FINDING_LABELS: Partial<Record<DoctorStorageFindingKindV1, string>> = {
   over_budget_store: 'Over-budget stores',
   orphan_store: 'Orphan stores',
-  stale_branch_dbs: 'Stale branch databases',
   incident_debris_present: 'Incident debris',
   retention_backlog: 'Retention backlog',
   table_growth: 'Table growth',
 };
 
 export function storageFindingLabel(kind: DoctorStorageFindingKindV1): string {
-  return FINDING_LABELS[kind];
+  return FINDING_LABELS[kind] ?? 'Unsupported storage finding';
 }
 
 const SOURCE_STATE_LABELS: Record<StorageFindingSourceStateV1, string> = {
   real: 'Observed',
-  unset: 'Unset',
   partial: 'Partial',
   unsupported: 'Unsupported',
 };
@@ -40,8 +38,6 @@ export function storageSourcePresentation(status: StorageFindingKindStatusV1): {
   switch (status.state) {
     case 'real':
       return { label, tokenClass: 'text-state-ready', dotClass: 'bg-state-ready' };
-    case 'unset':
-      return { label, tokenClass: 'text-state-locked', dotClass: 'bg-state-locked' };
     case 'partial':
       return { label, tokenClass: 'text-state-partial', dotClass: 'bg-state-partial' };
     case 'unsupported':

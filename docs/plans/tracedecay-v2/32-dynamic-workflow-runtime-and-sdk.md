@@ -373,9 +373,9 @@ history projections join runtime state only through exact versioned references.
 Plan 32 also publishes typed provider availability, lease/attempt liveness,
 progress, deadline, cancellation escalation, reconnect/resume, unknown-effect,
 placement/integration, and terminal evidence to the existing Doctor kernel.
-Doctor owns finding severity and remediation presentation; it may invoke only a
-separately authorized runtime control and cannot reclaim, retry, cancel, repair,
-or change configuration by inference.
+Doctor owns finding severity, evidence, and non-executable recovery guidance.
+It cannot invoke runtime controls, reclaim, retry, cancel, repair, clean up,
+run retention, relink, or change configuration.
 
 Already-shipped read-only feedback diagnostics, CI localization, GitHub review
 ingest, and proximity reads may be composed as typed workflow steps through

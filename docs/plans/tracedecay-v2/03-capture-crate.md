@@ -43,7 +43,7 @@ never skip a suffix.
 - Database connections, paths, transactions, writer recovery, or fallback
   persistence. Capture calls the daemon-owned store adapter.
 - Canonical projection, query/ranking, policy decisions after capture, public
-  transport semantics, dashboard views, or Doctor repair execution.
+  transport semantics, dashboard views, or operational mutation execution.
 - Hook-side database access or workflow execution. Hooks emit bounded events or
   signals to the daemon.
 - Documentation-driven orchestration, generated adapter matrices, or a
