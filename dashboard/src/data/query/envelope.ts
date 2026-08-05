@@ -22,8 +22,15 @@ export async function fetchEnvelope<T>(
   let response: Response;
   try {
     response = await fetch(url, { headers: { accept: 'application/json' }, ...init });
-  } catch {
+  } catch (err) {
+    if (init?.signal?.aborted === true) throw err;
     return { outcome: 'transport', state: 'offline' };
+  }
+  if (response.status === 401) {
+    return { outcome: 'transport', state: 'unauthorized' };
+  }
+  if (response.status === 403) {
+    return { outcome: 'transport', state: 'denied' };
   }
   // A write refused because its project is not the active one is `locked`, not
   // `error`: the request was well-formed and the daemon healthy, and the
@@ -47,9 +54,21 @@ export async function fetchEnvelope<T>(
   } catch {
     return { outcome: 'transport', state: 'unsupported_schema' };
   }
-  const parsed = DashboardEnvelopeV1Schema(payloadSchema).safeParse(body);
+  // Envelope routes use `null` only when the domain state says no safe payload
+  // exists (for example, a graph read that failed before it could produce a
+  // projection). Decode the envelope first so the reader receives the daemon's
+  // state rather than mislabelling that honest absence as a schema mismatch.
+  const parsed = DashboardEnvelopeV1Schema(payloadSchema.nullable()).safeParse(body);
   if (!parsed.success) {
     return { outcome: 'transport', state: 'unsupported_schema' };
   }
-  return { outcome: 'envelope', envelope: parsed.data as DashboardEnvelopeV1<T> };
+  const envelope = parsed.data;
+  if (envelope.payload === null) {
+    return {
+      outcome: 'transport',
+      state: envelope.domain_state,
+      detail: envelope.coverage.omission_reasons[0],
+    };
+  }
+  return { outcome: 'envelope', envelope: envelope as DashboardEnvelopeV1<T> };
 }

@@ -13,6 +13,7 @@ import { z } from 'zod';
 
 import { fetchEnvelope } from './envelope.ts';
 import { READ_ONLY_SCOPE_STATUS } from '../scope/store.ts';
+import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 
 const PayloadSchema = z.object({ note: z.string() });
 
@@ -88,6 +89,15 @@ describe('fetchEnvelope', () => {
     });
   });
 
+  it('preserves an error envelope with no payload as the daemon error state', async () => {
+    stub(200, fixtureEnvelope(null, 'error'));
+
+    expect(await fetchEnvelope('/api/x', PayloadSchema)).toMatchObject({
+      outcome: 'transport',
+      state: 'error',
+    });
+  });
+
   it('reports a network failure as offline', async () => {
     vi.stubGlobal(
       'fetch',
@@ -99,5 +109,21 @@ describe('fetchEnvelope', () => {
       outcome: 'transport',
       state: 'offline',
     });
+  });
+
+  it('propagates an aborted request instead of reporting the daemon offline', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const abort = new DOMException('The operation was aborted', 'AbortError');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw abort;
+      }),
+    );
+
+    await expect(
+      fetchEnvelope('/api/x', PayloadSchema, { signal: controller.signal }),
+    ).rejects.toBe(abort);
   });
 });

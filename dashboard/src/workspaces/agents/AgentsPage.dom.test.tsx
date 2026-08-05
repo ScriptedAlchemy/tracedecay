@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentsPage } from './AgentsPage.tsx';
 import type { AnalyticsUsageSummaryV1 } from '../../contracts/generated.ts';
+import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -116,7 +117,8 @@ function stubAnalytics(payloads: Record<string, unknown>) {
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const endpoint = String(input).split('/').pop() ?? '';
-      return new Response(JSON.stringify(payloads[endpoint]), {
+      const body = fixtureEnvelope(payloads[endpoint] ?? {});
+      return new Response(JSON.stringify(body), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });

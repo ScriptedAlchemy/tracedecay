@@ -15,22 +15,29 @@ vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
  * This suite used to assert the opposite — that a well-formed 200 reporting
  * zeros "is still not a measurement" — and the page was written to match:
  * every zero total, empty slice, and empty result set rendered as
- * "unverified", on the stated grounds that the legacy response could not tell
- * zero from a query failure.
+ * "unverified", on the stated grounds that the response could not tell zero
+ * from a query failure.
  *
- * It can. `LegacyBoundary` invokes a surface's render function only for
- * `outcome: 'ok'`, which is a 2xx whose body satisfied the route's schema;
- * every other reading — offline, 401, 403, a canonical 404/503, an
- * undecodable body, and the 500 these graph routes raise when the query fails
- * — is rendered by the boundary as that failure instead. So a zero reaching
- * the page has been measured, and the guard was suppressing real figures. It
- * was also an `||`: one zero among the three withheld all three, so a freshly
- * indexed project with symbols but no resolved edges was shown no node count.
+ * It can. `ReadSection` invokes a surface's render function only after a 2xx
+ * response satisfies the envelope and route schema; every other reading —
+ * offline, 401, 403, a canonical 404/503, an undecodable body, and the 500
+ * these graph routes raise when the query fails — renders as that failure
+ * instead. So a zero reaching the page has been measured, and the guard was
+ * suppressing real figures. It was also an `||`: one zero among the three
+ * withheld all three, so a freshly indexed project with symbols but no
+ * resolved edges was shown no node count.
  *
  * What follows pins both halves: a measured zero prints, and a read that
  * failed still refuses to print anything.
  */
 const wire = (path: string) => resolveFixture(path) as Record<string, unknown>;
+
+function patchEnvelopePayload(fixture: Record<string, unknown>, patch: Record<string, unknown>) {
+  return {
+    ...fixture,
+    payload: { ...(fixture.payload as Record<string, unknown>), ...patch },
+  };
+}
 
 function jsonOk(body: unknown) {
   return { ok: true, status: 200, json: async () => body } as Response;
@@ -41,16 +48,21 @@ function serveMeasuredZeros() {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes('/overview')) {
-      return jsonOk({
-        ...wire('/api/plugins/graph/overview'),
-        totals: { nodes: 0, edges: 0, files: 0 },
-        top_connected: [],
-      });
+      return jsonOk(
+        patchEnvelopePayload(wire('/api/plugins/graph/overview'), {
+          totals: { nodes: 0, edges: 0, files: 0 },
+          top_connected: [],
+        }),
+      );
     }
     if (url.includes('/subgraph')) {
-      return jsonOk({ ...wire('/api/plugins/graph/subgraph'), nodes: [], edges: [] });
+      return jsonOk(
+        patchEnvelopePayload(wire('/api/plugins/graph/subgraph'), { nodes: [], edges: [] }),
+      );
     }
-    return jsonOk({ ...wire('/api/plugins/graph/search'), total: 0, count: 0, results: [] });
+    return jsonOk(
+      patchEnvelopePayload(wire('/api/plugins/graph/search'), { total: 0, count: 0, results: [] }),
+    );
   });
 }
 
@@ -59,15 +71,20 @@ function serveZeroEdgesOnly() {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes('/overview')) {
-      return jsonOk({
-        ...wire('/api/plugins/graph/overview'),
-        totals: { nodes: 4_210, edges: 0, files: 187 },
-      });
+      return jsonOk(
+        patchEnvelopePayload(wire('/api/plugins/graph/overview'), {
+          totals: { nodes: 4_210, edges: 0, files: 187 },
+        }),
+      );
     }
     if (url.includes('/subgraph')) {
-      return jsonOk({ ...wire('/api/plugins/graph/subgraph'), nodes: [], edges: [] });
+      return jsonOk(
+        patchEnvelopePayload(wire('/api/plugins/graph/subgraph'), { nodes: [], edges: [] }),
+      );
     }
-    return jsonOk({ ...wire('/api/plugins/graph/search'), total: 0, count: 0, results: [] });
+    return jsonOk(
+      patchEnvelopePayload(wire('/api/plugins/graph/search'), { total: 0, count: 0, results: [] }),
+    );
   });
 }
 
@@ -135,12 +152,8 @@ describe('a graph read that failed', () => {
     vi.stubGlobal('fetch', serveReadFailure());
     renderCode();
 
-    // The boundary's own error rendering, which is what makes printing a
-    // measured zero safe: a failure never arrives at the render function.
-    // Every graph plate on the page reports it, so this is `findAll`.
-    expect(
-      await screen.findAllByText(/the read failed and nothing is being invented/i),
-    ).not.toHaveLength(0);
+    // Panel chrome reports transport errors as state chips with the HTTP detail.
+    expect((await screen.findAllByText(/HTTP 500/i)).length).toBeGreaterThan(0);
     expect(screen.queryByText(/symbols indexed/i)).toBeNull();
     expect(screen.queryByText(/no symbols are indexed/i)).toBeNull();
   });
