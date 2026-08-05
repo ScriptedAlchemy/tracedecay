@@ -27,7 +27,7 @@ two host-admitted agent sessions editing one file yield a single
 `ProximityTierV1::Immediate` contribution. `992934e03` narrowed
 `production_proximity_evidence_authority_v1` from `pub` to `pub(crate)` and
 dropped it from the `advisory` re-export list without touching the test, which
-left `tests/pr13_advisory_runtime_acceptance.rs` unable to compile;
+left `tests/advisory_runtime_acceptance.rs` unable to compile;
 `9e3ca9fd2` then deleted the test rather than repairing the import, and left
 this gate pointing at the deleted name. `production_proximity_evidence_authority_v1`
 now has no test caller anywhere.

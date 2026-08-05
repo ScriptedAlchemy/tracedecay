@@ -68,6 +68,7 @@ fn snapshot(epoch: u64, head: char) -> RepositoryStateSnapshotV1 {
             ignored_collision_digest: None,
         },
         GitOperationStateV1::None,
+        Some(digest('0')),
         Some(digest('1')),
         Some(digest('2')),
         Some(digest('3')),

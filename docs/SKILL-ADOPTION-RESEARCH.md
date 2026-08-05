@@ -151,9 +151,9 @@ deliberate design choice preventing ad-hoc work.
 | Layer | Mechanism | Character |
 |---|---|---|
 | Always-applied rule | `cursor-plugin/rules/tracedecay.mdc` | ~15 bullet points of routing advice; "prefer/first/fallback" phrasing; no decision procedure, no counters to rationalization |
-| Session start (Cursor) | `build_cursor_session_context` in `src/hooks/steering.rs` | Index status line + bare list of 25 skill names + tokens-saved counter. Doc comment says steering is deliberately left to the rule |
+| Session start (Cursor) | Native `sessionStart` → daemon-owned V2 admission | The hook returns only immediate daemon guidance, or an empty fail-open response when unavailable. |
 | Session start (Codex) | `build_codex_session_context_for_workspace` in `src/hooks/steering.rs` | One paragraph: "Prefer tracedecay MCP tools … over broad file reads"; CLI fallback note; index status |
-| Mid-session hints | `postToolUse` hook → `cursor_post_tool_use_decision` (`src/hooks/cursor.rs`) → `deduped_project_hint` (`src/hooks/mod.rs`), dedupe in `src/hooks/tool_hints.rs` | Fires after Grep/Read/etc., but deduped to **once per (session, category) forever** (`ToolHintDedupe::should_emit` is a plain `HashSet::insert`) |
+| Mid-session host events | Native Cursor lifecycle events → daemon-owned V2 admission | Immediate guidance, if any, is returned by the daemon; unsupported legacy surfaces stay passive. |
 | Skills | `cursor-plugin/skills/` (40 dirs installed: 23 model-invocable + 15 `tracedecay-*` slash-command variants with `disable-model-invocation: true` + a `memorize-subject`/`memorizing-subject` near-duplicate pair); `codex-plugin/skills/` (25) | Descriptions are actually good "Use when…" trigger form; the problem is volume and overlap, not phrasing |
 | MCP tool descriptions | `src/mcp/tools/definitions.rs` (68+ tools) | Capability descriptions ("Search for symbols … by name or keyword"), not invocation triggers; only `tracedecay_outline` and `tracedecay_context` carry usage steering (the latter a *budget cap*, i.e. anti-usage steering) |
 

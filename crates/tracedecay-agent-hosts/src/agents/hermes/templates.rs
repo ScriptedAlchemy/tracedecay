@@ -26,6 +26,7 @@ pub(super) fn plugin_manifest() -> String {
          provides_hooks:\n\
            - pre_llm_call\n\
            - post_tool_call\n\
+           - on_session_end\n\
          provides_commands:\n\
            - /tracedecay_status\n",
         version = crate::PRODUCT_VERSION,

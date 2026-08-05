@@ -16,18 +16,29 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub mod candidate_output;
+mod report;
 pub mod semantic_native;
+
+#[cfg(test)]
+mod report_tests;
+
+pub use report::{
+    DirectEvaluationReportV1, DirectProfileEvaluationV1, DirectQualityMetricsV1,
+    DirectQueryEvaluationV1, DirectQueryQualityV1, DirectRatioMetricV1, DirectStratumQualityV1,
+    DirectWorstStratumV1,
+};
 
 pub use candidate_output::{
     AdmittedCorpusScopeFn, CandidateOutputError, CandidateWorkloadV1,
-    DirectEvaluatedProfileMaterialV1, GenerateCandidateOutputsOptions,
-    GenerateCandidateOutputsResultV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-    ProductionCandidateNativeExecutionAuthorityV1, ProductionCandidateNativeGenerationResourcesV1,
-    ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
-    ProductionCandidateNativeResourceContextV1, ProductionCandidateOutputV1,
-    ResourceMeasurementStatusV1, WorkloadQueryV1, compute_corpus_digest,
-    compute_profile_material_digest, compute_workload_digest, direct_evaluated_profile_material,
-    generate_candidate_outputs, generate_candidate_outputs_with_native, load_candidate_workload,
+    DirectEvaluatedProfileMaterialV1, EvaluationExecutionContractV1,
+    GenerateCandidateOutputsOptions, GenerateCandidateOutputsResultV1, OptionalStageMeasurementV1,
+    OptionalStageMeasurementsV1, ProductionCandidateNativeExecutionAuthorityV1,
+    ProductionCandidateNativeGenerationResourcesV1, ProductionCandidateNativeQueryContextV1,
+    ProductionCandidateNativeQueryInputsV1, ProductionCandidateNativeResourceContextV1,
+    ProductionCandidateOutputV1, ResourceMeasurementStatusV1, WorkloadQueryV1,
+    compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
+    direct_evaluated_profile_material, generate_candidate_outputs,
+    generate_candidate_outputs_with_native, load_candidate_workload,
     load_direct_evaluated_profile_material, no_admitted_corpus_scope,
     retrieve_partition_query_bytes, validate_workload_for_tuning, write_generate_outputs,
 };
@@ -109,100 +120,6 @@ pub struct DirectWorkloadSummaryV1 {
     pub profile_count: usize,
     pub fixture_source_repository_commit: String,
     pub fixture_source_repository_tree: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DirectQueryEvaluationV1 {
-    pub query_id: String,
-    pub strata: Vec<String>,
-    pub protected: bool,
-    pub first_useful_rank: Option<u32>,
-    pub returned_candidates: usize,
-    pub wrong_scope_hits: usize,
-    pub forbidden_hits: usize,
-    pub expected_no_result: bool,
-    pub quality: DirectQueryQualityV1,
-    pub status: DirectEvaluationStatusV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DirectRatioMetricV1 {
-    pub numerator: u64,
-    pub denominator: u64,
-    pub ppm: u32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DirectQueryQualityV1 {
-    pub recall_at_10: DirectRatioMetricV1,
-    pub precision_at_10: DirectRatioMetricV1,
-    pub reciprocal_rank_ppm: u32,
-    pub ndcg_at_10_ppm: u32,
-    pub duplicate_rate: DirectRatioMetricV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DirectStratumQualityV1 {
-    pub stratum: String,
-    pub protected: bool,
-    pub query_count: u64,
-    pub relevant_query_count: u64,
-    pub recall_at_10: DirectRatioMetricV1,
-    pub precision_at_10: DirectRatioMetricV1,
-    pub mean_reciprocal_rank_ppm: u32,
-    pub ndcg_at_10_ppm: u32,
-    pub duplicate_rate: DirectRatioMetricV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DirectWorstStratumV1 {
-    pub stratum: String,
-    pub protected: bool,
-    pub relevant_query_count: u64,
-    pub recall_at_10: DirectRatioMetricV1,
-    pub mean_reciprocal_rank_ppm: u32,
-    pub ndcg_at_10_ppm: u32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DirectQualityMetricsV1 {
-    pub relevant_query_count: u64,
-    pub recall_at_10: DirectRatioMetricV1,
-    pub precision_at_10: DirectRatioMetricV1,
-    pub mean_reciprocal_rank_ppm: u32,
-    pub ndcg_at_10_ppm: u32,
-    pub duplicate_rate: DirectRatioMetricV1,
-    pub protected_recall_at_10: DirectRatioMetricV1,
-    pub strata: Vec<DirectStratumQualityV1>,
-    pub worst_stratum: Option<DirectWorstStratumV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DirectProfileEvaluationV1 {
-    pub profile_id: String,
-    pub partition: String,
-    pub query_count: usize,
-    pub failed_queries: usize,
-    pub fallback_stable: bool,
-    pub fallback_matches_expected: bool,
-    pub cancellation_bounded: bool,
-    pub offline: bool,
-    pub resource_status: DirectEvaluationStatusV1,
-    pub optional_stages: OptionalStageMeasurementsV1,
-    pub quality: DirectQualityMetricsV1,
-    pub status: DirectEvaluationStatusV1,
-    pub queries: Vec<DirectQueryEvaluationV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DirectEvaluationReportV1 {
-    pub command: String,
-    pub status: DirectEvaluationStatusV1,
-    pub workload_digest: String,
-    pub corpus_digest: String,
-    pub fixture_source_repository_commit: String,
-    pub fixture_source_repository_tree: String,
-    pub profiles: Vec<DirectProfileEvaluationV1>,
 }
 
 /// Genuine activation-eligible output coupling one immutable evaluator report
@@ -398,11 +315,7 @@ pub fn evaluate_default_activation_candidate(
     )?;
     validate_activation_native_matrix(&profile_ids, &generated)?;
     let report = evaluate_generated_outputs(repo_root, &workload, &generated)?;
-    if report.status != DirectEvaluationStatusV1::Pass {
-        return Err(SearchEvalError::Contract(
-            "activation candidate did not pass the required direct comparison matrix".to_owned(),
-        ));
-    }
+    report.validate_for_activation(repo_root, &workload)?;
     let evaluated_material = direct_evaluated_profile_material(&workload, evaluated_profile_id)?;
     Ok(DirectActivationEvaluationV1 {
         report,
@@ -475,6 +388,10 @@ pub fn evaluate_generated_outputs(
         corpus_digest,
         fixture_source_repository_commit: workload.source_repository_commit.clone(),
         fixture_source_repository_tree: workload.source_repository_tree.clone(),
+        execution_contract: workload.execution_contract.clone(),
+        profile_material_digests: report::profile_material_digests(&generated.outputs)?,
+        raw_output_digest: report::raw_output_digest(&generated.outputs)?,
+        raw_outputs: generated.outputs.clone(),
         profiles,
     })
 }

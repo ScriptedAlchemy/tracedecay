@@ -227,9 +227,12 @@ pub fn finish_synchronous_hook(
         | HookImmediateAdmissionStateV1::TimedOut
         | HookImmediateAdmissionStateV1::Backpressured => match replay_append {
             Some(SpoolAppendOutcomeV1::Accepted) => HookTransportDispositionV1::AcceptedForReplay,
-            Some(SpoolAppendOutcomeV1::Full | SpoolAppendOutcomeV1::Unavailable) | None => {
-                HookTransportDispositionV1::CatchupRequired
-            }
+            Some(
+                SpoolAppendOutcomeV1::Full
+                | SpoolAppendOutcomeV1::ResetRequired
+                | SpoolAppendOutcomeV1::Unavailable,
+            )
+            | None => HookTransportDispositionV1::CatchupRequired,
         },
     };
     let deadline_exceeded = elapsed_micros > HOOK_SYNCHRONOUS_BUDGET_MICROS;

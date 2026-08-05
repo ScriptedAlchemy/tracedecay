@@ -1,112 +1,56 @@
-//! High-level Hermes plugin lifecycle orchestration.
+//! Hermes registration projection for receipt-deployed plugin artifacts.
 //!
-//! This module owns the sequencing for user-level install, update, and
-//! uninstall. The concrete filesystem/config mutations stay in sibling
-//! helpers so the lifecycle path reads as ordered intent and preserves the
-//! historical side-effect order.
+//! The component catalog exclusively deploys the default profile's core
+//! plugin bytes. This module activates that exact deployment in Hermes config
+//! and projects it into existing named profiles, whose independent plugin
+//! directories are registration state covered by the catalog transaction.
 
-use std::path::{Path, PathBuf};
-
-use crate::agents::{InstallContext, UpdatePluginOutcome};
+use crate::agents::InstallContext;
 use crate::errors::Result;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InstallOutcome {
-    pub plugin_dir: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct UninstallOutcome {
-    pub plugin_dir: PathBuf,
-}
-
-pub(super) fn install(ctx: &InstallContext) -> Result<InstallOutcome> {
-    let plugin_dir = ctx.home.join(".hermes/plugins/tracedecay");
-
+pub(super) fn activate_deployed_plugin_registration(ctx: &InstallContext) -> Result<()> {
+    let deployed_plugin_dir = ctx.home.join(".hermes/plugins/tracedecay");
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
     for profile_plugin_dir in super::profile_plugin_dirs(&ctx.home) {
-        install_supported_plugin(&profile_plugin_dir, &ctx.tracedecay_bin, ctx.dashboard)?;
-    }
-
-    Ok(InstallOutcome { plugin_dir })
-}
-
-fn install_supported_plugin(
-    plugin_dir: &Path,
-    tracedecay_bin: &str,
-    deploy_dashboard: bool,
-) -> Result<()> {
-    let existed = plugin_dir.join("plugin.yaml").is_file();
-    if let Err(error) = super::install_plugin(plugin_dir, tracedecay_bin, deploy_dashboard) {
-        if !existed && let Err(cleanup_error) = super::remove_generated_plugin_files(plugin_dir) {
-            tracing::warn!(
-                plugin_dir = %plugin_dir.display(),
-                %cleanup_error,
-                "failed to roll back incomplete Hermes plugin"
-            );
-        }
-        return Err(error);
+        super::activate_deployed_plugin_profile(
+            &deployed_plugin_dir,
+            &profile_plugin_dir,
+            &ctx.tracedecay_bin,
+            ctx.dashboard,
+            &profile_root,
+        )?;
     }
     Ok(())
 }
 
-pub(super) fn update_plugin(ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-    let refreshed = refresh_installed_plugins(&ctx.home, &ctx.tracedecay_bin)?;
-    if refreshed.is_empty() {
-        Ok(UpdatePluginOutcome::NotInstalled)
-    } else {
-        Ok(UpdatePluginOutcome::Refreshed(refreshed))
-    }
-}
-
-/// Refreshes the generated user-level plugin without rewriting config.yaml.
-fn refresh_installed_plugins(home: &Path, tracedecay_bin: &str) -> Result<Vec<PathBuf>> {
-    let mut refreshed = Vec::new();
-    for plugin_dir in super::detected_plugin_dirs(home) {
-        let had_dashboard = super::dashboard_wrapper::is_deployed(&plugin_dir);
-
-        super::write_plugin_files(&plugin_dir, tracedecay_bin)?;
-        super::dashboard_wrapper::refresh_if_previously_deployed(
-            &plugin_dir,
-            tracedecay_bin,
-            had_dashboard,
-        )?;
-        refreshed.push(plugin_dir);
-    }
-    Ok(refreshed)
-}
-
-pub(super) fn uninstall(ctx: &InstallContext) -> Result<UninstallOutcome> {
-    let plugin_dir = ctx.home.join(".hermes/plugins/tracedecay");
-
+pub(super) fn deactivate_deployed_plugin_registration(ctx: &InstallContext) -> Result<()> {
+    let deployed_plugin_dir = ctx.home.join(".hermes/plugins/tracedecay");
     for profile_plugin_dir in super::profile_plugin_dirs(&ctx.home) {
-        super::uninstall_plugin(&profile_plugin_dir)?;
+        super::deactivate_deployed_plugin_profile(&deployed_plugin_dir, &profile_plugin_dir)?;
     }
-
-    Ok(UninstallOutcome { plugin_dir })
+    Ok(())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
-    use std::sync::{Mutex, OnceLock};
-
     use tempfile::TempDir;
 
-    use crate::agents::{InstallContext, UpdatePluginOutcome};
+    use crate::agents::InstallContext;
 
     use super::*;
 
-    const OLD_BIN: &str = "/old/bin/tracedecay";
     const NEW_BIN: &str = "/new/bin/tracedecay";
 
-    fn ctx(home: &Path, tracedecay_bin: &str) -> InstallContext {
+    fn ctx(home: &Path, tracedecay_bin: &str, dashboard: bool) -> InstallContext {
         InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
             tool_permissions: crate::agents::expected_tool_perms(),
             project_root: None,
-            dashboard: true,
+            dashboard,
         }
     }
 
@@ -115,39 +59,46 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
     }
 
-    fn with_hermes_home<T>(hermes_home: &Path, f: impl FnOnce() -> T) -> T {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let previous = std::env::var_os("HERMES_HOME");
-        unsafe {
-            std::env::set_var("HERMES_HOME", hermes_home);
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        unsafe {
-            if let Some(previous) = previous {
-                std::env::set_var("HERMES_HOME", previous);
-            } else {
-                std::env::remove_var("HERMES_HOME");
-            }
-        }
-        match result {
-            Ok(value) => value,
-            Err(payload) => std::panic::resume_unwind(payload),
+    fn seed_deployed_plugin(plugin_dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        super::super::managed_plugin_paths(plugin_dir)
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let contents = format!("feedback-target-{index}\n").into_bytes();
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &contents).unwrap();
+                (
+                    path.strip_prefix(plugin_dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    contents,
+                )
+            })
+            .collect()
+    }
+
+    fn assert_deployed_plugin_bytes(plugin_dir: &Path, expected: &BTreeMap<String, Vec<u8>>) {
+        for (relative, contents) in expected {
+            assert_eq!(
+                std::fs::read(plugin_dir.join(relative)).unwrap().as_slice(),
+                contents.as_slice(),
+                "{} did not preserve the deployed target",
+                plugin_dir.join(relative).display()
+            );
         }
     }
 
     #[test]
-    fn fresh_install_writes_plugin_and_enables_profile_config() {
+    fn activation_preserves_deployed_plugin_and_enables_profile_config() {
         let home = TempDir::new().unwrap();
+        let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
+        let deployed = seed_deployed_plugin(&plugin_dir);
 
-        let outcome = install(&ctx(home.path(), NEW_BIN)).unwrap();
+        activate_deployed_plugin_registration(&ctx(home.path(), NEW_BIN, true)).unwrap();
 
-        assert_eq!(
-            outcome.plugin_dir,
-            home.path().join(".hermes/plugins/tracedecay")
-        );
-        assert!(outcome.plugin_dir.join("plugin.yaml").is_file());
-        assert!(outcome.plugin_dir.join("dashboard/manifest.json").is_file());
+        assert_deployed_plugin_bytes(&plugin_dir, &deployed);
+        assert!(plugin_dir.join("dashboard/manifest.json").is_file());
         let config = text(&home.path().join(".hermes/config.yaml"));
         assert!(
             config.contains("- tracedecay"),
@@ -164,74 +115,48 @@ mod tests {
     }
 
     #[test]
-    fn update_existing_install_rebakes_artifacts_without_rewriting_config() {
+    fn activation_without_dashboard_leaves_no_wrapper_or_child() {
         let home = TempDir::new().unwrap();
-        let project = TempDir::new().unwrap();
-        let mut install_ctx = ctx(home.path(), OLD_BIN);
-        install_ctx.project_root = Some(project.path().to_path_buf());
-        install(&install_ctx).unwrap();
-        let config_path = home.path().join(".hermes/config.yaml");
-        let before = std::fs::read(&config_path).unwrap();
-
-        let outcome = with_hermes_home(&home.path().join(".hermes"), || {
-            update_plugin(&ctx(home.path(), NEW_BIN)).unwrap()
-        });
-
         let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-        assert!(
-            matches!(outcome, UpdatePluginOutcome::Refreshed(paths) if paths == vec![plugin_dir.clone()])
-        );
-        assert_eq!(std::fs::read(&config_path).unwrap(), before);
-        assert!(text(&plugin_dir.join("tools.py")).contains(NEW_BIN));
-        assert!(!text(&plugin_dir.join("tools.py")).contains(OLD_BIN));
-        assert!(text(&plugin_dir.join("dashboard/plugin_api.py")).contains(NEW_BIN));
+        let deployed = seed_deployed_plugin(&plugin_dir);
+
+        activate_deployed_plugin_registration(&ctx(home.path(), NEW_BIN, false)).unwrap();
+
+        assert_deployed_plugin_bytes(&plugin_dir, &deployed);
+        assert!(!plugin_dir.join("dashboard/manifest.json").exists());
+        assert!(!plugin_dir.join("dashboard/plugin_api.py").exists());
+        assert!(!plugin_dir.join("dashboard/dist/index.js").exists());
     }
 
     #[test]
-    fn install_configures_every_existing_hermes_profile() {
+    fn activation_configures_every_existing_hermes_profile() {
         let home = TempDir::new().unwrap();
-        let redirected = TempDir::new().unwrap();
+        let deployed_plugin = home.path().join(".hermes/plugins/tracedecay");
+        let deployed = seed_deployed_plugin(&deployed_plugin);
         let named = home.path().join(".hermes/profiles/work/plugins/tracedecay");
-        let redirected_plugin = redirected.path().join("plugins/tracedecay");
-        for plugin in [&named, &redirected_plugin] {
-            std::fs::create_dir_all(plugin).unwrap();
-            std::fs::write(plugin.join("plugin.yaml"), "name: tracedecay\n").unwrap();
-            std::fs::write(
-                plugin
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .join("config.yaml"),
-                "plugins:\n  enabled:\n    - tracedecay\n",
-            )
-            .unwrap();
-        }
+        std::fs::create_dir_all(named.parent().unwrap().parent().unwrap()).unwrap();
 
-        let outcome = install(&ctx(home.path(), NEW_BIN)).unwrap();
+        activate_deployed_plugin_registration(&ctx(home.path(), NEW_BIN, true)).unwrap();
 
-        assert!(outcome.plugin_dir.join("plugin.yaml").is_file());
-        assert!(named.join("plugin.yaml").exists());
-        assert!(redirected_plugin.join("plugin.yaml").exists());
+        assert_deployed_plugin_bytes(&deployed_plugin, &deployed);
+        assert_deployed_plugin_bytes(&named, &deployed);
         let named_config = text(&home.path().join(".hermes/profiles/work/config.yaml"));
         assert!(named_config.contains("- tracedecay"));
         assert!(named_config.contains("provider: tracedecay"));
         assert!(named_config.contains("engine: tracedecay"));
-        assert!(text(&redirected.path().join("config.yaml")).contains("tracedecay"));
     }
 
     #[test]
-    fn uninstall_removes_generated_current_plugin_state() {
+    fn deactivation_removes_registration_without_deployed_plugin_bytes() {
         let home = TempDir::new().unwrap();
-        install(&ctx(home.path(), NEW_BIN)).unwrap();
+        let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
+        let deployed = seed_deployed_plugin(&plugin_dir);
+        activate_deployed_plugin_registration(&ctx(home.path(), NEW_BIN, true)).unwrap();
 
-        let outcome = uninstall(&ctx(home.path(), NEW_BIN)).unwrap();
+        deactivate_deployed_plugin_registration(&ctx(home.path(), NEW_BIN, true)).unwrap();
 
-        assert_eq!(
-            outcome.plugin_dir,
-            home.path().join(".hermes/plugins/tracedecay")
-        );
-        assert!(!outcome.plugin_dir.join("plugin.yaml").exists());
+        assert_deployed_plugin_bytes(&plugin_dir, &deployed);
+        assert!(!plugin_dir.join("dashboard/manifest.json").exists());
         let config = text(&home.path().join(".hermes/config.yaml"));
         assert!(
             !config.contains("tracedecay"),
@@ -240,25 +165,22 @@ mod tests {
     }
 
     #[test]
-    fn install_rolls_back_new_artifacts_after_config_validation_failure() {
+    fn failed_profile_policy_does_not_replace_deployed_plugin_bytes() {
         let home = TempDir::new().unwrap();
+        let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
+        let deployed = seed_deployed_plugin(&plugin_dir);
         let config_path = home.path().join(".hermes/config.yaml");
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::write(&config_path, "memory:\n  provider: other\n").unwrap();
 
-        let err = install(&ctx(home.path(), NEW_BIN)).unwrap_err();
+        let err =
+            activate_deployed_plugin_registration(&ctx(home.path(), NEW_BIN, true)).unwrap_err();
 
         assert!(
             err.to_string()
                 .contains("Hermes memory provider already configured"),
             "unexpected error: {err}"
         );
-        assert!(
-            !home
-                .path()
-                .join(".hermes/plugins/tracedecay/plugin.yaml")
-                .exists()
-        );
+        assert_deployed_plugin_bytes(&plugin_dir, &deployed);
         assert_eq!(text(&config_path), "memory:\n  provider: other\n");
     }
 }

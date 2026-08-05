@@ -699,6 +699,10 @@ impl CursorComposerSource {
                                 Ok(CaptureObservationOutcome::Persisted {
                                     outcome: persisted,
                                     ..
+                                })
+                                | Ok(CaptureObservationOutcome::AcceptedForReplay {
+                                    outcome: persisted,
+                                    ..
                                 }) => {
                                     session_accepted = true;
                                     if matches!(*persisted, ObservationPersistOutcome::Committed(_))
@@ -950,6 +954,9 @@ impl CursorComposerSource {
             };
             match context.facade.capture_observation(request).await {
                 Ok(CaptureObservationOutcome::Persisted {
+                    outcome: persisted, ..
+                })
+                | Ok(CaptureObservationOutcome::AcceptedForReplay {
                     outcome: persisted, ..
                 }) => {
                     session_accepted = true;

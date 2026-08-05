@@ -1495,7 +1495,7 @@ mod discovery_tests {
     }
 
     fn scope(
-        fixture: &crate::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
+        fixture: &crate::advisory::fixtures::AdvisorySourceBackedCompositeFixtureV1,
     ) -> FeedbackScopeV1 {
         FeedbackScopeV1 {
             project_id: ProjectId::new("project.ci-discovery").unwrap(),
@@ -1507,7 +1507,7 @@ mod discovery_tests {
     }
 
     fn target(
-        _fixture: &crate::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
+        _fixture: &crate::advisory::fixtures::AdvisorySourceBackedCompositeFixtureV1,
     ) -> GitHubCiRepositoryTargetV1 {
         GitHubCiRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
@@ -1516,13 +1516,13 @@ mod discovery_tests {
     }
 
     fn config(
-        fixture: &crate::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
+        fixture: &crate::advisory::fixtures::AdvisorySourceBackedCompositeFixtureV1,
     ) -> ProductionCiProviderConfigV1 {
         config_with_source(fixture, SequencedSourceAccess::ready())
     }
 
     fn config_with_source(
-        fixture: &crate::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
+        fixture: &crate::advisory::fixtures::AdvisorySourceBackedCompositeFixtureV1,
         source_access: Arc<dyn CiSourceAccessAuthorityV1>,
     ) -> ProductionCiProviderConfigV1 {
         ProductionCiProviderConfigV1 {
@@ -1661,7 +1661,7 @@ mod discovery_tests {
     #[tokio::test]
     async fn denied_context_performs_zero_ci_discovery_reads() {
         let fixture =
-            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
         let calls = Arc::new(AtomicUsize::new(0));
         let client = CountingDiscoveryClient {
@@ -1684,7 +1684,7 @@ mod discovery_tests {
     #[test]
     fn configured_github_actions_builds_exact_failure_request_from_provider_records() {
         let fixture =
-            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
         let record = &fixture.ci_provider_record;
         let outcome = select_production_ci_failure_request_v1(
@@ -1706,7 +1706,7 @@ mod discovery_tests {
     #[test]
     fn ci_discovery_does_not_require_pull_request_resolution() {
         let fixture =
-            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
         let mut record = fixture.ci_provider_record.clone();
         record.workflow_run.pull_requests.clear();
@@ -1787,7 +1787,7 @@ mod discovery_tests {
     #[tokio::test]
     async fn retained_stale_fallback_exposes_rate_limit_cause_and_coverage() {
         let fixture =
-            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
         let request = CiFailureLocalizationRequestV1 {
             scope: scope.clone(),
@@ -1887,7 +1887,7 @@ mod discovery_tests {
         use tracedecay_application::feedback::CiFailureLocalizationPortOutcomeV1;
 
         let fixture =
-            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
         let request = CiFailureLocalizationRequestV1 {
             scope: scope.clone(),
@@ -1929,7 +1929,7 @@ mod discovery_tests {
     #[test]
     fn ci_discovery_requires_exact_two_scan_consensus() {
         let fixture =
-            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let request = CiFailureLocalizationRequestV1 {
             scope: scope(&fixture),
             run: fixture.ci.run.clone(),
@@ -1963,7 +1963,7 @@ mod discovery_tests {
     #[test]
     fn non_github_and_ambiguous_provider_records_fail_closed() {
         let fixture =
-            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
         let record = &fixture.ci_provider_record;
         assert_eq!(
@@ -2015,7 +2015,7 @@ mod discovery_tests {
     #[test]
     fn workflow_job_check_run_url_is_the_exact_check_identity() {
         let fixture =
-            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
         let record = &fixture.ci_provider_record;
         let mut workflow_job = record.workflow_job.clone();
@@ -2064,7 +2064,7 @@ mod discovery_tests {
     #[tokio::test]
     async fn discovery_collects_every_bounded_page_in_order() {
         let fixture =
-            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
         let first = fixture.ci_provider_record.workflow_run.clone();
         let mut second = first.clone();
@@ -2101,7 +2101,7 @@ mod discovery_tests {
     #[tokio::test]
     async fn source_revocation_stops_before_the_next_page() {
         let fixture =
-            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
         let first = fixture.ci_provider_record.workflow_run.clone();
         let source = SequencedSourceAccess::revoke_at(3);

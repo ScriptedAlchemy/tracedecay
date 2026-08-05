@@ -29,8 +29,8 @@ use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use super::{
     CurrentGitIndexPolicyStateV1, DaemonGitIndexTransactionService,
     DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor, GitIndexPolicyRecheckPort,
-    GitIndexTransactionStoreRegistry, SharedDaemonGitIndexTransactionStore,
-    canonicalize_repository_root,
+    GitIndexTransactionStoreRegistry, RepositoryMutationQueue,
+    SharedDaemonGitIndexTransactionStore, canonicalize_repository_root,
 };
 
 const GIT_POLICY_REVISION: u64 = 2;
@@ -415,6 +415,7 @@ impl ServiceKey {
 #[derive(Default)]
 pub(crate) struct DaemonGitIndexTransactionServiceRegistry {
     stores: GitIndexTransactionStoreRegistry,
+    mutation_queue: Arc<RepositoryMutationQueue>,
     services: tokio::sync::Mutex<HashMap<ServiceKey, ServiceEntry>>,
     creation_gate: tokio::sync::Mutex<()>,
 }
@@ -500,6 +501,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         let native_root = repository_root.clone();
         let authority = Arc::new(DaemonGitAuthoritySlot::default());
         let service_authority = Arc::clone(&authority);
+        let mutation_queue = Arc::clone(&self.mutation_queue);
         let (project_id, service) = tokio::task::spawn_blocking(move || {
             let native = FixedDaemonGitIndexExecutor::new(
                 DaemonProjectGitIndexPreviewAssembler::new(native_root, project_id.clone()),
@@ -509,6 +511,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
                 native,
                 GitEffectClassifierV1::default(),
                 DaemonGitIndexPolicyRecheck::new(service_authority),
+                mutation_queue,
                 observed_at,
             )
             .map(|service| (project_id, service))

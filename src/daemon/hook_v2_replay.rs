@@ -124,6 +124,13 @@ fn acknowledge(
         .is_ok()
 }
 
+enum ReplayCompletion {
+    Committed(HookSpoolRecordV1),
+    ExactDuplicate(HookSpoolRecordV1),
+    Tombstone(HookSpoolRecordV1, HookReplayTombstoneReasonV1),
+    Retained(u32),
+}
+
 /// Drain one host spool once. `admit` reauthorizes and admits a single
 /// envelope; production passes the daemon admission path, tests pass a fake.
 pub(crate) async fn drain_host_spool_once<A, F>(
@@ -167,78 +174,118 @@ where
     let batches = spool
         .claim_replay_batches(now, REPLAY_SESSIONS_PER_PASS)
         .ok()?;
+    let mut replay_batches = Vec::with_capacity(batches.len());
     for batch in batches {
-        let record_count = u16::try_from(batch.records.len()).unwrap_or(u16::MAX);
+        let Ok(record_count) = u16::try_from(batch.records.len()) else {
+            let _ = spool.release_replay_claim(batch.claim_id);
+            return Some(pass);
+        };
         if validate_replay_batch(record_count, batch.byte_count).is_err() {
             let _ = spool.release_replay_claim(batch.claim_id);
             pass.retained = pass.retained.saturating_add(record_count.into());
             continue;
         }
-        for record in &batch.records {
-            // Reauthorization on every replay, not once at spool time.
+        replay_batches.push((batch.records, record_count));
+    }
+
+    // The spool lease is process-wide and appenders need it to durably accept
+    // live hook events. Admission may await arbitrary daemon work, so retain
+    // only bounded record copies across that await and reacquire the writer
+    // solely for the final acknowledgement phase.
+    drop(spool);
+    let mut completions = Vec::new();
+    for (records, record_count) in replay_batches {
+        for (index, record) in records.into_iter().enumerate() {
             if record.envelope.validate(&binding).is_err() {
-                if acknowledge(
-                    &mut spool,
+                completions.push(ReplayCompletion::Tombstone(
                     record,
-                    HookSpoolAckDispositionV1::TerminalTombstone,
-                    now,
-                ) {
-                    log_tombstone(host, record, HookReplayTombstoneReasonV1::BindingStale);
-                    pass.tombstoned = pass.tombstoned.saturating_add(1);
-                }
+                    HookReplayTombstoneReasonV1::BindingStale,
+                ));
                 continue;
             }
-            match admit(record.envelope.clone()).await {
+            let outcome = admit(record.envelope.clone()).await;
+            match outcome {
                 HookV2AdmissionOutcomeV1::Admitted { .. } => {
-                    if acknowledge(
-                        &mut spool,
-                        record,
-                        HookSpoolAckDispositionV1::Committed,
-                        now,
-                    ) {
-                        pass.committed = pass.committed.saturating_add(1);
-                    }
+                    completions.push(ReplayCompletion::Committed(record));
                 }
                 HookV2AdmissionOutcomeV1::ExactDuplicate => {
-                    if acknowledge(
-                        &mut spool,
-                        record,
-                        HookSpoolAckDispositionV1::Committed,
-                        now,
-                    ) {
-                        pass.duplicates = pass.duplicates.saturating_add(1);
-                    }
+                    completions.push(ReplayCompletion::ExactDuplicate(record));
                 }
                 HookV2AdmissionOutcomeV1::Conflict => {
-                    if acknowledge(
-                        &mut spool,
+                    completions.push(ReplayCompletion::Tombstone(
                         record,
-                        HookSpoolAckDispositionV1::TerminalTombstone,
-                        now,
-                    ) {
-                        log_tombstone(host, record, HookReplayTombstoneReasonV1::IdentityConflict);
-                        pass.tombstoned = pass.tombstoned.saturating_add(1);
-                    }
+                        HookReplayTombstoneReasonV1::IdentityConflict,
+                    ));
                 }
                 HookV2AdmissionOutcomeV1::CatchupRequired => {
-                    if acknowledge(
-                        &mut spool,
+                    completions.push(ReplayCompletion::Tombstone(
                         record,
-                        HookSpoolAckDispositionV1::TerminalTombstone,
-                        now,
-                    ) {
-                        log_tombstone(host, record, HookReplayTombstoneReasonV1::BindingStale);
-                        pass.tombstoned = pass.tombstoned.saturating_add(1);
-                    }
+                        HookReplayTombstoneReasonV1::BindingStale,
+                    ));
                 }
-                // Transient: keep the record pending for a later pass.
                 HookV2AdmissionOutcomeV1::Backpressured | HookV2AdmissionOutcomeV1::Unavailable => {
-                    pass.retained = pass.retained.saturating_add(1);
+                    completions.push(ReplayCompletion::Retained(u32::from(
+                        record_count.saturating_sub(index as u16),
+                    )));
                     break;
                 }
             }
         }
-        let _ = spool.release_replay_claim(batch.claim_id);
+    }
+
+    let retained_without_ack = completions.iter().fold(0_u32, |retained, completion| {
+        retained.saturating_add(match completion {
+            ReplayCompletion::Retained(count) => *count,
+            ReplayCompletion::Committed(_)
+            | ReplayCompletion::ExactDuplicate(_)
+            | ReplayCompletion::Tombstone(_, _) => 1,
+        })
+    });
+    let Ok((mut spool, _)) = HookSpoolV1::open(
+        hook_v2_spool_root(data_root, host),
+        HookSpoolConfigV1::stock(host),
+        now,
+    ) else {
+        pass.retained = pass.retained.saturating_add(retained_without_ack);
+        return Some(pass);
+    };
+    for completion in completions {
+        match completion {
+            ReplayCompletion::Committed(record) => {
+                if acknowledge(
+                    &mut spool,
+                    &record,
+                    HookSpoolAckDispositionV1::Committed,
+                    now,
+                ) {
+                    pass.committed = pass.committed.saturating_add(1);
+                }
+            }
+            ReplayCompletion::ExactDuplicate(record) => {
+                if acknowledge(
+                    &mut spool,
+                    &record,
+                    HookSpoolAckDispositionV1::Committed,
+                    now,
+                ) {
+                    pass.duplicates = pass.duplicates.saturating_add(1);
+                }
+            }
+            ReplayCompletion::Tombstone(record, reason) => {
+                if acknowledge(
+                    &mut spool,
+                    &record,
+                    HookSpoolAckDispositionV1::TerminalTombstone,
+                    now,
+                ) {
+                    log_tombstone(host, &record, reason);
+                    pass.tombstoned = pass.tombstoned.saturating_add(1);
+                }
+            }
+            ReplayCompletion::Retained(count) => {
+                pass.retained = pass.retained.saturating_add(count);
+            }
+        }
     }
     Some(pass)
 }
@@ -446,6 +493,7 @@ pub(crate) async fn shutdown_hook_v2_replay_consumer(data_root: &Path) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::oneshot;
     use tracedecay_hooks::{
         HOOK_CONFIGURATION_SCHEMA_VERSION, HOOK_EVENT_SCHEMA_VERSION, HookBoundaryV1,
         HookCapabilityV1, HookConfigurationFileWriterV1, HookConfigurationPublisherV1,
@@ -616,6 +664,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_admission_does_not_hold_the_spool_writer_lease() {
+        let data_root = tempfile::tempdir().unwrap();
+        let current = UtcMicros(10);
+        let binding = binding(7);
+        publish_binding(data_root.path(), &binding, current);
+        let spool_root = hook_v2_spool_root(data_root.path(), HOST);
+        std::fs::create_dir_all(&spool_root).unwrap();
+        {
+            let (mut spool, _) =
+                HookSpoolV1::open(&spool_root, HookSpoolConfigV1::stock(HOST), current).unwrap();
+            spool
+                .append(envelope(9, &binding), &binding, current)
+                .unwrap();
+        }
+
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let entered_tx = Arc::new(StdMutex::new(Some(entered_tx)));
+        let release_rx = Arc::new(StdMutex::new(Some(release_rx)));
+        let drain = drain_host_spool_once(data_root.path(), HOST, current, move |_| {
+            let entered_tx = Arc::clone(&entered_tx);
+            let release_rx = Arc::clone(&release_rx);
+            async move {
+                let sender = entered_tx.lock().unwrap().take();
+                let receiver = release_rx.lock().unwrap().take();
+                if let Some(sender) = sender {
+                    let _ = sender.send(());
+                }
+                if let Some(receiver) = receiver {
+                    let _ = receiver.await;
+                }
+                admitted()
+            }
+        });
+        tokio::pin!(drain);
+        tokio::select! {
+            _ = &mut drain => panic!("drain returned before admission was released"),
+            result = entered_rx => result.expect("admission entered"),
+        }
+
+        let concurrent = HookSpoolV1::open(&spool_root, HookSpoolConfigV1::stock(HOST), current);
+        assert!(
+            concurrent.is_ok(),
+            "a live hook must be able to append while replay awaits daemon admission"
+        );
+        drop(concurrent);
+
+        let _ = release_tx.send(());
+        let report = drain.await.unwrap();
+        assert_eq!(report.committed, 1);
+    }
+
+    #[tokio::test]
     async fn a_stale_binding_tombstones_without_ever_reaching_admission() {
         let root = TestRoot::new("stale");
         let now = UtcMicros(1_000);
@@ -676,12 +777,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unavailable_daemon_retains_the_record_for_a_later_pass() {
+    async fn an_unavailable_daemon_retains_every_record_for_a_later_pass() {
         let root = TestRoot::new("retain");
         let now = UtcMicros(1_000);
         let binding = binding(7);
         publish_binding(root.path(), &binding, now);
-        spool_envelopes(root.path(), &binding, &[envelope(9, &binding)], now);
+        spool_envelopes(
+            root.path(),
+            &binding,
+            &[envelope(9, &binding), envelope(10, &binding)],
+            now,
+        );
 
         let report = drain_host_spool_once(root.path(), HOST, now, |_| async move {
             HookV2AdmissionOutcomeV1::Unavailable
@@ -689,15 +795,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(report.retained, 1);
+        assert_eq!(report.retained, 2);
         assert_eq!(report.committed, 0);
-        assert_eq!(pending_records(root.path(), now), 1);
+        assert_eq!(pending_records(root.path(), now), 2);
 
         // A later pass with a healthy daemon drains it.
         let report = drain_host_spool_once(root.path(), HOST, now, |_| async move { admitted() })
             .await
             .unwrap();
-        assert_eq!(report.committed, 1);
+        assert_eq!(report.committed, 2);
         assert_eq!(pending_records(root.path(), now), 0);
     }
 

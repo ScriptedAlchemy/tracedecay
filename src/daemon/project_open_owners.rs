@@ -108,6 +108,7 @@ use crate::daemon::service::invocation::{
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::mcp::McpServer;
+use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 use tracedecay_lsp::analyzer::broker::{AdmittedLspProvider, MountedLspProvider};
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 
@@ -1385,7 +1386,7 @@ pub(super) async fn register_project_open_dependent_owners(
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
-        phase = "semantic_activation_registered",
+        phase = "semantic_activation_resolved",
         elapsed_ms = semantic_activation_started.elapsed().as_millis(),
     );
     Ok(())
@@ -1424,114 +1425,117 @@ async fn register_semantic_activation_owner(
             message: format!("semantic accepted-profile authority unavailable: {error}"),
         })?,
     );
-    let current_state = match configuration_store
+    let current_state = configuration_store
         .current_state_if_present()
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("semantic retrieval current state unavailable: {error}"),
-        })? {
-        Some(state) => state,
-        None => {
-            let (report, accepted_profile, runtime) =
-                crate::application::semantic_runtime::bundled_query_authority().map_err(
-                    |error| TraceDecayError::Config {
-                        message: format!("bundled query authority rejected: {error}"),
-                    },
-                )?;
-            let evaluation_corpus_digest = tracedecay_domain::ManifestDigest::new(
-                report.corpus_digest.clone(),
-            )
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("bundled query corpus digest rejected: {error}"),
-            })?;
-            accepted_profiles
-                .publish(
-                    report,
-                    accepted_profile.clone(),
-                    runtime.clone(),
-                    evaluation_corpus_digest,
-                )
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("bundled query authority publication failed: {error}"),
-                })?;
-            let state = crate::config::retrieval::RetrievalProfileStateV1::new(
-                configuration.revision_id.clone(),
-                accepted_profile,
-                &runtime,
-            )
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("bundled query initial state rejected: {error}"),
-            })?;
-            configuration_store
-                .install_initial_state(&configuration_pin, &state)
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("bundled query initial state publication failed: {error}"),
-                })?;
-            state
-        }
-    };
+        })?;
     let observer = invocation.query_activation_registrar(project_root, Arc::clone(&session_db));
-    if current_state.audit().is_empty() {
-        let cursor_keys = Arc::new(
-            session_db
-                .load_session_cursor_key_provider_result()
+    if let Some(current_state) = current_state {
+        if current_state.audit().is_empty() {
+            let cursor_keys = Arc::new(
+                session_db
+                    .load_session_cursor_key_provider_result()
+                    .await
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("query cursor key authority unavailable: {error}"),
+                    })?,
+            );
+            invocation
+                .restore_initial_query_authority_for_project(
+                    scope.clone(),
+                    current_state,
+                    cursor_keys,
+                )
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("evaluated query initial authority restore failed: {error}"),
+                })?;
+        } else {
+            let committed = configuration_store
+                .current_committed_state()
                 .await
                 .map_err(|error| TraceDecayError::Config {
-                    message: format!("query cursor key authority unavailable: {error}"),
-                })?,
-        );
-        invocation
-            .restore_initial_query_authority_for_project(scope.clone(), current_state, cursor_keys)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("bundled query initial authority restore failed: {error}"),
-            })?;
+                    message: format!("semantic retrieval committed state unavailable: {error}"),
+                })?
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "semantic retrieval state has no current committed transition"
+                        .to_owned(),
+                })?;
+            observer
+                .activation_committed(committed)
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("semantic retrieval activation restore failed: {error}"),
+                })?;
+        }
+        if let Err(error) = invocation
+            .mount_query_authority_for_project(project_root, &scope)
+            .await
+        {
+            tracing::debug!(
+                event = "query_authority_mount",
+                outcome = "unavailable",
+                project_id = %scope.project_id,
+                reason = %error,
+                "query search authority unavailable; non-search project surfaces remain mounted"
+            );
+        }
+        if let Err(error) = crate::daemon::code_index_scheduler::semantic_query_runtime::
+            mount_current_semantic_query_authority_on_project_open(
+                &invocation.code_index_schedulers,
+                project_root,
+                &scope,
+                &configuration_store,
+                &configuration_pin,
+            )
+            .await
+        {
+            tracing::debug!(
+                event = "semantic_query_authority_mount",
+                outcome = "unavailable",
+                project_id = %scope.project_id,
+                reason = %error,
+                "semantic query authority unavailable; project surfaces remain mounted"
+            );
+        }
     } else {
-        let committed = configuration_store
-            .current_committed_state()
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("semantic retrieval committed state unavailable: {error}"),
-            })?
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "semantic retrieval state has no current committed transition".to_owned(),
-            })?;
-        observer
-            .activation_committed(committed)
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("semantic retrieval activation restore failed: {error}"),
-            })?;
-    }
-    if let Err(error) = invocation
-        .mount_query_authority_for_project(project_root, &scope)
-        .await
-    {
+        let core_query_available = match session_db.load_session_cursor_key_provider_result().await
+        {
+            Ok(cursor_keys) => {
+                if let Err(error) = invocation
+                    .mount_core_query_authority_for_project(project_root, &scope, &cursor_keys)
+                    .await
+                {
+                    tracing::debug!(
+                        event = "query_authority_mount",
+                        outcome = "unavailable",
+                        project_id = %scope.project_id,
+                        reason = %error,
+                        "core query fallback is unavailable; project admission continues"
+                    );
+                    false
+                } else {
+                    true
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    event = "query_authority_mount",
+                    outcome = "unavailable",
+                    project_id = %scope.project_id,
+                    reason = %error,
+                    "durable query cursor key is unavailable; project admission continues"
+                );
+                false
+            }
+        };
         tracing::debug!(
-            event = "query_authority_mount",
+            event = "semantic_activation_registration",
             outcome = "unavailable",
             project_id = %scope.project_id,
-            reason = %error,
-            "query search authority unavailable; non-search project surfaces remain mounted"
-        );
-    }
-    if let Err(error) = crate::daemon::code_index_scheduler::semantic_query_runtime::
-        mount_current_semantic_query_authority_on_project_open(
-            &invocation.code_index_schedulers,
-            project_root,
-            &scope,
-            &configuration_store,
-            &configuration_pin,
-        )
-        .await
-    {
-        tracing::debug!(
-            event = "semantic_query_authority_mount",
-            outcome = "unavailable",
-            project_id = %scope.project_id,
-            reason = %error,
-            "semantic query authority unavailable; canonical query remains mounted"
+            core_query_available,
+            "no genuinely evaluated optional-stage profile is published"
         );
     }
     let Some(inspector) =
@@ -1741,9 +1745,19 @@ async fn register_production_advisory_owner(
         feedback_scope.clone(),
     )
     .await;
-    let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
-        (remote.github, Some(remote.github_source_access), remote.ci)
-    });
+    let (github, github_provider, github_source_access, ci_config) =
+        remote.map_or((None, None, None, None), |remote| {
+            let provider = remote
+                .github
+                .as_ref()
+                .map(|github| github.identity.provider.clone());
+            (
+                remote.github,
+                provider,
+                Some(remote.github_source_access),
+                remote.ci,
+            )
+        });
     let github_pull_request_id = github
         .as_ref()
         .map(|github| github.target.pull_request_id.clone());
@@ -1822,9 +1836,13 @@ async fn register_production_advisory_owner(
         feedback_cycle,
     };
     let scout_claim_graph = Arc::clone(&graph);
+    let external_store = crate::daemon::external_acquisition::open_external_source_store(
+        &project_runtime_db,
+        github_provider.as_ref(),
+    )?;
     let production = Pr13AdvisoryProductionOpenV1 {
         database,
-        project_runtime_db,
+        project_runtime_db: Arc::clone(&project_runtime_db),
         graph,
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
         project_root: project_root.to_path_buf(),
@@ -1854,6 +1872,29 @@ async fn register_production_advisory_owner(
             });
         }
     };
+    let external_acquisition_request =
+        github_pull_request_id
+            .clone()
+            .map(|pull_request_id| GitHubReviewReadRequestV1 {
+                operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+                scope: feedback_scope_for_work.clone(),
+                pull_request_id,
+            });
+    let external_acquisition_context = external_acquisition_request.as_ref().and_then(|_| {
+        github_discovery_authorization_context(&source_access, &feedback_scope_for_work)
+    });
+    let external_acquisition =
+        crate::daemon::external_acquisition::mount_production_github_external_acquisition(
+            invocation,
+            project_root,
+            registration.as_ref(),
+            Arc::clone(&project_runtime_db),
+            external_acquisition_context,
+            external_acquisition_request,
+            github_provider,
+            external_store,
+        )
+        .await?;
     let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
         registration: Arc::clone(&registration),
         lsp_input: Arc::clone(&feedback_lsp_input),
@@ -1897,6 +1938,7 @@ async fn register_production_advisory_owner(
         let project_root = work_root.clone();
         let root_uri = root_uri.clone();
         let indexed_files = indexed_files.clone();
+        let external_acquisition = external_acquisition.clone();
         async move {
             run_production_pr13_hook_cycle(
                 request,
@@ -1912,6 +1954,7 @@ async fn register_production_advisory_owner(
                 project_root,
                 root_uri,
                 indexed_files,
+                external_acquisition,
             )
             .await;
         }
@@ -1950,6 +1993,9 @@ async fn run_production_pr13_hook_cycle(
     project_root: std::path::PathBuf,
     root_uri: String,
     indexed_files: Vec<String>,
+    external_acquisition: Option<
+        Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>,
+    >,
 ) {
     let Some(document_uri) = hook_feedback_document_uri_or_observe(
         &project_root,
@@ -2038,6 +2084,15 @@ async fn run_production_pr13_hook_cycle(
             expires_at,
         },
     };
+    let acquisition_outcome = crate::daemon::external_acquisition::handle_github_hook_event(
+        external_acquisition.as_ref(),
+        &invocation.context,
+        advisory.github.as_ref(),
+        request.hook.envelope(),
+        observed_at,
+    )
+    .await;
+    acquisition_outcome.observe(&feedback_scope.project_id, external_acquisition.is_some());
     let feedback_configuration_digest =
         advisory.feedback.input.request.configuration_digest.clone();
     let host = host_kind_for_hook(request.hook.envelope().producer);
@@ -2254,9 +2309,15 @@ fn hook_feedback_document_uri(
     let logical_path = match &request.hook.envelope().event {
         tracedecay_hooks::HookEventV2::SavedEdit { file_id, .. } => {
             indexed_files.iter().find(|logical_path| {
-                hash16(logical_path.as_bytes()) == *file_id
-                    || hash16(project_root.join(logical_path).to_string_lossy().as_bytes())
-                        == *file_id
+                let logical_file_id = daemon_mint_hook_v2_file_id(
+                    request.hook.envelope(),
+                    hash16(logical_path.as_bytes()),
+                );
+                let absolute_file_id = daemon_mint_hook_v2_file_id(
+                    request.hook.envelope(),
+                    hash16(project_root.join(logical_path).to_string_lossy().as_bytes()),
+                );
+                logical_file_id == *file_id || absolute_file_id == *file_id
             })?
         }
         _ => indexed_files.first()?,
@@ -2965,6 +3026,9 @@ pub(crate) fn resolved_scope_for_project(
 }
 
 #[cfg(test)]
+mod scout_journey_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tracedecay_domain::RepositoryId;
@@ -3046,23 +3110,25 @@ mod tests {
             capabilities,
         };
         Pr13HookOrchestrationRequestV1::from_envelope(
-            tracedecay_hooks::HookEventEnvelopeV2 {
-                schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
-                event_id: [1; 16],
-                producer: tracedecay_hooks::HookHostV1::Codex,
-                protected_session_id: [2; 32],
-                project_id: binding.project_id,
-                repository_id: binding.repository_id,
-                worktree_id: binding.worktree_id,
-                worktree_epoch: binding.worktree_epoch,
-                binding_token: binding.binding_token,
-                ordering: tracedecay_hooks::HookOrderingV1::Unknown,
-                observed_at: UtcMicros(10),
-                event: tracedecay_hooks::HookEventV2::SavedEdit {
-                    file_id,
-                    changed_range_count: 1,
+            crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_envelope(
+                &tracedecay_hooks::HookEventEnvelopeV2 {
+                    schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+                    event_id: [1; 16],
+                    producer: tracedecay_hooks::HookHostV1::Codex,
+                    protected_session_id: [2; 32],
+                    project_id: binding.project_id,
+                    repository_id: binding.repository_id,
+                    worktree_id: binding.worktree_id,
+                    worktree_epoch: binding.worktree_epoch,
+                    binding_token: binding.binding_token,
+                    ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+                    observed_at: UtcMicros(10),
+                    event: tracedecay_hooks::HookEventV2::SavedEdit {
+                        file_id,
+                        changed_range_count: 1,
+                    },
                 },
-            },
+            ),
             &binding,
             None,
             7,
@@ -3172,24 +3238,14 @@ mod tests {
             delivery_window:
                 crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::Immediate,
             delivered_dedupe_keys: BTreeSet::new(),
-            candidates: vec![
-                crate::agents::context_scout_v2::ContextScoutCandidateV1 {
-                    dedupe_key: [11; 32],
-                    category:
-                        crate::agents::context_scout_v2::ContextScoutCategoryV1::Retrieval,
-                    relevance_score: 10,
-                    suggestion_text: "Use the admitted evidence.".to_owned(),
-                    evidence: vec![
-                        crate::agents::context_scout_v2::ContextScoutEvidenceBindingV1 {
-                            anchor_id: [12; 16],
-                            content_identity: [13; 32],
-                            generation:
-                                crate::agents::context_scout_v2::ContextScoutEvidenceGenerationV1::SavedContent,
-                        },
-                    ],
-                    expires_at: UtcMicros(100),
-                },
-            ],
+            candidates: vec![crate::agents::context_scout_v2::ContextScoutCandidateV1 {
+                dedupe_key: [11; 32],
+                category: crate::agents::context_scout_v2::ContextScoutCategoryV1::Retrieval,
+                relevance_score: 10,
+                suggestion_text: "Use the admitted evidence.".to_owned(),
+                evidence: super::scout_journey_tests::configured_model_evidence(10),
+                expires_at: UtcMicros(100),
+            }],
         }
     }
 
@@ -3247,6 +3303,22 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn canonical_saved_edit_identity_resolves_its_exact_indexed_file() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let absolute_path = temporary.path().join("src/lib.rs");
+        let request = saved_edit_hook_request(hash16(absolute_path.to_string_lossy().as_bytes()));
+
+        assert_eq!(
+            hook_feedback_document_uri(
+                temporary.path(),
+                &["src/lib.rs".to_owned(), "src/other.rs".to_owned()],
+                &request,
+            ),
+            url::Url::from_file_path(absolute_path).ok().map(Into::into),
+        );
     }
 
     #[test]

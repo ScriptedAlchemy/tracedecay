@@ -27,6 +27,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::framed_log::{
@@ -48,6 +49,7 @@ const RECORD_BODY_BYTES: usize = IDENTITY_BYTES + DIGEST_BYTES + 8;
 const RECORD_BYTES: usize = RECORD_BODY_BYTES + CHECKSUM_PREFIX_BYTES;
 const RECORDS_FILE: &str = "admissions.v1.bin";
 const COMPLETIONS_FILE: &str = "admission-work-completions.v1.json";
+const LOCK_FILE: &str = "admissions.v1.lock";
 const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
 
 /// Checked-in ledger bounds. Callers may narrow these but never widen them.
@@ -114,6 +116,8 @@ pub enum HookAdmissionLedgerError {
     RecordUnencodable,
     #[error("hook admission ledger identity is invalid")]
     InvalidIdentity,
+    #[error("hook admission ledger is busy in another daemon")]
+    Busy,
 }
 
 /// Bounded recovery report for an opened ledger.
@@ -147,6 +151,7 @@ pub fn hook_admission_digest(
 #[derive(Debug)]
 pub struct HookAdmissionLedgerV1 {
     root: PathBuf,
+    _writer_lock: fs::File,
     host: HookHostV1,
     limits: HookAdmissionLedgerLimitsV1,
     entries: BTreeMap<[u8; IDENTITY_BYTES], LedgerEntry>,
@@ -165,6 +170,7 @@ impl HookAdmissionLedgerV1 {
         limits.validate()?;
         let root = root.into();
         ensure_root(&root)?;
+        let writer_lock = acquire_writer_lock(&root)?;
         let path = records_path(&root);
         ensure_header(&path)?;
         let bytes = read_bounded(&path, limits.max_file_bytes())?.unwrap_or_default();
@@ -172,6 +178,7 @@ impl HookAdmissionLedgerV1 {
         let completions_existed = completions_path(&root).is_file();
         let mut ledger = Self {
             root,
+            _writer_lock: writer_lock,
             host,
             limits,
             entries: BTreeMap::new(),
@@ -420,6 +427,28 @@ fn completions_path(root: &Path) -> PathBuf {
     root.join(COMPLETIONS_FILE)
 }
 
+fn lock_path(root: &Path) -> PathBuf {
+    root.join(LOCK_FILE)
+}
+
+fn acquire_writer_lock(root: &Path) -> Result<fs::File, HookAdmissionLedgerError> {
+    let path = lock_path(root);
+    shared_validate_regular(&path).map_err(|_| HookAdmissionLedgerError::UnsafePath)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|_| HookAdmissionLedgerError::Io)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(HookAdmissionLedgerError::Busy)
+        }
+        Err(_) => Err(HookAdmissionLedgerError::Io),
+    }
+}
+
 fn read_work_completions(
     root: &Path,
     max_records: u32,
@@ -545,6 +574,7 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, HookAdmi
 mod tests {
     use super::*;
     use crate::{HOOK_EVENT_SCHEMA_VERSION, HookBoundaryV1, HookEventV2, HookOrderingV1};
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TestDir(PathBuf);
@@ -654,6 +684,53 @@ mod tests {
             reopened.admit(&envelope(9, 6), UtcMicros(6)).unwrap(),
             HookAdmissionDecisionV1::Conflict
         );
+    }
+
+    #[test]
+    fn writer_lock_contends_and_releases_across_processes() {
+        const MODE_ENV: &str = "TRACEDECAY_HOOK_ADMISSION_LOCK_PROBE";
+        const ROOT_ENV: &str = "TRACEDECAY_HOOK_ADMISSION_LOCK_ROOT";
+        if let Ok(mode) = std::env::var(MODE_ENV) {
+            let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("child lock root"));
+            match mode.as_str() {
+                "contended" => assert!(matches!(
+                    HookAdmissionLedgerV1::open(
+                        &root,
+                        HookHostV1::ClaudeCode,
+                        HookAdmissionLedgerLimitsV1::stock(),
+                        UtcMicros(2),
+                    ),
+                    Err(HookAdmissionLedgerError::Busy)
+                )),
+                "released" => {
+                    HookAdmissionLedgerV1::open(
+                        &root,
+                        HookHostV1::ClaudeCode,
+                        HookAdmissionLedgerLimitsV1::stock(),
+                        UtcMicros(3),
+                    )
+                    .expect("OS releases the ledger lock when its owner exits");
+                }
+                other => panic!("unknown child lock probe mode: {other}"),
+            }
+            return;
+        }
+
+        let root = TestDir::new("process-lock");
+        let first = open(root.path(), UtcMicros(1));
+        let test_name =
+            "admission_ledger::tests::writer_lock_contends_and_releases_across_processes";
+        let run_child = |mode: &str| {
+            Command::new(std::env::current_exe().expect("current test binary"))
+                .args(["--exact", test_name, "--nocapture"])
+                .env(MODE_ENV, mode)
+                .env(ROOT_ENV, root.path())
+                .status()
+                .expect("run admission lock probe child")
+        };
+        assert!(run_child("contended").success());
+        drop(first);
+        assert!(run_child("released").success());
     }
 
     #[test]

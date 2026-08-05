@@ -1,0 +1,297 @@
+[
+  {
+    "path": "skills/recalling-session-context/SKILL.md",
+    "digest": "8baea6f4050fdecbd273eab8ff4131179ffb3ae8c9d6bfe64a88a73ce62acbb7",
+    "releases": [
+      "v0.0.25",
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: recalling-session-context\ndescription: 'Use when retrieving what happened in past agent sessions: full-text transcript recall, scoped/time-filtered grep, lossless session replay, summary-DAG drill-down, or compaction recovery.'\n---\n\n# Recalling session context\n\nClimb this ladder cheapest-first; stop as soon as the question is answered. For durable *decisions and facts* (rather than raw conversation), start with `tracedecay:project-memory` instead.\n\nThis skill owns the **FTS → LCM** lane of `tracedecay_message_search`: `message_search` is the entry point into raw-message grep, lossless replay, and summary-DAG drill-down (the ladder below). When `message_search` is instead the entry point into durable *facts*, that is `tracedecay:project-memory`'s FTS → fact lane.\n\n## Retrieval ladder\n\n1. **Fast full-text recall → `tracedecay_message_search`** (`query`, optional `provider`, `scope`: `all`|`parents_only`|`subagents_only`, `limit`): FTS over ingested transcripts; returns messages with their session ids — the entry point for the LCM ladder below.\n2. **Scoped/filtered grep → `tracedecay_lcm_grep`** (`query`, `scope`: `current`|`session`|`all` — `current`/`session` require `session_id`; `role`, `source`, `start_time`/`end_time`, `sort`: `recency`|`relevance`|`hybrid`): bounded raw-message snippets plus summary text when FTS recall needs role/time/session precision.\n3. **Lossless replay → `tracedecay_lcm_load_session`** (`session_id`, `after_store_id` + `limit` for stable pagination, `roles`, `content_offset`/`content_limit`): ordered raw messages of one session; page with `next_cursor` instead of asking for everything at once.\n4. **Summary-DAG drill-down:** `tracedecay_lcm_describe` (`session_id`) for the session's raw/summary shape; `tracedecay_lcm_expand` (`target.kind`: `raw_message`|`summary_node`|`external_payload`) to open one node, paging sources via `source_offset`/`source_limit`; `tracedecay_lcm_expand_query` (`query`) to assemble bounded retrieval context for a prompt in one call.\n5. **Store inspection → `tracedecay_lcm_status`** (counts, token estimates, DAG depth/compression ratio) when you need to know what the store contains before searching it.\n\n## Guardrails\n\n- Steps 1–5 are read-only. `tracedecay_lcm_compress`, `tracedecay_lcm_preflight`, and `tracedecay_lcm_session_boundary` are **lifecycle-integration tools for host agents** — never invoke them casually during recall.\n- For multi-step recall, dispatch scoped read-only subagents by session id, time window, provider, role, or query variant. Subagents must not call lifecycle or repair tools; the parent agent validates cited messages/summaries and produces the final timeline.\n- If the LCM store itself looks wrong (missing sessions, broken FTS, stale counts) → `tracedecay_lcm_doctor` (`mode: \"diagnose\"` first; `repair`/`clean` mutate and need explicit user intent).\n- All LCM tools default to `storage_scope: \"project_local\"`; only pass `hermes_profile` (with an absolute `hermes_home`) when the user asks about a Hermes profile store.\n\n## Handoff\n\n- Durable decisions/facts and persisting new ones → `tracedecay:project-memory`.\n\n## Output\n\n- The recalled messages/summaries with session ids and timestamps, and which rung answered the question.\n- If any result includes a `tracedecay_metrics:` line, report the savings to the user.\n"
+  },
+  {
+    "path": "skills/retrieving-cached-context/SKILL.md",
+    "digest": "fb1b2fa3e50d7f6e5a472259ed37c1e8135e29ced0ebb3e3cbb3bb2c5eab7300",
+    "releases": [
+      "v0.0.25",
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: retrieving-cached-context\ndescription: 'Use when a tracedecay response was truncated with a handle and the missing detail is needed — dereference the cached original with tracedecay_retrieve instead of re-running, or expand one LCM node.'\n---\n\n# Retrieving cached context\n\nTraceDecay truncates large tool responses and emits a **handle** envelope\ninstead of the full body. The original text is cached in the active-project\nstore; you dereference it with `tracedecay_retrieve` rather than re-running the\nsource tool. This skill covers that handle/caching mechanic and the related\nsingle-node expansion via `tracedecay_lcm_expand`.\n\n## When to retrieve vs re-run\n\n- A prior response ended with a `handle` (e.g. `rh_…`) and the missing details\n  are actually needed to answer the user → **retrieve the handle**. Do not\n  re-run the broad query, guess, or read a file again.\n- You do NOT need the truncated tail → leave it; retrieval costs tokens.\n- The result was truncated because the query was too broad → also consider\n  narrowing the original query next time (see `tracedecay:using-tracedecay`).\n\n## Tools\n\n1. **Dereference a handle → `tracedecay_retrieve`** (`handle` required, copied\n   exactly from the truncated envelope). It returns the **exact cached original\n   text** — it does not re-run the source tool or re-read a file/session/node.\n   Handles are scoped to the active project store, expire automatically, and\n   never reference remote storage. If the truncated response used a\n   `project-id`/`project-path` selector, pass the same selector to `retrieve`.\n2. **Expand one LCM node → `tracedecay_lcm_expand`** (`provider`, `session-id`,\n   `target` with `kind`: `raw_message`|`summary_node`|`external_payload`):\n   opens a single session node through the bounded LCM query API. Page a summary\n   node's sources with `source-offset`/`source-limit`, and page long content\n   with `content-offset`/`content-limit`. If a returned source has\n   `content_truncated: true`, continue via `target.kind: \"raw_message\"` for that\n   source's `store_id` and `content_offset`.\n\n## Guardrails\n\n- Both tools are **read-only**; they surface already-cached content and never\n  mutate state.\n- Retrieve only what you need — handles and node expansion are bounded on\n  purpose; do not dump the full cached body when a slice answers the question.\n- Handles expire; if `retrieve` reports an expired/unknown handle, re-run the\n  original tool with a narrower query rather than retrying the stale handle.\n- Handles are local and project-scoped — never treat them as durable\n  references to store or reuse across sessions.\n\n## Handoff\n\n- Finding which session node to expand (grep, replay, summary-DAG shape) → `tracedecay:recalling-session-context`.\n- Driving compression that produces those summary nodes → `tracedecay:managing-session-context`.\n- General \"narrow the query instead of re-running\" guidance → `tracedecay:using-tracedecay`.\n\n## Output\n\n- The retrieved cached text or expanded node content, and a note that it came\n  from a handle/cache rather than a fresh query.\n- If any result includes a `tracedecay_metrics:` line, report the savings to the user.\n"
+  },
+  {
+    "path": "skills/retrieving-project-memory/SKILL.md",
+    "digest": "e3a2fd2d24836e9319e8e177d4eebb06f15d8253d42d85bfd8b911fb27b488d5",
+    "releases": [
+      "v0.0.25",
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: retrieving-project-memory\ndescription: 'Use when querying or reasoning over stored tracedecay memory facts — searching, probing by entity, multi-fact reasoning, or fetching a fact with trust history. For recall framing see project-memory.'\n---\n\n# Retrieving project memory\n\nThis skill owns the **read/reason mechanics** of the holographic fact store:\nthe exact `tracedecay_fact_store` retrieval actions plus\n`tracedecay_memory_status`. It is the mechanical counterpart to\n`tracedecay:project-memory` (which frames memory recall around a task\nor decision and starts from transcripts). When the question is \"what does the\nfact store know about X and how do the facts relate,\" start here.\n\n## Retrieval actions (`tracedecay_fact_store`)\n\nAll read-mostly; they may update access/retrieval metadata but do not add or\ndelete facts. Read-only project selectors (`project-id` / `project-path`) are\nsupported for these actions.\n\n1. **search** (`query`, optional `category`, `limit` default 20 / max 200,\n   `min_trust`) — phase-vector similarity search; the default entry point for\n   \"find facts about X.\"\n2. **probe** (`entity` / `query`) — probe memory around a single named entity.\n3. **related** (`entity`) — facts connected to an entity via stored relations.\n4. **reason** (`query`, `entities`) — assemble and reason over multiple facts\n   for a query, following entity relations rather than returning a flat list.\n5. **get** (`fact-id`) — the full fact plus its `trust_history`, so you can\n   answer *why* a trust score is what it is.\n6. **list** (optional `category`, `min_trust`, `limit`) — enumerate stored\n   facts for review.\n7. **contradict** (`threshold`) — scan for contradictory facts; non-destructive.\n\n## Memory health\n\n- **`tracedecay_memory_status`** — fact/entity counts, trust distribution,\n  below-threshold and missing-vector signals, capacity-per-bank, and repair\n  stats. Note it **repairs** derived vectors/banks as a side effect, so call it\n  when the user asks for memory counts/health, not on every recall.\n\n## How to query and reason\n\n- Prefer `search`/`probe` to locate candidates, then `reason` (or `related`)\n  when the answer spans several linked facts.\n- Use `min_trust` to filter out low-confidence facts; use `get` on a specific\n  `fact-id` when the user challenges a fact or asks why its trust changed.\n- Keep retrieval bounded and token-aware: set `limit` deliberately and narrow\n  `query`/`category` rather than pulling the whole store with a broad `list`.\n\n## Guardrails\n\n- search/probe/related/reason/get/list/contradict are read-only recall (they\n  may touch access counters); they never mutate fact content.\n- `tracedecay_memory_status` mutates derived state (vector/bank repair) — treat\n  it as a health action, not a passive read.\n- Recall memory before external or web search — a prior session likely already\n  answered the question, cheaper and project-specific.\n\n## Handoff\n\n- Task/decision recall that should start from transcripts, or fixing stale/contradictory/duplicate facts → `tracedecay:project-memory`.\n- Persisting a new durable fact → `tracedecay:storing-project-memory`.\n\n## Output\n\n- The facts found/reasoned over with their ids, trust, and source, plus which\n  action answered the question.\n- If any result includes a `tracedecay_metrics:` line, report the savings to the user.\n"
+  },
+  {
+    "path": "skills/storing-project-memory/SKILL.md",
+    "digest": "0ac3f8a41bb88c61bcac0121aebe1b8ff239adfaee4ccaeb9904850c66521bfd",
+    "releases": [
+      "v0.0.25",
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: storing-project-memory\ndescription: 'Use when writing a durable fact to tracedecay memory — persisting a decision, preference, correction, pitfall, or entity relation, and handling near-duplicate/conflict/secret write diffs. For cleanup see project-memory.'\n---\n\n# Storing project memory\n\nThis skill owns the **write path** into holographic memory: turning a durable\ndecision or fact into a stored `tracedecay_fact_store` record. It is the\nnarrow \"add/update/relate\" counterpart to `tracedecay:project-memory`\n(dedup, merge, delete, whole-subject memorization) and\n`tracedecay:retrieving-project-memory` (read/reason). Store proactively\nwhenever a durable decision, user preference, correction, or pitfall surfaces —\ndo not wait for the user to ask.\n\n## When to store vs not\n\nStore only **durable, project-scoped** facts:\n\n- Store: architectural/design decisions, user or project preferences, hard-won\n  corrections, recurring pitfalls, stable conventions, entity relationships.\n- Do NOT store: secrets/credentials/API keys/PII, transient errors,\n  environment-specific failures, task progress, one-off narratives, or anything\n  that goes stale when the session ends — recover those from transcripts via\n  `tracedecay:recalling-session-context` instead.\n\n## Workflow\n\n1. **Dedupe first (read-only):** search before you write with\n   `tracedecay_fact_store` `action: \"search\"` (`query` = subject + candidate,\n   optional `category`, `limit: 10`, `min_trust: 0.5`). If a near-match exists,\n   prefer an update over a second add.\n2. **Add a fact → `tracedecay_fact_store`** `action: \"add\"` with `content`\n   (the durable claim), `category`, `source` (provenance label), `tags`,\n   `entities` (named entities the fact concerns), `trust`, and optional\n   `metadata` (subject/confidence/citations). The add result carries a\n   write-time diff — always read it (see below).\n3. **Update an existing fact → `tracedecay_fact_store`** `action: \"update\"`\n   with `fact-id` plus the changed `content`/`trust`/`tags`/`category`. Prefer\n   update when correcting or refining a fact so provenance survives.\n4. **Relate entities → `tracedecay_fact_store`** `action: \"relate\"` (with\n   `entities` / `entity`) to record a relationship between named entities the\n   facts concern.\n5. **Calibrate trust deliberately** — do not default high. Aim for a spread:\n   `>=0.85` for independently verified/durable decisions, `~0.7` for ordinary\n   well-sourced facts, `~0.5` for plausible-but-unsure. Do not lower trust\n   merely because a fact is old; cite newer evidence instead.\n\n## Reading the add diff\n\nEvery `action: \"add\"` returns `diff` / `closest_fact_id` / `similarity` /\n`reason`. Act on it, never ignore it:\n\n- `near_duplicate` — a very similar fact exists; prefer `action: \"update\"` on\n  `closest_fact_id` rather than storing a second copy.\n- `possible_conflict` — a negation/state-change cue suggests supersession;\n  confirm which fact is current before leaving both in place (hand off to\n  `tracedecay:project-memory` if a merge/delete is needed).\n- `rejected_secret_like` — credential-like content was **NOT** stored. Never\n  rephrase or obfuscate a rejected secret to bypass the filter.\n\n## Guardrails\n\n- `search` is read-only; `add`, `update`, and `relate` **mutate** memory state.\n  `search`/`probe`/`related`/`reason` may update access/retrieval counters.\n- Deletion is permanent and lives in `tracedecay:project-memory`, not\n  here — prefer update/relate over creating removable clutter.\n- Never store secrets, credentials, keys, or PII; rely on the built-in\n  `rejected_secret_like` filter as a backstop, not a first line.\n- Only the parent agent should call `add`/`update`/`relate`. Subagents may\n  gather cited evidence and candidate facts; the parent validates and writes.\n\n## Handoff\n\n- Dedup, merge, delete, or memorize a whole subject → `tracedecay:project-memory`.\n- Read, probe, or reason over stored facts → `tracedecay:retrieving-project-memory`.\n\n## Output\n\n- The fact(s) stored/updated with their ids, the trust assigned, and any\n  `near_duplicate` / `possible_conflict` / `rejected_secret_like` diff acted on.\n- If any result includes a `tracedecay_metrics:` line, report the savings to the user.\n"
+  },
+  {
+    "path": "skills/tracedecay-audit-safety/SKILL.md",
+    "digest": "bb196c87c451d75a148c47cfad3f50f3c8a0eff887d79de14169fa57df453d8e",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-audit-safety\ndescription: 'Use to audit the repo or a directory for ship-blocking risk, panic sites, risk markers, dead code, and untested high-risk symbols.'\n---\n\n# Audit safety\n\nUse when asked to audit the repo or a directory for ship-blocking risk, panic sites, risk markers, dead code, or untested high-risk symbols.\n\nRoute this through the `tracedecay:reviewing-changes` skill.\n\n- **Scope:** the whole repo, or a specific directory if one is named.\n- Follow that skill's read-only workflow and guardrails: report findings, do not fix them here.\n\nOutput: findings grouped Critical / Warning / Note with file + enclosing symbol, and a prioritized follow-up list.\n"
+  },
+  {
+    "path": "skills/tracedecay-audit-safety/SKILL.md",
+    "digest": "d31189e7edcd510ddf574b8a0406f8f87b95fed980bc833911b946d3389d9985",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-audit-safety\ndescription: 'Use to audit the repo or a directory for ship-blocking risk, panic sites, risk markers, dead code, and untested high-risk symbols.'\n---\n\n# Audit safety\n\nUse for repo or directory audits covering ship-blocking risk, panic sites, risk markers, dead code, or untested high-risk symbols.\n\nUse `tracedecay:reviewing-changes`.\n\n- **Scope:** the whole repo, or a specific directory if one is named.\n- Read-only: report findings, do not fix them here.\n\nOutput: findings grouped Critical / Warning / Note with file + enclosing symbol, and a prioritized follow-up list.\n"
+  },
+  {
+    "path": "skills/tracedecay-check-health/SKILL.md",
+    "digest": "14a48887d0b0759053031f5a7f5ca04ca5c47e41a4b01b6e21c8109bb58cadb5",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-check-health\ndescription: 'Use to check code health for the repo or a directory, including worst offenders and a prioritized fix list.'\n---\n\n# Check health\n\nUse when asked to check code health for the repo or a directory, including worst offenders and a prioritized fix list.\n\nRoute this through the `tracedecay:code-health` skill.\n\n- **Scope:** the whole repo, or a specific directory if one is named.\n- Follow that skill's read-only workflow and guardrails: lead with `tracedecay_health` and drill only into weak dimensions.\n\nOutput: the composite health score + weak dimensions, the worst offenders (complexity, duplication, god files, doc gaps, panic sites, test-risk), and a prioritized fix list.\n"
+  },
+  {
+    "path": "skills/tracedecay-check-health/SKILL.md",
+    "digest": "34ce491ee8ff4d5a887b4d9ddad7589734f548221d7014e4585aff3c07025537",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-check-health\ndescription: 'Use to check code health for the repo or a directory, including worst offenders and a prioritized fix list.'\n---\n\n# Check health\n\nUse for repo or directory code-health checks, worst offenders, and prioritized fix lists.\n\nUse `tracedecay:code-health`.\n\n- **Scope:** the whole repo, or a specific directory if one is named.\n- Read-only: lead with `tracedecay_health` and drill only into weak dimensions.\n\nOutput: the composite health score + weak dimensions, the worst offenders (complexity, duplication, god files, doc gaps, panic sites, test-risk), and a prioritized fix list.\n"
+  },
+  {
+    "path": "skills/tracedecay-clean-dead-code/SKILL.md",
+    "digest": "3fdfaa6bf98063f988b4daba7710c7329d97e8f2b50b199058647528c4a006c2",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-clean-dead-code\ndescription: 'Use to find and safely remove dead code, unused imports, and duplication via the TraceDecay code graph.'\n---\n\n# Clean dead code\n\nUse when asked to find and safely remove dead code, unused imports, or duplication.\n\nRoute this through the `tracedecay:reviewing-changes` skill to identify candidates, then apply `tracedecay:editing-safely` for any removals.\n\n- **Scope:** the whole repo, or a specific directory if one is named.\n- Follow those skills' guardrails: confirm zero real callers before deleting anything, be conservative with `pub` items, and verify with a build/test re-check after edits.\n\nOutput: removed/consolidated items and the before/after health or test result.\n"
+  },
+  {
+    "path": "skills/tracedecay-clean-dead-code/SKILL.md",
+    "digest": "e45b29417511f335a395d10985e646c4eb8ce104f772148418c95cbb62304d7f",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-clean-dead-code\ndescription: 'Use to find and safely remove dead code, unused imports, and duplication via the TraceDecay code graph.'\n---\n\n# Clean dead code\n\nUse to find and safely remove dead code, unused imports, or duplication.\n\nUse `tracedecay:reviewing-changes` to identify candidates, then `tracedecay:editing-safely` for removals.\n\n- **Scope:** the whole repo, or a specific directory if one is named.\n- Confirm zero real callers before deleting anything; be conservative with `pub` items; verify with a build/test re-check after edits.\n\nOutput: removed/consolidated items and the before/after health or test result.\n"
+  },
+  {
+    "path": "skills/tracedecay-compare-branches/SKILL.md",
+    "digest": "4540d196228e8cebfcd6211fe616fefa664ad7f0347fe6cdef575b1643509d74",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-compare-branches\ndescription: 'Use to compare or search another git branch''s code graph without switching your checkout.'\n---\n\n# Compare branches\n\nUse to compare or search another git branch's code graph without switching your checkout.\n\nUse `tracedecay:exploring-code` with `tracedecay_branch_list`, `tracedecay_branch_diff`, and `tracedecay_branch_search`.\n\n- **Target:** a single branch to compare against the current branch, or \"<base> <head>\" to diff two branches. If none is given, start with `tracedecay_branch_list` and ask what to search or compare.\n- Read-only. If a target branch isn't tracked, tell the user to run `tracedecay branch add <branch>` first, and surface any branch-fallback warning.\n\nOutput: the cross-branch search hits or the added/removed/changed symbol lists.\n"
+  },
+  {
+    "path": "skills/tracedecay-compare-branches/SKILL.md",
+    "digest": "cbf0a7a1a3b40deead079008d5a263a021ec4a7deffea6e65c5f1c022b1cbea7",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-compare-branches\ndescription: 'Use to compare or search another git branch''s code graph without switching your checkout.'\n---\n\n# Compare branches\n\nUse when asked to compare or search another git branch's code graph without switching your checkout.\n\nRoute this through the `tracedecay:exploring-code` skill, using the cross-branch tools (`tracedecay_branch_list`, `tracedecay_branch_diff`, `tracedecay_branch_search`).\n\n- **Target:** a single branch to compare against the current branch, or \"<base> <head>\" to diff two branches. If none is given, start with `tracedecay_branch_list` and ask what to search or compare.\n- Follow that skill's read-only workflow. If a target branch isn't tracked, tell the user to run `tracedecay branch add <branch>` in the terminal first, and surface any branch-fallback warning.\n\nOutput: the cross-branch search hits or the added/removed/changed symbol lists.\n"
+  },
+  {
+    "path": "skills/tracedecay-curate-memory/SKILL.md",
+    "digest": "662615971acb8286540ce4b788ff765e1042deae83e7e329222a2e187f6ccedf",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-curate-memory\ndescription: 'Use to curate, update, delete, or inspect TraceDecay memory facts and dashboard curation from an explicit slash workflow.'\n---\n\n# Curate memory\n\nUse when asked to curate, update, delete, or inspect TraceDecay memory facts, or to do dashboard curation.\n\nRoute this through the `tracedecay:project-memory` skill.\n\n- **Scope:** the fact, entity, query, or curation action to review. If none is given, ask what memory scope to curate before mutating anything.\n- Start read-only with `tracedecay_fact_store` search/list/probe/reason/contradict or `tracedecay_memory_status`; open `tracedecay_dashboard` only when the user wants visual curation.\n- Follow the hard-delete guardrail: confirm fact ids and reasons before `remove` unless the user already gave an exact deletion instruction.\n\nOutput: memory facts inspected or changed, confirmations requested, and the final verification search/list result.\n"
+  },
+  {
+    "path": "skills/tracedecay-curate-memory/SKILL.md",
+    "digest": "6b05eec049940a25f28eb0186853fb0b95747707750c2e3cbaa04643213b6fee",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-curate-memory\ndescription: 'Use to curate, update, delete, or inspect TraceDecay memory facts and dashboard curation from an explicit slash workflow.'\n---\n\n# Curate memory\n\nUse to curate, update, delete, or inspect TraceDecay memory facts, or to do dashboard curation.\n\nUse `tracedecay:project-memory`.\n\n- **Scope:** the fact, entity, query, or curation action to review. If none is given, ask what memory scope to curate before mutating anything.\n- Start read-only with `tracedecay_fact_store` search/list/probe/reason/contradict or `tracedecay_memory_status`; open `tracedecay_dashboard` only when the user wants visual curation.\n- Follow the hard-delete guardrail: confirm fact ids and reasons before `remove` unless the user already gave an exact deletion instruction.\n\nOutput: memory facts inspected or changed, confirmations requested, and the final verification search/list result.\n"
+  },
+  {
+    "path": "skills/tracedecay-draft-commit/SKILL.md",
+    "digest": "9a17774f196d2840a14824144273cc1981d5ef01a72f254fa3a270df493ada52",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-draft-commit\ndescription: 'Use to draft a commit message, PR description, or changelog from semantic changes; drafts text only and never commits or pushes.'\n---\n\n# Draft commit\n\nUse to draft a commit message, PR description, or changelog from current semantic changes.\n\nUse `tracedecay:reviewing-changes` to read the diff and impact.\n\n- **Target:** the artifact to draft (e.g. \"pr\", \"changelog\", a base ref, or \"staged\"). If none is given, draft a commit message for the working-tree/staged changes.\n- Draft text only — leave `git commit` / `gh pr create` to the user unless they explicitly ask.\n\nOutput: the drafted commit / PR / changelog text.\n"
+  },
+  {
+    "path": "skills/tracedecay-draft-commit/SKILL.md",
+    "digest": "ac6d44274d05a9e55f2ab6c215ccead1db9eebe69c3926eb958f2bd06df29ff3",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-draft-commit\ndescription: 'Use to draft a commit message, PR description, or changelog from semantic changes; drafts text only and never commits or pushes.'\n---\n\n# Draft commit\n\nUse when asked to draft a commit message, PR description, or changelog from the current semantic changes.\n\nRoute this through the `tracedecay:reviewing-changes` skill to read the diff and its impact.\n\n- **Target:** the artifact to draft (e.g. \"pr\", \"changelog\", a base ref, or \"staged\"). If none is given, draft a commit message for the working-tree/staged changes.\n- Follow that skill's guardrails: this drafts text only — leave `git commit` / `gh pr create` to the user unless they explicitly ask.\n\nOutput: the drafted commit / PR / changelog text.\n"
+  },
+  {
+    "path": "skills/tracedecay-find-impact/SKILL.md",
+    "digest": "184540ec2da7673dd535868f659fb2eff48bcd07abc5f651aa1272795a2bf640",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-find-impact\ndescription: 'Use to find the blast radius of a change, including impacted symbols, files, and the tests to run.'\n---\n\n# Find impact\n\nUse to find a change's blast radius: impacted symbols, files, and tests to run.\n\nUse `tracedecay:assessing-impact`.\n\n- **Target:** the symbol, file, or change to analyze. If none is given, use the current working-tree diff.\n- Read-only: shallow `max_depth` first. Identify impact; do not run tests.\n\nOutput: impacted symbols + files, the test set to run, and any hub/coupling risk.\n"
+  },
+  {
+    "path": "skills/tracedecay-find-impact/SKILL.md",
+    "digest": "349da2f8b490085b7515f106cc052980bbad9d98c09cc0815171a83e0a7f418f",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-find-impact\ndescription: 'Use to find the blast radius of a change, including impacted symbols, files, and the tests to run.'\n---\n\n# Find impact\n\nUse when asked to find the blast radius of a change, including impacted symbols, files, and the tests to run.\n\nRoute this through the `tracedecay:assessing-impact` skill.\n\n- **Target:** the symbol, file, or change to analyze. If none is given, use the current working-tree diff.\n- Follow that skill's read-only workflow and guardrails: shallow `max_depth` first; it identifies impact, it does not run tests.\n\nOutput: impacted symbols + files, the test set to run, and any hub/coupling risk.\n"
+  },
+  {
+    "path": "skills/tracedecay-fix-build/SKILL.md",
+    "digest": "64a876ea2615f1b940116bf3570d4cf722a03af06bdcf1faf716601eb72f9739",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-fix-build\ndescription: 'Use to fix build and type errors by running or parsing diagnostics, mapping them to symbols with callers, then fixing.'\n---\n\n# Fix build\n\nUse to fix build and type errors by running or parsing diagnostics, mapping them to symbols with callers, then fixing.\n\nUse `tracedecay:fixing-build-and-type-errors`.\n\n- **Input:** if the user pasted `cargo`/`clippy` output, route it to `tracedecay_diagnose`; otherwise run `tracedecay_diagnostics` (scoped to a directory if one is named).\n- Prefer pasted output when available. `tracedecay_diagnostics` runs the toolchain, so confirm before long checks.\n\nOutput: grouped diagnostics with enclosing symbols + callers, the applied fix, and a clean re-check.\n"
+  },
+  {
+    "path": "skills/tracedecay-fix-build/SKILL.md",
+    "digest": "c22aafad7165101fa012e92419eda3e18ad7ecf5859259e65636ce1431e3f75a",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-fix-build\ndescription: 'Use to fix build and type errors by running or parsing diagnostics, mapping them to symbols with callers, then fixing.'\n---\n\n# Fix build\n\nUse when asked to fix build and type errors by running or parsing diagnostics, mapping them to symbols with callers, then fixing.\n\nRoute this through the `tracedecay:fixing-build-and-type-errors` skill.\n\n- **Input:** if the user pasted `cargo`/`clippy` output, route it to `tracedecay_diagnose`; otherwise run `tracedecay_diagnostics` (scoped to a directory if one is named).\n- Follow that skill's guardrails: prefer pasted output when available; `tracedecay_diagnostics` runs the toolchain, so confirm before running long checks.\n\nOutput: grouped diagnostics with enclosing symbols + callers, the applied fix, and a clean re-check.\n"
+  },
+  {
+    "path": "skills/tracedecay-map-architecture/SKILL.md",
+    "digest": "2242ed70968d832fc40f917784e7c4571690ec07850ba1edfbbdfd69b344e0ac",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-map-architecture\ndescription: 'Use to map repo or directory architecture, including layered modules, dependency hotspots, and structural risks.'\n---\n\n# Map architecture\n\nUse when asked to map the repo or a directory's architecture, including layered modules, dependency hotspots, and structural risks.\n\nRoute this through the `tracedecay:exploring-code` skill for structure, and `tracedecay:code-health` for dependency hotspots and structural risk.\n\n- **Scope:** the whole repo, or a specific directory if one is named.\n- Follow those skills' read-only workflow and guardrails.\n\nOutput: a layered module map, dependency hotspots/violations, and a prioritized risk list.\n"
+  },
+  {
+    "path": "skills/tracedecay-map-architecture/SKILL.md",
+    "digest": "6bf5800ace17a547bc6d2e7c2112a1140923f9890102c653c35c4659f6ea0fef",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-map-architecture\ndescription: 'Use to map repo or directory architecture, including layered modules, dependency hotspots, and structural risks.'\n---\n\n# Map architecture\n\nUse to map repo or directory architecture: layered modules, dependency hotspots, and structural risks.\n\nUse `tracedecay:exploring-code` for structure and `tracedecay:code-health` for dependency hotspots and structural risk.\n\n- **Scope:** the whole repo, or a specific directory if one is named.\n- Read-only.\n\nOutput: a layered module map, dependency hotspots/violations, and a prioritized risk list.\n"
+  },
+  {
+    "path": "skills/tracedecay-port-code/SKILL.md",
+    "digest": "08c5b95fb3ca8abdb2a077645a4c97a805518f1ca98d15d4a90751801097a546",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-port-code\ndescription: 'Use to port or migrate code between directories in dependency-safe order and track progress.'\n---\n\n# Port code\n\nUse to port or migrate code between directories in dependency-safe order and track progress.\n\nUse `tracedecay:editing-safely` with `tracedecay_port_order` and `tracedecay_port_status`.\n\n- **Args:** \"<source_dir> <target_dir>\". If absent, ask for the source and target directories.\n- Port leaves first. Confirm before edits and toolchain runs.\n\nOutput: updated port status (done / remaining) and the per-batch typecheck result.\n"
+  },
+  {
+    "path": "skills/tracedecay-port-code/SKILL.md",
+    "digest": "9c222985b6bd7d9f1a4c60c4844587dfa86c5a8c77bc90ea71b67eb201df1a44",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-port-code\ndescription: 'Use to port or migrate code between directories in dependency-safe order and track progress.'\n---\n\n# Port code\n\nUse when asked to port or migrate code between directories in dependency-safe order and track progress.\n\nRoute this through the `tracedecay:editing-safely` skill, using the port tools (`tracedecay_port_order`, `tracedecay_port_status`).\n\n- **Args:** \"<source_dir> <target_dir>\". If absent, ask for the source and target directories.\n- Follow that skill's dependency-safe workflow and guardrails: port leaves first, and confirm before edits and toolchain runs.\n\nOutput: updated port status (done / remaining) and the per-batch typecheck result.\n"
+  },
+  {
+    "path": "skills/tracedecay-recall-memory/SKILL.md",
+    "digest": "6481a0780a031108e2a8084d7da926d06d524f8ab7f3b1428ae8f7c236cfd4a4",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-recall-memory\ndescription: 'Use to recall prior decisions, durable facts, and past session conversations for this project.'\n---\n\n# Recall memory\n\nUse to recall prior decisions, durable facts, or past session conversations for this project.\n\nRoute durable decisions/facts through the `tracedecay:project-memory` skill, and raw conversation recall through the `tracedecay:recalling-session-context` skill.\n\n- **Target:** the question or topic to recall. If none is given, ask what to look up.\n- Route durable decisions/facts through `fact_store` search; route \"what happened in that session\" through `tracedecay_message_search` and the LCM retrieval ladder. Stay read-only.\n- If the user asks to update, delete, merge, or prune stored facts, switch to `tracedecay:project-memory`.\n\nOutput: the recalled decisions/messages with their sources (fact, session id, timestamp).\n"
+  },
+  {
+    "path": "skills/tracedecay-recall-memory/SKILL.md",
+    "digest": "6bc0fa8061bd2aa704ac8a28811b433297411bbf63aabc39522009417ffb3717",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-recall-memory\ndescription: 'Use to recall prior decisions, durable facts, and past session conversations for this project.'\n---\n\n# Recall memory\n\nUse when asked to recall prior decisions, durable facts, or past session conversations for this project.\n\nRoute durable decisions/facts through the `tracedecay:project-memory` skill, and raw conversation recall through the `tracedecay:recalling-session-context` skill.\n\n- **Target:** the question or topic to recall. If none is given, ask what to look up.\n- Route durable decisions/facts through `fact_store` search; route \"what happened in that session\" through `tracedecay_message_search` and the LCM retrieval ladder. Follow both skills' read-only guardrails.\n- If the user asks to update, delete, merge, or prune stored facts, switch to `tracedecay:project-memory`.\n\nOutput: the recalled decisions/messages with their sources (fact, session id, timestamp).\n"
+  },
+  {
+    "path": "skills/tracedecay-review-diff/SKILL.md",
+    "digest": "9ad0572e2abbd1cd5784848042fc5c16fb44b6d1a57b2bdead89f6ad8e9ae018",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-review-diff\ndescription: 'Use to review the current PR or diff for impact, risk, and quality via the TraceDecay code graph.'\n---\n\n# Review diff\n\nUse when asked to review the current PR or diff for impact, risk, and quality.\n\nRoute this through the `tracedecay:reviewing-changes` skill.\n\n- **Scope:** the current working-tree diff, or the base ref / PR named if one is given.\n- Follow that skill's read-only workflow and guardrails: no edits or test runs; to verify behavior, hand off to `tracedecay:assessing-impact`.\n\nOutput: findings grouped Critical / Warning / Note, the impacted areas, and the test set to run.\n"
+  },
+  {
+    "path": "skills/tracedecay-review-diff/SKILL.md",
+    "digest": "f977e9bd0dec65569905a7c360bd232c6652e1644d870ad15fe48b80d70e71cf",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-review-diff\ndescription: 'Use to review the current PR or diff for impact, risk, and quality via the TraceDecay code graph.'\n---\n\n# Review diff\n\nUse to review the current PR or diff for impact, risk, and quality.\n\nUse `tracedecay:reviewing-changes`.\n\n- **Scope:** the current working-tree diff, or the base ref / PR named if one is given.\n- Read-only: no edits or test runs. To verify behavior, hand off to `tracedecay:assessing-impact`.\n\nOutput: findings grouped Critical / Warning / Note, the impacted areas, and the test set to run.\n"
+  },
+  {
+    "path": "skills/tracedecay-test-changes/SKILL.md",
+    "digest": "04481d6cd6c110efddd8db93129767003443ef57687d6e6dd775186b437bb85b",
+    "releases": [
+      "v0.0.26",
+      "v0.0.27",
+      "v0.0.28",
+      "v0.0.29"
+    ],
+    "contents": "---\nname: tracedecay-test-changes\ndescription: 'Use to test current changes by running only affected tests and mapping failures back to source.'\n---\n\n# Test changes\n\nUse to test current changes by running only affected tests and mapping failures back to source.\n\nUse `tracedecay:assessing-impact` with `tracedecay_run_affected_tests` and `tracedecay_diagnostics`.\n\n- **Input:** explicit changed paths if given; otherwise use the current working tree.\n- Preview scope read-only first. `tracedecay_run_affected_tests` and `tracedecay_diagnostics` run cargo-backed checks, so confirm before running.\n\nOutput: pass/fail summary, failing-symbol mapping, and suggested missing tests.\n"
+  },
+  {
+    "path": "skills/tracedecay-test-changes/SKILL.md",
+    "digest": "aec63d5a77d238eae959c579bd490068b283a859769c0a11d111ce257eeaf38f",
+    "releases": [
+      "v0.0.25"
+    ],
+    "contents": "---\nname: tracedecay-test-changes\ndescription: 'Use to test current changes by running only affected tests and mapping failures back to source.'\n---\n\n# Test changes\n\nUse when asked to test current changes by running only the affected tests and mapping failures back to source.\n\nRoute this through the `tracedecay:assessing-impact` skill, using the affected-tests tools (`tracedecay_run_affected_tests`, `tracedecay_diagnostics`).\n\n- **Input:** explicit changed paths if given; otherwise use the current working tree.\n- Follow that skill's workflow and guardrails: `tracedecay_run_affected_tests` and `tracedecay_diagnostics` run cargo-backed checks, so confirm before running; preview scope read-only first.\n\nOutput: pass/fail summary, failing-symbol mapping, and suggested missing tests.\n"
+  }
+]

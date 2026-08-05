@@ -539,11 +539,7 @@ enum DurableMemoryCheck {
 /// Every database under a store that can carry durable rows, or a typed
 /// statement that the inventory itself could not be trusted.
 ///
-/// A store is not one database. Besides the manifest-selected main graph there
-/// are registered graph scopes (which may live at custom relative paths) and
-/// per-branch databases under `branches/`, and legacy branch-exclusive memory
-/// rows are known to exist only in the latter. Checking the main graph alone
-/// declares a store empty while its branch databases still hold durable facts.
+/// The databases registered as project authorities for durable memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DurableDatabaseInventoryV1 {
     /// The complete set of database paths, relative to the store's data root.
@@ -560,7 +556,6 @@ enum DurableDatabaseInventoryV1 {
 /// would check the wrong file (or no file) and report "empty" for a store whose
 /// real graph sits elsewhere.
 fn durable_database_inventory(
-    data_root: &Path,
     manifest_bytes: Option<&[u8]>,
     graph_scope_relpaths: &[PathBuf],
 ) -> DurableDatabaseInventoryV1 {
@@ -578,34 +573,6 @@ fn durable_database_inventory(
         }
     }
 
-    // Branch databases are discovered on disk: a legacy store can hold branch
-    // databases the registry never recorded a scope for.
-    let branches = data_root.join("branches");
-    match std::fs::read_dir(&branches) {
-        Ok(entries) => {
-            for entry in entries {
-                let Ok(entry) = entry else {
-                    return DurableDatabaseInventoryV1::Unverifiable;
-                };
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("db") {
-                    continue;
-                }
-                let Some(name) = path.file_name() else {
-                    continue;
-                };
-                let relpath = Path::new("branches").join(name);
-                if !inventory.contains(&relpath) {
-                    inventory.push(relpath);
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        // The directory exists but could not be listed: its contents are
-        // unknown, so the store's durable data is unproven.
-        Err(_) => return DurableDatabaseInventoryV1::Unverifiable,
-    }
-
     DurableDatabaseInventoryV1::Resolved(inventory)
 }
 
@@ -617,11 +584,10 @@ async fn check_store_durable_memory(
     graph_scope_relpaths: &[PathBuf],
     scratch_root: &Path,
 ) -> DurableMemoryCheck {
-    let inventory =
-        match durable_database_inventory(data_root, manifest_bytes, graph_scope_relpaths) {
-            DurableDatabaseInventoryV1::Resolved(inventory) => inventory,
-            DurableDatabaseInventoryV1::Unverifiable => return DurableMemoryCheck::Unverifiable,
-        };
+    let inventory = match durable_database_inventory(manifest_bytes, graph_scope_relpaths) {
+        DurableDatabaseInventoryV1::Resolved(inventory) => inventory,
+        DurableDatabaseInventoryV1::Unverifiable => return DurableMemoryCheck::Unverifiable,
+    };
     for relpath in inventory {
         match check_durable_memory_rows(data_root, &relpath, scratch_root).await {
             DurableMemoryCheck::Empty => {}
@@ -1228,8 +1194,7 @@ pub(crate) async fn execute_unregistered_collection(
         )
         .ok();
         let scratch_root = durable_check_scratch_root(profile_root);
-        // An unregistered store has no registry graph scopes by definition;
-        // its branch databases are still discovered from disk.
+        // An unregistered store has no registry graph scopes by definition.
         match check_store_durable_memory(
             &finding.data_root,
             manifest_bytes.as_deref(),

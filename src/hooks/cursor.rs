@@ -8,15 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
-use tracedecay_hooks::{DaemonHookEvent, HookAgent};
+use tracedecay_hooks::DaemonHookEvent;
 
-use super::memory_inject;
 use super::post_tool_use::{
     EmptyPathPolicy, captured_tool_output, notify_edited_paths, trusted_tool_failure,
-};
-use super::steering::{
-    append_context_block, append_context_recovery_hint, build_cursor_session_context,
-    cursor_index_signals_for_root, session_start_from_compaction,
 };
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint};
 use super::{
@@ -36,8 +31,6 @@ pub const CURSOR_CATCH_UP_INGEST_MAX_BYTES: u64 =
 /// Hard wall-clock budget for the `beforeSubmitPrompt` tail ingest. Well under
 /// Cursor's 5s hook timeout; on expiry we fail open and let heavier hooks catch up.
 const CURSOR_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
-/// Budget for the `sessionStart` catch-up ingest (registered with a 5s timeout).
-const CURSOR_SESSION_INGEST_BUDGET: Duration = Duration::from_secs(4);
 /// Budget for the end-of-turn `stop` catch-up ingest (registered with a 30s timeout).
 const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
 
@@ -141,16 +134,12 @@ pub fn cursor_before_submit_prompt_json(additional_context: Option<&str>) -> Str
 }
 
 /// Assembles the prompt-shaped steering for a Cursor `beforeSubmitPrompt` event:
-/// a deduped prompt hint (`decide_hint`) followed by prompt-relevance-gated
-/// memory recall, mirroring [`super::codex::codex_user_prompt_submit_context_for_event`].
-/// Returns `None` when neither surfaces anything (fail-open: no context key).
+/// a deduped prompt hint (`decide_hint`). Returns `None` when the daemon-owned
+/// hint surface has nothing ready (fail-open: no context key).
 pub(super) async fn cursor_before_submit_prompt_context(event_json: &str) -> Option<String> {
     let mut context = String::new();
     if let Some(hint) = cursor_prompt_hint(event_json) {
         append_tool_hint(&mut context, &hint);
-    }
-    if let Some(recall) = Box::pin(cursor_prompt_memory_recall(event_json)).await {
-        append_context_block(&mut context, &recall);
     }
     (!context.trim().is_empty()).then_some(context)
 }
@@ -187,14 +176,6 @@ fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
     deduped_cursor_hint(event_json, &hint_id, hint)
 }
 
-async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    memory_inject::prompt_memory_recall(&parsed, || {
-        cursor_project_root_from_parsed_event_with_identity(&parsed)
-    })
-    .await
-}
-
 /// Cursor `sessionEnd` hook handler (fire-and-forget).
 ///
 /// Final transcript-ingest flush when a conversation ends (including
@@ -221,6 +202,17 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         .await
         .into_recorded_guidance(&hook_telemetry)
     {
+        let outcome = ingest_cursor_transcript_for_event_inner(
+            &event,
+            Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
+            CURSOR_STOP_INGEST_BUDGET,
+            Some(&hook_telemetry),
+        )
+        .await;
+        if outcome.user_scope && outcome.messages_upserted > 0 {
+            let session_id = event_session_id_from_json(&event);
+            super::schedule_user_session_review("cursor", session_id.as_deref()).await;
+        }
         if let Some(guidance) = guidance {
             println!("{}", serde_json::json!({ "additional_context": guidance }));
         } else {
@@ -237,7 +229,7 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
     .await;
     if outcome.user_scope && outcome.messages_upserted > 0 {
         let session_id = event_session_id_from_json(&event);
-        super::schedule_user_session_review("cursor", session_id.as_deref());
+        super::schedule_user_session_review("cursor", session_id.as_deref()).await;
     }
     println!("{}", serde_json::json!({}));
     0
@@ -332,67 +324,27 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
     0
 }
 
-/// Cursor `sessionStart` hook handler (fire-and-forget).
-///
-/// Emits Cursor's `sessionStart` output shape (`additional_context` + `env`)
-/// steering the agent toward tracedecay MCP tools and reporting index freshness
-/// for the resolved workspace. Never blocks session creation.
+/// Cursor `sessionStart` hook handler.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
-    if let (Some(root), Some(event)) = (root.as_ref(), cursor_session_start_hook_event(&parsed)) {
-        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
-    }
-    ingest_cursor_transcript_for_event_inner(
-        &event,
-        Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
-        CURSOR_SESSION_INGEST_BUDGET,
-        Some(&hook_telemetry),
-    )
-    .await;
-    let mut context = cursor_session_context_for_root(root.as_deref()).await;
-    let session_id = event_session_id(&parsed);
-    let digest = match root.as_deref() {
-        Some(root) => {
-            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
-        }
-        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
-    };
-    if let Some(digest) = digest {
-        append_context_block(&mut context, &digest);
-    }
-    if let Some(root) = root.as_deref() {
-        memory_inject::regenerate_cursor_memory_rule(root).await;
-    } else {
-        memory_inject::regenerate_cursor_user_memory_rule().await;
-    }
-    if session_start_from_compaction(&event) {
-        append_context_recovery_hint(&mut context);
-    }
-    println!("{}", cursor_session_start_json(root.as_deref(), &context));
+    println!("{}", cursor_session_start_response(&event).await);
     0
 }
 
-fn cursor_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
-    cursor_event_cwd(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Cursor, cwd))
-}
-
-/// Builds the lean Cursor `sessionStart` context for a resolved project root.
-///
-/// Adds index freshness, the skill index, and tokens-saved counter that the
-/// always-on plugin rule cannot know.
-async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
-    let (initialized, staleness, tokens_saved) = match root {
-        Some(r) if crate::tracedecay::TraceDecay::is_initialized(r) => {
-            let (staleness, tokens_saved) = cursor_index_signals_for_root(r).await;
-            (true, staleness, tokens_saved)
-        }
-        _ => (false, None, None),
-    };
-    build_cursor_session_context(initialized, staleness.as_deref(), tokens_saved)
+async fn cursor_session_start_response(event: &str) -> String {
+    let root = cursor_project_root_from_event_with_identity(event).await;
+    let hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", event);
+    let guidance = super::v2::dispatch_for_scope(
+        tracedecay_hooks::HookHostV1::CursorDesktop,
+        event,
+        root.as_deref(),
+        Some(&hook_telemetry),
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    .flatten();
+    cursor_session_start_json(root.as_deref(), guidance.as_deref().unwrap_or(""))
 }
 
 /// Cursor `afterShellExecution` hook handler.
@@ -421,9 +373,6 @@ pub async fn hook_cursor_workspace_open() -> i32 {
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
     notify_cursor_workspace_open(&event, &hook_telemetry).await;
-    if let Some(root) = root.as_deref() {
-        memory_inject::regenerate_cursor_memory_rule(root).await;
-    }
     println!("{}", serde_json::json!({}));
     0
 }
@@ -440,19 +389,6 @@ pub async fn hook_cursor_workspace_open() -> i32 {
 pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
     let _ = event_json;
     None
-}
-
-/// Pure decision logic for Cursor `postToolUse` hook events.
-///
-/// Returns a soft `additional_context` payload (Cursor's documented
-/// `postToolUse` output shape) for exploration tools tracedecay can replace.
-/// Invalid or unrelated tool events fail open with no output. Session-level
-/// dedupe lives in [`cursor_post_tool_use_decision`]; this stays pure for
-/// tests.
-pub fn evaluate_cursor_post_tool_use(event_json: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let hint = decide_hint(&cursor_tool_hint_input(&parsed))?;
-    Some(format_cursor_post_tool_use_decision(&hint))
 }
 
 fn format_cursor_post_tool_use_decision(hint: &ToolHint) -> String {
@@ -478,8 +414,8 @@ fn prepare_cursor_post_tool_use_hint(event_json: &str) -> Option<(String, ToolHi
     Some((hint_id, hint))
 }
 
-/// Impure `postToolUse` path: [`evaluate_cursor_post_tool_use`] plus
-/// per-session hint dedupe persisted under the project's `.tracedecay/` dir.
+/// Cursor `postToolUse` hint decision with per-session dedupe persisted under
+/// the project's `.tracedecay/` dir.
 pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
     let (hint_id, hint) = prepare_cursor_post_tool_use_hint(event_json)?;
     let hint = deduped_cursor_hint(event_json, &hint_id, hint)?;
@@ -640,19 +576,6 @@ fn cursor_event_cwd(event: &Value) -> Option<PathBuf> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-}
-
-/// Extracts the repo-relative paths edited in a Cursor `afterFileEdit` event.
-///
-/// Cursor sends an absolute `file_path` (plus an `edits` array). We strip the
-/// resolved `project_root` prefix and normalize to forward slashes so the hook
-/// can notify the daemon about only the changed files. Paths outside the project
-/// root are skipped.
-pub fn cursor_after_file_edit_rel_paths(event_json: &str, project_root: &Path) -> Vec<String> {
-    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
-        return Vec::new();
-    };
-    cursor_after_file_edit_rel_paths_from_parsed(&parsed, project_root)
 }
 
 fn cursor_after_file_edit_rel_paths_from_parsed(
@@ -916,9 +839,8 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
 /// Builds the redundancy-hint input for a Cursor `afterFileEdit` event.
 ///
 /// `afterFileEdit` reports `file_path` at the top level and the applied edit(s)
-/// as `edits: [{ old_string, new_string }]`. We join the `new_string`s (mirroring
-/// the Claude `MultiEdit` handling in [`super::post_tool_use::tool_input_edit_text`])
-/// into `edit_text` and label the synthetic tool `Edit` so the shared
+/// as `edits: [{ old_string, new_string }]`. We join the `new_string`s into
+/// `edit_text` and label the synthetic tool `Edit` so the shared
 /// [`is_redundancy_candidate_edit`](super::tool_hints) classifier recognizes it.
 /// Prompt/command/subagent fields are left empty: this surface only ever drives
 /// the edit-shaped categories (redundancy and harness-memory edits), never a
@@ -960,7 +882,8 @@ fn cursor_after_file_edit_new_text(parsed: &Value) -> Option<String> {
 /// edits (too small, no function shape, non-source file) and events without an
 /// edit body fail open with no output. Session-level dedupe lives in the impure
 /// paths; this stays pure for tests.
-pub fn evaluate_cursor_after_file_edit(event_json: &str) -> Option<String> {
+#[cfg(test)]
+fn evaluate_cursor_after_file_edit(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let hint = decide_hint(&cursor_after_file_edit_hint_input(&parsed))?;
     Some(format_cursor_post_tool_use_decision(&hint))
@@ -982,11 +905,10 @@ fn prepare_cursor_after_file_edit_hint(event_json: &str) -> Option<(String, Tool
     Some((hint_id, hint))
 }
 
-/// Impure `afterFileEdit` redundancy path: [`evaluate_cursor_after_file_edit`]
-/// plus per-session hint dedupe persisted under the project's `.tracedecay/` dir.
+/// Cursor `afterFileEdit` redundancy decision with per-session hint dedupe.
 /// Shares [`deduped_cursor_hint`] with `postToolUse`, so the redundancy category
-/// surfaces at most once per Cursor session regardless of which surface first
-/// emits it.
+/// surfaces at most once per Cursor session regardless of which surface emits
+/// it first.
 pub fn cursor_after_file_edit_decision(event_json: &str) -> Option<String> {
     let (hint_id, hint) = prepare_cursor_after_file_edit_hint(event_json)?;
     let hint = deduped_cursor_hint(event_json, &hint_id, hint)?;
@@ -1027,21 +949,6 @@ mod tests {
         assert_eq!(calls[0].1["max_new_bytes"], 4_096);
         assert_eq!(calls[0].1["timeout_budget_ms"], 250);
         assert_eq!(calls[0].1["format"], "json");
-    }
-
-    #[test]
-    fn cursor_session_start_event_signals_daemon_with_real_cwd() {
-        let event = cursor_session_start_hook_event(&serde_json::json!({
-            "cwd": "/workspace/cursor-session"
-        }))
-        .unwrap();
-
-        assert_eq!(event.agent, HookAgent::Cursor.as_wire());
-        assert_eq!(event.event, "sessionStart");
-        assert_eq!(
-            event.cwd.as_deref(),
-            Some(Path::new("/workspace/cursor-session"))
-        );
     }
 
     #[test]

@@ -23,9 +23,8 @@ use tracedecay_domain::{
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
     PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
     ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerDispositionV1,
-    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SnapshotFileDispositionV1, WorktreeId,
-    canonical_sha256,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    ScoreDomainId, SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
 };
 
 use crate::{
@@ -47,9 +46,7 @@ use crate::{
             build_batch_receipt,
         },
     },
-    privacy::{
-        CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, sanitize_code_source_bytes,
-    },
+    privacy::CODE_SOURCE_SANITIZER_VERSION_V1,
     query::retrieval::{
         exact::{CentralExactAdmissionAuthorityV1, ExactLane},
         graph::{GraphLane, production_code_index_freshness},
@@ -1970,19 +1967,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        let sanitized: CodeSourceSanitizationV1 = sanitize_code_source_bytes(&raw_bytes)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Privacy(error.to_string()))?;
-        let sensitivity_level = match sanitized.receipt().disposition() {
-            SanitizerDispositionV1::Accepted => SensitivityLevelV1::Public,
-            SanitizerDispositionV1::Redacted => SensitivityLevelV1::Redacted,
-            SanitizerDispositionV1::Rejected | SanitizerDispositionV1::Quarantined => {
-                return Err(CodeIndexSchedulerErrorV1::Privacy(
-                    "durable code source carried a non-durable sanitizer disposition".to_owned(),
-                ));
-            }
-        };
-        let receipt_id = sanitized.receipt().receipt().receipt_id().clone();
-        let (sanitized_bytes, _) = sanitized.into_parts();
+        let (sanitized_bytes, sensitivity_level, receipt_id) =
+            privacy::sanitize_code_file(&raw_bytes)?;
         let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
         let occurrence = file_occurrence_id(
             &self.repository_id,
@@ -2286,6 +2272,7 @@ mod activation;
 mod cadence;
 mod classification;
 pub(crate) mod identity;
+mod privacy;
 pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;
 mod registry;

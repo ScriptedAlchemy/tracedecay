@@ -3713,6 +3713,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4997,6 +5007,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml_ng"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5954,6 +5977,7 @@ dependencies = [
 name = "tracedecay-hooks"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "serde",
  "serde_json",
  "thiserror",
@@ -6013,7 +6037,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
- "tracedecay-agent-hosts",
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-domain",
@@ -6022,7 +6045,6 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-sessions",
  "tracedecay-store",
- "tracedecay-usecases",
  "tracing",
 ]
 
@@ -6071,18 +6093,21 @@ dependencies = [
  "gix",
  "hex",
  "libc",
+ "percent-encoding",
  "reflink-copy",
  "regex",
  "rusqlite",
  "schemars",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "sha2 0.11.0",
  "sysinfo",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
+ "toml",
  "tracedecay-automation",
  "tracedecay-capture",
  "tracedecay-code-extraction",
@@ -6093,6 +6118,7 @@ dependencies = [
  "tracedecay-store",
  "tracing",
  "tree-sitter",
+ "url",
  "windows-sys 0.61.2",
  "xattr",
 ]
@@ -6197,6 +6223,7 @@ dependencies = [
  "filetime",
  "gix",
  "hex",
+ "md-5",
  "rayon",
  "regex",
  "rusqlite",
@@ -6275,6 +6302,7 @@ dependencies = [
  "gix",
  "glob",
  "hex",
+ "hmac 0.13.0",
  "ignore",
  "regex",
  "same-file",
@@ -6878,6 +6906,12 @@ name = "unit-prefix"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
