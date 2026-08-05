@@ -480,6 +480,99 @@ async fn restart_replays_exact_refresh_and_commits_sanitized_provenance() {
 }
 
 #[tokio::test]
+async fn coalesced_event_runs_once_after_the_active_refresh_completes() {
+    let state = Arc::new(MemoryStatePort::default());
+    let (definition, binding) = source();
+    let seed = ExternalSourceAcquisitionOwnerV1::new(
+        state.clone(),
+        Arc::new(NeverPort),
+        Arc::new(NeverPort),
+        Arc::new(NeverPort),
+        SourceAcquisitionPolicyV1::new(
+            3,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    seed.admit_event(
+        &definition,
+        &binding,
+        SourceEventV1::new(binding.immutable_identity().unwrap(), digest('b')).unwrap(),
+        UtcMicros(10),
+    )
+    .await
+    .unwrap();
+    let coalesced = seed
+        .admit_event(
+            &definition,
+            &binding,
+            SourceEventV1::new(binding.immutable_identity().unwrap(), digest('c')).unwrap(),
+            UtcMicros(11),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        coalesced.disposition(),
+        SourceEventAdmissionDispositionV1::Coalesced
+    );
+
+    let task = pending_task(&state, &binding).await;
+    let grant = grant('7');
+    let complete = page(
+        &task,
+        &grant,
+        task.refresh().refresh_id().clone(),
+        SourceCoverageV1::Complete,
+    );
+    let scripted = Arc::new(ScriptedPort::new(
+        [
+            SourceAcquisitionAuthorizationOutcomeV1::Authorized(grant.clone()),
+            SourceAcquisitionAuthorizationOutcomeV1::Authorized(grant.clone()),
+            SourceAcquisitionAuthorizationOutcomeV1::Authorized(grant.clone()),
+            SourceAcquisitionAuthorizationOutcomeV1::Authorized(grant.clone()),
+        ],
+        [
+            SourceCanonicalRefetchOutcomeV1::Fetched(complete.clone()),
+            SourceCanonicalRefetchOutcomeV1::Fetched(complete),
+        ],
+    ));
+    let owner = ExternalSourceAcquisitionOwnerV1::new(
+        state,
+        scripted.clone(),
+        scripted.clone(),
+        scripted.clone(),
+        SourceAcquisitionPolicyV1::new(
+            3,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let cancellation = crate::observation::ObservationCancellation::default();
+
+    assert!(matches!(
+        owner.run_one(UtcMicros(11), &cancellation).await.unwrap(),
+        SourceAcquisitionRunOutcomeV1::Committed { .. }
+    ));
+    assert_eq!(
+        owner.pending_count().await.unwrap(),
+        1,
+        "the coalesced successor must become active after the first commit"
+    );
+    assert!(matches!(
+        owner.run_one(UtcMicros(11), &cancellation).await.unwrap(),
+        SourceAcquisitionRunOutcomeV1::Committed { .. }
+    ));
+    assert_eq!(scripted.fetch_count.load(Ordering::Relaxed), 2);
+    assert_eq!(owner.pending_count().await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn revoked_authorization_blocks_fetch_and_commit_independently() {
     let state = Arc::new(MemoryStatePort::default());
     let (definition, binding) = source();

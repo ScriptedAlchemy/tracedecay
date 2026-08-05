@@ -10,23 +10,20 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::{
     SourceCanonicalRefetchAuthorityV1, SourceEventAdmissionContextV1, SourceEventAdmissionV1,
 };
 use tracedecay_domain::{
-    ManifestDigest, SourceBindingIdentityV1, SourceBindingV1, SourceCoverageV1,
-    SourceDefinitionV1, SourceEventAdmissionReceiptV1, SourceEventKeyV1, SourceEventV1,
-    SourceProviderEnvelopeV1, SourceRefreshCauseV1, SourceRefreshReceiptV1,
-    SourceWholeRootStageV1, UtcMicros, canonical_sha256,
+    ManifestDigest, SourceBindingIdentityV1, SourceBindingV1, SourceCoverageV1, SourceDefinitionV1,
+    SourceEventAdmissionReceiptV1, SourceEventV1, SourceProviderEnvelopeV1, SourceRefreshCauseV1,
+    SourceRefreshReceiptV1, SourceWholeRootStageV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_store::SourceObjectMutationV1;
 
 use crate::observation::ObservationCancellation;
 
 const SOURCE_ACQUISITION_CAS_ATTEMPTS_V1: usize = 8;
-const MAX_SOURCE_ACQUISITION_ATTEMPTS_V1: u32 = 16;
 
 pub type SourceAcquisitionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -72,200 +69,9 @@ pub trait SourceAcquisitionStatePortV1: Send + Sync {
     ) -> SourceAcquisitionFuture<'_, Result<usize, SourceAcquisitionStateErrorV1>>;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceScheduledRefetchV1 {
-    definition: SourceDefinitionV1,
-    binding: SourceBindingV1,
-    event_receipt: SourceEventAdmissionReceiptV1,
-    whole_root_stage: Option<SourceWholeRootStageV1>,
-    attempt: u32,
-    not_before: UtcMicros,
-}
-
-impl SourceScheduledRefetchV1 {
-    fn new(
-        definition: SourceDefinitionV1,
-        binding: SourceBindingV1,
-        event_receipt: SourceEventAdmissionReceiptV1,
-        not_before: UtcMicros,
-    ) -> Result<Self, ExternalSourceAcquisitionErrorV1> {
-        let task = Self {
-            definition,
-            binding,
-            event_receipt,
-            whole_root_stage: None,
-            attempt: 0,
-            not_before,
-        };
-        task.validate()?;
-        Ok(task)
-    }
-
-    pub fn definition(&self) -> &SourceDefinitionV1 {
-        &self.definition
-    }
-
-    pub fn binding(&self) -> &SourceBindingV1 {
-        &self.binding
-    }
-
-    pub fn event_receipt(&self) -> &SourceEventAdmissionReceiptV1 {
-        &self.event_receipt
-    }
-
-    pub fn refresh(&self) -> &SourceRefreshReceiptV1 {
-        self.event_receipt.original_refresh()
-    }
-
-    pub fn whole_root_stage(&self) -> Option<&SourceWholeRootStageV1> {
-        self.whole_root_stage.as_ref()
-    }
-
-    pub fn attempt(&self) -> u32 {
-        self.attempt
-    }
-
-    pub fn not_before(&self) -> UtcMicros {
-        self.not_before
-    }
-
-    fn validate(&self) -> Result<(), ExternalSourceAcquisitionErrorV1> {
-        self.definition
-            .validate()
-            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
-        self.binding
-            .validate_against(&self.definition)
-            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
-        self.event_receipt
-            .validate()
-            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
-        self.whole_root_stage
-            .as_ref()
-            .map_or(Ok(()), SourceWholeRootStageV1::validate)
-            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
-        let identity = self
-            .binding
-            .immutable_identity()
-            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
-        if self.event_receipt.binding() != &identity
-            || self.event_receipt.original_refresh().cause() != SourceRefreshCauseV1::Event
-            || self.attempt > MAX_SOURCE_ACQUISITION_ATTEMPTS_V1
-        {
-            return Err(ExternalSourceAcquisitionErrorV1::InvalidState);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceAcquisitionQueueStateV1 {
-    definition: SourceDefinitionV1,
-    binding: SourceBindingV1,
-    active: Option<SourceScheduledRefetchV1>,
-    receipts: BTreeMap<SourceEventKeyV1, SourceEventAdmissionReceiptV1>,
-    state_digest: ManifestDigest,
-}
-
-impl SourceAcquisitionQueueStateV1 {
-    fn assemble(
-        definition: SourceDefinitionV1,
-        binding: SourceBindingV1,
-        active: Option<SourceScheduledRefetchV1>,
-        receipts: BTreeMap<SourceEventKeyV1, SourceEventAdmissionReceiptV1>,
-    ) -> Result<Self, ExternalSourceAcquisitionErrorV1> {
-        let state_digest = canonical_sha256(&(
-            "tracedecay.external-source.acquisition-queue.v1",
-            &definition,
-            &binding,
-            &active,
-            &receipts,
-        ))
-        .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
-        let state = Self {
-            definition,
-            binding,
-            active,
-            receipts,
-            state_digest,
-        };
-        state.validate()?;
-        Ok(state)
-    }
-
-    pub fn state_digest(&self) -> &ManifestDigest {
-        &self.state_digest
-    }
-
-    pub fn binding_identity(
-        &self,
-    ) -> Result<SourceBindingIdentityV1, ExternalSourceAcquisitionErrorV1> {
-        self.binding
-            .immutable_identity()
-            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)
-    }
-
-    pub fn active(&self) -> Option<&SourceScheduledRefetchV1> {
-        self.active.as_ref()
-    }
-
-    pub fn is_ready(&self, now: UtcMicros) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|task| task.not_before.0 <= now.0)
-    }
-
-    fn validate(&self) -> Result<(), ExternalSourceAcquisitionErrorV1> {
-        self.definition
-            .validate()
-            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
-        self.binding
-            .validate_against(&self.definition)
-            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
-        let identity = self.binding_identity()?;
-        if let Some(active) = &self.active {
-            active.validate()?;
-            if active.binding.immutable_identity().ok().as_ref() != Some(&identity)
-                || active.definition != self.definition
-            {
-                return Err(ExternalSourceAcquisitionErrorV1::InvalidState);
-            }
-        }
-        for (event_key, receipt) in &self.receipts {
-            receipt
-                .validate()
-                .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
-            if receipt.binding() != &identity || receipt.event_key() != event_key {
-                return Err(ExternalSourceAcquisitionErrorV1::InvalidState);
-            }
-        }
-        let expected = canonical_sha256(&(
-            "tracedecay.external-source.acquisition-queue.v1",
-            &self.definition,
-            &self.binding,
-            &self.active,
-            &self.receipts,
-        ))
-        .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
-        if expected != self.state_digest {
-            return Err(ExternalSourceAcquisitionErrorV1::InvalidState);
-        }
-        Ok(())
-    }
-
-    fn with_active(
-        &self,
-        active: Option<SourceScheduledRefetchV1>,
-    ) -> Result<Self, ExternalSourceAcquisitionErrorV1> {
-        Self::assemble(
-            self.definition.clone(),
-            self.binding.clone(),
-            active,
-            self.receipts.clone(),
-        )
-    }
-}
+pub use tracedecay_store::{
+    MAX_SOURCE_ACQUISITION_ATTEMPTS_V1, SourceAcquisitionQueueStateV1, SourceScheduledRefetchV1,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceAcquisitionGrantV1 {
@@ -565,11 +371,13 @@ where
                 .await
                 .map_err(|_| ExternalSourceAcquisitionErrorV1::StateUnavailable)?;
             if let Some(current) = &current {
-                current.validate()?;
-                if current.definition != *definition || current.binding != *binding {
+                current
+                    .validate()
+                    .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
+                if current.definition() != definition || current.binding() != binding {
                     return Err(ExternalSourceAcquisitionErrorV1::AuthorityChanged);
                 }
-                if let Some(original) = current.receipts.get(event.event_key()) {
+                if let Some(original) = current.receipt(event.event_key()) {
                     let duplicate = SourceEventAdmissionV1::admit(
                         definition,
                         binding,
@@ -606,7 +414,7 @@ where
                     definition,
                     binding,
                     event.clone(),
-                    SourceEventAdmissionContextV1::Coalesce(active.event_receipt.clone()),
+                    SourceEventAdmissionContextV1::Coalesce(active.event_receipt().clone()),
                 )
             } else {
                 SourceEventAdmissionV1::admit(
@@ -619,27 +427,45 @@ where
             .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
             let mut receipts = current
                 .as_ref()
-                .map_or_else(BTreeMap::new, |state| state.receipts.clone());
+                .map_or_else(BTreeMap::new, |state| state.receipts().clone());
             receipts.insert(
                 admission.receipt().event_key().clone(),
                 admission.receipt().clone(),
             );
+            let scheduled = SourceScheduledRefetchV1::new(
+                definition.clone(),
+                binding.clone(),
+                admission.receipt().clone(),
+                None,
+                0,
+                admitted_at,
+            )
+            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
             let active = if admission.schedules_refresh() {
-                Some(SourceScheduledRefetchV1::new(
-                    definition.clone(),
-                    binding.clone(),
-                    admission.receipt().clone(),
-                    admitted_at,
-                )?)
+                Some(scheduled.clone())
             } else {
-                current.as_ref().and_then(|state| state.active.clone())
+                current
+                    .as_ref()
+                    .and_then(SourceAcquisitionQueueStateV1::active)
+                    .cloned()
             };
-            let next = SourceAcquisitionQueueStateV1::assemble(
+            let successor = if admission.schedules_refresh() {
+                None
+            } else {
+                current
+                    .as_ref()
+                    .and_then(SourceAcquisitionQueueStateV1::successor)
+                    .cloned()
+                    .or(Some(scheduled))
+            };
+            let next = SourceAcquisitionQueueStateV1::new(
                 definition.clone(),
                 binding.clone(),
                 active,
+                successor,
                 receipts,
-            )?;
+            )
+            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
             let expected = current
                 .as_ref()
                 .map(SourceAcquisitionQueueStateV1::state_digest);
@@ -677,7 +503,9 @@ where
         else {
             return Ok(SourceAcquisitionRunOutcomeV1::Idle);
         };
-        state.validate()?;
+        state
+            .validate()
+            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
         let Some(task) = state.active().cloned() else {
             return Err(ExternalSourceAcquisitionErrorV1::InvalidState);
         };
@@ -780,10 +608,9 @@ where
                 whole_root_stage,
             } => {
                 if coverage == SourceCoverageV1::Partial {
-                    let mut continuation = task;
-                    continuation.attempt = 0;
-                    continuation.not_before = now;
-                    continuation.whole_root_stage = whole_root_stage;
+                    let continuation = task
+                        .with_whole_root_stage(whole_root_stage, now)
+                        .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
                     self.finish_state(&state, Some(continuation)).await?;
                     self.wake.notify_one();
                     Ok(SourceAcquisitionRunOutcomeV1::Partial {
@@ -823,17 +650,18 @@ where
     async fn retry_or_exhaust(
         &self,
         state: SourceAcquisitionQueueStateV1,
-        mut task: SourceScheduledRefetchV1,
+        task: SourceScheduledRefetchV1,
         now: UtcMicros,
     ) -> Result<SourceAcquisitionRunOutcomeV1, ExternalSourceAcquisitionErrorV1> {
-        let next_attempt = task.attempt.saturating_add(1);
+        let next_attempt = task.attempt().saturating_add(1);
         if next_attempt >= self.policy.max_attempts {
             self.finish_state(&state, None).await?;
             return Ok(SourceAcquisitionRunOutcomeV1::Exhausted);
         }
-        let retry_at = add_duration(now, self.policy.backoff(task.attempt))?;
-        task.attempt = next_attempt;
-        task.not_before = retry_at;
+        let retry_at = add_duration(now, self.policy.backoff(task.attempt()))?;
+        let task = task
+            .with_retry(next_attempt, retry_at)
+            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
         self.finish_state(&state, Some(task)).await?;
         Ok(SourceAcquisitionRunOutcomeV1::Unavailable {
             attempt: next_attempt,
@@ -846,8 +674,16 @@ where
         current: &SourceAcquisitionQueueStateV1,
         active: Option<SourceScheduledRefetchV1>,
     ) -> Result<(), ExternalSourceAcquisitionErrorV1> {
-        let binding = current.binding_identity()?;
-        let next = current.with_active(active)?;
+        let binding = current
+            .binding_identity()
+            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
+        let (active, successor) = match active {
+            Some(active) => (Some(active), current.successor().cloned()),
+            None => (current.successor().cloned(), None),
+        };
+        let next = current
+            .with_schedule(active, successor)
+            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
         match self
             .state
             .compare_and_swap(&binding, Some(current.state_digest()), next)
@@ -864,7 +700,7 @@ where
 
 impl SourceAcquisitionPolicyV1 {
     fn backoff(&self, attempt: u32) -> Duration {
-        let factor = 1_u32.checked_shl(attempt.min(31)).unwrap_or(u32::MAX);
+        let factor = 1_u32 << attempt;
         self.initial_backoff
             .saturating_mul(factor)
             .min(self.maximum_backoff)

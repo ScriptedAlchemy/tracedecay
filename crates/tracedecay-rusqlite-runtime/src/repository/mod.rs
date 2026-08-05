@@ -121,6 +121,9 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::ExternalSourceProjection(projection) => self
                 .project
                 .execute_external_source_projection_write(savepoint, projection),
+            RepositoryWritePayloadV1::ExternalSourceAcquisition(command) => self
+                .project
+                .execute_external_source_acquisition_write(savepoint, command),
             RepositoryWritePayloadV1::RetrievalAnchorDisposition(record) => self
                 .project
                 .execute_retrieval_anchor_disposition_write(savepoint, record),

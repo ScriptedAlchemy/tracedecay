@@ -11,10 +11,75 @@ use tracedecay_domain::{
 use crate::observation::ObservationCancellation;
 
 use super::{
-    ExternalSourceAcquisitionErrorV1, SourceAcquisitionFuture, SourceAcquisitionGrantV1,
-    SourceCanonicalCommitOutcomeV1, SourceCanonicalCommitPortV1, SourceCanonicalRefetchPageV1,
-    SourceScheduledRefetchV1,
+    ExternalSourceAcquisitionErrorV1, SourceAcquisitionCasOutcomeV1, SourceAcquisitionFuture,
+    SourceAcquisitionGrantV1, SourceAcquisitionQueueStateV1, SourceAcquisitionStateErrorV1,
+    SourceAcquisitionStatePortV1, SourceCanonicalCommitOutcomeV1, SourceCanonicalCommitPortV1,
+    SourceCanonicalRefetchPageV1, SourceScheduledRefetchV1,
 };
+
+impl SourceAcquisitionStatePortV1 for crate::external_source_store::RuntimeExternalSourceStore {
+    fn load<'a>(
+        &'a self,
+        binding: &'a tracedecay_domain::SourceBindingIdentityV1,
+    ) -> SourceAcquisitionFuture<
+        'a,
+        Result<Option<SourceAcquisitionQueueStateV1>, SourceAcquisitionStateErrorV1>,
+    > {
+        Box::pin(async move {
+            self.read_acquisition_state(binding.clone())
+                .await
+                .map_err(|_| SourceAcquisitionStateErrorV1)
+        })
+    }
+
+    fn compare_and_swap<'a>(
+        &'a self,
+        binding: &'a tracedecay_domain::SourceBindingIdentityV1,
+        expected: Option<&'a tracedecay_domain::ManifestDigest>,
+        next: SourceAcquisitionQueueStateV1,
+    ) -> SourceAcquisitionFuture<
+        'a,
+        Result<SourceAcquisitionCasOutcomeV1, SourceAcquisitionStateErrorV1>,
+    > {
+        Box::pin(async move {
+            self.compare_and_swap_acquisition(binding.clone(), expected.cloned(), next)
+                .await
+                .map(|outcome| match outcome {
+                    crate::external_source_store::acquisition::RuntimeAcquisitionCasOutcomeV1::Committed => {
+                        SourceAcquisitionCasOutcomeV1::Committed
+                    }
+                    crate::external_source_store::acquisition::RuntimeAcquisitionCasOutcomeV1::Conflict => {
+                        SourceAcquisitionCasOutcomeV1::Conflict
+                    }
+                })
+                .map_err(|_| SourceAcquisitionStateErrorV1)
+        })
+    }
+
+    fn next_ready<'a>(
+        &'a self,
+        now: tracedecay_domain::UtcMicros,
+    ) -> SourceAcquisitionFuture<
+        'a,
+        Result<Option<SourceAcquisitionQueueStateV1>, SourceAcquisitionStateErrorV1>,
+    > {
+        Box::pin(async move {
+            self.next_ready_acquisition(now)
+                .await
+                .map_err(|_| SourceAcquisitionStateErrorV1)
+        })
+    }
+
+    fn pending_count(
+        &self,
+    ) -> SourceAcquisitionFuture<'_, Result<usize, SourceAcquisitionStateErrorV1>> {
+        Box::pin(async move {
+            self.acquisition_pending_count()
+                .await
+                .map_err(|_| SourceAcquisitionStateErrorV1)
+        })
+    }
+}
 
 impl SourceCanonicalCommitPortV1 for crate::external_source_store::RuntimeExternalSourceStore {
     fn commit<'a>(
