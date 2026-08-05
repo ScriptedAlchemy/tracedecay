@@ -198,16 +198,32 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
             .await
             .unwrap()
     );
-    let mut publish = advanced.clone();
-    publish.generation = 5;
+    let mut unverified_publish = advanced.clone();
+    unverified_publish.generation = 5;
+    unverified_publish.scan_mode = GitHistoryScanMode::Publish;
+    assert!(
+        !compare_and_swap_progress(&conn, 4, &unverified_publish)
+            .await
+            .unwrap()
+    );
+    let mut publish_verify = advanced.clone();
+    publish_verify.generation = 5;
+    publish_verify.scan_mode = GitHistoryScanMode::PublishVerify;
+    assert!(
+        compare_and_swap_progress(&conn, 4, &publish_verify)
+            .await
+            .unwrap()
+    );
+    let mut publish = publish_verify;
+    publish.generation = 6;
     publish.scan_mode = GitHistoryScanMode::Publish;
-    assert!(compare_and_swap_progress(&conn, 4, &publish).await.unwrap());
+    assert!(compare_and_swap_progress(&conn, 5, &publish).await.unwrap());
     let mut backslid = advanced.clone();
-    backslid.generation = 6;
+    backslid.generation = 7;
     backslid.segment_cursor = 1;
     backslid.emitted_count = 0;
     assert!(
-        !compare_and_swap_progress(&conn, 5, &backslid)
+        !compare_and_swap_progress(&conn, 6, &backslid)
             .await
             .unwrap()
     );

@@ -166,9 +166,8 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
     drop(snapshot);
     let repository_seal = repository_seal_from_progress(progress)?;
     let Some(segment) = segment else {
-        let source = cursor_from_progress(progress)?;
-        verify_source_without_writer(project_path, &source, control).await?;
-        return seal_for_publish(session_store, progress, control, committed).await;
+        return mark_publish_verification_pending(session_store, progress, control, committed)
+            .await;
     };
     if !segment.applied {
         verify_repository_without_writer(project_path, &repository_seal, control).await?;
@@ -458,12 +457,46 @@ async fn apply_graph_chunk<S: GitCorrelationSessionStore>(
     }
 }
 
-async fn seal_for_publish<S: GitCorrelationSessionStore>(
+async fn mark_publish_verification_pending<S: GitCorrelationSessionStore>(
     session_store: &S,
     progress: &GitHistoryProgressRow,
     control: &BoundedGitControl,
     committed: &mut bool,
 ) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
+    let transaction = session_store
+        .open_write_transaction()
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    control.check()?;
+    let mut next = progress.clone();
+    next.generation = next
+        .generation
+        .checked_add(1)
+        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+    next.scan_mode = GitHistoryScanMode::PublishVerify;
+    if !history_progress::compare_and_swap_progress(&transaction, progress.generation, &next)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+    {
+        return Ok(StreamGitEvidenceOutcome::Progressed);
+    }
+    control.check()?;
+    GitCorrelationWriteTxn::commit(transaction)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    *committed = true;
+    Ok(StreamGitEvidenceOutcome::Progressed)
+}
+
+pub(super) async fn advance_publish_verification<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    project_path: &Path,
+    progress: &GitHistoryProgressRow,
+    control: &BoundedGitControl,
+    committed: &mut bool,
+) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
+    let source = cursor_from_progress(progress)?;
+    verify_source_without_writer(project_path, &source, control).await?;
     let transaction = session_store
         .open_write_transaction()
         .await
