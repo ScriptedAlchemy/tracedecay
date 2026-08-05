@@ -5,6 +5,9 @@
 
 mod journal;
 mod native;
+mod native_integration_topology;
+#[cfg(test)]
+mod native_integration_topology_tests;
 mod owner;
 mod queue;
 mod recovery;
