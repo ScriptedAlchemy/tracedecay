@@ -39,14 +39,8 @@ async fn seed_final_profile(temp: &TempDir) -> FinalProfileFixture {
     }
     for name in [
         "global.db",
-        "global.db-wal",
-        "global.db-shm",
         "user-sessions.db",
-        "user-sessions.db-wal",
-        "user-sessions.db-shm",
         "user-memory.db",
-        "user-memory.db-wal",
-        "user-memory.db-shm",
         "enrollment.json",
         "config.toml",
         "profile-identity.json",

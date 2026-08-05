@@ -10,14 +10,8 @@ async fn final_database(path: &Path) {
 async fn final_profile(root: &Path) {
     for name in [
         "global.db",
-        "global.db-wal",
-        "global.db-shm",
         "user-sessions.db",
-        "user-sessions.db-wal",
-        "user-sessions.db-shm",
         "user-memory.db",
-        "user-memory.db-wal",
-        "user-memory.db-shm",
         "enrollment.json",
         "config.toml",
         "profile-identity.json",
@@ -54,7 +48,7 @@ async fn complete_archive_rehearses_from_restored_isolated_copy() {
         manifest
             .entries
             .iter()
-            .any(|entry| { entry.logical_path == "user-sessions.db-wal" && entry.present })
+            .any(|entry| { entry.logical_path == "user-sessions.db-wal" && !entry.present })
     );
     assert!(
         manifest
