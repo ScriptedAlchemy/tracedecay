@@ -1074,7 +1074,7 @@ mod runtime_configuration_cutover {
     use tempfile::TempDir;
     use tracedecay_domain::configuration::{
         ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
-        SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
+        SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
     };
     use tracedecay_domain::{ProjectId, UtcMicros};
     use tracedecay_usecases::config::{
@@ -1084,9 +1084,7 @@ mod runtime_configuration_cutover {
         RuntimeConfigurationTarget as UsecaseRuntimeConfigurationTarget,
     };
 
-    use crate::application::configuration::{
-        ConfigurationControlStore, DirectConfigurationMutation,
-    };
+    use crate::application::configuration::DirectConfigurationMutation;
     use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::config::registry::ConfigurationRegistry;
     use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};

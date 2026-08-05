@@ -29,9 +29,11 @@ fn handoff_open_wire_is_closed_project_scoped_and_debug_redacted() {
     assert_eq!(request.validate(), Ok(()));
     assert!(!format!("{request:?}").contains(secret));
 
-    let encoded = serde_json::to_vec(&request).expect("encode daemon handoff request");
-    assert!(String::from_utf8_lossy(&encoded).contains(secret));
-    let decoded = parse_daemon_invocation_request(&encoded).expect("decode daemon handoff request");
+    let encoded = serde_json::to_string(&request).expect("encode daemon handoff request");
+    assert!(encoded.contains(secret));
+    let decoded = parse_daemon_invocation_request(&encoded)
+        .expect("recognize daemon handoff protocol")
+        .expect("decode daemon handoff request");
     assert_eq!(
         decoded.operation(),
         DaemonInvocationOperation::HandoffApplication
