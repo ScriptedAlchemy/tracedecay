@@ -315,6 +315,8 @@ pub struct ExternalSourceAcquisitionOwnerV1<S, A, F, C> {
     commit: Arc<C>,
     policy: SourceAcquisitionPolicyV1,
     wake: tokio::sync::Notify,
+    /// Serializes provider effects across background draining and direct runs.
+    run_gate: tokio::sync::Mutex<()>,
 }
 
 impl<S, A, F, C> ExternalSourceAcquisitionOwnerV1<S, A, F, C>
@@ -338,6 +340,7 @@ where
             commit,
             policy,
             wake: tokio::sync::Notify::new(),
+            run_gate: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -549,6 +552,15 @@ where
     }
 
     pub async fn run_one(
+        &self,
+        now: UtcMicros,
+        cancellation: &ObservationCancellation,
+    ) -> Result<SourceAcquisitionRunOutcomeV1, ExternalSourceAcquisitionErrorV1> {
+        let _run = self.run_gate.lock().await;
+        self.run_one_exclusive(now, cancellation).await
+    }
+
+    async fn run_one_exclusive(
         &self,
         now: UtcMicros,
         cancellation: &ObservationCancellation,
