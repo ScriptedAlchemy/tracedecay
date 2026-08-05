@@ -63,7 +63,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
             DatabaseOwnerEntry {
                 server,
                 last_used,
-                publication: ProjectServerPublication::RegisteredHostIngest,
+                publication: ProjectServerPublication::Full,
             },
         );
     }
@@ -122,11 +122,28 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         let Some(entry) = self.servers.get_mut(key) else {
             return false;
         };
-        if !entry.publication.satisfies(ProjectServerRequirement::Core) || !matches(&entry.server) {
+        if entry.publication != ProjectServerPublication::Core || !matches(&entry.server) {
             return false;
         }
         entry.server = replacement;
         entry.publication = ProjectServerPublication::RegisteredHostIngest;
+        entry.last_used = Instant::now();
+        true
+    }
+
+    pub(super) fn mark_full_ready_if<F>(&mut self, key: &ProjectServerKey, matches: F) -> bool
+    where
+        F: FnOnce(&Server) -> bool,
+    {
+        let Some(entry) = self.servers.get_mut(key) else {
+            return false;
+        };
+        if entry.publication != ProjectServerPublication::RegisteredHostIngest
+            || !matches(&entry.server)
+        {
+            return false;
+        }
+        entry.publication = ProjectServerPublication::Full;
         entry.last_used = Instant::now();
         true
     }
@@ -141,7 +158,13 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         F: FnOnce(&Server) -> bool,
     {
         let entry = self.servers.get_mut(key)?;
-        if !entry.publication.satisfies(ProjectServerRequirement::Core) || !matches(&entry.server) {
+        if !matches!(
+            entry.publication,
+            ProjectServerPublication::Core
+                | ProjectServerPublication::RegisteredHostIngest
+                | ProjectServerPublication::Full
+        ) || !matches(&entry.server)
+        {
             return None;
         }
         let displaced = std::mem::replace(&mut entry.server, replacement);

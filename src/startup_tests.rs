@@ -128,6 +128,7 @@ fn representative_commands_route_to_their_dispatch_family() {
         (
             Commands::Tool {
                 project: None,
+                help: false,
                 name: Some("status".to_string()),
                 args: Vec::new(),
             },
@@ -260,6 +261,7 @@ fn normal_commands_keep_startup_maintenance() {
 fn tool_fallback_skips_network_and_agent_startup_maintenance() {
     let command = Commands::Tool {
         project: None,
+        help: false,
         name: Some("message_search".to_string()),
         args: Vec::new(),
     };
@@ -272,7 +274,7 @@ fn first_class_git_reads_skip_network_and_agent_startup_maintenance() {
     let command = Commands::Git {
         action: GitAction::Status {
             project: GitProjectArgs {
-                path: None,
+                project: None,
                 project_id: None,
                 project_path: None,
                 json: true,

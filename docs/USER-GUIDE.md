@@ -445,6 +445,49 @@ tracedecay tool files --pattern "**/*.rs"       # only Rust files
 tracedecay tool files --json                    # machine-readable output
 ```
 
+### First-class Git intelligence
+
+For bounded native Git reads, use the `git` command rather than building a
+generic `tool` request. Each command resolves the current enrolled project and
+its exact worktree through the daemon, then returns the catalogued application
+result. It never accepts or runs an arbitrary Git command.
+
+```bash
+tracedecay git status --json
+tracedecay git diff --scope staged --json
+tracedecay git history --count 25 --path src/main.rs --json
+tracedecay git blame --path src/main.rs --json
+tracedecay git hunks --scope working-tree --preview-id <id> --snapshot-digest <digest> --json
+```
+
+`status`, `diff`, `history`, `blame`, and `hunks` are the first-class read
+operations. They wait for the daemon's complete project publication; a cold
+project can therefore return a typed warming or unavailable result rather than
+inventing a local repository route. `--path` is the repository-relative file
+filter for `history` and `blame`. To select a different admitted project, use
+`--project <root>`, `--project-id <id>`, or `--project-path <registered-root>`.
+
+### Workflow operations
+
+The closed, daemon-owned Workflow surface is available directly from the CLI.
+Pass one strict request JSON document with `--request-file` (or `-` for
+standard input) and request the canonical application envelope with `--json`:
+
+```bash
+tracedecay workflow register-definition --request-file definition.json --json
+tracedecay workflow activate-definition --request-file activation.json --json
+tracedecay workflow execute-fan-out --request-file fan-out.json --json
+tracedecay workflow handoff-issue --request-file handoff.json --json
+tracedecay workflow handoff-redeem --request-file redeem.json --json
+```
+
+The operation names are fixed: `register-definition`, `activate-definition`,
+`execute-fan-out`, `handoff-issue`, and `handoff-redeem`. Use `--project <root>`
+when the selected project is not the current checkout. The daemon validates the
+request against the operation's typed schema and returns only an admitted
+effect or a typed problem; the CLI does not create workflow state, schedule
+work, or fall back to a local store.
+
 ### Running the MCP server directly
 
 ```bash

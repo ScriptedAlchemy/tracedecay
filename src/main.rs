@@ -807,9 +807,16 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
     match command {
         Commands::Tool {
             project,
+            help,
             name,
-            args,
+            mut args,
         } => {
+            if help {
+                // Clap recognizes the visible command's bare `--help`, while
+                // the dynamic tool parser remains the authority for a named
+                // tool's schema help.
+                args.insert(0, "--help".to_owned());
+            }
             tool_command::run(project, name, args).await?;
         }
         Commands::Workflow { invocation } => workflow_command::run(invocation).await?,

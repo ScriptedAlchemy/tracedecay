@@ -1021,6 +1021,16 @@ pub(super) async fn production_project_server(
                     message: "project changed branch during full capability admission".to_owned(),
                 });
             }
+            let fully_published = store_administration
+                .project_servers()
+                .lock()
+                .await
+                .mark_full_ready_if(&key, |current| Arc::ptr_eq(current, &full_candidate));
+            if !fully_published {
+                return Err(TraceDecayError::Config {
+                    message: "project server changed before full capability publication".to_owned(),
+                });
+            }
             // The registry cutover prevents new core leases. Existing core
             // requests may finish while dependent owners warm, then the
             // displaced server is drained without closing the shared graph.

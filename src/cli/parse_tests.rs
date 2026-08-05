@@ -57,6 +57,52 @@ fn first_class_git_status_parses_as_a_cli_journey() {
     );
 }
 
+#[test]
+fn first_class_git_reads_render_help_with_distinct_project_and_file_paths() {
+    let git_read_paths = [
+        vec!["git", "status"],
+        vec!["git", "diff"],
+        vec!["git", "history"],
+        vec!["git", "blame"],
+        vec!["git", "hunks"],
+    ];
+    assert!(
+        !git_read_paths.is_empty(),
+        "the first-class Git journey must expose visible read commands"
+    );
+
+    for path in git_read_paths {
+        let action = path.last().expect("Git action");
+        let args = std::iter::once("tracedecay")
+            .chain(path.iter().copied())
+            .chain(std::iter::once("--help"));
+        let err = match Cli::try_parse_from(args) {
+            Ok(_) => panic!("Git help must short-circuit parsing"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.kind(),
+            ErrorKind::DisplayHelp,
+            "`tracedecay git {} --help` must render without argument collisions",
+            action
+        );
+    }
+
+    let parsed = Cli::try_parse_from([
+        "tracedecay",
+        "git",
+        "history",
+        "--path",
+        "src/lib.rs",
+        "--project",
+        "/workspace/project",
+    ]);
+    assert!(
+        parsed.is_ok(),
+        "the history file path and admitted project selector must stay distinct"
+    );
+}
+
 fn visible_subcommand_paths(command: &Command) -> Vec<Vec<String>> {
     fn collect(command: &Command, prefix: Vec<String>, paths: &mut Vec<Vec<String>>) {
         for subcommand in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
@@ -75,27 +121,31 @@ fn visible_subcommand_paths(command: &Command) -> Vec<Vec<String>> {
 #[test]
 fn visible_subcommands_accept_clap_help() {
     let command = Cli::command();
-    for path in visible_subcommand_paths(&command) {
-        if path == ["tool"] {
-            continue;
-        }
-
+    let paths = visible_subcommand_paths(&command);
+    assert!(
+        !paths.is_empty(),
+        "the visible-subcommand help journey must exercise at least one command"
+    );
+    for path in paths {
         let args = std::iter::once("tracedecay".to_string())
             .chain(path.iter().cloned())
             .chain(std::iter::once("--help".to_string()));
-        let err = match Cli::try_parse_from(args) {
-            Ok(_) => panic!(
-                "`tracedecay {} --help` should short-circuit parsing",
+        match Cli::try_parse_from(args) {
+            Err(err) => assert_eq!(
+                err.kind(),
+                ErrorKind::DisplayHelp,
+                "`tracedecay {} --help` should display help",
                 path.join(" ")
             ),
-            Err(err) => err,
-        };
-        assert_eq!(
-            err.kind(),
-            ErrorKind::DisplayHelp,
-            "`tracedecay {} --help` should display help",
-            path.join(" ")
-        );
+            Ok(Cli {
+                command: Some(Commands::Tool { help: true, .. }),
+                ..
+            }) if path == ["tool"] => {}
+            Ok(_) => panic!(
+                "`tracedecay {} --help` should display or route command help",
+                path.join(" ")
+            ),
+        }
     }
 }
 
@@ -184,7 +234,7 @@ fn top_level_help_teaches_the_tool_discovery_flow() {
 }
 
 #[test]
-fn tool_command_preserves_trailing_help_and_reserved_args() {
+fn tool_command_separates_clap_help_from_dynamic_tool_arguments() {
     let cli = Cli::try_parse_from([
         "tracedecay",
         "tool",
@@ -201,12 +251,16 @@ fn tool_command_preserves_trailing_help_and_reserved_args() {
 
     assert!(matches!(
         cli.command,
-        Some(Commands::Tool { project, name, args })
+        Some(Commands::Tool {
+            project,
+            help: true,
+            name,
+            args,
+        })
             if project.as_deref() == Some("/tmp/project")
                 && name.as_deref() == Some("search")
                 && args
                     == vec![
-                        "--help".to_string(),
                         "--json".to_string(),
                         "--args".to_string(),
                         r#"{"query":"foo"}"#.to_string(),

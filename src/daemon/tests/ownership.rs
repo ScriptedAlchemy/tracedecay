@@ -821,6 +821,13 @@ fn database_owner_registry_upgrades_only_the_published_core_and_preserves_aliase
             Arc::ptr_eq(current, &core)
         })
     );
+    assert!(
+        registry
+            .get_route_and_touch_for(&route("/project"), ProjectServerRequirement::Full)
+            .is_none(),
+        "the replacement server must stay hidden from Git until its authority is registered"
+    );
+    assert!(registry.mark_full_ready_if(&key, |current| Arc::ptr_eq(current, &full)));
     assert!(Arc::ptr_eq(
         registry
             .get_route(&route("/project"))

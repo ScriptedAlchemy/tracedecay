@@ -2,7 +2,9 @@ use super::*;
 #[cfg(unix)]
 use crate::application::context::CancellationToken;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
-use crate::daemon::{ProjectServerRequirement, project_server_requirement};
+use crate::daemon::{
+    ProjectServerPublication, ProjectServerRequirement, project_server_requirement,
+};
 #[cfg(unix)]
 use crate::errors::TraceDecayError;
 use crate::mcp::JsonRpcResponse;
@@ -98,6 +100,22 @@ fn hook_runtime_ingest_waits_for_registered_project_authority_publication() {
     assert_eq!(
         project_server_requirement(&ingest),
         ProjectServerRequirement::RegisteredHostIngest
+    );
+}
+
+#[test]
+fn full_project_server_requirement_waits_for_the_git_owning_publication() {
+    assert!(
+        !ProjectServerPublication::Core.satisfies(ProjectServerRequirement::Full),
+        "the core-only server does not own the Git application authority"
+    );
+    assert!(
+        !ProjectServerPublication::RegisteredHostIngest.satisfies(ProjectServerRequirement::Full),
+        "the host-ingest server still needs Git authority registration"
+    );
+    assert!(
+        ProjectServerPublication::Full.satisfies(ProjectServerRequirement::Full),
+        "the fully published server must own the Git application authority"
     );
 }
 

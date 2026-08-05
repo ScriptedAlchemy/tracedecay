@@ -420,6 +420,8 @@ impl ProjectOpenTasks {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ProjectServerRequirement {
     Core,
+    /// The completed project server, including the daemon-owned Git authority.
+    Full,
     RegisteredHostIngest,
 }
 
@@ -448,13 +450,17 @@ pub(super) enum ProjectServerPublication {
     Pending,
     Core,
     RegisteredHostIngest,
+    Full,
 }
 
 impl ProjectServerPublication {
     pub(super) fn satisfies(self, requirement: ProjectServerRequirement) -> bool {
         match requirement {
             ProjectServerRequirement::Core => self != Self::Pending,
-            ProjectServerRequirement::RegisteredHostIngest => self == Self::RegisteredHostIngest,
+            ProjectServerRequirement::Full => self == Self::Full,
+            ProjectServerRequirement::RegisteredHostIngest => {
+                matches!(self, Self::RegisteredHostIngest | Self::Full)
+            }
         }
     }
 }

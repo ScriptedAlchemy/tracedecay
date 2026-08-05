@@ -139,17 +139,23 @@ fn run_surface_tool_from(
 /// Runs the first-class Git read command from an admitted checkout. Unlike the
 /// generic `tool` escape hatch, this is the operator-facing journey for
 /// catalogued Git intelligence.
-fn run_git_status_from(home: &Path, working_directory: &Path) -> SurfaceOutcome {
+fn run_git_read_from(
+    home: &Path,
+    working_directory: &Path,
+    command_args: &[&str],
+) -> SurfaceOutcome {
     let mut command = tracedecay_command_with_home(home);
     command
         .current_dir(working_directory)
-        .args(["git", "status", "--json"])
+        .arg("git")
+        .args(command_args)
+        .arg("--json")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let output = command
         .output()
-        .expect("first-class tracedecay git status should run");
+        .expect("first-class tracedecay git read should run");
     SurfaceOutcome {
         success: output.status.success(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -234,22 +240,29 @@ fn application_surface_git_reads_resolve_the_working_directory_worktree() {
 }
 
 #[test]
-fn first_class_git_status_reads_the_admitted_worktree_through_the_daemon() {
+fn first_class_git_reads_wait_for_full_publication_then_dispatch() {
     let (_home, _project, home_path, project_path) = surface_fixture();
     let _daemon = spawn_tracedecay_daemon(&home_path);
 
-    let outcome = run_git_status_from(&home_path, &project_path);
-    assert!(
-        outcome.success,
-        "first-class git status must reach the daemon-owned application route\nstdout:\n{}\nstderr:\n{}",
-        outcome.stdout, outcome.stderr
-    );
-    let payload = outcome.payload();
-    assert!(
-        payload.get("scope").is_some(),
-        "first-class git status must preserve the authenticated scope, got:\n{}",
-        outcome.stdout
-    );
+    for command_args in [
+        ["status"].as_slice(),
+        ["history", "--count", "1"].as_slice(),
+        ["blame", "--path", "src/lib.rs"].as_slice(),
+    ] {
+        let outcome = run_git_read_from(&home_path, &project_path, command_args);
+        assert!(
+            outcome.success,
+            "first-class git {} must reach the fully published daemon-owned application route\nstdout:\n{}\nstderr:\n{}",
+            command_args[0], outcome.stdout, outcome.stderr
+        );
+        let payload = outcome.payload();
+        assert!(
+            payload.get("scope").is_some(),
+            "first-class git {} must preserve the authenticated scope, got:\n{}",
+            command_args[0],
+            outcome.stdout
+        );
+    }
 }
 
 #[test]

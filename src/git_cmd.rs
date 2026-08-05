@@ -90,12 +90,12 @@ async fn dispatch_git_read(
     project: GitProjectArgs,
 ) -> tracedecay::errors::Result<()> {
     let GitProjectArgs {
-        path,
+        project,
         project_id,
         project_path,
         json,
     } = project;
-    let project = resolve_cli_project_root(path, project_id, project_path).await?;
+    let project = resolve_cli_project_root(project, project_id, project_path).await?;
     dispatch_catalogued_cli_operation(operation, payload, Some(project), json).await
 }
 
@@ -138,12 +138,17 @@ fn git_history_payload(
     if follow && path.is_none() {
         return Err(config_error("--follow requires --path"));
     }
-    Ok(json!({
+    let mut payload = json!({
         "count": count,
-        "path": path,
         "follow": follow,
         "first_parent": first_parent,
-    }))
+    });
+    if let Some(path) = path
+        && let Some(fields) = payload.as_object_mut()
+    {
+        fields.insert("path".to_owned(), Value::String(path));
+    }
+    Ok(payload)
 }
 
 fn no_range_payload(
@@ -247,5 +252,31 @@ mod tests {
             .expect_err("Git cannot follow renames without a selected path");
 
         assert!(error.to_string().contains("--follow requires --path"));
+    }
+
+    #[test]
+    fn history_omits_an_absent_optional_path_from_its_reviewed_request() {
+        assert_eq!(
+            git_history_payload(1, None, false, false).expect("default history request"),
+            json!({
+                "count": 1,
+                "follow": false,
+                "first_parent": false,
+            })
+        );
+    }
+
+    #[test]
+    fn history_preserves_a_requested_file_path_in_its_reviewed_request() {
+        assert_eq!(
+            git_history_payload(1, Some("src/lib.rs".to_owned()), false, false)
+                .expect("path-filtered history request"),
+            json!({
+                "count": 1,
+                "path": "src/lib.rs",
+                "follow": false,
+                "first_parent": false,
+            })
+        );
     }
 }

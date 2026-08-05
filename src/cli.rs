@@ -199,10 +199,10 @@ pub enum Commands {
     },
     /// Invoke an MCP tool from the CLI (e.g. `tracedecay tool search foo`).
     //
-    // `disable_help_flag = true` lets `-h`/`--help` flow through to our parser
-    // so we can print the per-tool schema instead of clap's generic help.
-    // `main::render_dynamic_command_help` still renders this long help for a
-    // bare `tracedecay tool --help`.
+    // Keep Clap's generated help disabled so this explicit flag can preserve
+    // the dynamic schema journey for named tools. `main` replays named help
+    // into the tool parser; `render_dynamic_command_help` renders a bare
+    // `tracedecay tool --help` before dispatch.
     #[command(
         disable_help_flag = true,
         long_about = TOOL_LONG_ABOUT,
@@ -213,6 +213,10 @@ pub enum Commands {
         /// nearest initialised project walking up from cwd.
         #[arg(long)]
         project: Option<String>,
+        /// Render the command overview. Tool-specific `--help` after a name
+        /// remains a trailing argument for dynamic schema rendering.
+        #[arg(short = 'h', long)]
+        help: bool,
         /// MCP tool name (with or without the `tracedecay_` prefix). Omit to list all tools.
         name: Option<String>,
         /// Tool arguments: the tool's MCP arguments object via
@@ -799,13 +803,13 @@ pub enum AnalyticsAction {
 #[derive(Args)]
 pub struct GitProjectArgs {
     /// Project path (default: current directory, with discovery)
-    #[arg(short, long)]
-    pub path: Option<String>,
+    #[arg(long)]
+    pub project: Option<String>,
     /// Registered project id to inspect instead of discovering from cwd
-    #[arg(long, conflicts_with = "path")]
+    #[arg(long, conflicts_with = "project")]
     pub project_id: Option<String>,
     /// Registered project root path or alias to inspect instead of discovering from cwd
-    #[arg(long, conflicts_with_all = ["path", "project_id"])]
+    #[arg(long, conflicts_with_all = ["project", "project_id"])]
     pub project_path: Option<String>,
     /// Output the canonical application envelope as one JSON line
     #[arg(long)]

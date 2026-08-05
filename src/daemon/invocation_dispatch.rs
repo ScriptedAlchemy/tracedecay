@@ -35,6 +35,28 @@ pub(super) fn invalid_multi_root_invocation_response(
         .map(|problem| DaemonInvocationResponse::problem(request.request_id.clone(), problem))
 }
 
+pub(super) fn project_server_requirement_for_invocation(
+    operation: service::invocation::DaemonInvocationOperation,
+) -> ProjectServerRequirement {
+    if invocation_is_git_operation(operation) {
+        ProjectServerRequirement::Full
+    } else {
+        ProjectServerRequirement::Core
+    }
+}
+
+fn git_project_warming_response(request_id: String) -> DaemonInvocationResponse {
+    DaemonInvocationResponse::application_problem(
+        request_id,
+        tracedecay_application::ApplicationProblem::unavailable(
+            tracedecay_application::SafeDiagnostic {
+                code: "git.project.warming".to_owned(),
+                message: "The Git project authority is warming".to_owned(),
+            },
+        ),
+    )
+}
+
 #[cfg(any(not(unix), test))]
 pub(super) async fn execute_portable_daemon_invocation(
     lifecycle: DaemonLifecycle,
@@ -51,8 +73,15 @@ pub(super) async fn execute_portable_daemon_invocation(
     }
     let request_id = request.request_id.clone();
     let git_operation = invocation_is_git_operation(request.operation());
+    let project_server_requirement = project_server_requirement_for_invocation(request.operation());
     let mut project_path = None;
     if request.requires_project() {
+        let Ok((resolved_project_path, _)) = project_route_for_handshake(handshake) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        };
         if Box::pin(portable_project_server_for_request(
             lifecycle,
             store_administration.clone(),
@@ -60,28 +89,19 @@ pub(super) async fn execute_portable_daemon_invocation(
             invocation.clone(),
             http_application_registry,
             handshake,
-            ProjectServerRequirement::Core,
+            project_server_requirement,
             #[cfg(test)]
             project_open_attempts,
         ))
         .await
         .is_err()
         {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                if git_operation {
-                    DaemonInvocationProblem::NotFoundOrNotAuthorized
-                } else {
-                    DaemonInvocationProblem::Unavailable
-                },
-            );
+            return if git_operation {
+                git_project_warming_response(request_id)
+            } else {
+                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+            };
         }
-        let Ok((resolved_project_path, _)) = project_route_for_handshake(handshake) else {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::NotFoundOrNotAuthorized,
-            );
-        };
         if admitted_lsp_root_for_project_path(&resolved_project_path).is_none() {
             return DaemonInvocationResponse::problem(
                 request_id,
@@ -179,28 +199,29 @@ pub(super) async fn execute_daemon_invocation(
     }
     let request_id = request.request_id.clone();
     let git_operation = invocation_is_git_operation(request.operation());
+    let project_server_requirement = project_server_requirement_for_invocation(request.operation());
     let mut project_path = None;
     if request.requires_project() {
-        if engine
-            .project_server_for_request(handshake, ProjectServerRequirement::Core)
-            .await
-            .is_err()
-        {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                if git_operation {
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized
-                } else {
-                    service::invocation::DaemonInvocationProblem::Unavailable
-                },
-            );
-        }
         let Ok((resolved_project_path, _)) = DaemonEngine::project_route(handshake) else {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
+        if engine
+            .project_server_for_request(handshake, project_server_requirement)
+            .await
+            .is_err()
+        {
+            return if git_operation {
+                git_project_warming_response(request_id)
+            } else {
+                DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::Unavailable,
+                )
+            };
+        }
         if admitted_lsp_root_for_project_path(&resolved_project_path).is_none() {
             return DaemonInvocationResponse::problem(
                 request_id,
@@ -217,4 +238,46 @@ pub(super) async fn execute_daemon_invocation(
             request,
         )
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_invocations_require_the_fully_published_project_server() {
+        for operation in [
+            service::invocation::DaemonInvocationOperation::GitStatus,
+            service::invocation::DaemonInvocationOperation::GitDiff,
+            service::invocation::DaemonInvocationOperation::GitHistory,
+            service::invocation::DaemonInvocationOperation::GitBlame,
+            service::invocation::DaemonInvocationOperation::GitHunks,
+            service::invocation::DaemonInvocationOperation::GitPreview,
+            service::invocation::DaemonInvocationOperation::GitApply,
+        ] {
+            assert_eq!(
+                project_server_requirement_for_invocation(operation),
+                ProjectServerRequirement::Full,
+                "Git operation {operation:?} must wait for its complete daemon authority"
+            );
+        }
+    }
+
+    #[test]
+    fn cold_git_publication_returns_a_typed_retryable_warming_problem() {
+        let response = git_project_warming_response("request.git.warming".to_owned());
+        let service::invocation::DaemonInvocationOutcome::ApplicationProblem { problem } =
+            response.outcome
+        else {
+            panic!("cold Git publication must return an application problem");
+        };
+        assert!(matches!(
+            problem,
+            tracedecay_application::ApplicationProblem::Unavailable {
+                retry: tracedecay_application::RetryDirective::AfterDelay,
+                legal_actions,
+                ..
+            } if legal_actions == vec![tracedecay_application::LegalAction::Retry]
+        ));
+    }
 }
