@@ -4,7 +4,8 @@ use std::time::Duration;
 use tracedecay_application::OperationTermination;
 use tracedecay_application::session_sync::SessionSyncStatsV1;
 
-use super::{DaemonSessionSyncService, completion_termination};
+use super::{DaemonSessionSyncService, completed_profile_sweep_covers, completion_termination};
+use tracedecay_domain::UtcMicros;
 
 #[test]
 fn committed_result_stays_terminal_when_cancel_or_deadline_arrives_late() {
@@ -15,11 +16,11 @@ fn committed_result_stays_terminal_when_cancel_or_deadline_arrives_late() {
     };
 
     assert_eq!(
-        completion_termination(true, &stats, true),
+        completion_termination(true, &stats, true, true),
         OperationTermination::Completed
     );
     assert_eq!(
-        completion_termination(true, &stats, false),
+        completion_termination(true, &stats, true, false),
         OperationTermination::Partial
     );
 }
@@ -27,9 +28,38 @@ fn committed_result_stays_terminal_when_cancel_or_deadline_arrives_late() {
 #[test]
 fn uncommitted_failure_is_not_reported_as_success() {
     assert_eq!(
-        completion_termination(false, &SessionSyncStatsV1::default(), false),
+        completion_termination(false, &SessionSyncStatsV1::default(), true, false),
         OperationTermination::Failed
     );
+}
+
+#[test]
+fn partial_coverage_is_never_completed_without_failures() {
+    assert_eq!(
+        completion_termination(false, &SessionSyncStatsV1::default(), false, true),
+        OperationTermination::Failed
+    );
+    let stats = SessionSyncStatsV1 {
+        messages_imported: 1,
+        ..SessionSyncStatsV1::default()
+    };
+    assert_eq!(
+        completion_termination(true, &stats, false, true),
+        OperationTermination::Partial
+    );
+}
+
+#[test]
+fn completed_profile_sweep_only_covers_already_admitted_work() {
+    assert!(completed_profile_sweep_covers(
+        Some(&UtcMicros(20)),
+        UtcMicros(19)
+    ));
+    assert!(!completed_profile_sweep_covers(
+        Some(&UtcMicros(20)),
+        UtcMicros(21)
+    ));
+    assert!(!completed_profile_sweep_covers(None, UtcMicros(19)));
 }
 
 #[tokio::test]

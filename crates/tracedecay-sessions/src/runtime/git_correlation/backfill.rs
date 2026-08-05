@@ -9,6 +9,11 @@ use super::{
     normalize_worktree, run_commit_attribution_sweep,
 };
 
+mod bounded;
+pub use bounded::{
+    BoundedBackfillInterruption, BoundedBackfillOutcome, BoundedGitControl, run_bounded_backfill,
+};
+
 // Historical backfill for sessions that predate live span recording.
 
 /// One session's declared and message-derived activity bounds, read from the

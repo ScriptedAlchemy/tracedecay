@@ -11,11 +11,12 @@ use tracedecay_store::StoreShardScopeV1;
 use crate::db::engine::ReadSnapshot;
 use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use crate::sessions::git_correlation::{
-    AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats, CommitRelationFilter,
-    CorrelationIndexHealth, GitCorrelationError, GitCorrelationSessionStore,
-    GitCorrelationWriteTxn, GitReflogSource, SessionGitCorrelationHit, SessionsForQuery,
-    SpanObservation, correlation_index_health, record_span_observation_in_transaction,
-    run_backfill, run_incremental_backfill, sessions_for_with_relation,
+    AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats, BoundedBackfillOutcome,
+    BoundedGitControl, CommitRelationFilter, CorrelationIndexHealth, GitCorrelationError,
+    GitCorrelationSessionStore, GitCorrelationWriteTxn, GitReflogSource, SessionGitCorrelationHit,
+    SessionsForQuery, SpanObservation, correlation_index_health,
+    record_span_observation_in_transaction, run_backfill, run_bounded_backfill,
+    run_incremental_backfill, sessions_for_with_relation,
 };
 
 /// Adapter over an already-open project-sessions database.
@@ -105,6 +106,18 @@ where
         limit_sessions: usize,
     ) -> Result<BackfillStats, GitCorrelationError> {
         run_incremental_backfill(self, git, limit_sessions).await
+    }
+
+    pub(crate) async fn run_bounded_backfill<E>(
+        &self,
+        analytics_events: &[E],
+        opts: &BackfillOptions,
+        control: &BoundedGitControl,
+    ) -> Result<BoundedBackfillOutcome, GitCorrelationError>
+    where
+        E: AnalyticsSessionTimestampSource,
+    {
+        run_bounded_backfill(self, analytics_events, opts, control).await
     }
 
     pub(crate) async fn correlation_index_health(

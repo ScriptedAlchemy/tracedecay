@@ -9,7 +9,7 @@ mod user_provider;
 
 pub use authority::{IngestAdmissionBinding, SessionIngestAuthority};
 pub use failure::{
-    TranscriptCatchUpFailure, classify_claude_observation_failure,
+    IngestPassCoverage, TranscriptCatchUpFailure, classify_claude_observation_failure,
     classify_transcript_ingest_failure,
 };
 pub use project::{
@@ -27,7 +27,7 @@ pub use user::{
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub mod test_support {
-    pub use super::failure::{IngestPassBounds, IngestPassCoverage, IngestPassOutcome};
+    pub use super::failure::{IngestPassBounds, IngestPassOutcome};
     pub use super::project::ingest_project_sources_for_provider_without_registered_authority;
     pub use super::scheduler::USER_INGEST_PROVIDER_FRONTIER_KEY;
     pub use super::startup::ingest_user_global_sources_for_startup_with_db_without_registered_authority;

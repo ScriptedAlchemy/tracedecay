@@ -4,6 +4,43 @@ use tracedecay_runtime_core::errors::TraceDecayError;
 use crate::{RegisteredGlobalDb, global_db_operation_error};
 
 impl RegisteredGlobalDb {
+    pub async fn list_session_sync_source_frontiers(
+        &self,
+    ) -> Result<Vec<(String, String, String)>, TraceDecayError> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| global_db_operation_error("open session source frontiers", error))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT source_json, scope_json, cursor_json
+                 FROM source_cursors
+                 ORDER BY source_json, scope_json",
+                params![],
+            )
+            .await
+            .map_err(|error| global_db_operation_error("list session source frontiers", error))?;
+        let mut frontiers = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error("step session source frontiers", error))?
+        {
+            frontiers.push((
+                row.get(0).map_err(|error| {
+                    global_db_operation_error("decode session source identity", error)
+                })?,
+                row.get(1).map_err(|error| {
+                    global_db_operation_error("decode session source scope", error)
+                })?,
+                row.get(2).map_err(|error| {
+                    global_db_operation_error("decode session committed cursor", error)
+                })?,
+            ));
+        }
+        Ok(frontiers)
+    }
+
     pub async fn read_session_sync_journal(
         &self,
         key: &str,

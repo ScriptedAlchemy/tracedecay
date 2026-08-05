@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use tracedecay_application::session_sync::{
     SessionGitSyncV1, SessionSyncAdmissionErrorV1, SessionSyncCommandV1,
-    SessionSyncCompletionReceiptV1, SessionSyncControlV1, SessionSyncFuture,
+    SessionSyncCompletionReceiptV1, SessionSyncControlV1, SessionSyncCoverageV1, SessionSyncFuture,
     SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
-    SessionSyncScopeV1, SessionSyncServicePort, SessionSyncShutdownFuture, SessionSyncStatsV1,
+    SessionSyncScopeV1, SessionSyncServicePort, SessionSyncShutdownFuture,
+    SessionSyncSourceCoverageV1, SessionSyncSourceFrontierV1, SessionSyncStatsV1,
     SessionTranscriptImportV1,
 };
 use tracedecay_application::{
@@ -22,8 +23,10 @@ use crate::store::{GlobalDbGitCorrelationStore, GlobalDbSessionIngestAuthority};
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
 const SESSION_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SESSION_SYNC_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
+const SESSION_SYNC_SHUTDOWN_ABORT_GRACE: Duration = Duration::from_secs(1);
 const SESSION_SYNC_STARTUP_DEADLINE_MICROS: i64 = 60_000_000;
 const GIT_SYNC_ANALYTICS_LIMIT: usize = 500_000;
+const GIT_SYNC_COMMAND_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub(crate) struct DaemonSessionSyncService {
@@ -31,7 +34,16 @@ pub(crate) struct DaemonSessionSyncService {
     active: Arc<Mutex<BTreeMap<String, CancellationSignal>>>,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     scan_slots: Arc<tokio::sync::Semaphore>,
+    admission_gate: Arc<tokio::sync::Mutex<()>>,
+    active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
+    completed_profile_sweeps: Arc<Mutex<BTreeMap<String, UtcMicros>>>,
     shutdown: crate::application::observation::ObservationCancellation,
+}
+
+#[derive(Clone)]
+struct ActiveSessionImport {
+    admission: tracedecay_application::session_sync::SessionSyncAdmissionReceiptV1,
+    journal_key: String,
 }
 
 pub(crate) struct DaemonSessionSyncConfig {
@@ -71,6 +83,8 @@ enum SessionSyncWorkResult {
     Finished {
         committed: bool,
         stats: SessionSyncStatsV1,
+        coverage: Vec<SessionSyncSourceCoverageV1>,
+        source_frontiers: Vec<SessionSyncSourceFrontierV1>,
         failure_codes: Vec<String>,
     },
     Cancelled,
@@ -85,6 +99,9 @@ impl Default for DaemonSessionSyncService {
             active: Arc::new(Mutex::new(BTreeMap::new())),
             tasks: Arc::new(Mutex::new(Vec::new())),
             scan_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            admission_gate: Arc::new(tokio::sync::Mutex::new(())),
+            active_imports: Arc::new(Mutex::new(BTreeMap::new())),
+            completed_profile_sweeps: Arc::new(Mutex::new(BTreeMap::new())),
             shutdown: crate::application::observation::ObservationCancellation::default(),
         }
     }
@@ -114,8 +131,9 @@ impl DaemonSessionSyncService {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(scope.project_id().as_str().to_owned(), Arc::clone(&context));
-        self.recover_project(&context).await?;
-        if config.startup_import {
+        let _admission = self.admission_gate.lock().await;
+        let recovered_import = self.recover_project(&context).await?;
+        if config.startup_import && !recovered_import {
             self.schedule_startup_import(scope).await?;
         }
         Ok(())
@@ -157,14 +175,14 @@ impl DaemonSessionSyncService {
             cancellation,
             SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
         );
-        let _ = self.execute_request(request).await;
+        let _ = self.execute_request_locked(request).await;
         Ok(())
     }
 
     async fn recover_project(
         &self,
         context: &Arc<SessionSyncProjectContext>,
-    ) -> crate::errors::Result<()> {
+    ) -> crate::errors::Result<bool> {
         let scope = SessionSyncScopeV1::new(context.project_id.clone(), context.profile_id.clone());
         let prefix = journal_prefix(&scope);
         let journals = context
@@ -172,18 +190,22 @@ impl DaemonSessionSyncService {
             .list_session_sync_journals(&prefix)
             .await
             .map_err(store_error)?;
+        let mut recovered_import = false;
         for (key, encoded) in journals {
-            let journal: SessionSyncJournalV1 =
+            let mut journal: SessionSyncJournalV1 =
                 serde_json::from_str(&encoded).map_err(journal_decode_error)?;
             if journal.scope != scope || journal.status == SessionSyncJournalStatusV1::Complete {
                 continue;
             }
+            journal = self.refresh_source_frontiers(context, &key).await?;
             if journal.cancel_requested_at.is_some() {
                 self.persist_terminal(
                     context,
                     &key,
                     OperationTermination::Cancelled,
-                    journal.frontier,
+                    journal.stats,
+                    journal.coverage,
+                    journal.source_frontiers,
                     Vec::new(),
                 )
                 .await?;
@@ -194,10 +216,32 @@ impl DaemonSessionSyncService {
                     context,
                     &key,
                     OperationTermination::TimedOut,
-                    journal.frontier,
+                    journal.stats,
+                    journal.coverage,
+                    journal.source_frontiers,
                     Vec::new(),
                 )
                 .await?;
+                continue;
+            }
+            let active_import =
+                matches!(journal.source, SessionSyncCommandV1::ImportTranscripts(_))
+                    .then(|| {
+                        self.active_imports
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .get(&import_scope_key(&journal.scope))
+                            .cloned()
+                    })
+                    .flatten();
+            if let Some(active_import) = active_import {
+                recovered_import = true;
+                self.coalesce_recovered_import(
+                    Arc::clone(context),
+                    key,
+                    journal,
+                    active_import.journal_key,
+                );
                 continue;
             }
             let cancellation = CancellationSignal::active(format!(
@@ -205,6 +249,7 @@ impl DaemonSessionSyncService {
                 journal.admission.operation_id.as_str()
             ))
             .map_err(contract_error)?;
+            let admission = journal.admission.clone();
             let request = SessionSyncRequestV1::new(
                 journal.admission.operation_id,
                 journal.admission.idempotency_key,
@@ -213,12 +258,21 @@ impl DaemonSessionSyncService {
                 cancellation,
                 journal.source,
             );
-            let _ = self.enqueue(Arc::clone(context), key, request);
+            recovered_import |= matches!(
+                request.command(),
+                SessionSyncCommandV1::ImportTranscripts(_)
+            );
+            let _ = self.enqueue(Arc::clone(context), key, request, admission);
         }
-        Ok(())
+        Ok(recovered_import)
     }
 
     async fn execute_request(&self, request: SessionSyncRequestV1) -> SessionSyncOutcomeV1 {
+        let _admission = self.admission_gate.lock().await;
+        self.execute_request_locked(request).await
+    }
+
+    async fn execute_request_locked(&self, request: SessionSyncRequestV1) -> SessionSyncOutcomeV1 {
         let observed_at = now_micros();
         match request.admit_at(observed_at) {
             Ok(()) => {}
@@ -232,13 +286,26 @@ impl DaemonSessionSyncService {
         let Some(context) = self.context_for(request.scope()) else {
             return SessionSyncOutcomeV1::WrongScope;
         };
+        if matches!(
+            request.command(),
+            SessionSyncCommandV1::ImportTranscripts(_)
+        ) && let Some(receipt) = self
+            .active_imports
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&import_scope_key(request.scope()))
+            .map(|active| active.admission.clone())
+        {
+            return SessionSyncOutcomeV1::Joined(receipt);
+        }
         let key = journal_key(request.scope(), request.idempotency_key());
         match context.registry.read_session_sync_journal(&key).await {
             Ok(Some(encoded)) => {
                 return match decode_matching_journal(&encoded, &request) {
                     Ok(journal) => {
+                        let admission = journal.admission.clone();
                         if journal.status != SessionSyncJournalStatusV1::Complete
-                            && !self.enqueue(context, key, request)
+                            && !self.enqueue(context, key, request, admission)
                         {
                             return SessionSyncOutcomeV1::Unavailable {
                                 reason_code: "session_sync_capacity_reached",
@@ -300,7 +367,7 @@ impl DaemonSessionSyncService {
             }
         }
         let admission = journal.admission.clone();
-        if !self.enqueue(context, key, request) {
+        if !self.enqueue(context, key, request, admission.clone()) {
             return SessionSyncOutcomeV1::Unavailable {
                 reason_code: "session_sync_capacity_reached",
             };
@@ -313,6 +380,7 @@ impl DaemonSessionSyncService {
         context: Arc<SessionSyncProjectContext>,
         key: String,
         request: SessionSyncRequestV1,
+        admission: tracedecay_application::session_sync::SessionSyncAdmissionReceiptV1,
     ) -> bool {
         let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         if active.contains_key(&key) {
@@ -322,6 +390,23 @@ impl DaemonSessionSyncService {
             return false;
         }
         active.insert(key.clone(), request.cancellation().clone());
+        let import_scope = matches!(
+            request.command(),
+            SessionSyncCommandV1::ImportTranscripts(_)
+        )
+        .then(|| import_scope_key(request.scope()));
+        if let Some(import_scope) = import_scope.as_ref() {
+            self.active_imports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(
+                    import_scope.clone(),
+                    ActiveSessionImport {
+                        admission,
+                        journal_key: key.clone(),
+                    },
+                );
+        }
         drop(active);
         let service = self.clone();
         let task = tokio::spawn(async move {
@@ -331,6 +416,13 @@ impl DaemonSessionSyncService {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&key);
+            if let Some(import_scope) = import_scope {
+                service
+                    .active_imports
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&import_scope);
+            }
         });
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|task| !task.is_finished());
@@ -357,22 +449,18 @@ impl DaemonSessionSyncService {
                         return;
                     }
                     if request.cancellation().is_cancelled() {
-                        let _ = self.persist_terminal(
+                        let _ = self.persist_interruption(
                             &context,
                             &key,
                             OperationTermination::Cancelled,
-                            SessionSyncStatsV1::default(),
-                            Vec::new(),
                         ).await;
                         return;
                     }
                     if request.deadline().is_elapsed_at(now_micros()) {
-                        let _ = self.persist_terminal(
+                        let _ = self.persist_interruption(
                             &context,
                             &key,
                             OperationTermination::TimedOut,
-                            SessionSyncStatsV1::default(),
-                            Vec::new(),
                         ).await;
                         return;
                     }
@@ -386,36 +474,35 @@ impl DaemonSessionSyncService {
         if request.cancellation().is_cancelled() {
             drop(permit);
             let _ = self
-                .persist_terminal(
-                    &context,
-                    &key,
-                    OperationTermination::Cancelled,
-                    SessionSyncStatsV1::default(),
-                    Vec::new(),
-                )
+                .persist_interruption(&context, &key, OperationTermination::Cancelled)
                 .await;
             return;
         }
         if request.deadline().is_elapsed_at(now_micros()) {
             drop(permit);
             let _ = self
-                .persist_terminal(
-                    &context,
-                    &key,
-                    OperationTermination::TimedOut,
-                    SessionSyncStatsV1::default(),
-                    Vec::new(),
-                )
+                .persist_interruption(&context, &key, OperationTermination::TimedOut)
                 .await;
             return;
         }
-        if self.transition_running(&context, &key).await.is_err() {
-            drop(permit);
-            return;
-        }
+        let running = match self.transition_running(&context, &key).await {
+            Ok(running) => running,
+            Err(_) => {
+                drop(permit);
+                return;
+            }
+        };
         let work = match request.command() {
             SessionSyncCommandV1::ImportTranscripts(_) => {
-                context.import_transcripts(&request, &self.shutdown).await
+                context
+                    .import_transcripts(
+                        self,
+                        &key,
+                        running.admission.accepted_at,
+                        &request,
+                        &self.shutdown,
+                    )
+                    .await
             }
             SessionSyncCommandV1::SynchronizeGit(options) => {
                 context
@@ -428,35 +515,37 @@ impl DaemonSessionSyncService {
             SessionSyncWorkResult::Shutdown => {}
             SessionSyncWorkResult::Cancelled => {
                 let _ = self
-                    .persist_terminal(
-                        &context,
-                        &key,
-                        OperationTermination::Cancelled,
-                        SessionSyncStatsV1::default(),
-                        Vec::new(),
-                    )
+                    .persist_interruption(&context, &key, OperationTermination::Cancelled)
                     .await;
             }
             SessionSyncWorkResult::TimedOut => {
                 let _ = self
-                    .persist_terminal(
-                        &context,
-                        &key,
-                        OperationTermination::TimedOut,
-                        SessionSyncStatsV1::default(),
-                        Vec::new(),
-                    )
+                    .persist_interruption(&context, &key, OperationTermination::TimedOut)
                     .await;
             }
             SessionSyncWorkResult::Finished {
                 committed,
                 stats,
+                coverage,
+                source_frontiers,
                 failure_codes,
             } => {
-                let termination =
-                    completion_termination(committed, &stats, failure_codes.is_empty());
+                let termination = completion_termination(
+                    committed,
+                    &stats,
+                    coverage.iter().all(|entry| entry.coverage.is_complete()),
+                    failure_codes.is_empty(),
+                );
                 if self
-                    .persist_terminal(&context, &key, termination, stats, failure_codes)
+                    .persist_terminal(
+                        &context,
+                        &key,
+                        termination,
+                        stats,
+                        coverage,
+                        source_frontiers,
+                        failure_codes,
+                    )
                     .await
                     .is_ok()
                     && committed
@@ -472,7 +561,7 @@ impl DaemonSessionSyncService {
         &self,
         context: &SessionSyncProjectContext,
         key: &str,
-    ) -> crate::errors::Result<()> {
+    ) -> crate::errors::Result<SessionSyncJournalV1> {
         self.update_journal(context, key, |journal| {
             if journal.status != SessionSyncJournalStatusV1::Complete {
                 journal.status = SessionSyncJournalStatusV1::Running;
@@ -480,7 +569,34 @@ impl DaemonSessionSyncService {
             }
         })
         .await
-        .map(|_| ())
+    }
+
+    async fn persist_interruption(
+        &self,
+        context: &SessionSyncProjectContext,
+        key: &str,
+        termination: OperationTermination,
+    ) -> crate::errors::Result<SessionSyncJournalV1> {
+        let current = context
+            .registry
+            .read_session_sync_journal(key)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "session sync journal disappeared".to_owned(),
+            })?;
+        let journal: SessionSyncJournalV1 =
+            serde_json::from_str(&current).map_err(journal_decode_error)?;
+        self.persist_terminal(
+            context,
+            key,
+            termination,
+            journal.stats,
+            journal.coverage,
+            journal.source_frontiers,
+            Vec::new(),
+        )
+        .await
     }
 
     async fn persist_terminal(
@@ -489,6 +605,8 @@ impl DaemonSessionSyncService {
         key: &str,
         termination: OperationTermination,
         stats: SessionSyncStatsV1,
+        coverage: Vec<SessionSyncSourceCoverageV1>,
+        source_frontiers: Vec<SessionSyncSourceFrontierV1>,
         failure_codes: Vec<String>,
     ) -> crate::errors::Result<SessionSyncJournalV1> {
         self.update_journal(context, key, |journal| {
@@ -497,12 +615,16 @@ impl DaemonSessionSyncService {
             }
             let completed_at = now_micros();
             journal.status = SessionSyncJournalStatusV1::Complete;
-            journal.frontier = stats.clone();
+            journal.stats = stats.clone();
+            journal.coverage.clone_from(&coverage);
+            journal.source_frontiers.clone_from(&source_frontiers);
             journal.completion = Some(SessionSyncCompletionReceiptV1 {
                 admission: journal.admission.clone(),
                 completed_at,
                 termination,
                 stats: stats.clone(),
+                coverage: coverage.clone(),
+                source_frontiers: source_frontiers.clone(),
                 failure_codes: failure_codes.clone(),
             });
             journal.updated_at = completed_at;
@@ -541,11 +663,51 @@ impl DaemonSessionSyncService {
         }
     }
 
+    async fn persist_progress(
+        &self,
+        context: &SessionSyncProjectContext,
+        key: &str,
+        stats: SessionSyncStatsV1,
+        coverage: Vec<SessionSyncSourceCoverageV1>,
+    ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+        let source_frontiers = context.source_frontiers().await?;
+        self.update_journal(context, key, |journal| {
+            if journal.status != SessionSyncJournalStatusV1::Complete {
+                journal.stats = stats.clone();
+                journal.coverage.clone_from(&coverage);
+                journal.source_frontiers.clone_from(&source_frontiers);
+                journal.updated_at = now_micros();
+            }
+        })
+        .await?;
+        Ok(source_frontiers)
+    }
+
+    async fn refresh_source_frontiers(
+        &self,
+        context: &SessionSyncProjectContext,
+        key: &str,
+    ) -> crate::errors::Result<SessionSyncJournalV1> {
+        let source_frontiers = context.source_frontiers().await?;
+        self.update_journal(context, key, |journal| {
+            if journal.status != SessionSyncJournalStatusV1::Complete
+                && journal.source_frontiers != source_frontiers
+            {
+                journal.source_frontiers.clone_from(&source_frontiers);
+                journal.updated_at = now_micros();
+            }
+        })
+        .await
+    }
+
     async fn status_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
         let Some(context) = self.context_for(control.scope()) else {
             return SessionSyncOutcomeV1::WrongScope;
         };
         let key = journal_key(control.scope(), control.idempotency_key());
+        if let Err(error) = self.refresh_source_frontiers(&context, &key).await {
+            tracing::warn!(%error, "session sync frontier refresh failed");
+        }
         match context.registry.read_session_sync_journal(&key).await {
             Ok(Some(encoded)) => match serde_json::from_str::<SessionSyncJournalV1>(&encoded) {
                 Ok(journal)
@@ -618,13 +780,7 @@ impl DaemonSessionSyncService {
             journal.outcome()
         } else {
             match self
-                .persist_terminal(
-                    &context,
-                    &key,
-                    OperationTermination::Cancelled,
-                    journal.frontier,
-                    Vec::new(),
-                )
+                .persist_interruption(&context, &key, OperationTermination::Cancelled)
                 .await
             {
                 Ok(journal) => journal.outcome(),
@@ -659,224 +815,34 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
                 let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
                 std::mem::take(&mut *tasks)
             };
-            if tokio::time::timeout(
-                SESSION_SYNC_SHUTDOWN_DEADLINE,
-                futures_util::future::join_all(tasks.iter_mut()),
-            )
-            .await
-            .is_err()
-            {
+            let joined = tokio::time::timeout(SESSION_SYNC_SHUTDOWN_DEADLINE, async {
+                let grace_deadline =
+                    tokio::time::Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
+                tokio::select! {
+                    results = futures_util::future::join_all(tasks.iter_mut()) => {
+                        for result in results {
+                            log_session_sync_join(result);
+                        }
+                        return;
+                    }
+                    () = tokio::time::sleep_until(grace_deadline) => {}
+                }
                 for task in &tasks {
                     task.abort();
                 }
                 for result in futures_util::future::join_all(tasks).await {
-                    if let Err(error) = result
-                        && !error.is_cancelled()
-                    {
-                        tracing::warn!(%error, "session sync worker abort failed");
-                    }
+                    log_session_sync_join(result);
                 }
+            })
+            .await;
+            if joined.is_err() {
+                tracing::warn!("session sync shutdown exceeded its total join deadline");
             }
         })
     }
 }
 
-impl SessionSyncProjectContext {
-    async fn import_transcripts(
-        &self,
-        request: &SessionSyncRequestV1,
-        shutdown: &crate::application::observation::ObservationCancellation,
-    ) -> SessionSyncWorkResult {
-        let cancellation = crate::application::observation::ObservationCancellation::default();
-        let pass_cancellation = cancellation.clone();
-        let brain_id = self.brain_id.clone();
-        let profile_id = self.profile_id.clone();
-        let project_id = self.project_id.clone();
-        let project_root = self.project_root.clone();
-        let profile_root = self.profile_root.clone();
-        let project_sessions = Arc::clone(&self.project_sessions);
-        let user_sessions = Arc::clone(&self.user_sessions);
-        let registry = Arc::clone(&self.registry);
-        let pass = async move {
-            let project_authority = GlobalDbSessionIngestAuthority::new(project_sessions);
-            let project = crate::sessions::ingest_project_sources_for_provider_with_cancellation(
-                &brain_id,
-                &profile_id,
-                &project_authority,
-                &project_root,
-                Some(project_id),
-                None,
-                true,
-                &pass_cancellation,
-            )
-            .await;
-            let user_authority = GlobalDbSessionIngestAuthority::new(user_sessions);
-            let registry_authority = GlobalDbSessionIngestAuthority::new(registry);
-            let user =
-                crate::sessions::ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
-                    &brain_id,
-                    &profile_id,
-                    &user_authority,
-                    &registry_authority,
-                    &profile_root,
-                    None,
-                    &pass_cancellation,
-                )
-                .await;
-            (project, user)
-        };
-        let pass = async {
-            match &self.transcript_source_home {
-                Some(home) => {
-                    crate::sessions::with_transcript_source_home(home.clone(), pass).await
-                }
-                None => pass.await,
-            }
-        };
-        tokio::pin!(pass);
-        let mut interrupted = None;
-        let (project, user) = loop {
-            tokio::select! {
-                outcomes = &mut pass => break outcomes,
-                () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
-                    if shutdown.is_cancelled() {
-                        cancellation.cancel();
-                        interrupted = Some(SessionSyncWorkResult::Shutdown);
-                    } else if request.cancellation().is_cancelled() {
-                        cancellation.cancel();
-                        interrupted = Some(SessionSyncWorkResult::Cancelled);
-                    } else if request.deadline().is_elapsed_at(now_micros()) {
-                        cancellation.cancel();
-                        interrupted = Some(SessionSyncWorkResult::TimedOut);
-                    }
-                }
-            }
-        };
-        let combined = project.stats.merge(user.stats);
-        let stats = SessionSyncStatsV1 {
-            sessions_imported: combined.sessions_upserted,
-            messages_imported: combined.messages_upserted,
-            ..SessionSyncStatsV1::default()
-        };
-        let failure_codes = project
-            .failures
-            .into_iter()
-            .chain(user.failures)
-            .map(|failure| failure.reason_code.to_owned())
-            .collect::<Vec<_>>();
-        let committed = stats != SessionSyncStatsV1::default();
-        if committed {
-            return SessionSyncWorkResult::Finished {
-                committed: true,
-                stats,
-                failure_codes,
-            };
-        }
-        match interrupted {
-            Some(interrupted) => interrupted,
-            None => SessionSyncWorkResult::Finished {
-                committed: false,
-                stats,
-                failure_codes,
-            },
-        }
-    }
-
-    async fn synchronize_git(
-        &self,
-        request: &SessionSyncRequestV1,
-        options: SessionGitSyncV1,
-        shutdown: &crate::application::observation::ObservationCancellation,
-    ) -> SessionSyncWorkResult {
-        let Some(analytics) = self.analytics.as_ref() else {
-            return SessionSyncWorkResult::Finished {
-                committed: false,
-                stats: SessionSyncStatsV1::default(),
-                failure_codes: vec!["analytics_authority_unavailable".to_owned()],
-            };
-        };
-        let project_key = RegisteredGlobalDb::canonical_project_key(&self.project_root);
-        let query = analytics.query_analytics_events(&AnalyticsEventQuery {
-            project_id: Some(project_key),
-            since: Some(options.since_unix()),
-            limit: GIT_SYNC_ANALYTICS_LIMIT,
-            ..AnalyticsEventQuery::default()
-        });
-        tokio::pin!(query);
-        let events = loop {
-            tokio::select! {
-                result = &mut query => {
-                    match result {
-                        Ok(events) => break events,
-                        Err(error) => {
-                            tracing::warn!(%error, "session git sync analytics read failed");
-                            return SessionSyncWorkResult::Finished {
-                                committed: false,
-                                stats: SessionSyncStatsV1::default(),
-                                failure_codes: vec!["analytics_read_failed".to_owned()],
-                            };
-                        }
-                    }
-                }
-                () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
-                    if shutdown.is_cancelled() {
-                        return SessionSyncWorkResult::Shutdown;
-                    }
-                    if request.cancellation().is_cancelled() {
-                        return SessionSyncWorkResult::Cancelled;
-                    }
-                    if request.deadline().is_elapsed_at(now_micros()) {
-                        return SessionSyncWorkResult::TimedOut;
-                    }
-                }
-            }
-        };
-        if shutdown.is_cancelled() {
-            return SessionSyncWorkResult::Shutdown;
-        }
-        if request.cancellation().is_cancelled() {
-            return SessionSyncWorkResult::Cancelled;
-        }
-        if request.deadline().is_elapsed_at(now_micros()) {
-            return SessionSyncWorkResult::TimedOut;
-        }
-        let result = GlobalDbGitCorrelationStore::new(Arc::clone(&self.project_sessions))
-            .run_backfill(
-                &events,
-                &crate::sessions::git_correlation::SystemGit,
-                &crate::sessions::git_correlation::BackfillOptions {
-                    since: options.since_unix(),
-                    limit_sessions: options.max_sessions(),
-                    merge_gap_secs: crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
-                    max_commits_per_repo: 5_000,
-                    dry_run: options.dry_run(),
-                },
-            )
-            .await;
-        match result {
-            Ok(stats) => SessionSyncWorkResult::Finished {
-                committed: !options.dry_run(),
-                stats: SessionSyncStatsV1 {
-                    sessions_scanned: saturating_usize_to_u64(stats.sessions_scanned),
-                    spans_written: saturating_usize_to_u64(stats.spans_written),
-                    commits_attributed: saturating_usize_to_u64(stats.commits_attributed),
-                    skipped: saturating_usize_to_u64(stats.skipped_total()),
-                    ..SessionSyncStatsV1::default()
-                },
-                failure_codes: Vec::new(),
-            },
-            Err(error) => {
-                tracing::warn!(%error, "session git sync failed");
-                SessionSyncWorkResult::Finished {
-                    committed: false,
-                    stats: SessionSyncStatsV1::default(),
-                    failure_codes: vec!["git_sync_failed".to_owned()],
-                }
-            }
-        }
-    }
-}
-
+mod work;
 fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
     let profile_id = scope.profile_id().as_str();
     let project_id = scope.project_id().as_str();
@@ -885,6 +851,46 @@ fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
         profile_id.len(),
         project_id.len(),
     )
+}
+
+fn import_scope_key(scope: &SessionSyncScopeV1) -> String {
+    format!(
+        "p{}:{}.r{}:{}",
+        scope.profile_id().as_str().len(),
+        scope.profile_id().as_str(),
+        scope.project_id().as_str().len(),
+        scope.project_id().as_str(),
+    )
+}
+
+fn completed_profile_sweep_covers(
+    sweep_started_at: Option<&UtcMicros>,
+    admitted_at: UtcMicros,
+) -> bool {
+    sweep_started_at.is_some_and(|sweep_started_at| *sweep_started_at >= admitted_at)
+}
+
+fn source_coverage(
+    store_scope: &str,
+    coverage: crate::sessions::IngestPassCoverage,
+) -> SessionSyncSourceCoverageV1 {
+    let coverage = match coverage {
+        crate::sessions::IngestPassCoverage::Complete => SessionSyncCoverageV1::Complete,
+        crate::sessions::IngestPassCoverage::Partial { deferred_units } => {
+            SessionSyncCoverageV1::Partial { deferred_units }
+        }
+        crate::sessions::IngestPassCoverage::Backpressured {
+            admitted_units,
+            rejected_units,
+        } => SessionSyncCoverageV1::Backpressured {
+            admitted_units,
+            rejected_units,
+        },
+    };
+    SessionSyncSourceCoverageV1 {
+        store_scope: store_scope.to_owned(),
+        coverage,
+    }
 }
 
 fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
@@ -909,9 +915,10 @@ fn decode_matching_journal(
 fn completion_termination(
     committed: bool,
     stats: &SessionSyncStatsV1,
+    coverage_complete: bool,
     failures_empty: bool,
 ) -> OperationTermination {
-    if failures_empty {
+    if failures_empty && coverage_complete {
         OperationTermination::Completed
     } else if committed || stats != &SessionSyncStatsV1::default() {
         OperationTermination::Partial
@@ -924,6 +931,14 @@ fn saturating_usize_to_u64(value: usize) -> u64 {
     match u64::try_from(value) {
         Ok(value) => value,
         Err(_) => u64::MAX,
+    }
+}
+
+fn log_session_sync_join(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result
+        && !error.is_cancelled()
+    {
+        tracing::warn!(%error, "session sync worker join failed");
     }
 }
 

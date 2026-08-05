@@ -750,6 +750,7 @@ async fn run_git_sync(
     Ok(())
 }
 
+#[derive(Debug)]
 enum SessionSyncPollState {
     Pending {
         operation_id: String,
@@ -808,7 +809,14 @@ fn session_sync_poll_state(
                         "daemon {label} response reported complete without a termination"
                     ),
                 })?;
-            if termination != "completed" {
+            let remaining_work = session_sync_remaining_work(outcome).ok_or_else(|| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "daemon {label} response reported complete without truthful source coverage"
+                    ),
+                }
+            })?;
+            if termination != "completed" || remaining_work > 0 {
                 let failures = outcome
                     .get("failure_codes")
                     .and_then(serde_json::Value::as_array)
@@ -820,6 +828,11 @@ fn session_sync_poll_state(
                     termination.to_owned()
                 } else {
                     format!("{termination}: {}", failures.join(", "))
+                };
+                let detail = if remaining_work == 0 {
+                    detail
+                } else {
+                    format!("{detail}; remaining work {remaining_work}")
                 };
                 return Err(tracedecay::errors::TraceDecayError::Config {
                     message: format!("{label} did not complete successfully ({detail})"),
@@ -850,6 +863,23 @@ fn session_sync_poll_state(
             message: format!("daemon {label} response reported unknown status {unexpected:?}"),
         }),
     }
+}
+
+fn session_sync_remaining_work(outcome: &Value) -> Option<u64> {
+    let coverage = outcome.get("coverage")?.as_array()?;
+    if coverage.is_empty() {
+        return None;
+    }
+    coverage.iter().try_fold(0_u64, |remaining, entry| {
+        let coverage = entry.get("coverage")?;
+        let deferred = match coverage.get("outcome")?.as_str()? {
+            "complete" => 0,
+            "partial" => coverage.get("deferred_units")?.as_u64()?,
+            "backpressured" => coverage.get("rejected_units")?.as_u64()?,
+            _ => return None,
+        };
+        Some(remaining.saturating_add(deferred))
+    })
 }
 
 async fn await_session_sync_completion(
@@ -1003,7 +1033,13 @@ mod tests {
                     "operation_id": "operation.fixture",
                     "idempotency_key": "session-sync.fixture",
                     "termination": "completed",
-                    "stats": {}
+                    "stats": {},
+                    "coverage": [{
+                        "store_scope": "project",
+                        "coverage": {
+                            "outcome": "complete"
+                        }
+                    }]
                 })
             )
             .unwrap(),
@@ -1038,6 +1074,49 @@ mod tests {
         ] {
             assert!(session_sync_poll_state("session import", &outcome).is_err());
         }
+    }
+
+    #[test]
+    fn session_sync_reports_remaining_coverage_even_if_daemon_mislabels_completion() {
+        let error = session_sync_poll_state(
+            "session import",
+            &json!({
+                "status": "complete",
+                "operation_id": "operation.fixture",
+                "idempotency_key": "session-sync.fixture",
+                "termination": "completed",
+                "coverage": [{
+                    "store_scope": "profile",
+                    "coverage": {
+                        "outcome": "partial",
+                        "deferred_units": 4
+                    }
+                }]
+            }),
+        )
+        .expect_err("partial transcript coverage cannot be CLI success");
+
+        assert!(error.to_string().contains("remaining work 4"));
+    }
+
+    #[test]
+    fn session_sync_rejects_completion_without_source_coverage() {
+        let error = session_sync_poll_state(
+            "session import",
+            &json!({
+                "status": "complete",
+                "operation_id": "operation.fixture",
+                "idempotency_key": "session-sync.fixture",
+                "termination": "completed"
+            }),
+        )
+        .expect_err("coverage-free completion cannot prove convergence");
+
+        assert!(
+            error
+                .to_string()
+                .contains("without truthful source coverage")
+        );
     }
 
     #[test]

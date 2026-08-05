@@ -34,7 +34,7 @@ pub mod workflow_state;
 
 pub use crate::{ProviderScope, SessionProvider};
 pub use ingest::{
-    TranscriptCatchUpFailure, classify_claude_observation_failure,
+    IngestPassCoverage, TranscriptCatchUpFailure, classify_claude_observation_failure,
     classify_transcript_ingest_failure, home_dir, ingest_project_sources_for_provider,
     ingest_project_sources_for_provider_with_cancellation,
     ingest_user_global_sources_for_provider_with_authorities,
