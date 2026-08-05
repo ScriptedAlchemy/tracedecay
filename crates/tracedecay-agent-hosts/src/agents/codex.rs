@@ -1431,6 +1431,53 @@ fn remove_codex_plugin_skills_dir(install_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn remove_codex_retired_autodiscovered_files(install_dir: &Path) -> Result<()> {
+    let managed = codex_plugin_managed_paths(install_dir)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    for relative_root in ["agents", "commands", "hooks", "skills"] {
+        let root = install_dir.join(relative_root);
+        let Ok(metadata) = std::fs::symlink_metadata(&root) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let mut files =
+            super::collect_regular_files(&root).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to inventory retired Codex plugin files under {}: {error}",
+                    root.display()
+                ),
+            })?;
+        files.sort();
+        for file in files {
+            if managed.contains(&file) {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            if !super::skill_contents_have_tracedecay_marker(&contents) {
+                continue;
+            }
+            super::safe_remove_host_file(&file).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to remove retired TraceDecay plugin file {}: {error}",
+                    file.display()
+                ),
+            })?;
+        }
+        prune_empty_dirs(&root).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to prune retired Codex plugin directories under {}: {error}",
+                root.display()
+            ),
+        })?;
+    }
+    Ok(())
+}
+
 fn remove_codex_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
@@ -1497,6 +1544,7 @@ fn remove_codex_plugin_install(install_dir: &Path) -> Result<()> {
         });
     }
     remove_codex_plugin_skills_dir(install_dir)?;
+    remove_codex_retired_autodiscovered_files(install_dir)?;
     if codex_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", install_dir.display()),

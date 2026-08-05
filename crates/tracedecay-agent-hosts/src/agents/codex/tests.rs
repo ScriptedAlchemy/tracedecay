@@ -579,6 +579,56 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
     ));
 }
 
+#[test]
+fn redeploy_retires_owned_discovery_files_and_preserves_foreign_bytes() {
+    let home = tempfile::tempdir().unwrap();
+    write_exact_native_activation(home.path(), TEST_BIN);
+    let ctx = install_ctx(home.path());
+    let source = codex_plugin_install_dir(home.path());
+    let retired = source.join("skills/tracedecay-retired/SKILL.md");
+    std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
+    std::fs::write(
+        &retired,
+        "---\nname: tracedecay:retired\ndescription: TraceDecay retired skill\n---\n",
+    )
+    .unwrap();
+    let operator_support = retired.parent().unwrap().join("operator-notes.txt");
+    let operator_support_bytes = b"preserve operator support bytes";
+    std::fs::write(&operator_support, operator_support_bytes).unwrap();
+    assert!(matches!(
+        CodexIntegration
+            .preflight_non_interactive_install(&ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::DeferredUserAction(_)
+    ));
+
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    assert!(!retired.exists());
+    assert_eq!(
+        std::fs::read(&operator_support).unwrap(),
+        operator_support_bytes
+    );
+    assert!(matches!(
+        CodexIntegration
+            .preflight_non_interactive_install(&ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::Ready
+    ));
+
+    let foreign = source.join("skills/operator-owned/SKILL.md");
+    std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    let foreign_bytes = b"---\nname: operator-owned\ndescription: Keep this workflow\n---\n";
+    std::fs::write(&foreign, foreign_bytes).unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    assert_eq!(std::fs::read(foreign).unwrap(), foreign_bytes);
+    assert!(matches!(
+        CodexIntegration
+            .preflight_non_interactive_install(&ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::DeferredUserAction(_)
+    ));
+}
+
 /// Codex cache activation is intentionally deferred to the host CLI.
 #[test]
 fn codex_reports_host_native_activation_requirement() {
