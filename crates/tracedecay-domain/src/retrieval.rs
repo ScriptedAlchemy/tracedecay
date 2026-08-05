@@ -794,6 +794,7 @@ pub enum RetrieverOutcome<T> {
     Denied,
     Stale(SourceFreshness),
     BudgetExceeded(RetrievalBudgetUsage),
+    TimedOut(RetrievalBudgetUsage),
     Cancelled,
 }
 
@@ -1487,6 +1488,22 @@ mod tests {
                 format!("\"{wire}\""),
             );
         }
+    }
+
+    #[test]
+    fn retriever_outcome_keeps_deadlines_distinct_from_cancellation() {
+        let usage = RetrievalBudgetUsage {
+            elapsed_micros: 10_000,
+            ..RetrievalBudgetUsage::default()
+        };
+        let timed_out = RetrieverOutcome::<()>::TimedOut(usage);
+        let cancelled = RetrieverOutcome::<()>::Cancelled;
+
+        assert_ne!(timed_out, cancelled);
+        assert_eq!(
+            serde_json::to_value(timed_out).expect("serialize timeout")["outcome"],
+            "timed_out",
+        );
     }
 
     #[test]

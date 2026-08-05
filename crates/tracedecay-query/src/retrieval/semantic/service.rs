@@ -169,6 +169,7 @@ pub enum SemanticAbstentionV1 {
     PartialCoverage,
     SemanticUnavailable,
     Cancelled,
+    TimedOut,
     BudgetExceeded,
     Denied,
     Stale,
@@ -330,6 +331,9 @@ where
                     SemanticAbstentionV1::BudgetExceeded,
                     fallback,
                 );
+            }
+            RetrieverOutcome::TimedOut(_) => {
+                return self.abstain(on_abstention, SemanticAbstentionV1::TimedOut, fallback);
             }
             RetrieverOutcome::Cancelled => {
                 return self.abstain(on_abstention, SemanticAbstentionV1::Cancelled, fallback);

@@ -36,7 +36,7 @@ use self::resolution::summary::{
     evaluate_summary_lineage_eligibility_controlled,
 };
 use self::resolution::types::{
-    ResolutionLineageEdge, ResolutionLineageEdgeKind, ResolvedOccurrence,
+    ResolutionLineageEdge, ResolutionLineageEdgeKind, ResolvedOccurrence, TemporalResolution,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,6 +210,37 @@ pub struct TemporalKernelResult {
     pub next_cursor: Option<String>,
 }
 
+/// Frozen compact temporal page before any payload authorization or read.
+///
+/// Public getters intentionally expose only rank, snapshot, and continuation.
+/// Resolution records needed for canonical context assembly remain private and
+/// can be consumed only by [`hydrate_temporal_candidate_export`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemporalCandidateExport {
+    snapshot: TemporalExecutionSnapshot,
+    ranked: Vec<RankedCandidate>,
+    next_cursor: Option<String>,
+    all_candidate_anchors: BTreeSet<RetrievalAnchorId>,
+    visible_anchors: BTreeSet<RetrievalAnchorId>,
+    resolution: TemporalResolution,
+    summaries: Vec<SessionSummaryRecordV1>,
+    summary_eligibility: SummaryLineageEligibility,
+}
+
+impl TemporalCandidateExport {
+    pub fn snapshot(&self) -> &TemporalExecutionSnapshot {
+        &self.snapshot
+    }
+
+    pub fn ranked(&self) -> &[RankedCandidate] {
+        &self.ranked
+    }
+
+    pub fn next_cursor(&self) -> Option<&str> {
+        self.next_cursor.as_deref()
+    }
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum TemporalKernelError {
     #[error("temporal query limit must be non-zero")]
@@ -239,6 +270,17 @@ pub async fn execute_temporal_kernel(
     authenticator: &impl SessionCursorAuthenticator,
     token_estimator: &impl VersionedTokenEstimator,
 ) -> Result<TemporalKernelResult, TemporalKernelError> {
+    let export = execute_temporal_candidate_export(request, read_port, authenticator).await?;
+    hydrate_temporal_candidate_export(request, export, hydration_port, token_estimator).await
+}
+
+/// Execute the canonical Plan-23 candidate, temporal-resolution, fusion,
+/// dedupe, diversity, and pagination phases without reading payload bytes.
+pub async fn execute_temporal_candidate_export(
+    request: &TemporalKernelRequest,
+    read_port: &impl TemporalReadPort,
+    authenticator: &impl SessionCursorAuthenticator,
+) -> Result<TemporalCandidateExport, TemporalKernelError> {
     if request.limit == 0 {
         return Err(TemporalKernelError::InvalidLimit);
     }
@@ -416,6 +458,54 @@ pub async fn execute_temporal_kernel(
 
     let has_more = ranked.len() > request.limit;
     ranked.truncate(request.limit);
+    let next_cursor = if has_more {
+        ranked
+            .last()
+            .map(stable_sort_key)
+            .map(|sort_key| encode_cursor(snapshot, &sort_key, authenticator))
+            .transpose()?
+    } else {
+        None
+    };
+
+    Ok(TemporalCandidateExport {
+        snapshot: snapshot.clone(),
+        ranked,
+        next_cursor,
+        all_candidate_anchors,
+        visible_anchors,
+        resolution: resolved,
+        summaries: records.summaries,
+        summary_eligibility,
+    })
+}
+
+/// Hydrate one frozen candidate export through the canonical Plan-23
+/// authorization/redaction/content port without changing rank or cursor.
+pub async fn hydrate_temporal_candidate_export(
+    request: &TemporalKernelRequest,
+    export: TemporalCandidateExport,
+    hydration_port: &impl TemporalHydrationPort,
+    token_estimator: &impl VersionedTokenEstimator,
+) -> Result<TemporalKernelResult, TemporalKernelError> {
+    if export.snapshot != request.snapshot {
+        return Err(TemporalKernelError::Port(
+            TemporalPortError::InvalidBinding {
+                field: "temporal candidate export snapshot",
+            },
+        ));
+    }
+    let TemporalCandidateExport {
+        snapshot,
+        ranked,
+        next_cursor,
+        all_candidate_anchors,
+        visible_anchors,
+        resolution,
+        summaries,
+        summary_eligibility,
+    } = export;
+    check_control(&snapshot)?;
     let ranked_anchors = ranked
         .iter()
         .map(|candidate| candidate.anchor_id.clone())
@@ -424,17 +514,17 @@ pub async fn execute_temporal_kernel(
         .iter()
         .map(|candidate| candidate.anchor_id.clone())
         .collect::<Vec<_>>();
-    let hydration = hydrate_selected(hydration_port, snapshot, &anchors)
+    let hydration = hydrate_selected(hydration_port, &snapshot, &anchors)
         .await
         .map_err(map_hydration_error)?;
-    check_control(snapshot)?;
+    check_control(&snapshot)?;
     let frames = temporal_context_frames(
         &all_candidate_anchors,
         &visible_anchors,
-        &resolved,
-        &resolved.lineage_edges,
+        &resolution,
+        &resolution.lineage_edges,
         &hydration,
-        &records.summaries,
+        &summaries,
         &ranked_anchors,
         &summary_eligibility,
     );
@@ -447,24 +537,14 @@ pub async fn execute_temporal_kernel(
         snapshot.request().execution_control(),
     )
     .map_err(map_context_error)?;
-    check_control(snapshot)?;
-    let next_cursor = if has_more {
-        ranked
-            .last()
-            .map(stable_sort_key)
-            .map(|sort_key| encode_cursor(snapshot, &sort_key, authenticator))
-            .transpose()?
-    } else {
-        None
-    };
-
+    check_control(&snapshot)?;
     let summary_omissions = public_summary_omissions(&summary_eligibility);
     let hydrated = TemporalHydratedResult::from_batch(hydration, &ranked);
     Ok(TemporalKernelResult {
         coverage: context.bundle.coverage,
         conflicts: context.bundle.conflicts.clone(),
         lineage: context.bundle.lineage.clone(),
-        snapshot: snapshot.clone(),
+        snapshot,
         ranked,
         hydrated,
         context,
