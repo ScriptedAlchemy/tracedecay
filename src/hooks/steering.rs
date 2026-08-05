@@ -195,16 +195,6 @@ fn append_codex_recall_and_registry_guidance(s: &mut String) {
     );
 }
 
-pub(super) fn append_context_block(context: &mut String, block: &str) {
-    if !context.is_empty() && !context.ends_with('\n') {
-        context.push('\n');
-    }
-    context.push_str(block);
-    if !block.ends_with('\n') {
-        context.push('\n');
-    }
-}
-
 #[cfg(test)]
 pub(super) fn append_context_recovery_hint(context: &mut String) {
     if !context.is_empty() && !context.ends_with('\n') {

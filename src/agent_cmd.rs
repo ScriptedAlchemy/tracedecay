@@ -726,6 +726,7 @@ fn apply_canonical_component_set_with_dashboard(
     )
 }
 
+#[cfg(test)]
 fn apply_canonical_component_set_with_tracedecay_bin(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -3347,9 +3348,7 @@ fn preflight_agent_integration(
     health_context: &tracedecay::agents::HealthcheckContext,
     install_context: &tracedecay::agents::InstallContext,
 ) -> tracedecay::errors::Result<String> {
-    use tracedecay::agents::host_bundle_v2::{
-        HostBundleComponentV1, HostBundleRegistrationStateV1,
-    };
+    use tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1;
 
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)

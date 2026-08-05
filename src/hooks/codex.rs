@@ -318,7 +318,7 @@ pub async fn hook_codex_stop() -> i32 {
     {
         if ingest_codex_stop_transcript_with_budget(session_id.clone(), Some(&hook_telemetry)).await
         {
-            super::schedule_user_session_review("codex", session_id.as_deref());
+            super::schedule_user_session_review("codex", session_id.as_deref()).await;
         }
         if let Some(guidance) = guidance {
             println!("{}", codex_additional_context_json("Stop", &guidance));
@@ -334,7 +334,7 @@ pub async fn hook_codex_stop() -> i32 {
     )
     .await;
     if ingested {
-        super::schedule_user_session_review("codex", session_id.as_deref());
+        super::schedule_user_session_review("codex", session_id.as_deref()).await;
     }
     println!("{}", serde_json::json!({}));
     0
