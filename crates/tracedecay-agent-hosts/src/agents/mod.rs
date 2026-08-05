@@ -394,15 +394,6 @@ pub trait AgentIntegration {
         self.host_registration_paths(home)
     }
 
-    fn host_component_registration_paths_at(
-        &self,
-        components: &[host_bundle_v2::HostBundleComponentV1],
-        home: &Path,
-        _project_path: &Path,
-    ) -> Vec<PathBuf> {
-        self.host_component_registration_paths(components, home)
-    }
-
     /// Exact project-scoped paths the catalog registration projection may
     /// create, replace, or remove. The aggregate transaction snapshots this
     /// complete set before invoking the projection.
@@ -427,8 +418,8 @@ pub trait AgentIntegration {
     }
 
     /// Re-activate only the native registration owned by the selected
-    /// receipt-backed components. The default keeps compatibility for hosts
-    /// whose only registered component is Core.
+    /// receipt-backed components. The default forwards Core to the host's
+    /// deployed registration boundary.
     fn activate_deployed_host_component_registration(
         &self,
         components: &[host_bundle_v2::HostBundleComponentV1],

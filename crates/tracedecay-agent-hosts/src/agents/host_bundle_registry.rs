@@ -514,10 +514,9 @@ fn component_assets(
             .collect());
     }
 
-    // The Claude marketplace deploy dir is also rewritten by the legacy
-    // installer during the compatibility apply, and installed digests are
-    // verified afterwards — deploy the installer's rendered inventory so both
-    // writers produce identical bytes.
+    // Native-activation staging and the catalog transaction share this
+    // renderer. The staged source is therefore byte-identical to the
+    // receipt-backed artifacts recorded after Claude activates it.
     if host == HostKindV1::ClaudeCode
         && matches!(
             component,

@@ -311,18 +311,6 @@ impl AgentIntegration for ClaudeIntegration {
         ]
     }
 
-    fn host_component_registration_paths_at(
-        &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
-        home: &Path,
-        project_path: &Path,
-    ) -> Vec<PathBuf> {
-        let mut paths = self.host_registration_paths(home);
-        paths.push(project_path.join(".mcp.json"));
-        paths.push(project_path.join(".claude/settings.local.json"));
-        paths
-    }
-
     fn has_tracedecay(&self, home: &Path) -> bool {
         plugin_marketplace_manifest_path(home).exists()
     }
@@ -432,8 +420,8 @@ const PLUGIN_IDENTIFIER: &str = "tracedecay@tracedecay";
 /// tracedecay binary path at deploy time.
 const TRACEDECAY_BIN_PLACEHOLDER: &str = "__TRACEDECAY_BIN__";
 
-/// The compatibility installer composes the MCP-free core and optional MCP
-/// companion. Signed lifecycle callers can consume either inventory
+/// Compose the MCP-free core and optional MCP companion for native staging and
+/// catalog rendering. Signed lifecycle callers can consume either inventory
 /// independently through `plugin_bundle`.
 fn claude_embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
     let mut files = crate::agents::plugin_bundle::claude_core_files();

@@ -12,7 +12,6 @@ use tracedecay_host_integration::host_bundle_stale_preview;
 use tracedecay_host_integration::host_bundle_storage_failure;
 
 const REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION: u16 = 2;
-const MIN_SUPPORTED_REGISTRATION_BACKUP_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 struct RegistrationBackupIdentityV1 {
@@ -33,7 +32,6 @@ struct RegistrationObservedStateV1 {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 struct RegistrationDirectoryAppliedStateV2 {
     metadata: crate::agents::HostFileMetadataIdentityV1,
-    #[serde(default)]
     unix_identity: Option<(u64, u64)>,
 }
 
@@ -50,7 +48,6 @@ struct RegistrationMutationPlanV1 {
     integration_id: String,
     operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     paths: Vec<PathBuf>,
-    #[serde(default)]
     directories: Vec<PathBuf>,
 }
 
@@ -77,24 +74,14 @@ impl RegistrationBackupIdentityV1 {
         profile: &Path,
         project: Option<&Path>,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-        if !(MIN_SUPPORTED_REGISTRATION_BACKUP_SCHEMA_VERSION
-            ..=REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION)
-            .contains(&self.schema_version)
-        {
+        if self.schema_version != REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION {
             return Err(crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat);
         }
         let observed = Self::new(integration_id, home, profile, project)?;
-        // Schema v1 did not bind global Claude recovery to the project path.
-        // Its persisted mutation paths still bind recovery to the exact
-        // project files, so retain compatibility without weakening v2.
-        let project_matches = self.canonical_project == observed.canonical_project
-            || (self.schema_version == 1
-                && self.integration_id == "claude"
-                && self.canonical_project.is_none());
         (self.integration_id == observed.integration_id
             && self.canonical_home == observed.canonical_home
             && self.canonical_profile == observed.canonical_profile
-            && project_matches)
+            && self.canonical_project == observed.canonical_project)
             .then_some(())
             .ok_or(crate::agents::host_bundle_v2::HostBundleError::WrongTarget)
     }
@@ -144,10 +131,7 @@ impl CatalogHostComponentRegistrationAuthority {
     }
 
     fn rollback_project_path(&self) -> Option<&Path> {
-        self.project_path.as_deref().or_else(|| {
-            (self.integration.id() == "claude")
-                .then_some(self.health_context.project_path.as_path())
-        })
+        self.project_path.as_deref()
     }
 
     pub fn new(
@@ -523,11 +507,9 @@ impl CatalogHostComponentRegistrationAuthority {
             paths.dedup();
             return Ok(paths);
         }
-        let mut paths = self.integration.host_component_registration_paths_at(
-            &components,
-            &self.context.home,
-            &self.health_context.project_path,
-        );
+        let mut paths = self
+            .integration
+            .host_component_registration_paths(&components, &self.context.home);
         if self.integration.id() == "claude" {
             let artifact_owned_manifest = self
                 .context
@@ -541,24 +523,16 @@ impl CatalogHostComponentRegistrationAuthority {
     }
 
     fn allowed_registration_directories(&self) -> Vec<PathBuf> {
-        if self.integration.id() != "claude" {
-            return Vec::new();
+        match (self.integration.id(), self.project_path.as_deref()) {
+            ("claude", Some(project_path)) => vec![project_path.join(".claude")],
+            _ => Vec::new(),
         }
-        let mut paths = vec![
-            self.context.home.join(".claude"),
-            self.context.home.join(".claude/agents"),
-            self.health_context.project_path.join(".claude"),
-        ];
-        paths.sort();
-        paths.dedup();
-        paths
     }
 
     fn registration_directory_in_recovery_scope(&self, path: &Path) -> bool {
-        // New backups and recovery use the same ownership boundary. The
-        // recovery-side check additionally protects authentic v1 project
-        // backups that over-inventoried user-global Claude directories.
-        self.project_path.is_none() || !path.starts_with(self.context.home.join(".claude"))
+        self.allowed_registration_directories()
+            .iter()
+            .any(|allowed| allowed == path)
     }
 
     fn registration_directories(
@@ -570,14 +544,12 @@ impl CatalogHostComponentRegistrationAuthority {
             return Ok(allowed);
         }
         let registration_paths = self.registration_paths(component_set)?;
-        let claude_root = self.context.home.join(".claude");
         Ok(allowed
             .into_iter()
             .filter(|directory| {
-                (self.project_path.is_none() && directory == &claude_root)
-                    || registration_paths
-                        .iter()
-                        .any(|path| path.parent() == Some(directory.as_path()))
+                registration_paths
+                    .iter()
+                    .any(|path| path.parent() == Some(directory.as_path()))
             })
             .collect())
     }
@@ -822,18 +794,6 @@ impl CatalogHostComponentRegistrationAuthority {
         Ok(())
     }
 
-    /// Whether `directory` can only have come into existence because this
-    /// transaction wrote a declared artifact underneath it.
-    ///
-    /// The caller has already established that the backup recorded `directory`
-    /// as absent, so a strict ancestor relationship to a declared write is
-    /// proof of authorship: nothing else in the operation touches that path.
-    fn declared_write_created_directory(&self, directory: &Path) -> bool {
-        self.declared_artifact_writes
-            .iter()
-            .any(|write| write != directory && write.starts_with(directory))
-    }
-
     fn prepare_missing_registration_directories(
         &self,
         operation_id: [u8; 16],
@@ -847,28 +807,9 @@ impl CatalogHostComponentRegistrationAuthority {
                 continue;
             }
             match fs::symlink_metadata(path) {
-                // `apply` runs *after* the transaction wrote its declared
-                // artifacts, and writing `<dir>/artifact` creates `<dir>`. A
-                // registration directory that the backup recorded as absent is
-                // therefore expected to exist by now whenever it is an ancestor
-                // of one of this transaction's own declared writes. Treating
-                // that as foreign drift made the very first install into a
-                // fresh home fail, so adopt the directory instead: record the
-                // applied state the rollback path needs, then move on. Any
-                // other pre-existing entry is still genuine drift.
-                Ok(metadata)
-                    if !metadata.file_type().is_symlink()
-                        && metadata.is_dir()
-                        && self.declared_write_created_directory(path) =>
-                {
-                    let applied = registration_directory_applied_state(path)?;
-                    write_registration_backup(
-                        &self.directory_applied_metadata_marker(operation_id, index),
-                        &serde_json::to_vec(&applied)
-                            .map_err(|_| host_bundle_storage_failure!())?,
-                    )?;
-                    continue;
-                }
+                // Project registration directories are disjoint from catalog
+                // artifact paths. If an absent directory appears before this
+                // authority creates it, that state is foreign drift.
                 Ok(_) => return Err(host_bundle_stale_preview!()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => {
@@ -1036,10 +977,7 @@ impl CatalogHostComponentRegistrationAuthority {
             .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
         let mutation_plan: RegistrationMutationPlanV1 = serde_json::from_slice(&mutation_plan)
             .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
-        if !(MIN_SUPPORTED_REGISTRATION_BACKUP_SCHEMA_VERSION
-            ..=REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION)
-            .contains(&mutation_plan.schema_version)
-        {
+        if mutation_plan.schema_version != REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION {
             return Err(crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat);
         }
         if mutation_plan.integration_id != self.integration.id()
@@ -1062,35 +1000,22 @@ impl CatalogHostComponentRegistrationAuthority {
             }
         }
         let current_registration_paths = self.registration_paths(component_set)?;
-        let registration_paths = if mutation_plan.schema_version == 1 {
-            if mutation_plan
-                .paths
-                .iter()
-                .any(|path| !current_registration_paths.contains(path))
-            {
-                return Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget);
-            }
-            mutation_plan.paths.clone()
-        } else {
-            // The inventory recorded at backup time is what the backup markers
-            // are indexed by, so it -- not a fresh recomputation -- is the set
-            // to restore. Some inventories are derived from state the operation
-            // itself rewrites: Codex's `.tracedecay-managed-agents.json` is both
-            // a registration path and the record naming the previous bundle's
-            // exports, so a Core apply that retires a stale export shrinks the
-            // recomputed set. Demanding exact equality made every such rollback
-            // refuse as `WrongTarget` and strand the journal. Require instead
-            // that the recorded inventory still cover everything registration
-            // surface is today, which is what actually rules out restoring a
-            // backup taken for a different target.
-            if current_registration_paths
-                .iter()
-                .any(|path| !persisted_paths.contains(path))
-            {
-                return Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget);
-            }
-            persisted_paths.clone()
-        };
+        // The inventory recorded at backup time is what the backup markers are
+        // indexed by, so it -- not a fresh recomputation -- is the set to
+        // restore. Some inventories are derived from state the operation
+        // itself rewrites: Codex's `.tracedecay-managed-agents.json` is both a
+        // registration path and the record naming the previous bundle's
+        // exports, so a Core apply that retires a stale export shrinks the
+        // recomputed set. Require the recorded inventory to cover everything
+        // the registration surface is today, which rules out restoring a
+        // backup taken for a different target.
+        if current_registration_paths
+            .iter()
+            .any(|path| !persisted_paths.contains(path))
+        {
+            return Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget);
+        }
+        let registration_paths = persisted_paths.clone();
         let allowed_registration_directories = self.allowed_registration_directories();
         let registration_directories = mutation_plan.directories.clone();
         let mut persisted_directories = Vec::new();
@@ -1380,13 +1305,6 @@ impl CatalogHostComponentRegistrationAuthority {
                     .map_err(|_| host_bundle_storage_failure!())?;
             } else {
                 let applied_marker = self.directory_applied_metadata_marker(operation_id, index);
-                // Legacy schema-v1 backups never recorded applied state, and a
-                // schema-v2 operation that died between its artifact write and
-                // `prepare_missing_registration_directories` did not get to
-                // record it either. Both cases still have to roll back, so
-                // assert nothing about the directory's exact state and let the
-                // empty-guarded removal below decide.
-                let unattributed_missing_directory = !applied_marker.is_file();
                 match fs::symlink_metadata(path) {
                     Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                         return Err(
@@ -1415,16 +1333,17 @@ impl CatalogHostComponentRegistrationAuthority {
                         return Err(host_bundle_storage_failure!());
                     }
                 }
-                if !unattributed_missing_directory {
-                    let applied: RegistrationDirectoryAppliedStateV2 = serde_json::from_slice(
-                        &fs::read(applied_marker).map_err(|_| host_bundle_storage_failure!())?,
-                    )
-                    .map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
-                    })?;
-                    if registration_directory_applied_state(path)? != applied {
-                        return Err(host_bundle_stale_preview!());
-                    }
+                if !applied_marker.is_file() {
+                    return Err(host_bundle_stale_preview!());
+                }
+                let applied: RegistrationDirectoryAppliedStateV2 = serde_json::from_slice(
+                    &fs::read(applied_marker).map_err(|_| host_bundle_storage_failure!())?,
+                )
+                .map_err(|_| {
+                    crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
+                })?;
+                if registration_directory_applied_state(path)? != applied {
+                    return Err(host_bundle_stale_preview!());
                 }
                 match fs::remove_dir(path) {
                     Ok(()) => {}
@@ -2014,12 +1933,12 @@ mod tests {
         lifecycle_root: &Path,
         directories: &[PathBuf],
     ) -> (CatalogHostComponentRegistrationAuthority, [u8; 16]) {
-        let authority = CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+        let authority = CatalogHostComponentRegistrationAuthority::new_project_local(
             "claude",
+            home,
             home,
             lifecycle_root,
             crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install,
-            "tracedecay".to_string(),
         )
         .expect("catalog registration authority");
         let operation_id = [7u8; 16];
@@ -2081,47 +2000,13 @@ mod tests {
         (authority, operation_id)
     }
 
-    /// The transaction writes its declared artifacts *before* `apply` runs, and
-    /// writing `<dir>/artifact.md` creates `<dir>`. A registration directory the
-    /// backup recorded as absent is therefore expected to be present by then.
-    /// Reporting that as foreign drift made the very first `install` into a
-    /// fresh home fail outright.
-    #[test]
-    fn declared_artifact_write_directory_is_adopted_not_reported_as_drift() {
-        let home = tempfile::tempdir().unwrap();
-        let lifecycle = tempfile::tempdir().unwrap();
-        let managed = home.path().join(".claude/agents");
-
-        let (mut authority, operation_id) = missing_directory_fixture(
-            home.path(),
-            lifecycle.path(),
-            std::slice::from_ref(&managed),
-        );
-        authority.declared_artifact_writes = [managed.join("code-explorer.md")].into();
-
-        // The artifact writer already created the directory tree.
-        fs::create_dir_all(&managed).unwrap();
-
-        authority
-            .prepare_missing_registration_directories(operation_id)
-            .expect("a directory created by this transaction's own write is not foreign drift");
-
-        assert!(
-            authority
-                .directory_applied_metadata_marker(operation_id, 0)
-                .is_file(),
-            "adoption must record the applied state that rollback needs to reclaim the directory"
-        );
-        assert!(managed.is_dir(), "the adopted directory is left in place");
-    }
-
-    /// The same directory appearing without any declared write underneath it is
-    /// still a genuinely foreign mutation and must abort the apply.
+    /// A directory appearing after backup but before this authority creates it
+    /// is foreign mutation and must abort the apply.
     #[test]
     fn undeclared_directory_reappearing_is_still_drift() {
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
-        let foreign = home.path().join(".claude/agents");
+        let foreign = home.path().join(".claude");
 
         let (authority, operation_id) = missing_directory_fixture(
             home.path(),
@@ -2139,37 +2024,11 @@ mod tests {
         );
     }
 
-    /// A directory is only adopted for a *strict* descendant write. A declared
-    /// write whose path is the directory itself is a file, not a parent, and
-    /// proves nothing about who created the directory.
     #[test]
-    fn declared_write_equal_to_the_directory_does_not_claim_it() {
+    fn rollback_refuses_an_unattributed_directory() {
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
-        let path = home.path().join(".claude/agents");
-
-        let (mut authority, operation_id) =
-            missing_directory_fixture(home.path(), lifecycle.path(), std::slice::from_ref(&path));
-        authority.declared_artifact_writes = [path.clone()].into();
-        fs::create_dir_all(&path).unwrap();
-
-        assert!(matches!(
-            authority.prepare_missing_registration_directories(operation_id),
-            Err(HostBundleError::StalePreview(_))
-        ));
-    }
-
-    /// The wedge this pair of defects produced: an operation died after its
-    /// artifact write created a registration directory but before `apply` could
-    /// record the applied-state marker. Rollback then found a directory the
-    /// backup said was absent, with nothing attributing it, and refused. The
-    /// journal stayed on disk and every later lifecycle command reported the
-    /// same stale preview, with no way out short of deleting state by hand.
-    #[test]
-    fn rollback_converges_when_a_missing_directory_has_no_applied_marker() {
-        let home = tempfile::tempdir().unwrap();
-        let lifecycle = tempfile::tempdir().unwrap();
-        let orphaned = home.path().join(".claude/agents");
+        let orphaned = home.path().join(".claude");
 
         let (authority, operation_id) = missing_directory_fixture(
             home.path(),
@@ -2187,23 +2046,22 @@ mod tests {
 
         let component_set = empty_claude_component_set();
 
-        authority
-            .restore_registration(&component_set, operation_id)
-            .expect("rollback must converge instead of wedging on an unattributable directory");
-
         assert!(
-            !orphaned.exists(),
-            "an empty directory this operation introduced is removed, restoring the pre-op tree"
+            matches!(
+                authority.restore_registration(&component_set, operation_id),
+                Err(HostBundleError::StalePreview(_))
+            ),
+            "recovery must not adopt a directory it never recorded creating"
         );
+        assert!(orphaned.is_dir(), "foreign directory was removed");
     }
 
-    /// Convergence must not become a licence to delete a directory somebody
-    /// else is using: the removal stays empty-guarded.
+    /// Recovery refuses unattributed content and preserves it byte-for-byte.
     #[test]
     fn rollback_leaves_a_non_empty_unattributed_directory_in_place() {
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
-        let orphaned = home.path().join(".claude/agents");
+        let orphaned = home.path().join(".claude");
 
         let (authority, operation_id) = missing_directory_fixture(
             home.path(),
@@ -2215,9 +2073,10 @@ mod tests {
 
         let component_set = empty_claude_component_set();
 
-        authority
-            .restore_registration(&component_set, operation_id)
-            .expect("rollback still converges");
+        assert!(matches!(
+            authority.restore_registration(&component_set, operation_id),
+            Err(HostBundleError::StalePreview(_))
+        ));
 
         assert_eq!(
             fs::read(orphaned.join("someone-elses.md")).unwrap(),
@@ -2331,32 +2190,6 @@ mod tests {
         assert_eq!(
             future_identity.validate("codex", home.path(), profile.path(), Some(project.path())),
             Err(HostBundleError::UnsupportedRecoveryFormat)
-        );
-    }
-
-    #[test]
-    fn legacy_global_claude_identity_accepts_project_bound_by_persisted_paths() {
-        let home = tempfile::tempdir().unwrap();
-        let profile = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let other = tempfile::tempdir().unwrap();
-        let mut identity =
-            RegistrationBackupIdentityV1::new("claude", home.path(), profile.path(), None).unwrap();
-        identity.schema_version = 1;
-
-        assert_eq!(
-            identity.validate("claude", home.path(), profile.path(), Some(project.path())),
-            Ok(())
-        );
-        assert_eq!(
-            identity.validate("claude", other.path(), profile.path(), Some(project.path())),
-            Err(HostBundleError::WrongTarget)
-        );
-
-        identity.schema_version = 2;
-        assert_eq!(
-            identity.validate("claude", home.path(), profile.path(), Some(project.path())),
-            Err(HostBundleError::WrongTarget)
         );
     }
 }
