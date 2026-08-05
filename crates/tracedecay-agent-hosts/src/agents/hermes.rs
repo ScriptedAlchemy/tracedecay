@@ -7,6 +7,7 @@ mod dashboard_wrapper;
 mod lifecycle;
 mod profile_config;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -48,33 +49,16 @@ impl AgentIntegration for HermesIntegration {
         _component: super::host_bundle_v2::HostBundleComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+        hermes_registration_state(&ctx.home, None)
+    }
 
-        let plugin_dirs = profile_plugin_dirs(&ctx.home);
-        let default_plugin = hermes_home(&ctx.home).join("plugins/tracedecay");
-        if !default_plugin.join("plugin.yaml").is_file() {
-            return State::Missing;
-        }
-        if !managed_plugin_paths(&default_plugin)
-            .into_iter()
-            .all(|path| path.is_file())
-            || !dashboard_wrapper::is_current(&default_plugin)
-        {
-            return State::Repairable;
-        }
-        for plugin_dir in plugin_dirs {
-            let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) else {
-                return State::Corrupt;
-            };
-            if profile_config::registration_state(&profile_dir.join("config.yaml"))
-                != State::Current
-                || !dashboard_wrapper::is_current(&plugin_dir)
-                || !managed_profile_files_match(&default_plugin, &plugin_dir)
-            {
-                return State::Repairable;
-            }
-        }
-        State::Current
+    fn host_component_registration_for_lifecycle(
+        &self,
+        _component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+        install: &InstallContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        hermes_registration_state(&ctx.home, Some(install.dashboard))
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -105,6 +89,21 @@ impl AgentIntegration for HermesIntegration {
         paths
     }
 
+    fn host_component_registration_paths_checked(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        let mut paths = self.host_registration_paths(home);
+        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
+        for plugin_dir in profile_plugin_dirs(home) {
+            paths.extend(managed_skill_overlay_paths(&profile_root, &plugin_dir)?);
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
     fn has_tracedecay(&self, home: &Path) -> bool {
         detected_plugin_dirs(home)
             .into_iter()
@@ -125,6 +124,78 @@ impl AgentIntegration for HermesIntegration {
             )?);
         }
         Ok(exports)
+    }
+}
+
+fn hermes_registration_state(
+    home: &Path,
+    expected_dashboard: Option<bool>,
+) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+    use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+    let plugin_dirs = profile_plugin_dirs(home);
+    let default_plugin = hermes_home(home).join("plugins/tracedecay");
+    if !default_plugin.join("plugin.yaml").is_file() {
+        return State::Missing;
+    }
+    if !managed_plugin_paths(&default_plugin)
+        .into_iter()
+        .all(|path| path.is_file())
+    {
+        return State::Repairable;
+    }
+    let dashboard_enabled = match expected_dashboard {
+        Some(enabled) => enabled,
+        None if dashboard_wrapper::is_current(&default_plugin) => true,
+        None if dashboard_wrapper::is_absent(&default_plugin) => false,
+        None => return State::Repairable,
+    };
+    if !dashboard_wrapper::matches_policy(&default_plugin, dashboard_enabled) {
+        return State::Repairable;
+    }
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
+    for plugin_dir in plugin_dirs {
+        let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) else {
+            return State::Corrupt;
+        };
+        let overlay_current = match managed_skill_overlay_is_current(&profile_root, &plugin_dir) {
+            Ok(current) => current,
+            Err(_) => return State::Corrupt,
+        };
+        if profile_config::registration_state(&profile_dir.join("config.yaml")) != State::Current
+            || !dashboard_wrapper::matches_policy(&plugin_dir, dashboard_enabled)
+            || !managed_profile_files_match(&default_plugin, &plugin_dir)
+            || !overlay_current
+        {
+            return State::Repairable;
+        }
+    }
+    State::Current
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod registration_tests {
+    use super::*;
+
+    #[test]
+    fn registration_inventory_owns_existing_managed_skill_overlay_files() {
+        let home = tempfile::tempdir().unwrap();
+        let overlay = home
+            .path()
+            .join(".hermes/plugins/tracedecay/skills/agent-managed/example");
+        std::fs::create_dir_all(&overlay).unwrap();
+        let skill = overlay.join("SKILL.md");
+        std::fs::write(&skill, "managed").unwrap();
+
+        let paths = HermesIntegration
+            .host_component_registration_paths_checked(
+                &[super::super::host_bundle_v2::HostBundleComponentV1::Core],
+                home.path(),
+            )
+            .unwrap();
+
+        assert!(paths.contains(&skill));
     }
 }
 
@@ -186,9 +257,11 @@ pub(super) fn install_plugin(
     plugin_dir: &Path,
     tracedecay_bin: &str,
     deploy_dashboard: bool,
+    profile_root: &Path,
 ) -> Result<()> {
     write_plugin_files(plugin_dir, tracedecay_bin)?;
     dashboard_wrapper::apply_install_policy(plugin_dir, tracedecay_bin, deploy_dashboard)?;
+    reconcile_managed_skill_overlay(profile_root, plugin_dir)?;
     if let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) {
         let config_path = profile_dir.join("config.yaml");
         enable_plugin(&config_path)?;
@@ -313,18 +386,7 @@ pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
     remove_generated_file(&plugin_dir.join("cli.py"))?;
     remove_generated_file(&plugin_dir.join("skills/tracedecay/SKILL.md"))?;
     remove_empty_dir(&plugin_dir.join("skills/tracedecay"))?;
-    let managed_overlay = plugin_dir.join("skills/agent-managed");
-    if managed_overlay
-        .join(".tracedecay-managed-skills.json")
-        .is_file()
-    {
-        std::fs::remove_dir_all(&managed_overlay).map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "failed to remove generated Hermes skill overlay {}: {e}",
-                managed_overlay.display()
-            ),
-        })?;
-    }
+    remove_managed_skill_overlay(plugin_dir)?;
     remove_empty_dir(&plugin_dir.join("skills"))?;
     dashboard_wrapper::uninstall(plugin_dir)?;
 
@@ -338,6 +400,209 @@ pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
             plugin_dir = %plugin_dir.display(),
             "left Hermes plugin directory in place because it contains files not generated by tracedecay"
         );
+    }
+    Ok(())
+}
+
+fn managed_skill_overlay_root(plugin_dir: &Path) -> PathBuf {
+    plugin_dir.join("skills/agent-managed")
+}
+
+fn existing_managed_skill_overlay_paths(plugin_dir: &Path) -> Result<Vec<PathBuf>> {
+    let root = managed_skill_overlay_root(plugin_dir);
+    for ancestor in [plugin_dir.to_path_buf(), plugin_dir.join("skills")] {
+        match std::fs::symlink_metadata(&ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "refusing unsafe Hermes managed skill parent {}",
+                        ancestor.display()
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to inspect Hermes managed skill parent {}: {error}",
+                        ancestor.display()
+                    ),
+                });
+            }
+        }
+    }
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing unsafe Hermes managed skill overlay {}",
+                    root.display()
+                ),
+            });
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect Hermes managed skill overlay {}: {error}",
+                    root.display()
+                ),
+            });
+        }
+    }
+    fn collect(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(directory).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to inventory Hermes managed skill directory {}: {error}",
+                directory.display()
+            ),
+        })? {
+            let entry = entry.map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to inventory Hermes managed skill directory {}: {error}",
+                    directory.display()
+                ),
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect Hermes managed skill path {}: {error}",
+                    path.display()
+                ),
+            })?;
+            if file_type.is_symlink() {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "refusing symlink in Hermes managed skill overlay {}",
+                        path.display()
+                    ),
+                });
+            }
+            if file_type.is_dir() {
+                collect(&path, paths)?;
+            } else if file_type.is_file() {
+                paths.push(path);
+            } else {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "refusing non-file in Hermes managed skill overlay {}",
+                        path.display()
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+    let mut paths = Vec::new();
+    collect(&root, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn managed_skill_overlay_paths(profile_root: &Path, plugin_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = existing_managed_skill_overlay_paths(plugin_dir)?;
+    paths.extend(
+        crate::automation::skill_targets::rendered_native_skill_overlay_files(
+            profile_root,
+            crate::automation::skill_targets::SkillInstallTarget::Hermes,
+            plugin_dir,
+        )?
+        .into_iter()
+        .map(|(path, _)| path),
+    );
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn managed_skill_overlay_is_current(profile_root: &Path, plugin_dir: &Path) -> Result<bool> {
+    let desired = crate::automation::skill_targets::rendered_native_skill_overlay_files(
+        profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Hermes,
+        plugin_dir,
+    )?
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    let existing = existing_managed_skill_overlay_paths(plugin_dir)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if existing != desired.keys().cloned().collect() {
+        return Ok(false);
+    }
+    Ok(desired
+        .into_iter()
+        .all(|(path, expected)| std::fs::read(path).is_ok_and(|observed| observed == expected)))
+}
+
+fn reconcile_managed_skill_overlay(profile_root: &Path, plugin_dir: &Path) -> Result<()> {
+    let desired = crate::automation::skill_targets::rendered_native_skill_overlay_files(
+        profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Hermes,
+        plugin_dir,
+    )?
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    let existing = existing_managed_skill_overlay_paths(plugin_dir)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    for (path, bytes) in &desired {
+        super::safe_write_bytes_file(path, bytes, None)?;
+    }
+    for path in existing {
+        if !desired.contains_key(&path) {
+            remove_generated_file(&path)?;
+        }
+    }
+    prune_empty_managed_skill_overlay_dirs(plugin_dir)
+}
+
+fn remove_managed_skill_overlay(plugin_dir: &Path) -> Result<()> {
+    for path in existing_managed_skill_overlay_paths(plugin_dir)? {
+        remove_generated_file(&path)?;
+    }
+    prune_empty_managed_skill_overlay_dirs(plugin_dir)
+}
+
+fn prune_empty_managed_skill_overlay_dirs(plugin_dir: &Path) -> Result<()> {
+    let root = managed_skill_overlay_root(plugin_dir);
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut directories = Vec::new();
+    let mut pending = vec![root.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to inspect Hermes managed skill directory {}: {error}",
+                directory.display()
+            ),
+        })? {
+            let entry = entry.map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect Hermes managed skill directory {}: {error}",
+                    directory.display()
+                ),
+            })?;
+            if entry
+                .file_type()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "failed to inspect Hermes managed skill path {}: {error}",
+                        entry.path().display()
+                    ),
+                })?
+                .is_dir()
+            {
+                pending.push(entry.path());
+            }
+        }
+        directories.push(directory);
+    }
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        remove_empty_dir(&directory)?;
     }
     Ok(())
 }

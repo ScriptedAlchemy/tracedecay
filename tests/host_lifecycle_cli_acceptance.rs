@@ -263,7 +263,8 @@ fn set_claude_native_activation(cli: &IsolatedCli, active: bool) {
     let cache_root = cli
         .home
         .path()
-        .join(".claude/plugins/cache/tracedecay/tracedecay/current");
+        .join(".claude/plugins/cache/tracedecay/tracedecay")
+        .join(tracedecay_agent_hosts::PRODUCT_VERSION);
     if active {
         fs::create_dir_all(cache_root.join(".claude-plugin")).unwrap();
         fs::copy(
@@ -726,7 +727,9 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
     let cache_manifest = cli
         .home
         .path()
-        .join(".claude/plugins/cache/tracedecay/tracedecay/current/.claude-plugin/plugin.json");
+        .join(".claude/plugins/cache/tracedecay/tracedecay")
+        .join(tracedecay_agent_hosts::PRODUCT_VERSION)
+        .join(".claude-plugin/plugin.json");
     fs::write(
         &cache_manifest,
         br#"{"name":"tracedecay","version":"stale"}"#,
