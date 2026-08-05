@@ -36,15 +36,11 @@ pub enum LcmAuthorityOperation {
 
 /// Authenticated host protocol evidence carried to compaction admission.
 ///
-/// Claude PostCompact carries the host's native summary. Cursor and Codex
-/// expose pressure/boundary signals without compacted content.
+/// Cursor and Codex expose pressure/boundary signals without raw compacted
+/// content. No generic provider escape hatch is accepted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "host", rename_all = "snake_case")]
 pub enum LcmHostProtocol {
-    ClaudeCodePostCompact {
-        protocol_revision: String,
-        event_digest: ManifestDigest,
-    },
     CursorPreCompact {
         protocol_revision: String,
         event_digest: ManifestDigest,
@@ -58,7 +54,6 @@ pub enum LcmHostProtocol {
 impl LcmHostProtocol {
     pub fn provider(&self) -> &str {
         match self {
-            Self::ClaudeCodePostCompact { .. } => "claude",
             Self::CursorPreCompact { .. } => "cursor",
             Self::CodexContextCompacted { .. } => "codex",
         }
@@ -66,8 +61,7 @@ impl LcmHostProtocol {
 
     pub fn event_digest(&self) -> &ManifestDigest {
         match self {
-            Self::ClaudeCodePostCompact { event_digest, .. }
-            | Self::CursorPreCompact { event_digest, .. }
+            Self::CursorPreCompact { event_digest, .. }
             | Self::CodexContextCompacted { event_digest, .. } => event_digest,
         }
     }
@@ -75,27 +69,20 @@ impl LcmHostProtocol {
 
 /// Host pressure evidence presented for daemon admission.
 ///
-/// Claude's native summary is admitted only with its exact PostCompact event;
-/// source content never crosses this boundary and is canonically hydrated by
-/// the daemon. No generic caller-provided summary escape hatch exists.
+/// No supported hook currently carries machine-verifiable compacted content.
+/// This contract therefore cannot represent caller-provided summaries or model
+/// substitutes; hosts continue transcript ingest and receive typed unavailable
+/// compaction until authenticated native provenance exists.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LcmCompressionEvidence {
-    PressureOnly {
-        protocol: LcmHostProtocol,
-    },
-    ClaudeNativeSummary {
-        protocol: LcmHostProtocol,
-        summary_text: String,
-    },
+    PressureOnly { protocol: LcmHostProtocol },
 }
 
 impl LcmCompressionEvidence {
     pub fn protocol(&self) -> &LcmHostProtocol {
         match self {
-            Self::PressureOnly { protocol } | Self::ClaudeNativeSummary { protocol, .. } => {
-                protocol
-            }
+            Self::PressureOnly { protocol } => protocol,
         }
     }
 }
@@ -214,7 +201,6 @@ pub struct LcmAuthorityInvocation {
 #[derive(Clone, Debug)]
 pub enum LcmAuthorityPayload {
     Ingest(LcmPreflightResponse),
-    Compaction(tracedecay_sessions::runtime::lcm::LcmCompressionResponse),
     Status(LcmStatus),
     Doctor(serde_json::Value),
 }

@@ -844,7 +844,6 @@ impl McpServer {
                     Arc::clone(database),
                     root.identity().clone(),
                     root.expected_runtime_shard()?,
-                    project_session_retrieval_service.clone(),
                 )
             });
         let user_lcm_authority = profile_session_retrieval_root
@@ -855,7 +854,6 @@ impl McpServer {
                     Arc::clone(database),
                     root.identity().clone(),
                     root.expected_runtime_shard()?,
-                    user_session_retrieval_service.clone(),
                 )
             });
 

@@ -182,16 +182,6 @@ fn cursor_advance_receipt_collisions_are_permanent() {
 }
 
 #[test]
-fn untrusted_claude_transcript_paths_are_permanent() {
-    let failure = classify_claude_observation_failure(
-        &claude_observation::ClaudeObservationIngestError::UntrustedTranscriptPath,
-    );
-
-    assert_eq!(failure.reason_code, "observation_transcript_path_untrusted");
-    assert!(!failure.retryable);
-}
-
-#[test]
 fn transcript_privacy_and_non_durable_failures_are_bounded_and_permanent() {
     let privacy = source::TranscriptIngestError::Privacy(
         tracedecay_runtime_core::privacy::PrivacySanitizerError::InvalidPolicy,

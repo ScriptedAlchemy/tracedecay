@@ -220,80 +220,15 @@ pub(super) async fn codex_compact(
 
 pub(super) async fn claude_compact(
     args: &Value,
-    session_authorities: SessionAuthorities<'_>,
+    _session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
-    let event_json = required_str(args, "event_json")?;
-    let parsed: Value = serde_json::from_str(event_json)?;
-    if parsed.get("hook_event_name").and_then(Value::as_str) != Some("PostCompact")
-        || !matches!(
-            parsed.get("trigger").and_then(Value::as_str),
-            Some("manual" | "auto")
-        )
-    {
-        return Err(config_error(
-            "Claude compaction requires a native PostCompact event",
-        ));
-    }
-    let session_id = required_str(&parsed, "session_id")?;
-    required_str(&parsed, "transcript_path")?;
-    let summary_text = tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(
-        required_str(&parsed, "compact_summary")?,
-    )
-    .filter(|summary| !summary.trim().is_empty())
-    .ok_or_else(|| config_error("Claude compact summary failed canonical privacy policy"))?;
-    let authority = if args.get("user_scope").and_then(Value::as_bool) == Some(true) {
-        session_authorities.profile_lcm
-    } else {
-        session_authorities.project_lcm
-    };
-    let Some(authority) = authority else {
-        return Ok(compaction_authority_unavailable("claude_compact"));
-    };
-    let Some(response) = authority
-        .execute(LcmAuthorityRequest::Compact(LcmCompactionCommand {
-            preflight: crate::sessions::lcm::LcmPreflightRequest {
-                provider: "claude".to_owned(),
-                session_id: session_id.to_owned(),
-                messages: Vec::new(),
-                current_tokens: None,
-                threshold_tokens: None,
-                max_assembly_tokens: None,
-                leaf_chunk_tokens: None,
-                max_source_messages: None,
-                summary_fan_in: None,
-                incremental_max_depth: None,
-                fresh_tail_count: None,
-                dynamic_leaf_chunk_enabled: None,
-                dynamic_leaf_chunk_max: None,
-                context_length: None,
-                reserve_tokens_floor: None,
-                ignore_session_patterns: Vec::new(),
-                stateless_session_patterns: Vec::new(),
-                ignore_message_patterns: Vec::new(),
-            },
-            evidence: LcmCompressionEvidence::ClaudeNativeSummary {
-                protocol: LcmHostProtocol::ClaudeCodePostCompact {
-                    protocol_revision: "claude.postcompact.v1".to_owned(),
-                    event_digest: tracedecay_domain::canonical_sha256(event_json).map_err(
-                        |error| config_error(format!("digest Claude event failed: {error}")),
-                    )?,
-                },
-                summary_text,
-            },
-        }))
-        .await
-    else {
-        return Ok(compaction_authority_unavailable("claude_compact"));
-    };
+    required_str(args, "event_json")?;
     Ok(json!({
         "action": "claude_compact",
-        "status": if response.outcome == LcmAuthorityOutcome::Ready {
-            "ok"
-        } else {
-            "unavailable"
-        },
-        "authority_outcome": response.outcome,
-        "committed_state": response.receipt.committed_state,
+        "status": "unavailable",
+        "reason": "claude_postcompact_provenance_unavailable",
+        "summary_nodes_created": 0,
+        "summary_node_ids": [],
     }))
 }
 
@@ -557,10 +492,7 @@ pub(super) async fn ingest_transcript(
     let deferred_by_byte_cap = source_deferred
         || snapshot_capture
             .as_ref()
-            .is_some_and(|capture| capture.deferred_by_byte_cap)
-        || claude_observation_stats
-            .as_ref()
-            .is_some_and(|stats| stats.deferred_sources > 0);
+            .is_some_and(|capture| capture.deferred_by_byte_cap);
     let admission = complete_ingest_admission(
         admission,
         authority_changed,
