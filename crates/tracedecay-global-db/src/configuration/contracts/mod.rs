@@ -19,9 +19,10 @@ pub use ports::{
     CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
 pub use types::{
-    AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
-    ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
-    ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationPlanContext,
-    ConfigurationRollbackRequest, CredentialWriteHandleV1, DirectConfigurationMutation,
-    ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation, configuration_layer_scope_digest,
+    ActivationDriftV1, AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT,
+    ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
+    ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
+    ConfigurationPlanContext, ConfigurationRollbackRequest, CredentialWriteHandleV1,
+    DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
+    configuration_layer_scope_digest,
 };

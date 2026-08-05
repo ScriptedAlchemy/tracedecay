@@ -278,7 +278,17 @@ pub async fn ensure_registered_schema_for_admission(
 
         configuration::ensure_configuration_schema(&transaction)
             .await
-            .map_err(|error| global_db_operation_error("initialize configuration schema", error))?;
+            .map_err(|error| match error {
+                configuration::ConfigurationSchemaError::ResetRequired { reason } => {
+                    tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                        "configuration",
+                        reason,
+                    )
+                }
+                configuration::ConfigurationSchemaError::Storage(error) => {
+                    global_db_operation_error("initialize configuration schema", error)
+                }
+            })?;
         git_index_transactions::ensure_git_index_transaction_schema(&transaction).await?;
 
         transaction

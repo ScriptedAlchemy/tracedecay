@@ -41,6 +41,9 @@ pub enum TraceDecayError {
     #[error("config error: {message}")]
     Config { message: String },
 
+    #[error("{authority} persisted shape requires reset: {reason}")]
+    ResetRequired { authority: String, reason: String },
+
     #[error("project route error ({reason_code}): {detail}")]
     ProjectRoute {
         reason_code: String,
@@ -106,6 +109,20 @@ fn flatten_error_chain(source: &(dyn std::error::Error + 'static)) -> String {
 }
 
 impl TraceDecayError {
+    pub fn reset_required(authority: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::ResetRequired {
+            authority: authority.into(),
+            reason: reason.into(),
+        }
+    }
+
+    pub fn reset_required_context(&self) -> Option<(&str, &str)> {
+        let Self::ResetRequired { authority, reason } = self else {
+            return None;
+        };
+        Some((authority, reason))
+    }
+
     pub fn project_route(
         reason_code: impl Into<String>,
         retryable: bool,
@@ -214,6 +231,17 @@ mod tests {
         let s = err.to_string();
         assert!(s.contains("constraint violated"), "{s}");
         assert!(s.contains("INSERT"), "{s}");
+    }
+
+    #[test]
+    fn reset_required_preserves_typed_authority_and_reason() {
+        let error =
+            TraceDecayError::reset_required("configuration", "persisted format is not final");
+
+        assert_eq!(
+            error.reset_required_context(),
+            Some(("configuration", "persisted format is not final"))
+        );
     }
 
     #[test]
