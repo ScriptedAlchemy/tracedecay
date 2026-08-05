@@ -360,7 +360,7 @@ async fn forced_overflow_replay_budget_accounts_for_prompt_overhead_delta() {
 }
 
 #[tokio::test]
-async fn non_compressing_fake_summary_falls_back_deterministically() {
+async fn oversized_authoritative_summary_is_preserved_exactly() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_raw_messages(
@@ -376,30 +376,27 @@ async fn non_compressing_fake_summary_falls_back_deterministically() {
     )
     .await;
 
+    let exact_summary = "oversized ".repeat(100);
     let response = db
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
             LcmSummarizerMode::Fake {
-                summary_text: "oversized ".repeat(100),
+                summary_text: exact_summary.clone(),
             },
         ))
         .await
         .unwrap();
 
     assert_eq!(response.status, "ok");
-    assert_eq!(response.reason, "compressed_backlog_with_fallback_summary");
+    assert_eq!(response.reason, "compressed_backlog");
     let summary = &response.summary_nodes[0];
-    assert!(
-        summary
-            .summary_text
-            .starts_with("[deterministic LCM summary:")
-    );
-    assert!(summary.summary_token_count < summary.source_token_count);
+    assert_eq!(summary.summary_text, exact_summary);
+    assert!(!response.fallback_used);
 }
 
 #[tokio::test]
-async fn non_compressing_summary_reports_fallback_attempt_state() {
+async fn authoritative_summary_reports_no_fallback_attempt_state() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_raw_messages(
@@ -428,13 +425,10 @@ async fn non_compressing_summary_reports_fallback_attempt_state() {
     let response_json = serde_json::to_value(&response).unwrap();
 
     assert_eq!(response.status, "ok");
-    assert_eq!(response.reason, "compressed_backlog_with_fallback_summary");
+    assert_eq!(response.reason, "compressed_backlog");
     assert_eq!(response_json["compression_attempts"], 1);
-    assert_eq!(response_json["fallback_used"], true);
-    assert_eq!(
-        response_json["retry_status"].as_str(),
-        Some("fallback_summary")
-    );
+    assert_eq!(response_json["fallback_used"], false);
+    assert!(response_json["retry_status"].is_null());
     assert!(response.frontier.maintenance_debt.is_empty());
     assert_eq!(response_json["replay_over_budget"], false);
 }

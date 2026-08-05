@@ -220,7 +220,7 @@ mod tests {
     fn empty_provided_summary_requires_an_authoritative_summary() {
         let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
             summary_text: " \n ".into(),
-            route: Some("daemon_deterministic".into()),
+            route: Some("obsolete_empty_route".into()),
         });
 
         assert!(adapter.persisted_summary_invocation().is_none());

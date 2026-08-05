@@ -70,7 +70,6 @@ struct CompressionTransactionWriteResult {
     created_summaries: Vec<LcmSummaryNode>,
     frontier: LcmLifecycleState,
     remaining_backlog: Vec<LcmRawMessage>,
-    fallback_used: bool,
 }
 
 struct CompressionTransactionContext {
@@ -742,8 +741,6 @@ async fn persist_and_replay_backlog_compression(
     let mut status = "ok";
     let mut reason = if context.plan.forced_overflow_recovery {
         "forced_overflow_recovery"
-    } else if write_result.fallback_used {
-        "compressed_backlog_with_fallback_summary"
     } else {
         "compressed_backlog"
     };
@@ -757,13 +754,10 @@ async fn persist_and_replay_backlog_compression(
     let compression_attempts = write_result.created_summaries.len();
     let summary_nodes = write_result.created_summaries;
 
-    let retry_status = if context.plan.forced_overflow_recovery {
-        Some("critical_pressure_catch_up")
-    } else if write_result.fallback_used {
-        Some("fallback_summary")
-    } else {
-        None
-    };
+    let retry_status = context
+        .plan
+        .forced_overflow_recovery
+        .then_some("critical_pressure_catch_up");
 
     Ok(compression_response_with_attempt_state(
         CompressionResponseParts {
@@ -781,7 +775,6 @@ async fn persist_and_replay_backlog_compression(
         },
         CompressionAttemptState {
             compression_attempts,
-            fallback_used: write_result.fallback_used,
             retry_status,
         },
     ))
@@ -799,7 +792,6 @@ async fn persist_compression_transaction_writes(
     };
     let mut remaining_backlog = write.backlog.to_vec();
     let mut created_summaries = Vec::new();
-    let mut fallback_used = false;
     let mut new_frontier = write.existing_frontier.current_frontier_store_id;
 
     while !remaining_backlog.is_empty() && created_summaries.len() < pass_limit {
@@ -815,13 +807,6 @@ async fn persist_compression_transaction_writes(
             write.request.max_source_messages,
         );
         let selected_backlog = remaining_backlog[..selected_len].to_vec();
-        let source_tokens = source_token_count(&selected_backlog);
-        let (pass_summary_text, pass_fallback_used) = rescuing_summary_text(
-            write.summary_text.to_string(),
-            &selected_backlog,
-            source_tokens,
-        );
-        fallback_used |= pass_fallback_used;
 
         let summary = dag::insert_summary_node(
             publisher,
@@ -829,7 +814,7 @@ async fn persist_compression_transaction_writes(
                 &write.request.provider,
                 write.conversation_id,
                 &write.request.session_id,
-                &pass_summary_text,
+                write.summary_text,
                 write.route.clone(),
                 write.extraction_result.as_ref(),
                 &selected_backlog,
@@ -870,7 +855,6 @@ async fn persist_compression_transaction_writes(
         created_summaries,
         frontier: lifecycle_state(conn, &update.provider, &update.conversation_id).await?,
         remaining_backlog,
-        fallback_used,
     })
 }
 
@@ -1396,7 +1380,6 @@ fn compression_response(
         },
         CompressionAttemptState {
             compression_attempts: 0,
-            fallback_used: false,
             retry_status: None,
         },
     )
@@ -1415,7 +1398,6 @@ struct CompressionResponseParts<'a> {
 #[derive(Clone, Copy)]
 struct CompressionAttemptState<'a> {
     compression_attempts: usize,
-    fallback_used: bool,
     retry_status: Option<&'a str>,
 }
 
@@ -1434,7 +1416,6 @@ fn compression_response_with_attempt_state(
     } = parts;
     let CompressionAttemptState {
         compression_attempts,
-        fallback_used,
         retry_status,
     } = attempt_state;
     let replay_token_estimate = replay_token_estimate(&replay_messages);
@@ -1453,7 +1434,7 @@ fn compression_response_with_attempt_state(
         replay_token_estimate,
         replay_over_budget: replay_exceeds_budget(replay_token_estimate, max_assembly_tokens),
         compression_attempts,
-        fallback_used,
+        fallback_used: false,
         context_recovery_hint,
         retry_status: retry_status.map(str::to_string),
         relation_projection_status,
@@ -1616,16 +1597,6 @@ async fn condense_summary_nodes_if_ready(
     }
 
     let summary_text = summary_invocation.summary_text.clone();
-    let source_tokens = children
-        .iter()
-        .map(|node| node.summary_token_count)
-        .sum::<i64>();
-    let source_texts = children
-        .iter()
-        .map(|node| node.summary_text.clone())
-        .collect::<Vec<_>>();
-    let (summary_text, fallback_used) =
-        rescuing_summary_text_from_texts(summary_text, &source_texts, source_tokens);
     let summary = dag::insert_summary_node(
         publisher,
         condensation_draft(
@@ -1655,11 +1626,6 @@ async fn condense_summary_nodes_if_ready(
     )
     .await?;
     let frontier = lifecycle_state(conn, &update.provider, &update.conversation_id).await?;
-    let reason = if fallback_used {
-        "condensed_summary_nodes_with_fallback_summary"
-    } else {
-        "condensed_summary_nodes"
-    };
     // Mirrors hermes-lcm: `_assemble_context` always follows
     // `_maybe_condense`, so a condensation-only pass still returns the
     // assembled active context instead of an empty replay.
@@ -1678,7 +1644,7 @@ async fn condense_summary_nodes_if_ready(
     .await?;
     Ok(Some(compression_response(
         "ok",
-        reason,
+        "condensed_summary_nodes",
         vec![summary],
         replay_messages,
         frontier,
@@ -2311,22 +2277,6 @@ fn debt_for_deferred_backlog(deferred_backlog: &[LcmRawMessage]) -> Vec<LcmMaint
     }
 }
 
-fn rescuing_summary_text(
-    summary_text: String,
-    _backlog: &[LcmRawMessage],
-    _source_token_count: i64,
-) -> (String, bool) {
-    (summary_text, false)
-}
-
-fn rescuing_summary_text_from_texts(
-    summary_text: String,
-    _source_texts: &[String],
-    _source_token_count: i64,
-) -> (String, bool) {
-    (summary_text, false)
-}
-
 fn debt_to_db(debt: &LcmMaintenanceDebt) -> (String, &'static str, Option<i64>, Option<i64>) {
     match debt {
         LcmMaintenanceDebt::RawBacklog {
@@ -2359,17 +2309,20 @@ fn debt_from_db(
 
 #[cfg(test)]
 mod authority_tests {
-    use super::rescuing_summary_text_from_texts;
+    use super::*;
+    use crate::runtime::lcm::LcmSummarizerMode;
 
     #[test]
     fn authoritative_summary_text_is_never_replaced_by_an_extractive_fallback() {
         let summary = "Exact native host summary. ".repeat(400);
-        let sources = vec!["source ".repeat(100)];
+        let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
+            summary_text: summary.clone(),
+            route: Some("native_host".to_string()),
+        });
 
-        let (actual, fallback_used) =
-            rescuing_summary_text_from_texts(summary.clone(), &sources, 300);
-
-        assert_eq!(actual, summary);
-        assert!(!fallback_used);
+        let invocation = adapter
+            .persisted_summary_invocation()
+            .expect("non-empty authoritative summary should persist");
+        assert_eq!(invocation.summary_text, summary);
     }
 }
