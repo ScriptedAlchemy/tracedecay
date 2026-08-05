@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use tracedecay_application::{WorkProviderRun, WorkProviderSettlementV1};
+use tracedecay_application::{WorkProviderExecutionOutcomeV1, WorkProviderRun};
 use tracedecay_domain::{WorkApprovalPolicy, WorkExecutionBudgetV1, WorkFilesystemPolicy};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -143,11 +143,11 @@ pub(super) struct NativeCliWorkRun {
 }
 
 impl WorkProviderRun for NativeCliWorkRun {
-    fn execute(&self) -> WorkProviderSettlementV1 {
+    fn execute(&self) -> WorkProviderExecutionOutcomeV1 {
         match self.execute_inner() {
             NativeProcessOutcome::Completed { stdout } => {
                 if stdout.len() as u64 > self.plan.budget.max_protocol_bytes() {
-                    return WorkProviderSettlementV1::Failed {
+                    return WorkProviderExecutionOutcomeV1::Failed {
                         message: "provider protocol stream exceeded its bound".to_owned(),
                     };
                 }
@@ -156,9 +156,11 @@ impl WorkProviderRun for NativeCliWorkRun {
                     NativeCliKind::Codex => parse_codex_terminal(&stdout),
                 }
             }
-            NativeProcessOutcome::Cancelled => WorkProviderSettlementV1::Cancelled,
-            NativeProcessOutcome::TimedOut => WorkProviderSettlementV1::TimedOut,
-            NativeProcessOutcome::Failed(message) => WorkProviderSettlementV1::Failed { message },
+            NativeProcessOutcome::Cancelled => WorkProviderExecutionOutcomeV1::Cancelled,
+            NativeProcessOutcome::TimedOut => WorkProviderExecutionOutcomeV1::TimedOut,
+            NativeProcessOutcome::Failed(message) => {
+                WorkProviderExecutionOutcomeV1::Failed { message }
+            }
         }
     }
 
@@ -299,7 +301,7 @@ fn join_reader(reader: Option<thread::JoinHandle<Result<Vec<u8>, ()>>>) -> Resul
     reader.ok_or(())?.join().map_err(|_| ())?
 }
 
-fn parse_claude_terminal(stdout: &[u8]) -> WorkProviderSettlementV1 {
+fn parse_claude_terminal(stdout: &[u8]) -> WorkProviderExecutionOutcomeV1 {
     let Ok(stdout) = std::str::from_utf8(stdout) else {
         return malformed_protocol();
     };
@@ -326,11 +328,11 @@ fn parse_claude_terminal(stdout: &[u8]) -> WorkProviderSettlementV1 {
         }
     }
     terminal.map_or_else(malformed_protocol, |evidence| {
-        WorkProviderSettlementV1::Completed { evidence }
+        WorkProviderExecutionOutcomeV1::Completed { evidence }
     })
 }
 
-fn parse_codex_terminal(stdout: &[u8]) -> WorkProviderSettlementV1 {
+fn parse_codex_terminal(stdout: &[u8]) -> WorkProviderExecutionOutcomeV1 {
     let Ok(stdout) = std::str::from_utf8(stdout) else {
         return malformed_protocol();
     };
@@ -353,7 +355,7 @@ fn parse_codex_terminal(stdout: &[u8]) -> WorkProviderSettlementV1 {
             }
             Some("turn.completed") if !terminal => terminal = true,
             Some("turn.failed" | "error") => {
-                return WorkProviderSettlementV1::Failed {
+                return WorkProviderExecutionOutcomeV1::Failed {
                     message: "Codex reported a terminal protocol failure".to_owned(),
                 };
             }
@@ -365,7 +367,7 @@ fn parse_codex_terminal(stdout: &[u8]) -> WorkProviderSettlementV1 {
     if !terminal || evidence.is_empty() {
         return malformed_protocol();
     }
-    WorkProviderSettlementV1::Completed {
+    WorkProviderExecutionOutcomeV1::Completed {
         evidence: evidence.to_owned(),
     }
 }
@@ -376,8 +378,8 @@ fn protocol_version_drifted(value: &Value) -> bool {
         .is_some_and(|version| version.as_u64() != Some(1))
 }
 
-fn malformed_protocol() -> WorkProviderSettlementV1 {
-    WorkProviderSettlementV1::Failed {
+fn malformed_protocol() -> WorkProviderExecutionOutcomeV1 {
+    WorkProviderExecutionOutcomeV1::Failed {
         message: "provider stream lacked a valid structured terminal event".to_owned(),
     }
 }
@@ -421,7 +423,7 @@ mod tests {
             parse_claude_terminal(include_bytes!(
                 "../../../tests/fixtures/workflow_provider/claude-code-result.json"
             )),
-            WorkProviderSettlementV1::Completed {
+            WorkProviderExecutionOutcomeV1::Completed {
                 evidence: "native claude terminal fixture".to_owned(),
             }
         );
@@ -429,7 +431,7 @@ mod tests {
             parse_codex_terminal(include_bytes!(
                 "../../../tests/fixtures/workflow_provider/codex-exec.jsonl"
             )),
-            WorkProviderSettlementV1::Completed {
+            WorkProviderExecutionOutcomeV1::Completed {
                 evidence: "native codex terminal fixture".to_owned(),
             }
         );
@@ -470,7 +472,10 @@ mod tests {
             parse_codex_terminal(b"{\"type\":\"item.completed\"}\n"),
             parse_codex_terminal(b"{\"protocol_version\":2,\"type\":\"turn.completed\"}\n"),
         ] {
-            assert!(matches!(outcome, WorkProviderSettlementV1::Failed { .. }));
+            assert!(matches!(
+                outcome,
+                WorkProviderExecutionOutcomeV1::Failed { .. }
+            ));
         }
     }
 

@@ -7,8 +7,8 @@ use tracedecay_domain::{
     WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
     WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1, WorkCancellationRequestV1,
     WorkCancellationStateV1, WorkExecutionEnvelopeV1, WorkLeaseFenceV1, WorkProjectionSnapshotV1,
-    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError,
-    WorkTerminalEvidenceV1,
+    WorkProviderRouteV1, WorkProviderSelectionReceiptV1, WorkRecoveryStateV1, WorkRestartReasonV1,
+    WorkRuntimeContractError, WorkTerminalEvidenceV1,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -300,7 +300,7 @@ where
         Ok(next)
     }
 
-    /// Records the durable intent to run an attempt on `route`.
+    /// Records the durable intent to run an attempt on the selected provider.
     ///
     /// Replaying `start` for an already-running attempt re-records the same
     /// state, so a caller whose provider admission was refused can retry
@@ -311,9 +311,13 @@ where
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         recovery: WorkRecoveryStateV1,
-        route: WorkProviderRouteV1,
+        selection: WorkProviderSelectionReceiptV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
         let current = self.load_with_fence(authority, identity, lease)?;
+        selection.validate_against(current.execution().execution_snapshot())?;
+        if selection.requested_route() != current.requested_route() {
+            return Err(WorkRuntimeContractError::InvalidExecutionSnapshot.into());
+        }
         let artifacts = current.artifacts().to_vec();
         self.transition(
             authority,
@@ -323,7 +327,7 @@ where
             artifacts,
             WorkCancellationStateV1::None,
             recovery,
-            Some(route),
+            Some(selection.actual_route().clone()),
             None,
             lease.clone(),
         )
@@ -723,6 +727,15 @@ mod tests {
         .unwrap()
     }
 
+    fn primary_selection() -> WorkProviderSelectionReceiptV1 {
+        let requested_route = route("route.requested");
+        WorkProviderSelectionReceiptV1::primary(
+            &execution_snapshot(requested_route.clone()),
+            requested_route,
+        )
+        .unwrap()
+    }
+
     fn execution_envelope(
         identity: WorkAttemptIdentityV1,
         projection_binding: WorkAttemptProjectionBindingV1,
@@ -845,7 +858,7 @@ mod tests {
                 &identity,
                 &lease(1),
                 WorkRecoveryStateV1::Fresh,
-                route("route.actual"),
+                primary_selection(),
             )
             .unwrap();
         service
@@ -902,7 +915,7 @@ mod tests {
                 &identity,
                 &lease(1),
                 WorkRecoveryStateV1::Fresh,
-                route("route.actual"),
+                primary_selection(),
             )
             .unwrap();
         let original = cancellation_request("cancel.work.first", 30);
@@ -951,7 +964,7 @@ mod tests {
                 &identity,
                 &lease(1),
                 WorkRecoveryStateV1::Fresh,
-                route("route.actual"),
+                primary_selection(),
             )
             .unwrap();
         service
@@ -995,7 +1008,7 @@ mod tests {
                     &identity,
                     &lease(1),
                     WorkRecoveryStateV1::Fresh,
-                    route("route.actual"),
+                    primary_selection(),
                 )
                 .unwrap_err(),
             WorkExecutionError::Persistence(WorkExecutionPersistenceError::Conflict)
@@ -1023,7 +1036,7 @@ mod tests {
                 &identity,
                 &lease(1),
                 WorkRecoveryStateV1::Fresh,
-                route("route.actual"),
+                primary_selection(),
             )
             .unwrap();
         let replayed = service
@@ -1032,7 +1045,7 @@ mod tests {
                 &identity,
                 &lease(1),
                 WorkRecoveryStateV1::Fresh,
-                route("route.actual"),
+                primary_selection(),
             )
             .unwrap();
 
@@ -1055,7 +1068,7 @@ mod tests {
                     source_attempt_id: predecessor.clone(),
                     reason: WorkRestartReasonV1::ProcessLost,
                 },
-                route("route.actual"),
+                primary_selection(),
             )
             .unwrap();
 
@@ -1089,7 +1102,7 @@ mod tests {
                 &identity,
                 &lease(1),
                 WorkRecoveryStateV1::Fresh,
-                route("route.actual"),
+                primary_selection(),
             )
             .unwrap();
 
@@ -1133,7 +1146,7 @@ mod tests {
                 &identity,
                 &lease(1),
                 recovery.clone(),
-                route("route.actual"),
+                primary_selection(),
             )
             .unwrap();
         assert_eq!(running.recovery(), &recovery);

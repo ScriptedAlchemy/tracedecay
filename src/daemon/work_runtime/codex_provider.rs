@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::{
-    WorkProviderExecutionError, WorkProviderExecutionPort, WorkProviderRun,
-    WorkProviderSettlementV1, WorkStorageError, WorkStoragePort,
+    WorkProviderExecutionError, WorkProviderExecutionOutcomeV1, WorkProviderExecutionPort,
+    WorkProviderRun, WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
     ManifestDigest, ProviderId, UtcMicros, WorkAttemptV1, WorkAuthority, WorkProjection,
@@ -272,7 +272,7 @@ pub(crate) enum NativeWorkRunV1 {
 }
 
 impl WorkProviderRun for NativeWorkRunV1 {
-    fn execute(&self) -> WorkProviderSettlementV1 {
+    fn execute(&self) -> WorkProviderExecutionOutcomeV1 {
         match self {
             Self::CodexAppServer(run) => run.execute(),
             Self::Cli(run) => run.execute(),
@@ -296,7 +296,7 @@ pub(crate) struct CodexAppServerWorkRunV1 {
 }
 
 impl WorkProviderRun for CodexAppServerWorkRunV1 {
-    fn execute(&self) -> WorkProviderSettlementV1 {
+    fn execute(&self) -> WorkProviderExecutionOutcomeV1 {
         let outcome = run_work_with_codex_app_server(
             &self.prompt,
             &self.config,
@@ -306,13 +306,13 @@ impl WorkProviderRun for CodexAppServerWorkRunV1 {
             self.timeout,
         );
         if self.cancellation.is_cancelled() {
-            return WorkProviderSettlementV1::Cancelled;
+            return WorkProviderExecutionOutcomeV1::Cancelled;
         }
         match outcome {
-            Ok(summary) => WorkProviderSettlementV1::Completed {
+            Ok(summary) => WorkProviderExecutionOutcomeV1::Completed {
                 evidence: summary.text,
             },
-            Err(_) => WorkProviderSettlementV1::Failed {
+            Err(_) => WorkProviderExecutionOutcomeV1::Failed {
                 message: "Codex app-server failed before a valid terminal event".to_owned(),
             },
         }

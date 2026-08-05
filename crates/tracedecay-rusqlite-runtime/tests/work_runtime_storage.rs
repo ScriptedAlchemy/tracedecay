@@ -93,6 +93,10 @@ fn requested_route() -> WorkProviderRouteV1 {
     )
 }
 
+fn fallback_route() -> WorkProviderRouteV1 {
+    route("provider.work.codex-cli", "route.work.codex-cli.v1")
+}
+
 fn execution_snapshot() -> WorkExecutionSnapshot {
     WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
         configuration_revision_id: id::<ConfigurationRevisionId>(
@@ -120,7 +124,14 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
         credential_references: BTreeSet::new(),
         limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
         deadline: UtcMicros(9_000),
-        fallback: WorkFallbackTopology::Disabled,
+        fallback: WorkFallbackTopology::CodexCli {
+            route: fallback_route(),
+            executable: WorkExecutableReference::new(
+                "executable.codex.cli".to_owned(),
+                digest('9'),
+            )
+            .unwrap(),
+        },
         topology_policy_digest: digest('f'),
     })
     .unwrap()
@@ -310,13 +321,18 @@ fn application_execution_service_composes_with_sqlite_adapter() {
             .unwrap(),
         leased
     );
+    let selection = tracedecay_domain::WorkProviderSelectionReceiptV1::primary(
+        leased.execution().execution_snapshot(),
+        leased.requested_route().clone(),
+    )
+    .unwrap();
     service
         .start(
             &owner,
             &identity,
             &lease(1),
             WorkRecoveryStateV1::Fresh,
-            route("provider.work.actual", "route.work.actual"),
+            selection,
         )
         .unwrap();
     service
@@ -375,7 +391,7 @@ fn attempt_transitions_replay_and_rebuild_after_restart() {
             vec![artifact],
             WorkCancellationStateV1::None,
             WorkRecoveryStateV1::Fresh,
-            Some(route("provider.work.actual", "route.work.actual")),
+            Some(requested_route()),
             None,
             lease(2),
         )
@@ -416,7 +432,7 @@ fn lease_loss_rejects_stale_writer_without_partial_progress_or_artifacts() {
             Vec::new(),
             WorkCancellationStateV1::None,
             WorkRecoveryStateV1::Fresh,
-            Some(route("provider.work.actual", "route.work.actual")),
+            Some(requested_route()),
             None,
             lease(2),
         )
@@ -447,7 +463,7 @@ fn terminal_evidence_is_published_exactly_once() {
             Vec::new(),
             WorkCancellationStateV1::None,
             WorkRecoveryStateV1::Fresh,
-            Some(route("provider.work.actual", "route.work.actual")),
+            Some(requested_route()),
             None,
             lease(1),
         )
@@ -629,7 +645,7 @@ fn recovery_candidate_resumes_and_clears_restart_work() {
                 source_attempt_id: id("attempt.work.runtime-store.0"),
                 checkpoint: None,
             },
-            Some(route("provider.work.actual", "route.work.actual")),
+            Some(requested_route()),
             None,
             lease(2),
         )
@@ -660,7 +676,7 @@ fn cancellation_acknowledgement_and_terminal_evidence_persist_together() {
             Vec::new(),
             WorkCancellationStateV1::None,
             WorkRecoveryStateV1::Fresh,
-            Some(route("provider.work.actual", "route.work.actual")),
+            Some(requested_route()),
             None,
             lease(1),
         )

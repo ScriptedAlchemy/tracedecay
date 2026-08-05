@@ -189,6 +189,134 @@ pub enum WorkFallbackTopology {
     },
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WorkProviderFallbackDispositionV1 {
+    Disabled,
+    NotUsed {
+        topology_policy_digest: ManifestDigest,
+        route: WorkProviderRouteV1,
+        executable: WorkExecutableReference,
+    },
+}
+
+/// Exact provider selection recorded before a Work provider effect starts.
+///
+/// This receipt is primary-only until a real selector can record pre-launch
+/// failure evidence. A configured fallback is retained as `NotUsed`; it is not
+/// silently promoted into the actual route.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProviderSelectionReceiptV1 {
+    requested_route: WorkProviderRouteV1,
+    actual_route: WorkProviderRouteV1,
+    fallback: WorkProviderFallbackDispositionV1,
+}
+
+impl WorkProviderSelectionReceiptV1 {
+    pub fn primary(
+        snapshot: &WorkExecutionSnapshot,
+        requested_route: WorkProviderRouteV1,
+    ) -> Result<Self, WorkRuntimeContractError> {
+        let fallback = match snapshot.fallback() {
+            WorkFallbackTopology::Disabled => WorkProviderFallbackDispositionV1::Disabled,
+            WorkFallbackTopology::CodexCli { route, executable } => {
+                WorkProviderFallbackDispositionV1::NotUsed {
+                    topology_policy_digest: snapshot.topology_policy_digest().clone(),
+                    route: route.clone(),
+                    executable: executable.clone(),
+                }
+            }
+        };
+        let receipt = Self {
+            actual_route: requested_route.clone(),
+            requested_route,
+            fallback,
+        };
+        receipt.validate_shape()?;
+        receipt.validate_against(snapshot)?;
+        Ok(receipt)
+    }
+
+    pub fn requested_route(&self) -> &WorkProviderRouteV1 {
+        &self.requested_route
+    }
+
+    pub fn actual_route(&self) -> &WorkProviderRouteV1 {
+        &self.actual_route
+    }
+
+    pub const fn fallback(&self) -> &WorkProviderFallbackDispositionV1 {
+        &self.fallback
+    }
+
+    pub fn validate_against(
+        &self,
+        snapshot: &WorkExecutionSnapshot,
+    ) -> Result<(), WorkRuntimeContractError> {
+        self.validate_shape()?;
+        if &self.requested_route != snapshot.route() {
+            return Err(WorkRuntimeContractError::InvalidExecutionSnapshot);
+        }
+        match (&self.fallback, snapshot.fallback()) {
+            (WorkProviderFallbackDispositionV1::Disabled, WorkFallbackTopology::Disabled)
+                if self.actual_route == self.requested_route =>
+            {
+                Ok(())
+            }
+            (
+                WorkProviderFallbackDispositionV1::NotUsed {
+                    topology_policy_digest,
+                    route: recorded_route,
+                    executable: recorded_executable,
+                },
+                WorkFallbackTopology::CodexCli { route, executable },
+            ) if self.actual_route == self.requested_route
+                && topology_policy_digest == snapshot.topology_policy_digest()
+                && recorded_route == route
+                && recorded_executable == executable =>
+            {
+                Ok(())
+            }
+            (WorkProviderFallbackDispositionV1::Disabled, _)
+            | (WorkProviderFallbackDispositionV1::NotUsed { .. }, _) => {
+                Err(WorkRuntimeContractError::InvalidExecutionSnapshot)
+            }
+        }
+    }
+
+    fn validate_shape(&self) -> Result<(), WorkRuntimeContractError> {
+        if self.requested_route() != self.actual_route() {
+            return Err(WorkRuntimeContractError::InvalidExecutionSnapshot);
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkProviderSelectionReceiptV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            requested_route: WorkProviderRouteV1,
+            actual_route: WorkProviderRouteV1,
+            fallback: WorkProviderFallbackDispositionV1,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let receipt = Self {
+            requested_route: wire.requested_route,
+            actual_route: wire.actual_route,
+            fallback: wire.fallback,
+        };
+        receipt.validate_shape().map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkExecutionSnapshotInput {
     pub configuration_revision_id: ConfigurationRevisionId,

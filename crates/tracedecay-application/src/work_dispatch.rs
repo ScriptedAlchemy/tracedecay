@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use tracedecay_domain::{
-    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkLeaseFenceV1, WorkProviderRouteV1,
+    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkLeaseFenceV1,
+    WorkProviderRouteV1, WorkProviderSelectionReceiptV1,
 };
 
 use crate::work_execution::WorkProviderExecutionError;
@@ -34,13 +35,41 @@ impl WorkDispatchBoundsV1 {
     }
 }
 
-/// Outcome a provider execution reports once it stops running.
+/// Raw outcome a provider execution reports once it stops running.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorkProviderSettlementV1 {
+pub enum WorkProviderExecutionOutcomeV1 {
     Completed { evidence: String },
     Cancelled,
     TimedOut,
     Failed { message: String },
+}
+
+/// Provider outcome bound to the exact durable pre-effect route selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkProviderSettlementV1 {
+    selection: WorkProviderSelectionReceiptV1,
+    outcome: WorkProviderExecutionOutcomeV1,
+}
+
+impl WorkProviderSettlementV1 {
+    fn new(
+        selection: WorkProviderSelectionReceiptV1,
+        outcome: WorkProviderExecutionOutcomeV1,
+    ) -> Self {
+        Self { selection, outcome }
+    }
+
+    pub fn selection(&self) -> &WorkProviderSelectionReceiptV1 {
+        &self.selection
+    }
+
+    pub fn outcome(&self) -> &WorkProviderExecutionOutcomeV1 {
+        &self.outcome
+    }
+
+    pub fn into_outcome(self) -> WorkProviderExecutionOutcomeV1 {
+        self.outcome
+    }
 }
 
 /// A prepared provider execution owned by the bounded queue.
@@ -49,7 +78,7 @@ pub enum WorkProviderSettlementV1 {
 /// provider stops; `cancel` asks that provider to stop and may be called from
 /// any thread while `execute` is in flight.
 pub trait WorkProviderRun: Send + Sync + 'static {
-    fn execute(&self) -> WorkProviderSettlementV1;
+    fn execute(&self) -> WorkProviderExecutionOutcomeV1;
 
     fn cancel(&self);
 }
@@ -123,8 +152,9 @@ impl From<WorkProviderExecutionError> for WorkDispatchError {
 
 struct InFlightV1<R> {
     lease: WorkLeaseFenceV1,
+    selection: WorkProviderSelectionReceiptV1,
     run: Arc<R>,
-    worker: Option<JoinHandle<WorkProviderSettlementV1>>,
+    worker: Option<JoinHandle<WorkProviderExecutionOutcomeV1>>,
 }
 
 /// The single execution authority for provider work in this process.
@@ -203,6 +233,10 @@ where
         let Some(route) = attempt.actual_route() else {
             return Err(WorkDispatchError::RouteNotMounted);
         };
+        let selection = attempt
+            .provider_selection()
+            .map_err(|error| WorkProviderExecutionError::Rejected(error.to_string()))?
+            .ok_or(WorkDispatchError::NotAdmitted)?;
         if !self.provider.supports_route(route)? {
             return Err(WorkDispatchError::RouteNotMounted);
         }
@@ -242,6 +276,7 @@ where
             attempt.identity().clone(),
             InFlightV1 {
                 lease: attempt.lease().clone(),
+                selection,
                 run,
                 worker: Some(worker),
             },
@@ -273,6 +308,26 @@ where
         lease: &WorkLeaseFenceV1,
     ) -> Result<WorkProviderSettlementV1, WorkDispatchError> {
         self.claim(identity, Some(lease))
+    }
+
+    /// Claims a finished execution without waiting for a running provider.
+    ///
+    /// `None` means this process still owns the exact in-flight execution.
+    pub fn try_settle(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        lease: &WorkLeaseFenceV1,
+    ) -> Result<Option<WorkProviderSettlementV1>, WorkDispatchError> {
+        let finished = {
+            let in_flight = self.registry();
+            let entry = in_flight.get(identity).ok_or(WorkDispatchError::Detached)?;
+            entry.fenced_by(lease)?;
+            entry.worker.as_ref().is_some_and(JoinHandle::is_finished)
+        };
+        if !finished {
+            return Ok(None);
+        }
+        self.claim(identity, Some(lease)).map(Some)
     }
 
     /// Cancels and joins every execution this process still owns.
@@ -330,7 +385,7 @@ where
         identity: &WorkAttemptIdentityV1,
         lease: Option<&WorkLeaseFenceV1>,
     ) -> Result<WorkProviderSettlementV1, WorkDispatchError> {
-        let worker = {
+        let (selection, worker) = {
             let mut in_flight = self.registry();
             let entry = in_flight
                 .get_mut(identity)
@@ -338,13 +393,18 @@ where
             if let Some(lease) = lease {
                 entry.fenced_by(lease)?;
             }
-            entry.worker.take().ok_or(WorkDispatchError::Detached)?
+            (
+                entry.selection.clone(),
+                entry.worker.take().ok_or(WorkDispatchError::Detached)?,
+            )
         };
-        let settlement = worker.join().unwrap_or(WorkProviderSettlementV1::Failed {
-            message: "work execution worker panicked".to_owned(),
-        });
+        let outcome = worker
+            .join()
+            .unwrap_or(WorkProviderExecutionOutcomeV1::Failed {
+                message: "work execution worker panicked".to_owned(),
+            });
         self.registry().remove(identity);
-        Ok(settlement)
+        Ok(WorkProviderSettlementV1::new(selection, outcome))
     }
 }
 
@@ -507,14 +567,14 @@ mod tests {
     }
 
     impl WorkProviderRun for BlockingRun {
-        fn execute(&self) -> WorkProviderSettlementV1 {
+        fn execute(&self) -> WorkProviderExecutionOutcomeV1 {
             while !self.released.load(Ordering::SeqCst) && !self.cancelled.load(Ordering::SeqCst) {
                 thread::sleep(std::time::Duration::from_millis(1));
             }
             if self.cancelled.load(Ordering::SeqCst) {
-                WorkProviderSettlementV1::Cancelled
+                WorkProviderExecutionOutcomeV1::Cancelled
             } else {
-                WorkProviderSettlementV1::Completed {
+                WorkProviderExecutionOutcomeV1::Completed {
                     evidence: "released".to_owned(),
                 }
             }
@@ -587,16 +647,10 @@ mod tests {
 
     #[test]
     fn admission_rejects_intents_bound_to_an_unmounted_route() {
-        let queue = WorkExecutionQueueV1::new(
-            BlockingProvider::new(Arc::new(AtomicBool::new(true))),
-            bounds(1),
-        );
-        let elsewhere = attempt(
-            "attempt.work.elsewhere",
-            WorkAttemptStateV1::Running,
-            lease("lease.work.dispatch", 1),
-            Some(route("route.work.other")),
-        );
+        let mut provider = BlockingProvider::new(Arc::new(AtomicBool::new(true)));
+        provider.route_id = "route.work.other";
+        let queue = WorkExecutionQueueV1::new(provider, bounds(1));
+        let elsewhere = running("attempt.work.elsewhere", 1);
 
         assert_eq!(
             queue.admit(&elsewhere).unwrap_err(),
@@ -626,9 +680,20 @@ mod tests {
         assert_eq!(queue.in_flight(), 1);
 
         released.store(true, Ordering::SeqCst);
+        let settlement = queue.settle(first.identity(), first.lease()).unwrap();
         assert_eq!(
-            queue.settle(first.identity(), first.lease()).unwrap(),
-            WorkProviderSettlementV1::Completed {
+            settlement.outcome(),
+            &WorkProviderExecutionOutcomeV1::Completed {
+                evidence: "released".to_owned()
+            }
+        );
+        assert_eq!(
+            settlement.selection(),
+            &first.provider_selection().unwrap().unwrap()
+        );
+        assert_eq!(
+            settlement.into_outcome(),
+            WorkProviderExecutionOutcomeV1::Completed {
                 evidence: "released".to_owned()
             }
         );
@@ -693,9 +758,14 @@ mod tests {
 
         queue.admit(&attempt).unwrap();
         queue.cancel(attempt.identity(), attempt.lease()).unwrap();
+        let settlement = queue.settle(attempt.identity(), attempt.lease()).unwrap();
         assert_eq!(
-            queue.settle(attempt.identity(), attempt.lease()).unwrap(),
-            WorkProviderSettlementV1::Cancelled
+            settlement.selection(),
+            &attempt.provider_selection().unwrap().unwrap()
+        );
+        assert_eq!(
+            settlement.into_outcome(),
+            WorkProviderExecutionOutcomeV1::Cancelled
         );
         assert_eq!(
             queue
@@ -708,6 +778,40 @@ mod tests {
                 .cancel(attempt.identity(), attempt.lease())
                 .unwrap_err(),
             WorkDispatchError::Detached
+        );
+        assert_eq!(queue.in_flight(), 0);
+    }
+
+    #[test]
+    fn try_settle_observes_completion_without_waiting_for_a_running_provider() {
+        let released = Arc::new(AtomicBool::new(false));
+        let queue =
+            WorkExecutionQueueV1::new(BlockingProvider::new(Arc::clone(&released)), bounds(1));
+        let attempt = running("attempt.work.try-settle", 1);
+
+        queue.admit(&attempt).unwrap();
+        assert_eq!(
+            queue
+                .try_settle(attempt.identity(), attempt.lease())
+                .unwrap(),
+            None
+        );
+
+        released.store(true, Ordering::SeqCst);
+        let settlement = loop {
+            if let Some(settlement) = queue
+                .try_settle(attempt.identity(), attempt.lease())
+                .unwrap()
+            {
+                break settlement;
+            }
+            thread::yield_now();
+        };
+        assert_eq!(
+            settlement.into_outcome(),
+            WorkProviderExecutionOutcomeV1::Completed {
+                evidence: "released".to_owned()
+            }
         );
         assert_eq!(queue.in_flight(), 0);
     }
@@ -743,7 +847,7 @@ mod tests {
         struct PanicRun;
 
         impl WorkProviderRun for PanicRun {
-            fn execute(&self) -> WorkProviderSettlementV1 {
+            fn execute(&self) -> WorkProviderExecutionOutcomeV1 {
                 panic!("provider execution panicked");
             }
 
@@ -777,8 +881,8 @@ mod tests {
         std::panic::set_hook(previous);
 
         assert_eq!(
-            settlement,
-            WorkProviderSettlementV1::Failed {
+            settlement.into_outcome(),
+            WorkProviderExecutionOutcomeV1::Failed {
                 message: "work execution worker panicked".to_owned()
             }
         );

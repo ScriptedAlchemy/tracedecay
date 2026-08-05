@@ -1,6 +1,6 @@
 use tracedecay_application::{
-    WorkProviderExecutionError, WorkProviderExecutionPort, WorkProviderRun,
-    WorkProviderSettlementV1,
+    WorkProviderExecutionError, WorkProviderExecutionOutcomeV1, WorkProviderExecutionPort,
+    WorkProviderRun,
 };
 use tracedecay_domain::{WorkAttemptV1, WorkProviderRouteV1};
 
@@ -28,7 +28,7 @@ pub(crate) enum RegisteredWorkRun {
 }
 
 impl WorkProviderRun for RegisteredWorkRun {
-    fn execute(&self) -> WorkProviderSettlementV1 {
+    fn execute(&self) -> WorkProviderExecutionOutcomeV1 {
         match self {
             Self::Native(run) => run.execute(),
         }
@@ -69,8 +69,13 @@ where
     }
 
     fn prepare(&self, attempt: &WorkAttemptV1) -> Result<Self::Run, WorkProviderExecutionError> {
+        let actual_route = attempt.actual_route().ok_or_else(|| {
+            WorkProviderExecutionError::Rejected(
+                "Work provider selection was not persisted before launch".to_owned(),
+            )
+        })?;
         for provider in &self.providers {
-            if provider.supports_route(attempt.execution().route())? {
+            if provider.supports_route(actual_route)? {
                 return provider.prepare(attempt).map(RegisteredWorkRun::Native);
             }
         }

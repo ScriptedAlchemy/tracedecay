@@ -4,8 +4,9 @@ use tracedecay_domain::{
     ConfigurationRevisionId, ConfigurationSnapshotId, CredentialReferenceId, ManifestDigest,
     ProviderId, UtcMicros, WorkApprovalPolicy, WorkEgressPolicy, WorkExecutableReference,
     WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
-    WorkFilesystemPolicy, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
-    WorkProviderRouteV1, WorkRuntimeContractError, WorkSandboxPolicy,
+    WorkFilesystemPolicy, WorkProviderBackendV1, WorkProviderFallbackDispositionV1,
+    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkProviderSelectionReceiptV1,
+    WorkRuntimeContractError, WorkSandboxPolicy,
 };
 
 fn id<T>(value: &str) -> T
@@ -95,4 +96,30 @@ fn execution_snapshot_rejects_backend_protocol_drift() {
         WorkExecutionSnapshot::new(input),
         Err(WorkRuntimeContractError::InvalidExecutionSnapshot)
     );
+}
+
+#[test]
+fn provider_selection_records_that_the_pinned_fallback_was_not_used() {
+    let snapshot = WorkExecutionSnapshot::new(input()).unwrap();
+    let requested = snapshot.route().clone();
+    let primary = WorkProviderSelectionReceiptV1::primary(&snapshot, requested.clone()).unwrap();
+    assert_eq!(primary.requested_route(), &requested);
+    assert_eq!(primary.actual_route(), &requested);
+
+    let WorkFallbackTopology::CodexCli { route, executable } = snapshot.fallback() else {
+        panic!("fixture must pin a fallback");
+    };
+    assert_eq!(
+        primary.fallback(),
+        &WorkProviderFallbackDispositionV1::NotUsed {
+            topology_policy_digest: snapshot.topology_policy_digest().clone(),
+            route: route.clone(),
+            executable: executable.clone(),
+        }
+    );
+
+    let mut wire = serde_json::to_value(&primary).unwrap();
+    wire["actual_route"] =
+        serde_json::to_value(route("provider.work.codex-cli", "route.work.unrecorded")).unwrap();
+    assert!(serde_json::from_value::<WorkProviderSelectionReceiptV1>(wire).is_err());
 }

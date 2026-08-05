@@ -67,6 +67,10 @@ fn requested_route() -> WorkProviderRouteV1 {
     )
 }
 
+fn fallback_route() -> WorkProviderRouteV1 {
+    route("provider.work.codex-cli", "route.work.codex-cli.v1")
+}
+
 fn execution_snapshot() -> WorkExecutionSnapshot {
     WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
         configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.work.1"),
@@ -90,7 +94,14 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
         credential_references: BTreeSet::new(),
         limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
         deadline: UtcMicros(1_000_000),
-        fallback: WorkFallbackTopology::Disabled,
+        fallback: WorkFallbackTopology::CodexCli {
+            route: fallback_route(),
+            executable: WorkExecutableReference::new(
+                "executable.codex.cli".to_owned(),
+                digest('9'),
+            )
+            .unwrap(),
+        },
         topology_policy_digest: digest('f'),
     })
     .unwrap()
@@ -183,7 +194,7 @@ fn running() -> WorkAttemptV1 {
         WorkCancellationStateV1::None,
         WorkRecoveryStateV1::Fresh,
         requested_route(),
-        Some(route("provider.work.actual", "route.work.actual")),
+        Some(requested_route()),
         None,
     )
     .unwrap()
@@ -216,7 +227,7 @@ fn attempt_identity_fence_and_projection_binding_are_validated() {
         WorkCancellationStateV1::None,
         WorkRecoveryStateV1::Fresh,
         requested_route(),
-        Some(route("provider.work.actual", "route.work.actual")),
+        Some(requested_route()),
         None,
     )
     .unwrap();
@@ -256,12 +267,12 @@ fn progress_artifacts_and_provider_routes_are_bounded_and_explicit() {
         WorkCancellationStateV1::None,
         WorkRecoveryStateV1::Fresh,
         requested_route(),
-        Some(route("provider.work.actual", "route.work.actual")),
+        Some(requested_route()),
         None,
     )
     .unwrap();
 
-    assert_ne!(attempt.requested_route(), attempt.actual_route().unwrap());
+    assert_eq!(attempt.requested_route(), attempt.actual_route().unwrap());
     assert_eq!(attempt.artifacts().len(), 1);
     assert!(
         attempt
@@ -297,7 +308,7 @@ fn cancellation_request_acknowledgement_and_escalation_are_ordered() {
             Vec::new(),
             WorkCancellationStateV1::Requested(request),
             WorkRecoveryStateV1::Fresh,
-            Some(route("provider.work.actual", "route.work.actual")),
+            Some(requested_route()),
             None,
             lease(1),
         )
@@ -309,7 +320,7 @@ fn cancellation_request_acknowledgement_and_escalation_are_ordered() {
             Vec::new(),
             WorkCancellationStateV1::Acknowledged(acknowledged),
             WorkRecoveryStateV1::Fresh,
-            Some(route("provider.work.actual", "route.work.actual")),
+            Some(requested_route()),
             None,
             lease(1),
         )
@@ -321,7 +332,7 @@ fn cancellation_request_acknowledgement_and_escalation_are_ordered() {
             Vec::new(),
             WorkCancellationStateV1::Escalated(escalated),
             WorkRecoveryStateV1::Fresh,
-            Some(route("provider.work.actual", "route.work.actual")),
+            Some(requested_route()),
             None,
             lease(2),
         )
@@ -335,7 +346,7 @@ fn cancellation_request_acknowledgement_and_escalation_are_ordered() {
                 Vec::new(),
                 WorkCancellationStateV1::None,
                 WorkRecoveryStateV1::Fresh,
-                Some(route("provider.work.actual", "route.work.actual")),
+                Some(requested_route()),
                 None,
                 lease(1),
             )
@@ -362,7 +373,7 @@ fn recovery_and_terminal_evidence_match_attempt_state() {
         WorkCancellationStateV1::None,
         recovery,
         requested_route(),
-        Some(route("provider.work.actual", "route.work.actual")),
+        Some(requested_route()),
         None,
     )
     .unwrap();

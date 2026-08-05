@@ -6,8 +6,8 @@ use std::sync::Arc;
 use tracedecay_application::{
     WorkAttemptAcquireLeaseRequestV1, WorkAttemptPersistencePort, WorkAttemptResponseV1,
     WorkDispatchBoundsV1, WorkDispatchError, WorkExecutionError, WorkExecutionQueueV1,
-    WorkExecutionService, WorkProviderExecutionError, WorkProviderSettlementV1, WorkStorageError,
-    WorkStoragePort,
+    WorkExecutionService, WorkProviderExecutionError, WorkProviderExecutionOutcomeV1,
+    WorkProviderSettlementV1, WorkStorageError, WorkStoragePort,
 };
 #[cfg(all(test, unix))]
 use tracedecay_domain::WorkProviderRouteV1;
@@ -245,14 +245,17 @@ where
         lease: &WorkLeaseFenceV1,
         recovery: WorkRecoveryStateV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let requested_route = self
+        let current = self
             .attempt(identity)?
-            .ok_or(WorkExecutionError::NotFound)?
-            .requested_route()
-            .clone();
+            .ok_or(WorkExecutionError::NotFound)?;
+        let requested_route = current.requested_route().clone();
+        let selection = tracedecay_domain::WorkProviderSelectionReceiptV1::primary(
+            current.execution().execution_snapshot(),
+            requested_route,
+        )?;
         let running =
             self.execution
-                .start(&self.authority, identity, lease, recovery, requested_route)?;
+                .start(&self.authority, identity, lease, recovery, selection)?;
         // Re-check the published projection before the queue takes a slot. A
         // superseded proposal or replanned version must not consume capacity
         // under a lease that was exact when acquired and is exact no longer.
@@ -358,41 +361,8 @@ where
                 )
                 .into());
             };
-            match settlement {
-                WorkProviderSettlementV1::Completed { evidence } => {
-                    let digest = canonical_sha256(&evidence).map_err(|error| {
-                        WorkProviderExecutionError::Rejected(format!(
-                            "Codex Work artifact digest failed: {error}"
-                        ))
-                    })?;
-                    let artifact = WorkArtifactRefV1::new(
-                        artifact_id(identity.attempt_id())?,
-                        digest.clone(),
-                        u64::try_from(evidence.len()).map_err(|_| {
-                            WorkProviderExecutionError::Rejected(
-                                "Codex Work artifact length overflowed".to_owned(),
-                            )
-                        })?,
-                    )?;
-                    self.publish_artifact(identity, lease, artifact).await?;
-                    self.publish_progress(identity, lease, WorkAttemptProgressV1::new(1, 1)?)
-                        .await?;
-                    WorkTerminalEvidenceV1::succeeded(digest, observed_at)?
-                }
-                // A stop the store never requested cannot become a cancelled
-                // terminal; the recorded state and the provider disagree.
-                WorkProviderSettlementV1::Cancelled => {
-                    return Err(WorkExecutionError::TerminalConflict);
-                }
-                WorkProviderSettlementV1::Failed { message } => WorkTerminalEvidenceV1::failed(
-                    failed_evidence_digest(identity, &message, observed_at)?,
-                    observed_at,
-                )?,
-                WorkProviderSettlementV1::TimedOut => WorkTerminalEvidenceV1::timed_out(
-                    timed_out_evidence_digest(identity, observed_at)?,
-                    observed_at,
-                )?,
-            }
+            self.terminal_from_settlement(&current, lease, settlement, observed_at)
+                .await?
         };
         let completed = self
             .execution
@@ -400,6 +370,88 @@ where
         self.publish_activity(attempt_state_key(completed.state()))
             .await;
         Ok(completed)
+    }
+
+    /// Observes a provider settlement without blocking the caller on a running
+    /// child. `None` means this process still owns the exact in-flight effect.
+    pub(crate) async fn try_finish(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        lease: &WorkLeaseFenceV1,
+        observed_at: UtcMicros,
+    ) -> Result<Option<WorkAttemptV1>, WorkExecutionError> {
+        let current = self.fenced_attempt(identity, lease)?;
+        if current.is_terminal() {
+            return Ok(Some(current));
+        }
+        if !matches!(current.cancellation(), WorkCancellationStateV1::None) {
+            return Ok(None);
+        }
+        let settlement = match self.queue.try_settle(identity, lease) {
+            Ok(Some(settlement)) => settlement,
+            Ok(None) => return Ok(None),
+            Err(error) => return Err(map_dispatch_error(error)),
+        };
+        let terminal = self
+            .terminal_from_settlement(&current, lease, settlement, observed_at)
+            .await?;
+        let completed = self
+            .execution
+            .terminalize(&self.authority, identity, lease, terminal)?;
+        self.publish_activity(attempt_state_key(completed.state()))
+            .await;
+        Ok(Some(completed))
+    }
+
+    async fn terminal_from_settlement(
+        &self,
+        current: &WorkAttemptV1,
+        lease: &WorkLeaseFenceV1,
+        settlement: WorkProviderSettlementV1,
+        observed_at: UtcMicros,
+    ) -> Result<WorkTerminalEvidenceV1, WorkExecutionError> {
+        let selection = current
+            .provider_selection()?
+            .ok_or(WorkExecutionError::TerminalConflict)?;
+        if settlement.selection() != &selection {
+            return Err(WorkExecutionError::TerminalConflict);
+        }
+        match settlement.into_outcome() {
+            WorkProviderExecutionOutcomeV1::Completed { evidence } => {
+                let digest = canonical_sha256(&evidence).map_err(|error| {
+                    WorkProviderExecutionError::Rejected(format!(
+                        "Codex Work artifact digest failed: {error}"
+                    ))
+                })?;
+                let artifact = WorkArtifactRefV1::new(
+                    artifact_id(current.identity().attempt_id())?,
+                    digest.clone(),
+                    u64::try_from(evidence.len()).map_err(|_| {
+                        WorkProviderExecutionError::Rejected(
+                            "Codex Work artifact length overflowed".to_owned(),
+                        )
+                    })?,
+                )?;
+                self.publish_artifact(current.identity(), lease, artifact)
+                    .await?;
+                self.publish_progress(current.identity(), lease, WorkAttemptProgressV1::new(1, 1)?)
+                    .await?;
+                Ok(WorkTerminalEvidenceV1::succeeded(digest, observed_at)?)
+            }
+            // A stop the store never requested cannot become a cancelled
+            // terminal; the recorded state and the provider disagree.
+            WorkProviderExecutionOutcomeV1::Cancelled => Err(WorkExecutionError::TerminalConflict),
+            WorkProviderExecutionOutcomeV1::Failed { message } => {
+                Ok(WorkTerminalEvidenceV1::failed(
+                    failed_evidence_digest(current.identity(), &message, observed_at)?,
+                    observed_at,
+                )?)
+            }
+            WorkProviderExecutionOutcomeV1::TimedOut => Ok(WorkTerminalEvidenceV1::timed_out(
+                timed_out_evidence_digest(current.identity(), observed_at)?,
+                observed_at,
+            )?),
+        }
     }
 
     /// Records the durable cancellation intent, then stops the provider.

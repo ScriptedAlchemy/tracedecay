@@ -1016,6 +1016,23 @@ impl WorkAttemptV1 {
         self.actual_route.as_ref()
     }
 
+    pub fn provider_selection(
+        &self,
+    ) -> Result<Option<crate::WorkProviderSelectionReceiptV1>, WorkRuntimeContractError> {
+        self.actual_route
+            .clone()
+            .map(|actual_route| {
+                if actual_route != self.requested_route {
+                    return Err(WorkRuntimeContractError::InvalidExecutionSnapshot);
+                }
+                crate::WorkProviderSelectionReceiptV1::primary(
+                    self.execution.execution_snapshot(),
+                    self.requested_route.clone(),
+                )
+            })
+            .transpose()
+    }
+
     pub fn terminal(&self) -> Option<&WorkTerminalEvidenceV1> {
         self.terminal.as_ref()
     }
@@ -1108,6 +1125,7 @@ impl WorkAttemptV1 {
         if self.recovery.source_attempt_id() == Some(self.identity.attempt_id()) {
             return Err(WorkRuntimeContractError::SelfRecovery);
         }
+        self.provider_selection()?;
         let valid = match self.state {
             WorkAttemptStateV1::Leased => {
                 self.actual_route.is_none()

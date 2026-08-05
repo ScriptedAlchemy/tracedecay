@@ -742,6 +742,14 @@ async fn saturated_work_queue_refuses_new_executions_and_keeps_the_durable_inten
         .start(&occupying, &lease(1), WorkRecoveryStateV1::Fresh)
         .await
         .unwrap();
+    assert_eq!(
+        runtime
+            .try_finish(&occupying, &lease(1), UtcMicros(55))
+            .await
+            .unwrap(),
+        None,
+        "polling a running provider must not block or fabricate a terminal"
+    );
     assert_eq!(runtime.in_flight(), 1);
 
     let refused = identity(&harness.task_id, "refused");
