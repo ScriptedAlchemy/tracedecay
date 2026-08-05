@@ -805,58 +805,6 @@ pub(super) const TABLES: &[Table] = &[
         ]
     ),
     table!(
-        "session_summary_sources",
-        [
-            column("summary_id", "TEXT", true, None, 1),
-            column("source_ordinal", "INTEGER", true, None, 2),
-            column("source_kind", "TEXT", true, None, 0),
-            column("source_anchor_id", "TEXT", false, None, 0),
-            column("source_summary_id", "TEXT", false, None, 0),
-        ],
-        [
-            foreign_key(
-                "summary_id",
-                "session_summary_nodes",
-                "summary_id",
-                "CASCADE"
-            ),
-            foreign_key(
-                "source_anchor_id",
-                "retrieval_anchors",
-                "anchor_id",
-                "NO ACTION"
-            ),
-            foreign_key(
-                "source_summary_id",
-                "session_summary_nodes",
-                "summary_id",
-                "NO ACTION"
-            ),
-        ]
-    ),
-    table!(
-        "session_summary_successors",
-        [
-            column("predecessor_summary_id", "TEXT", true, None, 1),
-            column("successor_summary_id", "TEXT", true, None, 2),
-            column("created_at", "INTEGER", true, None, 0),
-        ],
-        [
-            foreign_key(
-                "predecessor_summary_id",
-                "session_summary_nodes",
-                "summary_id",
-                "NO ACTION"
-            ),
-            foreign_key(
-                "successor_summary_id",
-                "session_summary_nodes",
-                "summary_id",
-                "NO ACTION"
-            ),
-        ]
-    ),
-    table!(
         "session_external_payload_manifests",
         [
             column("payload_ref", "TEXT", false, None, 1),
@@ -1274,51 +1222,6 @@ pub(super) const TABLES: &[Table] = &[
         ]
     ),
     table!(
-        "session_logical_copy_edges",
-        [
-            column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("occurrence_id", "TEXT", true, None, 3),
-            column("copied_from_occurrence_id", "TEXT", true, None, 4),
-            column("proof_json", "TEXT", true, None, 0),
-            column("knowledge_at", "INTEGER", true, None, 0),
-            column("valid_time_json", "TEXT", true, None, 0),
-            column("created_at", "INTEGER", true, None, 0),
-        ],
-        [
-            foreign_key("session_id", "session_occurrences", "session_id", "CASCADE"),
-            foreign_key_sequence(
-                "generation",
-                "session_occurrences",
-                "generation",
-                "CASCADE",
-                1
-            ),
-            foreign_key_sequence(
-                "occurrence_id",
-                "session_occurrences",
-                "occurrence_id",
-                "CASCADE",
-                2
-            ),
-            foreign_key("session_id", "session_occurrences", "session_id", "CASCADE"),
-            foreign_key_sequence(
-                "generation",
-                "session_occurrences",
-                "generation",
-                "CASCADE",
-                1
-            ),
-            foreign_key_sequence(
-                "copied_from_occurrence_id",
-                "session_occurrences",
-                "occurrence_id",
-                "CASCADE",
-                2
-            ),
-        ]
-    ),
-    table!(
         "session_turn_members",
         [
             column("session_id", "TEXT", true, None, 1),
@@ -1346,60 +1249,6 @@ pub(super) const TABLES: &[Table] = &[
                 "CASCADE",
                 2
             ),
-        ]
-    ),
-    table!(
-        "session_thread_hierarchy_edges",
-        [
-            column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("parent_thread_id", "TEXT", true, None, 3),
-            column("child_thread_id", "TEXT", true, None, 4),
-            column("ordinal", "INTEGER", true, None, 0),
-        ],
-        [
-            foreign_key("session_id", "session_threads", "session_id", "CASCADE"),
-            foreign_key_sequence("generation", "session_threads", "generation", "CASCADE", 1),
-            foreign_key_sequence(
-                "parent_thread_id",
-                "session_threads",
-                "thread_id",
-                "CASCADE",
-                2
-            ),
-            foreign_key("session_id", "session_threads", "session_id", "CASCADE"),
-            foreign_key_sequence("generation", "session_threads", "generation", "CASCADE", 1),
-            foreign_key_sequence(
-                "child_thread_id",
-                "session_threads",
-                "thread_id",
-                "CASCADE",
-                2
-            ),
-        ]
-    ),
-    table!(
-        "session_agent_hierarchy_edges",
-        [
-            column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("parent_agent_id", "TEXT", true, None, 3),
-            column("child_agent_id", "TEXT", true, None, 4),
-            column("ordinal", "INTEGER", true, None, 0),
-        ],
-        [
-            foreign_key("session_id", "session_agents", "session_id", "CASCADE"),
-            foreign_key_sequence("generation", "session_agents", "generation", "CASCADE", 1),
-            foreign_key_sequence(
-                "parent_agent_id",
-                "session_agents",
-                "agent_id",
-                "CASCADE",
-                2
-            ),
-            foreign_key("session_id", "session_agents", "session_id", "CASCADE"),
-            foreign_key_sequence("generation", "session_agents", "generation", "CASCADE", 1),
-            foreign_key_sequence("child_agent_id", "session_agents", "agent_id", "CASCADE", 2),
         ]
     ),
     table!(
@@ -1955,31 +1804,6 @@ pub(super) const INDEXES: &[Index] = &[
         columns: &["created_at", "session_id", "summary_id"],
     },
     Index {
-        table: "session_summary_sources",
-        name: Some("idx_session_summary_sources_anchor"),
-        unique: false,
-        origin: "c",
-        columns: &["source_anchor_id"],
-    },
-    Index {
-        table: "session_summary_sources",
-        name: Some("idx_session_summary_sources_summary"),
-        unique: false,
-        origin: "c",
-        columns: &["source_summary_id", "summary_id"],
-    },
-    Index {
-        table: "session_summary_successors",
-        name: Some("idx_session_summary_successors_successor"),
-        unique: false,
-        origin: "c",
-        columns: &[
-            "successor_summary_id",
-            "created_at",
-            "predecessor_summary_id",
-        ],
-    },
-    Index {
         table: "session_external_payload_manifests",
         name: Some("idx_session_external_payload_manifests_session"),
         unique: false,
@@ -2171,32 +1995,11 @@ pub(super) const INDEXES: &[Index] = &[
         ],
     },
     Index {
-        table: "session_logical_copy_edges",
-        name: Some("idx_session_logical_copy_edges_target"),
-        unique: false,
-        origin: "c",
-        columns: &["session_id", "generation", "copied_from_occurrence_id"],
-    },
-    Index {
         table: "session_turn_members",
         name: Some("idx_session_turn_members_occurrence"),
         unique: false,
         origin: "c",
         columns: &["session_id", "generation", "occurrence_id"],
-    },
-    Index {
-        table: "session_thread_hierarchy_edges",
-        name: Some("idx_session_thread_hierarchy_edges_child"),
-        unique: false,
-        origin: "c",
-        columns: &["session_id", "generation", "child_thread_id"],
-    },
-    Index {
-        table: "session_agent_hierarchy_edges",
-        name: Some("idx_session_agent_hierarchy_edges_child"),
-        unique: false,
-        origin: "c",
-        columns: &["session_id", "generation", "child_agent_id"],
     },
     Index {
         table: "session_assertions",

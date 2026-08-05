@@ -431,38 +431,6 @@ const SESSION_SUMMARY_AUTHORITY_IMMUTABILITY: &[Trigger] = &[
             END",
     },
     Trigger {
-        name: "session_summary_sources_immutable_update_v1",
-        table: "session_summary_sources",
-        create_sql: "CREATE TRIGGER session_summary_sources_immutable_update_v1
-            BEFORE UPDATE ON session_summary_sources BEGIN
-                SELECT RAISE(ABORT, 'session summary sources are immutable');
-            END",
-    },
-    Trigger {
-        name: "session_summary_sources_immutable_delete_v1",
-        table: "session_summary_sources",
-        create_sql: "CREATE TRIGGER session_summary_sources_immutable_delete_v1
-            BEFORE DELETE ON session_summary_sources BEGIN
-                SELECT RAISE(ABORT, 'session summary sources are immutable');
-            END",
-    },
-    Trigger {
-        name: "session_summary_successors_immutable_update_v1",
-        table: "session_summary_successors",
-        create_sql: "CREATE TRIGGER session_summary_successors_immutable_update_v1
-            BEFORE UPDATE ON session_summary_successors BEGIN
-                SELECT RAISE(ABORT, 'session summary successors are immutable');
-            END",
-    },
-    Trigger {
-        name: "session_summary_successors_immutable_delete_v1",
-        table: "session_summary_successors",
-        create_sql: "CREATE TRIGGER session_summary_successors_immutable_delete_v1
-            BEFORE DELETE ON session_summary_successors BEGIN
-                SELECT RAISE(ABORT, 'session summary successors are immutable');
-            END",
-    },
-    Trigger {
         name: "session_external_payload_manifests_immutable_update_v1",
         table: "session_external_payload_manifests",
         create_sql: "CREATE TRIGGER session_external_payload_manifests_immutable_update_v1
@@ -1203,34 +1171,6 @@ const SESSION_CURSOR_KEY_GUARDS: &[Trigger] = &[
 
 const SESSION_SUMMARY_OWNER_GUARDS: &[Trigger] = &[
     Trigger {
-        name: "session_summary_sources_owner_guard_v1",
-        table: "session_summary_sources",
-        create_sql: "CREATE TRIGGER session_summary_sources_owner_guard_v1
-            BEFORE INSERT ON session_summary_sources
-            WHEN NEW.source_summary_id IS NOT NULL AND NOT EXISTS (
-                SELECT 1
-                FROM session_summary_nodes AS target
-                JOIN session_summary_nodes AS source
-                  ON source.summary_id = NEW.source_summary_id
-                WHERE target.summary_id = NEW.summary_id
-                  AND target.session_id = source.session_id
-            ) BEGIN SELECT RAISE(ABORT, 'session summary source crosses sessions'); END",
-    },
-    Trigger {
-        name: "session_summary_successors_owner_guard_v1",
-        table: "session_summary_successors",
-        create_sql: "CREATE TRIGGER session_summary_successors_owner_guard_v1
-            BEFORE INSERT ON session_summary_successors
-            WHEN NOT EXISTS (
-                SELECT 1
-                FROM session_summary_nodes AS predecessor
-                JOIN session_summary_nodes AS successor
-                  ON successor.summary_id = NEW.successor_summary_id
-                WHERE predecessor.summary_id = NEW.predecessor_summary_id
-                  AND predecessor.session_id = successor.session_id
-            ) BEGIN SELECT RAISE(ABORT, 'session summary successor crosses sessions'); END",
-    },
-    Trigger {
         name: "session_external_payload_manifests_owner_guard_v1",
         table: "session_external_payload_manifests",
         create_sql: "CREATE TRIGGER session_external_payload_manifests_owner_guard_v1
@@ -1468,17 +1408,8 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
     },
     Invariant {
         triggers: SESSION_SUMMARY_AUTHORITY_IMMUTABILITY,
-        audit_query: Some(
-            "SELECT 1
-             FROM session_summary_successors AS edge
-             JOIN session_summary_nodes AS predecessor
-               ON predecessor.summary_id = edge.predecessor_summary_id
-             JOIN session_summary_nodes AS successor
-               ON successor.summary_id = edge.successor_summary_id
-             WHERE predecessor.session_id <> successor.session_id
-             LIMIT 1",
-        ),
-        violation: "session summary authority is mutable or crosses sessions",
+        audit_query: None,
+        violation: "session summary payload authority is mutable",
     },
     Invariant {
         triggers: SESSION_RECEIPT_IMMUTABILITY,

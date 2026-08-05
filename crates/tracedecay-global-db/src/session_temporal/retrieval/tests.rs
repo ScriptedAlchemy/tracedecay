@@ -530,19 +530,6 @@ impl HostAdmissionTestRuntimeV1 {
                     'needle summary outside', 'needle summary outside', '{}',
                     '{\"provider\":\"claude\"}', 35
                 );
-             INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES
-                (
-                    'summary-plan-inside', 0, 'anchor', 'anchor-plan-inside', NULL
-                ),
-                (
-                    'summary-plan-inside-old', 0, 'anchor',
-                    'anchor-plan-inside-old', NULL
-                ),
-                (
-                    'summary-plan-outside', 0, 'anchor', 'anchor-plan-outside', NULL
-                );
              INSERT INTO session_summary_availability (
                 session_id, generation, summary_id, availability,
                 source_horizon_json, reason, checked_at
@@ -747,13 +734,6 @@ impl HostAdmissionTestRuntimeV1 {
                     'source-anchor-b', 'user', 4, '{\"kind\":\"unknown\"}', '{}',
                     'source', 'source'
                 );
-             INSERT INTO session_logical_copy_edges (
-                session_id, generation, occurrence_id, copied_from_occurrence_id,
-                proof_json, knowledge_at, valid_time_json, created_at
-             ) VALUES (
-                'session-b', 1, 'same-id', 'source-b', '{}', 5,
-                '{\"kind\":\"unknown\"}', 5
-             );
              INSERT INTO session_assertions (
                 session_id, generation, assertion_id, assertion_kind,
                 subject_anchor_id, object_anchor_id, knowledge_at,
@@ -871,11 +851,7 @@ impl HostAdmissionTestRuntimeV1 {
              );
              INSERT INTO retrieval_anchors (
                 anchor_id, anchor_json, owner_json, projection_generation
-             ) VALUES
-                ('anchor-evidence', '{}', '{}', 'fixture'),
-                ('anchor-publication', '{}', '{}', 'fixture'),
-                ('source-short', '{}', '{}', 'fixture'),
-                ('anchor-source', '{}', '{}', 'fixture');",
+             ) VALUES ('anchor-evidence', '{}', '{}', 'fixture');",
         )
         .await
         .expect("oversized observation fixture");
@@ -895,72 +871,7 @@ impl HostAdmissionTestRuntimeV1 {
         )
         .await
         .expect("oversized occurrence fixture");
-        Executor::execute(
-            &writer,
-            "INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
-                source_horizon_json, publication_json, created_at
-             ) VALUES (
-                'summary-publication', 'session-snapshot', 'anchor-publication',
-                'summary', 'summary', '{}', ?1, 1
-             )",
-            [oversized_json],
-        )
-        .await
-        .expect("oversized publication fixture");
-        Executor::execute_batch(
-            &writer,
-            "INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES ('summary-publication', 0, 'anchor', 'source-short', NULL);
-             INSERT INTO session_summary_availability (
-                session_id, generation, summary_id, availability,
-                source_horizon_json, reason, checked_at
-             ) VALUES (
-                'session-snapshot', 1, 'summary-publication', 'available',
-                '{}', NULL, 1
-             );
-             INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
-                source_horizon_json, publication_json, created_at
-             ) VALUES (
-                'summary-source', 'session-snapshot', 'anchor-source',
-                'summary', 'summary', '{}', NULL, 1
-             );",
-        )
-        .await
-        .expect("oversized summary fixtures");
-        let oversized_source = format!("source-{}", "y".repeat(512));
-        Executor::execute(
-            &writer,
-            "INSERT INTO retrieval_anchors (
-                anchor_id, anchor_json, owner_json, projection_generation
-             ) VALUES (?1, '{}', '{}', 'fixture')",
-            [oversized_source.as_str()],
-        )
-        .await
-        .expect("oversized source anchor fixture");
-        Executor::execute(
-            &writer,
-            "INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES ('summary-source', 0, 'anchor', ?1, NULL)",
-            [oversized_source],
-        )
-        .await
-        .expect("oversized source fixture");
-        Executor::execute_batch(
-            &writer,
-            "INSERT INTO session_summary_availability (
-                session_id, generation, summary_id, availability,
-                source_horizon_json, reason, checked_at
-             ) VALUES (
-                'session-snapshot', 1, 'summary-source', 'available',
-                '{}', NULL, 1
-             );",
-        )
-        .await
-        .expect("oversized summary availability");
+        drop(oversized_json);
     }
 
     async fn seed_provider_summary_fixture_for_test(&self) {
@@ -1010,9 +921,6 @@ impl HostAdmissionTestRuntimeV1 {
                 'summary', 'summary',
                 '{\"knowledge_through\":1,\"valid_through\":null}', NULL, 1
              );
-             INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES ('summary-provider', 0, 'anchor', 'source-claude', NULL);
              INSERT INTO session_summary_availability (
                 session_id, generation, summary_id, availability,
                 source_horizon_json, reason, checked_at
@@ -1089,14 +997,6 @@ impl HostAdmissionTestRuntimeV1 {
                     'successor', 'successor',
                     '{\"knowledge_through\":10,\"valid_through\":10}', NULL, 10
                 );
-             INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES
-                ('historical-summary', 0, 'anchor', 'shared-summary-source', NULL),
-                ('successor-summary', 0, 'anchor', 'shared-summary-source', NULL);
-             INSERT INTO session_summary_successors (
-                predecessor_summary_id, successor_summary_id, created_at
-             ) VALUES ('historical-summary', 'successor-summary', 10);
              INSERT INTO session_summary_availability (
                 session_id, generation, summary_id, availability,
                 source_horizon_json, reason, checked_at

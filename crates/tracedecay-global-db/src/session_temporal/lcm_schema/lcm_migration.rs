@@ -116,11 +116,6 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
                       ) <> 'codex_app_server'
                 ELSE 0
               END = 1
-          AND NOT EXISTS (
-                SELECT 1
-                FROM session_summary_successors AS lineage
-                WHERE lineage.predecessor_summary_id = candidate.node_id
-              )
           AND EXISTS (
                 SELECT 1
                 FROM lcm_summary_sources AS source
@@ -154,11 +149,6 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
                       ) <> 'codex_app_server'
                 ELSE 0
               END = 1
-          AND NOT EXISTS (
-                SELECT 1
-                FROM session_summary_successors AS lineage
-                WHERE lineage.predecessor_summary_id = candidate.node_id
-              )
           AND EXISTS (
                 SELECT 1
                 FROM lcm_summary_sources AS source
@@ -266,13 +256,6 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
                 .iter()
                 .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
             "pending query must not sort through a temporary B-tree: {details:?}"
-        );
-        assert!(
-            details.iter().any(|detail| {
-                detail.contains("sqlite_autoindex_session_summary_successors_1")
-                    && detail.contains("predecessor_summary_id=?")
-            }),
-            "leaf anti-join must use the successor primary key: {details:?}"
         );
     }
 }

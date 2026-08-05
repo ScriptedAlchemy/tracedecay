@@ -84,7 +84,7 @@ async fn records_from_projection(
 }
 
 #[tokio::test]
-async fn copy_lineage_comes_from_grafeo_when_sql_relation_disagrees() {
+async fn copy_lineage_comes_from_grafeo_without_a_sql_relation_table() {
     let directory = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
         .await
@@ -92,7 +92,6 @@ async fn copy_lineage_comes_from_grafeo_when_sql_relation_disagrees() {
     runtime.seed_cross_session_record_fixture_for_test().await;
     let target_value = digest('a');
     let graph_source_value = digest('b');
-    let sql_source_value = digest('c');
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database");
@@ -105,8 +104,7 @@ async fn copy_lineage_comes_from_grafeo_when_sql_relation_disagrees() {
                  anchor_id, anchor_json, owner_json, projection_generation
              ) VALUES
                  ('graph-target-anchor', '{{}}', '{{}}', 'fixture'),
-                 ('graph-source-anchor', '{{}}', '{{}}', 'fixture'),
-                 ('sql-source-anchor', '{{}}', '{{}}', 'fixture');
+                 ('graph-source-anchor', '{{}}', '{{}}', 'fixture');
              INSERT INTO session_occurrences (
                  session_id, generation, occurrence_id, source_observation_id,
                  projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
@@ -127,26 +125,11 @@ async fn copy_lineage_comes_from_grafeo_when_sql_relation_disagrees() {
                     \"sanitization_receipt\":{{
                       \"receipt_id\":\"receipt-1\",\"sanitizer_version\":\"fixture\"
                     }}}}',
-                  'graph', 'graph'),
-                 ('session-b', 1, '{sql_source_value}', 'observation-shared', 4,
-                  'sql-source-anchor', 'user', 4, '{{\"kind\":\"unknown\"}}',
-                  '{{\"authority\":\"canonical_observation\",\"evidence_class\":\"observed\",
-                    \"source_anchor_id\":\"sql-source-anchor\",
-                    \"sanitization_receipt\":{{
-                      \"receipt_id\":\"receipt-1\",\"sanitizer_version\":\"fixture\"
-                    }}}}',
-                  'sql', 'sql');
-             INSERT INTO session_logical_copy_edges (
-                 session_id, generation, occurrence_id, copied_from_occurrence_id,
-                 proof_json, knowledge_at, valid_time_json, created_at
-             ) VALUES (
-                 'session-b', 1, '{target_value}', '{sql_source_value}',
-                 '{{}}', 6, '{{\"kind\":\"unknown\"}}', 6
-             )"
+                  'graph', 'graph');"
         ),
     )
     .await
-    .expect("conflicting SQL relation fixture");
+    .expect("occurrence fixture");
     let read = runtime.retrieval_read_for_test().await;
     let target = MessageOccurrenceIdV1::new(target_value).expect("target");
     let graph_source = MessageOccurrenceIdV1::new(graph_source_value).expect("graph source");

@@ -221,7 +221,6 @@ pub use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) enum SessionTemporalFixtureCountV1 {
     ProjectionReceipts,
     Occurrences,
-    LogicalCopyEdges,
     Assertions,
     RefreshReceipts,
     RefreshProgress,
@@ -561,7 +560,6 @@ impl HostAdmissionTestRuntimeV1 {
                 "session_temporal_projection_receipts"
             }
             SessionTemporalFixtureCountV1::Occurrences => "session_occurrences",
-            SessionTemporalFixtureCountV1::LogicalCopyEdges => "session_logical_copy_edges",
             SessionTemporalFixtureCountV1::Assertions => "session_assertions",
             SessionTemporalFixtureCountV1::RefreshReceipts => "session_refresh_receipts",
             SessionTemporalFixtureCountV1::RefreshProgress => "session_refresh_progress",
@@ -580,39 +578,6 @@ impl HostAdmissionTestRuntimeV1 {
             }
         })?;
         row.get(0).map_err(Into::into)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn session_temporal_copy_edge_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        session_id: &tracedecay_domain::SessionId,
-    ) -> tracedecay_runtime_core::errors::Result<Option<(i64, tracedecay_domain::TemporalValidityV1)>>
-    {
-        let snapshot = self
-            .session_database_for_test(scope)?
-            .read_snapshot()
-            .await?;
-        let mut rows = snapshot
-            .query(
-                "SELECT knowledge_at, valid_time_json
-                 FROM session_logical_copy_edges
-                 WHERE session_id = ?1",
-                [session_id.as_str()],
-            )
-            .await?;
-        let Some(row) = rows.next().await? else {
-            return Ok(None);
-        };
-        let knowledge_at = row.get::<i64>(0)?;
-        let valid_time_json = row.get::<String>(1)?;
-        let valid_time = serde_json::from_str(&valid_time_json).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "parse session-temporal copy edge valid time".to_owned(),
-                message: error.to_string(),
-            }
-        })?;
-        Ok(Some((knowledge_at, valid_time)))
     }
 
     #[cfg(test)]

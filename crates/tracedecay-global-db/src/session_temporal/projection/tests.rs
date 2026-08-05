@@ -362,7 +362,6 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
     for (kind, expected) in [
         (SessionTemporalFixtureCountV1::ProjectionReceipts, 1),
         (SessionTemporalFixtureCountV1::Occurrences, 2),
-        (SessionTemporalFixtureCountV1::LogicalCopyEdges, 0),
         (SessionTemporalFixtureCountV1::Assertions, 1),
         (SessionTemporalFixtureCountV1::RefreshReceipts, 1),
     ] {
