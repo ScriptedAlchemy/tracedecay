@@ -382,7 +382,8 @@ mod config_backend_tests {
     #[test]
     fn current_activation_rejects_shifted_calibration_projection() {
         let target = pins('a');
-        let configuration = pin("configuration.revision.1", '8');
+        let configuration =
+            SemanticConfigurationPinV1::from_current(&configuration()).expect("configuration pin");
         let request =
             SemanticActivationRequestV1::new(target.vector_generation_id.clone(), None, None)
                 .expect("activation request");
