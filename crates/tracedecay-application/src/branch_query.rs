@@ -189,7 +189,7 @@ pub struct BranchAuthorizationEpochV1 {
     pub configuration_revision: ConfigurationRevisionId,
     pub configuration_digest: ManifestDigest,
     pub configuration_provenance_digest: ManifestDigest,
-    pub grant_expires_at: UtcMicros,
+    pub access_digest: ManifestDigest,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

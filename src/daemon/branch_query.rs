@@ -49,6 +49,8 @@ use crate::types::Node;
 const BRANCH_QUERY_DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 const BRANCH_GRAPH_GENERATION_DOMAIN_V1: &str = "tracedecay.daemon.branch-graph-generation.v1";
 const BRANCH_QUERY_BINDING_DOMAIN_V1: &str = "tracedecay.daemon.branch-query-binding.v1";
+const BRANCH_AUTHORIZATION_EPOCH_DOMAIN_V1: &str =
+    "tracedecay.daemon.branch-authorization-epoch.v1";
 const BRANCH_SEARCH_CANDIDATE_LIMIT: usize = 500;
 
 type BranchGraphFuture<'a, T> = Pin<Box<dyn Future<Output = crate::errors::Result<T>> + Send + 'a>>;
@@ -211,6 +213,35 @@ struct RegisteredBranchSnapshotResolver {
 }
 
 impl RegisteredBranchSnapshotResolver {
+    fn authorization_epoch(
+        access: &ProjectSourceAccessSnapshot,
+    ) -> Result<BranchAuthorizationEpochV1, BranchQueryUnavailableReasonV1> {
+        let access_digest = canonical_sha256(&(
+            BRANCH_AUTHORIZATION_EPOCH_DOMAIN_V1,
+            &access.scope,
+            &access.requester,
+            &access.binding,
+            &access.configuration_revision,
+            &access.configuration_digest,
+            &access.configuration_provenance_digest,
+            &access.effective_capabilities,
+        ))
+        .map_err(|_| BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable)?;
+        Ok(BranchAuthorizationEpochV1 {
+            configuration_revision: access.configuration_revision.clone(),
+            configuration_digest: access.configuration_digest.clone(),
+            configuration_provenance_digest: access.configuration_provenance_digest.clone(),
+            access_digest,
+        })
+    }
+
+    fn authorization_epoch_is_current(
+        frozen: &BranchAuthorizationEpochV1,
+        access: &ProjectSourceAccessSnapshot,
+    ) -> Result<bool, BranchQueryUnavailableReasonV1> {
+        Ok(Self::authorization_epoch(access)? == *frozen)
+    }
+
     async fn registry_context(
         &self,
     ) -> Result<crate::global_db::ProjectRegistryContext, BranchQueryUnavailableReasonV1> {
@@ -614,11 +645,9 @@ impl BranchSnapshotResolver for RegisteredBranchSnapshotResolver {
                     BranchQueryUnavailableReasonV1::BranchUnavailable,
                 );
             };
-            let authorization_epoch = BranchAuthorizationEpochV1 {
-                configuration_revision: authorization.configuration_revision,
-                configuration_digest: authorization.configuration_digest,
-                configuration_provenance_digest: authorization.configuration_provenance_digest,
-                grant_expires_at: authorization.grant_expires_at,
+            let authorization_epoch = match Self::authorization_epoch(&authorization) {
+                Ok(epoch) => epoch,
+                Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
             };
             BranchResolutionOutcome::Resolved(ResolvedBranchSnapshot {
                 identity: BranchSnapshotIdentityV1 {
@@ -675,13 +704,13 @@ impl BranchSnapshotResolver for RegisteredBranchSnapshotResolver {
                 }
                 Err(reason) => return BranchRevalidationOutcome::Unavailable(reason),
             };
-            let authorization_epoch = BranchAuthorizationEpochV1 {
-                configuration_revision: authorization.configuration_revision,
-                configuration_digest: authorization.configuration_digest,
-                configuration_provenance_digest: authorization.configuration_provenance_digest,
-                grant_expires_at: authorization.grant_expires_at,
-            };
-            if authorization_epoch != snapshot.authorization {
+            let authorization_is_current =
+                match Self::authorization_epoch_is_current(&snapshot.authorization, &authorization)
+                {
+                    Ok(current) => current,
+                    Err(reason) => return BranchRevalidationOutcome::Unavailable(reason),
+                };
+            if !authorization_is_current {
                 return BranchRevalidationOutcome::Stale(
                     BranchQueryStaleReasonV1::AuthorizationEpochChanged,
                 );
@@ -1099,10 +1128,7 @@ impl DaemonBranchQueryExecutor {
                 .map_err(|_| BranchQueryUnavailableReasonV1::CursorUnavailable)?,
             identity.scope_digest.as_str(),
             request_binding.as_str(),
-            identity
-                .authorization
-                .configuration_provenance_digest
-                .as_str(),
+            identity.authorization.access_digest.as_str(),
             TemporalModeV1::Current,
             RetrievalGrainV1::Occurrence,
         )

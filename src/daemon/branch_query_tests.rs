@@ -1,8 +1,12 @@
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use tracedecay_domain::{
-    ConfigurationRevisionId, GitOidV1, ManifestDigest, RepositoryId, SessionCursorKeyIdV1,
+    ActorId, ConfigurationRevisionId, GitOidV1, ManifestDigest, RepositoryId, SessionCursorKeyIdV1,
     SessionCursorVersionV1, SignedCursorKeyRefV1, WorktreeId,
+    configuration::{
+        AuthorityRef, LocatorDigest, ScopeSourceBinding, SourceBindingId, SourceKindV1,
+    },
 };
 use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
 
@@ -184,7 +188,41 @@ fn authorization_epoch() -> BranchAuthorizationEpochV1 {
             .expect("digest"),
         configuration_provenance_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
             .expect("digest"),
-        grant_expires_at: UtcMicros(i64::MAX),
+        access_digest: ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).expect("digest"),
+    }
+}
+
+fn production_access_snapshot(
+    revision: &str,
+    capability: &str,
+    grant_expires_at: UtcMicros,
+) -> ProjectSourceAccessSnapshot {
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.fixture").expect("project"),
+        RepositoryId::new("repository.fixture").expect("repository"),
+        WorktreeId::new("worktree.fixture").expect("worktree"),
+        Some(RefId::new("refs/heads/main").expect("reference")),
+    )
+    .expect("scope");
+    ProjectSourceAccessSnapshot {
+        scope: scope.clone(),
+        requester: ActorId::new("actor.daemon").expect("actor"),
+        binding: ScopeSourceBinding::new(
+            SourceBindingId::new("binding.daemon").expect("binding"),
+            SourceKindV1::Cursor,
+            LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).expect("locator"),
+            AuthorityRef::Project(scope.project_id.clone()),
+        )
+        .expect("binding"),
+        configuration_revision: ConfigurationRevisionId::new(revision).expect("revision"),
+        configuration_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
+            .expect("configuration"),
+        configuration_provenance_digest: ManifestDigest::new(format!("sha256:{}", "c".repeat(64)))
+            .expect("provenance"),
+        effective_capabilities: BTreeSet::from(
+            [CapabilityId::new(capability).expect("capability")],
+        ),
+        grant_expires_at,
     }
 }
 
@@ -525,4 +563,50 @@ fn invalid_registered_generation_is_unavailable() {
 #[test]
 fn symbolic_text_is_not_accepted_as_a_native_source_oid() {
     assert!(GitOidV1::new("banana").is_err());
+}
+
+#[test]
+fn production_authorization_epoch_survives_grant_reissue_and_detects_real_drift() {
+    let admitted = production_access_snapshot(
+        "configuration.revision.1",
+        BRANCH_SEARCH_CAPABILITY_ID_V1,
+        UtcMicros(100),
+    );
+    let reissued = production_access_snapshot(
+        "configuration.revision.1",
+        BRANCH_SEARCH_CAPABILITY_ID_V1,
+        UtcMicros(200),
+    );
+    let revised = production_access_snapshot(
+        "configuration.revision.2",
+        BRANCH_SEARCH_CAPABILITY_ID_V1,
+        UtcMicros(200),
+    );
+    let narrowed = production_access_snapshot(
+        "configuration.revision.1",
+        BRANCH_DIFF_CAPABILITY_ID_V1,
+        UtcMicros(200),
+    );
+    let mut redigested = reissued.clone();
+    redigested.configuration_digest =
+        ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("changed digest");
+
+    let admitted =
+        RegisteredBranchSnapshotResolver::authorization_epoch(&admitted).expect("admitted epoch");
+    assert!(
+        RegisteredBranchSnapshotResolver::authorization_epoch_is_current(&admitted, &reissued)
+            .expect("reissued sink")
+    );
+    assert!(
+        !RegisteredBranchSnapshotResolver::authorization_epoch_is_current(&admitted, &revised)
+            .expect("revised sink")
+    );
+    assert!(
+        !RegisteredBranchSnapshotResolver::authorization_epoch_is_current(&admitted, &redigested)
+            .expect("redigested sink")
+    );
+    assert!(
+        !RegisteredBranchSnapshotResolver::authorization_epoch_is_current(&admitted, &narrowed)
+            .expect("narrowed sink")
+    );
 }
