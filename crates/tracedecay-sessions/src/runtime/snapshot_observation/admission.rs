@@ -9,7 +9,7 @@ use tracedecay_domain::{
 use tracedecay_store::ObservationPersistOutcome;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::admission::HostAdmission;
+use crate::admission::{HostAdmission, is_admission_cancellation};
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
@@ -261,7 +261,12 @@ impl SnapshotAdmissionRunner {
             let outcome = match facade.capture_observation(request).await {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    ensure_snapshot_admission_active(provider, cancellation)?;
+                    if is_admission_cancellation(&error, cancellation) {
+                        return Err(TranscriptIngestError::Cancelled { provider });
+                    }
+                    if cancellation.is_cancelled() {
+                        return Err(host_admission_error(provider, error));
+                    }
                     let committed = snapshot_range_was_committed(
                         facade,
                         &source_identity,
@@ -270,7 +275,9 @@ impl SnapshotAdmissionRunner {
                         range,
                     )
                     .await;
-                    ensure_snapshot_admission_active(provider, cancellation)?;
+                    if cancellation.is_cancelled() {
+                        return Err(host_admission_error(provider, error));
+                    }
                     if committed {
                         cursors.remove(record.session_id());
                         continue;
@@ -371,7 +378,7 @@ async fn session_cursor(
         .get_source_cursor(source, scope)
         .await
         .map_err(|outcome| {
-            if cancellation.is_cancelled() {
+            if is_admission_cancellation(&outcome, cancellation) {
                 TranscriptIngestError::Cancelled { provider }
             } else {
                 host_admission_error(provider, outcome)
@@ -462,7 +469,7 @@ pub async fn advance_snapshot_coverage_maybe(
         .await
         .map(|_| ())
         .map_err(|outcome| {
-            if cancellation.is_cancelled() {
+            if is_admission_cancellation(&outcome, cancellation) {
                 TranscriptIngestError::Cancelled { provider }
             } else {
                 host_admission_error(provider, outcome)

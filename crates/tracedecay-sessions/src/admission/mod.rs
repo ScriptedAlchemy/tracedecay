@@ -74,6 +74,7 @@ pub struct HostProjectionDrainOutcome {
     pub projected_outputs: u64,
     pub skipped: u64,
     pub exact_duplicates: u64,
+    pub deferred: bool,
     pub session_ids: Vec<String>,
 }
 
@@ -254,6 +255,16 @@ impl HostAdmissionOutcome {
             Some("registered_authority_unavailable"),
         )
     }
+}
+
+pub(crate) fn is_admission_cancellation(
+    outcome: &HostAdmissionOutcome,
+    cancellation: &ObservationCancellation,
+) -> bool {
+    cancellation.is_cancelled()
+        && outcome.status == HostAdmissionStatus::Backpressured
+        && outcome.retryable
+        && outcome.reason_code == Some("admission_cancelled")
 }
 
 /// Everything the session runtime asks of the host-admission facade.
@@ -566,6 +577,7 @@ pub(crate) mod test_support {
     pub(crate) struct MemoryHostAdmission {
         store: MemoryObservationStore,
         cancel_on_cursor_read: Arc<Mutex<Option<ObservationCancellation>>>,
+        projection_failure: Arc<Mutex<Option<(HostAdmissionOutcome, ObservationCancellation)>>>,
     }
 
     impl MemoryHostAdmission {
@@ -597,6 +609,17 @@ pub(crate) mod test_support {
                 .cancel_on_cursor_read
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()) = Some(cancellation);
+        }
+
+        pub(crate) fn fail_next_projection_drain_after_cancelling(
+            &self,
+            outcome: HostAdmissionOutcome,
+            cancellation: ObservationCancellation,
+        ) {
+            *self
+                .projection_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some((outcome, cancellation));
         }
 
         pub(crate) fn session_message_read_count(&self) -> usize {
@@ -686,8 +709,17 @@ pub(crate) mod test_support {
             max: usize,
         ) -> AdmissionFuture<'a, HostProjectionDrainOutcome> {
             Box::pin(async move {
+                if let Some((outcome, cancellation)) = self
+                    .projection_failure
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    cancellation.cancel();
+                    return Err(outcome);
+                }
                 let mut state = self.store.state();
-                let candidates = state
+                let mut candidates = state
                     .observations
                     .iter()
                     .filter(|stored| {
@@ -695,9 +727,11 @@ pub(crate) mod test_support {
                             && stored.observation().scope() == scope
                             && !state.projected_sequences.contains(&stored.sequence())
                     })
-                    .take(max)
+                    .take(max.saturating_add(1))
                     .map(StoredObservation::sequence)
                     .collect::<Vec<_>>();
+                let deferred = candidates.len() > max;
+                candidates.truncate(max);
                 let mut session_ids = Vec::new();
                 for sequence in &candidates {
                     let Some(stored) = state
@@ -721,6 +755,7 @@ pub(crate) mod test_support {
                 Ok(HostProjectionDrainOutcome {
                     projected: u64::try_from(candidates.len()).unwrap_or(u64::MAX),
                     projected_outputs: u64::try_from(candidates.len()).unwrap_or(u64::MAX),
+                    deferred,
                     session_ids,
                     ..HostProjectionDrainOutcome::default()
                 })
