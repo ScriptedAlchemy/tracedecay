@@ -316,6 +316,7 @@ multi_str_replace|mutate|{"path":"@FILE","replacements":[],"dry_run":true}
 replace_symbol|mutate|{"symbol":"@SYMBOL","new_source":"","dry_run":true}
 str_replace|preview|{"path":"@FILE","old_str":"@SYMBOL","new_str":"@SYMBOL","dry_run":true}
 source_edit_reconcile|mutate|{"effect_id":"sweep","kind":"str_replace","disposition":"abandon","idempotency_key":"sweep","attempt_idempotency_key":"sweep","input_digest":"0","confirm":false}
+source_edit_rollback|mutate|{"effect_id":"sweep","original_idempotency_key":"sweep-original","idempotency_key":"sweep-rollback","original_input_digest":"0","expected_state":"0","confirm":false}
 # git & history
 affected|read|{"files":["@FILE"]}
 branch_diff|read|{}

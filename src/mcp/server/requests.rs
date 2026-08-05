@@ -1860,6 +1860,7 @@ mod git_read_control_tests {
             "tracedecay_insert_at_symbol",
             "tracedecay_move_symbol",
             "tracedecay_source_edit_reconcile",
+            "tracedecay_source_edit_rollback",
         ] {
             assert!(is_source_edit_tool(tool_name));
             assert!(tool_supports_live_cancellation(tool_name));

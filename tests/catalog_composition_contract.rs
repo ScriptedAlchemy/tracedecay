@@ -151,6 +151,7 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             "capability.application.source-edit.multi-str-replace",
             "capability.application.source-edit.reconcile",
             "capability.application.source-edit.replace-symbol",
+            "capability.application.source-edit.rollback",
             "capability.application.source-edit.str-replace",
             "capability.retrieval.symbol-search",
         ]

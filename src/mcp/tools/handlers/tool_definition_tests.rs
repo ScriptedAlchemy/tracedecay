@@ -130,6 +130,7 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_insert_at_symbol"));
     assert!(tool_names.contains(&"tracedecay_move_symbol"));
     assert!(tool_names.contains(&"tracedecay_source_edit_reconcile"));
+    assert!(tool_names.contains(&"tracedecay_source_edit_rollback"));
     assert!(tool_names.contains(&"tracedecay_find_exact_symbol"));
 }
 
@@ -232,6 +233,7 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_move_symbol",
         "tracedecay_ast_grep_rewrite",
         "tracedecay_source_edit_reconcile",
+        "tracedecay_source_edit_rollback",
         "tracedecay_git_apply",
         "tracedecay_run_affected_tests",
         "tracedecay_session_start",

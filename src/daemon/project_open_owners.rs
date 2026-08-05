@@ -2877,6 +2877,7 @@ fn production_owner_capabilities()
         "capability.application.source-edit.multi-str-replace",
         "capability.application.source-edit.replace-symbol",
         "capability.application.source-edit.reconcile",
+        "capability.application.source-edit.rollback",
         "capability.application.source-edit.str-replace",
         "capability.git.stage-hunks",
         "capability.git.unstage-hunks",
