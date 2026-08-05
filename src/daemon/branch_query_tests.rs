@@ -1,6 +1,10 @@
 use std::sync::Mutex;
 
-use tracedecay_domain::{ManifestDigest, RepositoryId, WorktreeId};
+use tracedecay_domain::{
+    ConfigurationRevisionId, GitOidV1, ManifestDigest, RepositoryId, SessionCursorKeyIdV1,
+    SessionCursorVersionV1, SignedCursorKeyRefV1, WorktreeId,
+};
+use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
 
 use super::*;
 
@@ -78,7 +82,9 @@ impl FakeResolver {
         .expect("scope");
         let generation = BranchGraphGenerationV1 {
             graph_scope_id: format!("scope.{branch}"),
-            source_commit: CommitId::new("a".repeat(40)).expect("commit"),
+            source_oid: GitOidV1::new("a".repeat(40)).expect("commit"),
+            content_digest: ManifestDigest::new(format!("sha256:{}", "c".repeat(64)))
+                .expect("digest"),
             recorded_sync_at: Some(UtcMicros(1)),
             generation_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
                 .expect("digest"),
@@ -90,6 +96,7 @@ impl FakeResolver {
                 worktree_id: scope.worktree_id,
                 reference,
                 scope_digest: scope.scope_digest,
+                authorization: authorization_epoch(),
                 generation,
             },
             registered_scope: GraphScopeRecord {
@@ -102,6 +109,9 @@ impl FakeResolver {
                 last_synced_at: Some(1),
                 writable: false,
             },
+            authorization: authorization_epoch(),
+            worktree_root: PathBuf::from("/fixture"),
+            symbols: self.graph.nodes.clone(),
             graph: Arc::clone(&self.graph) as Arc<dyn BranchGraphReadPort>,
         }
     }
@@ -146,6 +156,9 @@ impl BranchSnapshotResolver for FakeResolver {
             match &*self.revalidation.lock().expect("revalidation") {
                 BranchRevalidationOutcome::Current => BranchRevalidationOutcome::Current,
                 BranchRevalidationOutcome::Denied => BranchRevalidationOutcome::Denied,
+                BranchRevalidationOutcome::Stale(reason) => {
+                    BranchRevalidationOutcome::Stale(*reason)
+                }
                 BranchRevalidationOutcome::Unavailable(reason) => {
                     BranchRevalidationOutcome::Unavailable(*reason)
                 }
@@ -159,7 +172,34 @@ fn search_request() -> BranchQueryRequestV1 {
         branch: "main".to_owned(),
         query: "needle".to_owned(),
         limit: 10,
+        cursor: None,
     })
+}
+
+fn authorization_epoch() -> BranchAuthorizationEpochV1 {
+    BranchAuthorizationEpochV1 {
+        configuration_revision: ConfigurationRevisionId::new("configuration.revision.fixture")
+            .expect("revision"),
+        configuration_digest: ManifestDigest::new(format!("sha256:{}", "d".repeat(64)))
+            .expect("digest"),
+        configuration_provenance_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
+            .expect("digest"),
+        grant_expires_at: UtcMicros(i64::MAX),
+    }
+}
+
+fn executor(resolver: FakeResolver) -> DaemonBranchQueryExecutor {
+    let cursor_key = SignedCursorKeyRefV1 {
+        key_id: SessionCursorKeyIdV1::new("branch-query-test").expect("key"),
+        version: SessionCursorVersionV1::new(1).expect("version"),
+    };
+    let cursor_authenticator =
+        InMemoryCursorAuthenticator::new(cursor_key.clone(), vec![7; 32]).expect("authenticator");
+    DaemonBranchQueryExecutor {
+        resolver: Arc::new(resolver),
+        cursor_key,
+        cursor_authenticator: Arc::new(cursor_authenticator),
+    }
 }
 
 fn search_match(id: &str) -> BranchSearchMatchV1 {
@@ -178,9 +218,7 @@ fn search_match(id: &str) -> BranchSearchMatchV1 {
 async fn unauthorized_branch_is_denied_without_a_graph_result() {
     let mut resolver = FakeResolver::ready("worktree.main");
     resolver.disposition = FakeDisposition::Denied;
-    let executor = DaemonBranchQueryExecutor {
-        resolver: Arc::new(resolver),
-    };
+    let executor = executor(resolver);
     assert!(matches!(
         executor
             .execute(search_request(), BranchQueryControlsV1::default())
@@ -191,9 +229,7 @@ async fn unauthorized_branch_is_denied_without_a_graph_result() {
 
 #[tokio::test]
 async fn linked_worktree_identity_is_retained_in_the_snapshot() {
-    let executor = DaemonBranchQueryExecutor {
-        resolver: Arc::new(FakeResolver::ready("worktree.linked")),
-    };
+    let executor = executor(FakeResolver::ready("worktree.linked"));
     let outcome = executor
         .execute(search_request(), BranchQueryControlsV1::default())
         .await;
@@ -207,21 +243,20 @@ async fn linked_worktree_identity_is_retained_in_the_snapshot() {
 }
 
 #[tokio::test]
-async fn result_limit_is_partial_only_when_an_extra_match_exists() {
+async fn search_cursor_pages_total_order_without_repeating_items() {
     let mut exact = FakeResolver::ready("worktree.main");
     Arc::get_mut(&mut exact.graph).expect("unique graph").search = vec![search_match("one")];
-    let exact_outcome = DaemonBranchQueryExecutor {
-        resolver: Arc::new(exact),
-    }
-    .execute(
-        BranchQueryRequestV1::Search(BranchSearchRequestV1 {
-            branch: "main".to_owned(),
-            query: "needle".to_owned(),
-            limit: 1,
-        }),
-        BranchQueryControlsV1::default(),
-    )
-    .await;
+    let exact_outcome = executor(exact)
+        .execute(
+            BranchQueryRequestV1::Search(BranchSearchRequestV1 {
+                branch: "main".to_owned(),
+                query: "needle".to_owned(),
+                limit: 1,
+                cursor: None,
+            }),
+            BranchQueryControlsV1::default(),
+        )
+        .await;
     assert!(matches!(
         exact_outcome,
         BranchQueryOutcomeV1::Complete { .. }
@@ -231,43 +266,65 @@ async fn result_limit_is_partial_only_when_an_extra_match_exists() {
     Arc::get_mut(&mut truncated.graph)
         .expect("unique graph")
         .search = vec![search_match("one"), search_match("two")];
-    let truncated_outcome = DaemonBranchQueryExecutor {
-        resolver: Arc::new(truncated),
-    }
-    .execute(
-        BranchQueryRequestV1::Search(BranchSearchRequestV1 {
-            branch: "main".to_owned(),
-            query: "needle".to_owned(),
-            limit: 1,
-        }),
-        BranchQueryControlsV1::default(),
-    )
-    .await;
-    let BranchQueryOutcomeV1::Partial {
+    let executor = executor(truncated);
+    let first_outcome = executor
+        .execute(
+            BranchQueryRequestV1::Search(BranchSearchRequestV1 {
+                branch: "main".to_owned(),
+                query: "needle".to_owned(),
+                limit: 1,
+                cursor: None,
+            }),
+            BranchQueryControlsV1::default(),
+        )
+        .await;
+    let BranchQueryOutcomeV1::Complete {
         result: BranchQueryResultV1::Search(result),
-        reason: BranchQueryPartialReasonV1::ResultLimitReached,
-    } = truncated_outcome
+    } = first_outcome
     else {
-        panic!("expected truncated search");
+        panic!("expected first search page");
     };
     assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].id, "one");
+    assert_eq!(result.total, 2);
+    let cursor = result.next_cursor.expect("cursor");
+
+    let second_outcome = executor
+        .execute(
+            BranchQueryRequestV1::Search(BranchSearchRequestV1 {
+                branch: "main".to_owned(),
+                query: "needle".to_owned(),
+                limit: 1,
+                cursor: Some(cursor),
+            }),
+            BranchQueryControlsV1::default(),
+        )
+        .await;
+    let BranchQueryOutcomeV1::Complete {
+        result: BranchQueryResultV1::Search(result),
+    } = second_outcome
+    else {
+        panic!("expected second search page");
+    };
+    assert_eq!(result.items[0].id, "two");
+    assert!(result.next_cursor.is_none());
 }
 
 #[tokio::test]
 async fn same_branch_diff_reuses_one_exact_snapshot() {
-    let outcome = DaemonBranchQueryExecutor {
-        resolver: Arc::new(FakeResolver::ready("worktree.main")),
-    }
-    .execute(
-        BranchQueryRequestV1::Diff(BranchDiffRequestV1 {
-            base: Some("main".to_owned()),
-            head: Some("main".to_owned()),
-            file: None,
-            kind: None,
-        }),
-        BranchQueryControlsV1::default(),
-    )
-    .await;
+    let outcome = executor(FakeResolver::ready("worktree.main"))
+        .execute(
+            BranchQueryRequestV1::Diff(BranchDiffRequestV1 {
+                base: Some("main".to_owned()),
+                head: Some("main".to_owned()),
+                file: None,
+                kind: None,
+                limit: 10,
+                cursor: None,
+            }),
+            BranchQueryControlsV1::default(),
+        )
+        .await;
     let BranchQueryOutcomeV1::Complete {
         result: BranchQueryResultV1::Diff(result),
     } = outcome
@@ -286,9 +343,7 @@ async fn missing_graph_authority_is_not_an_empty_success() {
     let mut resolver = FakeResolver::ready("worktree.main");
     resolver.disposition =
         FakeDisposition::Unavailable(BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable);
-    let executor = DaemonBranchQueryExecutor {
-        resolver: Arc::new(resolver),
-    };
+    let executor = executor(resolver);
     assert!(matches!(
         executor
             .execute(search_request(), BranchQueryControlsV1::default())
@@ -300,24 +355,115 @@ async fn missing_graph_authority_is_not_an_empty_success() {
 }
 
 #[tokio::test]
-async fn generation_drift_discards_query_values() {
+async fn generation_drift_discards_query_values_as_stale() {
     let mut resolver = FakeResolver::ready("worktree.main");
     Arc::get_mut(&mut resolver.graph)
         .expect("unique graph")
         .search = vec![search_match("must-not-escape")];
     *resolver.revalidation.lock().expect("revalidation") =
-        BranchRevalidationOutcome::Unavailable(BranchQueryUnavailableReasonV1::GenerationDrift);
-    let executor = DaemonBranchQueryExecutor {
-        resolver: Arc::new(resolver),
-    };
+        BranchRevalidationOutcome::Stale(BranchQueryStaleReasonV1::GraphGenerationChanged);
+    let executor = executor(resolver);
     assert!(matches!(
         executor
             .execute(search_request(), BranchQueryControlsV1::default())
             .await,
-        BranchQueryOutcomeV1::Unavailable {
-            reason: BranchQueryUnavailableReasonV1::GenerationDrift
+        BranchQueryOutcomeV1::Stale {
+            reason: BranchQueryStaleReasonV1::GraphGenerationChanged
         }
     ));
+}
+
+#[tokio::test]
+async fn authorization_epoch_drift_discards_query_values() {
+    let mut resolver = FakeResolver::ready("worktree.main");
+    Arc::get_mut(&mut resolver.graph)
+        .expect("unique graph")
+        .search = vec![search_match("must-not-escape")];
+    *resolver.revalidation.lock().expect("revalidation") =
+        BranchRevalidationOutcome::Stale(BranchQueryStaleReasonV1::AuthorizationEpochChanged);
+    assert!(matches!(
+        executor(resolver)
+            .execute(search_request(), BranchQueryControlsV1::default())
+            .await,
+        BranchQueryOutcomeV1::Stale {
+            reason: BranchQueryStaleReasonV1::AuthorizationEpochChanged
+        }
+    ));
+}
+
+#[tokio::test]
+async fn tampered_search_cursor_is_rejected() {
+    let mut resolver = FakeResolver::ready("worktree.main");
+    Arc::get_mut(&mut resolver.graph)
+        .expect("unique graph")
+        .search = vec![search_match("one"), search_match("two")];
+    let executor = executor(resolver);
+    let first = executor
+        .execute(
+            BranchQueryRequestV1::Search(BranchSearchRequestV1 {
+                branch: "main".to_owned(),
+                query: "needle".to_owned(),
+                limit: 1,
+                cursor: None,
+            }),
+            BranchQueryControlsV1::default(),
+        )
+        .await;
+    let BranchQueryOutcomeV1::Complete {
+        result: BranchQueryResultV1::Search(result),
+    } = first
+    else {
+        panic!("expected first page");
+    };
+    let mut cursor = result.next_cursor.expect("cursor");
+    cursor.push('0');
+    assert!(matches!(
+        executor
+            .execute(
+                BranchQueryRequestV1::Search(BranchSearchRequestV1 {
+                    branch: "main".to_owned(),
+                    query: "needle".to_owned(),
+                    limit: 1,
+                    cursor: Some(cursor),
+                }),
+                BranchQueryControlsV1::default(),
+            )
+            .await,
+        BranchQueryOutcomeV1::Unavailable {
+            reason: BranchQueryUnavailableReasonV1::CursorUnavailable
+        }
+    ));
+}
+
+#[test]
+fn diff_page_is_bounded_across_change_categories() {
+    let symbol = |name: &str| BranchDiffSymbolV1 {
+        name: name.to_owned(),
+        qualified_name: name.to_owned(),
+        kind: "function".to_owned(),
+        file: "src/lib.rs".to_owned(),
+        line: 1,
+        signature: None,
+    };
+    let changed = BranchChangedSymbolV1 {
+        name: "changed".to_owned(),
+        qualified_name: "changed".to_owned(),
+        kind: "function".to_owned(),
+        file: "src/lib.rs".to_owned(),
+        line: 1,
+        base_signature: Some("old".to_owned()),
+        head_signature: Some("new".to_owned()),
+    };
+    let (added, removed, changed) = paginate_diff(
+        vec![symbol("added")],
+        vec![symbol("removed")],
+        vec![changed],
+        1,
+        3,
+    );
+    assert!(added.is_empty());
+    assert_eq!(removed.len(), 1);
+    assert_eq!(changed.len(), 1);
 }
 
 #[tokio::test]
@@ -326,9 +472,7 @@ async fn live_cancellation_stops_before_graph_resolution() {
         .expect("cancellation");
     let mut resolver = FakeResolver::ready("worktree.main");
     resolver.disposition = FakeDisposition::Pending;
-    let executor = DaemonBranchQueryExecutor {
-        resolver: Arc::new(resolver),
-    };
+    let executor = executor(resolver);
     let execution = executor.execute(
         search_request(),
         BranchQueryControlsV1 {
@@ -346,9 +490,7 @@ async fn live_cancellation_stops_before_graph_resolution() {
 
 #[tokio::test]
 async fn elapsed_deadline_stops_before_graph_resolution() {
-    let executor = DaemonBranchQueryExecutor {
-        resolver: Arc::new(FakeResolver::ready("worktree.main")),
-    };
+    let executor = executor(FakeResolver::ready("worktree.main"));
     assert!(matches!(
         executor
             .execute(
@@ -371,7 +513,16 @@ fn invalid_registered_generation_is_unavailable() {
     let mut scope = resolver.snapshot("main").registered_scope;
     scope.last_synced_at = Some(-1);
     assert!(matches!(
-        RegisteredBranchSnapshotResolver::generation(&scope, "a".repeat(40)),
+        RegisteredBranchSnapshotResolver::generation(
+            &scope,
+            GitOidV1::new("a".repeat(40)).expect("oid"),
+            ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("digest"),
+        ),
         Err(BranchQueryUnavailableReasonV1::GenerationUnavailable)
     ));
+}
+
+#[test]
+fn symbolic_text_is_not_accepted_as_a_native_source_oid() {
+    assert!(GitOidV1::new("banana").is_err());
 }

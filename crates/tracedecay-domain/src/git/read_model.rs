@@ -11,6 +11,7 @@
 //! submodule) are represented explicitly through [`GitCoverageV1`] rather
 //! than guessed.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::research::time::UtcMicros;
@@ -53,7 +54,7 @@ fn validate_git_oid(value: &str, field: &'static str) -> Result<(), DomainError>
 /// A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
 /// SHA-256 length. This is identity evidence only; it never authorizes
 /// object reconstruction or traversal outside native Git.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct GitOidV1(String);
 

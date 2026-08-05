@@ -64,10 +64,11 @@ pub use authorization::{
 };
 pub use branch_query::{
     BRANCH_DIFF_CAPABILITY_ID_V1, BRANCH_QUERY_DEFAULT_LIMIT_V1, BRANCH_QUERY_MAX_LIMIT_V1,
-    BRANCH_SEARCH_CAPABILITY_ID_V1, BranchChangedSymbolV1, BranchDiffRequestV1, BranchDiffResultV1,
-    BranchDiffSummaryV1, BranchDiffSymbolV1, BranchGraphGenerationV1, BranchQueryControlsV1,
-    BranchQueryFuture, BranchQueryOutcomeV1, BranchQueryPartialReasonV1, BranchQueryPort,
-    BranchQueryRequestV1, BranchQueryResultV1, BranchQueryUnavailableReasonV1, BranchSearchMatchV1,
+    BRANCH_SEARCH_CAPABILITY_ID_V1, BranchAuthorizationEpochV1, BranchChangedSymbolV1,
+    BranchDiffRequestV1, BranchDiffResultV1, BranchDiffSummaryV1, BranchDiffSymbolV1,
+    BranchGraphGenerationV1, BranchQueryControlsV1, BranchQueryFuture, BranchQueryOutcomeV1,
+    BranchQueryPartialReasonV1, BranchQueryPort, BranchQueryRequestV1, BranchQueryResultV1,
+    BranchQueryStaleReasonV1, BranchQueryUnavailableReasonV1, BranchSearchMatchV1,
     BranchSearchRequestV1, BranchSearchResultV1, BranchSnapshotIdentityV1,
 };
 pub use clock::now_micros;

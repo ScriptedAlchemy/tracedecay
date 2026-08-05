@@ -329,6 +329,7 @@ mod tests {
                 created_at: "0".to_string(),
                 last_synced_at: "0".to_string(),
                 gc_protected: false,
+                graph_source: None,
             },
         );
         branches.insert(
@@ -339,6 +340,7 @@ mod tests {
                 created_at: "0".to_string(),
                 last_synced_at: "0".to_string(),
                 gc_protected: false,
+                graph_source: None,
             },
         );
         let meta = crate::branch_meta::BranchMeta {
@@ -518,6 +520,7 @@ mod tests {
                 created_at: "0".to_string(),
                 last_synced_at: "0".to_string(),
                 gc_protected: false,
+                graph_source: None,
             },
         );
         let meta = crate::branch_meta::BranchMeta {

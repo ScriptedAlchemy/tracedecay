@@ -7,24 +7,37 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tracedecay_application::{
-    BRANCH_DIFF_CAPABILITY_ID_V1, BRANCH_SEARCH_CAPABILITY_ID_V1, BranchChangedSymbolV1,
-    BranchDiffRequestV1, BranchDiffResultV1, BranchDiffSummaryV1, BranchDiffSymbolV1,
-    BranchGraphGenerationV1, BranchQueryControlsV1, BranchQueryFuture, BranchQueryOutcomeV1,
-    BranchQueryPartialReasonV1, BranchQueryPort, BranchQueryRequestV1, BranchQueryResultV1,
-    BranchQueryUnavailableReasonV1, BranchSearchMatchV1, BranchSearchRequestV1,
-    BranchSearchResultV1, BranchSnapshotIdentityV1, ResolvedScope,
+    BRANCH_DIFF_CAPABILITY_ID_V1, BRANCH_SEARCH_CAPABILITY_ID_V1, BranchAuthorizationEpochV1,
+    BranchChangedSymbolV1, BranchDiffRequestV1, BranchDiffResultV1, BranchDiffSummaryV1,
+    BranchDiffSymbolV1, BranchGraphGenerationV1, BranchQueryControlsV1, BranchQueryFuture,
+    BranchQueryOutcomeV1, BranchQueryPartialReasonV1, BranchQueryPort, BranchQueryRequestV1,
+    BranchQueryResultV1, BranchQueryStaleReasonV1, BranchQueryUnavailableReasonV1,
+    BranchSearchMatchV1, BranchSearchRequestV1, BranchSearchResultV1, BranchSnapshotIdentityV1,
+    ResolvedScope,
 };
 use tracedecay_domain::{
-    CanonicalGitRefNameV1, CommitId, ProjectId, RefId, UtcMicros, canonical_sha256,
+    CanonicalGitRefNameV1, GitOidV1, ManifestDigest, ProjectId, RefId, RepositoryId,
+    RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, WorktreeId,
+    canonical_sha256,
+};
+use tracedecay_temporal_query::{
+    cursor::{StableSortKey, encode_cursor, verify_cursor},
+    ports::{
+        BindingDigest, KernelVersions, SessionCursorAuthenticator, TemporalExecutionSnapshot,
+        TemporalSnapshotRequest, TemporalWatermarks,
+    },
 };
 use tracedecay_tool_catalog::CapabilityId;
-use tracedecay_usecases::tracedecay::GraphRuntimePort;
+use tracedecay_usecases::{
+    source_authorization::ProjectSourceAccessSnapshot, tracedecay::GraphRuntimePort,
+};
 
 use super::project_open_owners::{
     daemon_owned_project_source_access_at, resolved_scope_for_project,
@@ -35,6 +48,8 @@ use crate::types::Node;
 
 const BRANCH_QUERY_DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 const BRANCH_GRAPH_GENERATION_DOMAIN_V1: &str = "tracedecay.daemon.branch-graph-generation.v1";
+const BRANCH_QUERY_BINDING_DOMAIN_V1: &str = "tracedecay.daemon.branch-query-binding.v1";
+const BRANCH_SEARCH_CANDIDATE_LIMIT: usize = 500;
 
 type BranchGraphFuture<'a, T> = Pin<Box<dyn Future<Output = crate::errors::Result<T>> + Send + 'a>>;
 type BranchMarkerFuture<'a> = Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>>;
@@ -58,8 +73,9 @@ trait BranchGraphReadPort: Send + Sync {
     fn source_commit(&self) -> BranchMarkerFuture<'_>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 struct BranchGraphSymbol {
+    node_digest: ManifestDigest,
     name: String,
     qualified_name: String,
     kind: String,
@@ -104,7 +120,12 @@ impl BranchGraphReadPort for TraceDecayBranchGraph {
             let nodes = GraphRuntimePort::get_all_nodes(self.graph.as_ref()).await?;
             let mut symbols = Vec::with_capacity(nodes.len());
             for node in nodes {
-                symbols.push(BranchGraphSymbol::from(node));
+                let node_digest = canonical_sha256(&("tracedecay.branch-graph-node.v1", &node))
+                    .map_err(|error| crate::errors::TraceDecayError::Database {
+                        operation: "digest branch graph node".to_owned(),
+                        message: error.to_string(),
+                    })?;
+                symbols.push(BranchGraphSymbol::new(node, node_digest));
                 if symbols.len() % 256 == 0 {
                     tokio::task::yield_now().await;
                 }
@@ -118,9 +139,10 @@ impl BranchGraphReadPort for TraceDecayBranchGraph {
     }
 }
 
-impl From<Node> for BranchGraphSymbol {
-    fn from(node: Node) -> Self {
+impl BranchGraphSymbol {
+    fn new(node: Node, node_digest: ManifestDigest) -> Self {
         Self {
+            node_digest,
             name: node.name,
             qualified_name: node.qualified_name,
             kind: node.kind.as_str().to_owned(),
@@ -135,12 +157,16 @@ impl From<Node> for BranchGraphSymbol {
 struct ResolvedBranchSnapshot {
     identity: BranchSnapshotIdentityV1,
     registered_scope: GraphScopeRecord,
+    authorization: BranchAuthorizationEpochV1,
+    worktree_root: PathBuf,
+    symbols: Vec<BranchGraphSymbol>,
     graph: Arc<dyn BranchGraphReadPort>,
 }
 
 enum BranchResolutionOutcome {
     Resolved(ResolvedBranchSnapshot),
     Denied,
+    Stale(BranchQueryStaleReasonV1),
     Unavailable(BranchQueryUnavailableReasonV1),
 }
 
@@ -148,6 +174,13 @@ enum BranchResolutionOutcome {
 enum BranchRevalidationOutcome {
     Current,
     Denied,
+    Stale(BranchQueryStaleReasonV1),
+    Unavailable(BranchQueryUnavailableReasonV1),
+}
+
+enum BranchGenerationOutcome {
+    Current(BranchGraphGenerationV1),
+    Drift,
     Unavailable(BranchQueryUnavailableReasonV1),
 }
 
@@ -208,14 +241,19 @@ impl RegisteredBranchSnapshotResolver {
         Ok(by_id)
     }
 
-    fn branch_scope(&self, branch: &str) -> Result<ResolvedScope, BranchQueryUnavailableReasonV1> {
+    fn branch_scope(
+        &self,
+        branch: &str,
+        repository_id: RepositoryId,
+        worktree_id: WorktreeId,
+    ) -> Result<ResolvedScope, BranchQueryUnavailableReasonV1> {
         let reference = CanonicalGitRefNameV1::new(format!("refs/heads/{branch}"))
             .and_then(|reference| RefId::new(reference.as_str().to_owned()))
             .map_err(|_| BranchQueryUnavailableReasonV1::BranchUnavailable)?;
         ResolvedScope::new(
             self.project_scope.project_id.clone(),
-            self.project_scope.repository_id.clone(),
-            self.project_scope.worktree_id.clone(),
+            repository_id,
+            worktree_id,
             Some(reference),
         )
         .map_err(|_| BranchQueryUnavailableReasonV1::BranchUnavailable)
@@ -224,8 +262,9 @@ impl RegisteredBranchSnapshotResolver {
     async fn authorize(
         &self,
         scope: &ResolvedScope,
+        worktree_root: &Path,
         capability: &'static str,
-    ) -> Result<bool, BranchQueryUnavailableReasonV1> {
+    ) -> Result<ProjectSourceAccessSnapshot, BranchQueryUnavailableReasonV1> {
         let observed_at = tracedecay_application::now_micros();
         let configuration = self
             .active_graph
@@ -236,7 +275,7 @@ impl RegisteredBranchSnapshotResolver {
             .map_err(|_| BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable)?;
         let access = match daemon_owned_project_source_access_at(
             scope,
-            self.active_graph.project_root(),
+            worktree_root,
             &configuration,
             observed_at,
         ) {
@@ -247,8 +286,13 @@ impl RegisteredBranchSnapshotResolver {
         };
         let capability = CapabilityId::new(capability)
             .map_err(|_| BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable)?;
-        Ok(access.effective_capabilities.contains(&capability)
-            && observed_at < access.grant_expires_at)
+        if access.effective_capabilities.contains(&capability)
+            && observed_at < access.grant_expires_at
+        {
+            Ok(access)
+        } else {
+            Err(BranchQueryUnavailableReasonV1::ProjectUnavailable)
+        }
     }
 
     fn exact_graph_scope(
@@ -278,11 +322,12 @@ impl RegisteredBranchSnapshotResolver {
 
     async fn open_graph(
         &self,
+        worktree_root: &Path,
         branch: &str,
         registered_scope: &GraphScopeRecord,
     ) -> Result<Arc<TraceDecay>, BranchQueryUnavailableReasonV1> {
         let graph = TraceDecay::open_branch_with_registered_configuration(
-            self.active_graph.project_root(),
+            worktree_root,
             branch,
             self.active_graph.open_options(),
             self.active_graph.store_layout().clone(),
@@ -307,15 +352,87 @@ impl RegisteredBranchSnapshotResolver {
         Ok(graph)
     }
 
+    fn graph_source(
+        &self,
+        branch: &str,
+        _registered_scope: &GraphScopeRecord,
+    ) -> Result<(crate::branch_meta::BranchGraphSourceV1, PathBuf), BranchQueryUnavailableReasonV1>
+    {
+        let meta =
+            crate::branch_meta::load_branch_meta(&self.active_graph.store_layout().data_root)
+                .ok_or(BranchQueryUnavailableReasonV1::GenerationUnavailable)?;
+        let entry = meta
+            .branches
+            .get(branch)
+            .ok_or(BranchQueryUnavailableReasonV1::BranchUnavailable)?;
+        let source = entry
+            .graph_source
+            .clone()
+            .ok_or(BranchQueryUnavailableReasonV1::GenerationUnavailable)?;
+        let worktree_root = PathBuf::from(&source.worktree_root)
+            .canonicalize()
+            .map_err(|_| BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable)?;
+        let expected_repository =
+            crate::daemon::code_index_scheduler::identity::repository_id_for(&worktree_root)
+                .map_err(|_| BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable)?;
+        let expected_worktree =
+            crate::daemon::code_index_scheduler::identity::worktree_id_for(&worktree_root)
+                .map_err(|_| BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable)?;
+        GitOidV1::new(source.source_oid.clone())
+            .map_err(|_| BranchQueryUnavailableReasonV1::GenerationUnavailable)?;
+        if source.project_id != self.project_scope.project_id.as_str()
+            || source.repository_id != expected_repository.as_str()
+            || source.worktree_id != expected_worktree.as_str()
+            || source.reference != format!("refs/heads/{branch}")
+            || crate::worktree::git_common_dir(&worktree_root)
+                != crate::worktree::git_common_dir(self.active_graph.project_root())
+        {
+            return Err(BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable);
+        }
+        Ok((source, worktree_root))
+    }
+
+    fn live_ref_oid(&self, reference: &str) -> Result<GitOidV1, BranchQueryUnavailableReasonV1> {
+        let repo = gix::open(self.active_graph.project_root())
+            .map_err(|_| BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable)?;
+        let mut reference = repo
+            .find_reference(reference)
+            .map_err(|_| BranchQueryUnavailableReasonV1::BranchUnavailable)?;
+        let oid = reference
+            .peel_to_id_in_place()
+            .map_err(|_| BranchQueryUnavailableReasonV1::BranchUnavailable)?;
+        let oid_hex = oid.to_hex().to_string();
+        repo.find_object(oid.detach())
+            .map_err(|_| BranchQueryUnavailableReasonV1::BranchUnavailable)?;
+        GitOidV1::new(oid_hex).map_err(|_| BranchQueryUnavailableReasonV1::GenerationUnavailable)
+    }
+
+    fn content_digest(
+        symbols: &[BranchGraphSymbol],
+    ) -> Result<ManifestDigest, BranchQueryUnavailableReasonV1> {
+        let mut symbols = symbols.to_vec();
+        symbols.sort_by(|left, right| {
+            left.node_digest
+                .cmp(&right.node_digest)
+                .then_with(|| left.file.cmp(&right.file))
+                .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| left.line.cmp(&right.line))
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.signature.cmp(&right.signature))
+        });
+        canonical_sha256(&("tracedecay.branch-graph-content.v1", symbols))
+            .map_err(|_| BranchQueryUnavailableReasonV1::GenerationUnavailable)
+    }
+
     fn generation(
         scope: &GraphScopeRecord,
-        source_commit: String,
+        source_oid: GitOidV1,
+        content_digest: ManifestDigest,
     ) -> Result<BranchGraphGenerationV1, BranchQueryUnavailableReasonV1> {
         if scope.graph_scope_id.is_empty() || scope.graph_scope_id.chars().any(char::is_control) {
             return Err(BranchQueryUnavailableReasonV1::GenerationUnavailable);
         }
-        let source_commit = CommitId::new(source_commit)
-            .map_err(|_| BranchQueryUnavailableReasonV1::GenerationUnavailable)?;
         let recorded_sync_at = match scope.last_synced_at {
             Some(seconds) if seconds >= 0 => {
                 Some(UtcMicros(seconds.checked_mul(1_000_000).ok_or(
@@ -332,13 +449,14 @@ impl RegisteredBranchSnapshotResolver {
             &scope.store_id,
             &scope.branch_name,
             &scope.db_relpath,
-            scope.last_synced_at,
-            &source_commit,
+            &source_oid,
+            &content_digest,
         ))
         .map_err(|_| BranchQueryUnavailableReasonV1::GenerationUnavailable)?;
         Ok(BranchGraphGenerationV1 {
             graph_scope_id: scope.graph_scope_id.clone(),
-            source_commit,
+            source_oid,
+            content_digest,
             recorded_sync_at,
             generation_digest,
         })
@@ -347,13 +465,34 @@ impl RegisteredBranchSnapshotResolver {
     async fn current_generation(
         graph: &dyn BranchGraphReadPort,
         scope: &GraphScopeRecord,
-    ) -> Result<BranchGraphGenerationV1, BranchQueryUnavailableReasonV1> {
-        let source_commit = graph
+        source: &crate::branch_meta::BranchGraphSourceV1,
+        symbols: &[BranchGraphSymbol],
+    ) -> BranchGenerationOutcome {
+        let Some(graph_source_oid) = graph
             .source_commit()
             .await
             .filter(|commit| !commit.is_empty())
-            .ok_or(BranchQueryUnavailableReasonV1::GenerationUnavailable)?;
-        Self::generation(scope, source_commit)
+        else {
+            return BranchGenerationOutcome::Unavailable(
+                BranchQueryUnavailableReasonV1::GenerationUnavailable,
+            );
+        };
+        let Ok(source_oid) = GitOidV1::new(source.source_oid.clone()) else {
+            return BranchGenerationOutcome::Unavailable(
+                BranchQueryUnavailableReasonV1::GenerationUnavailable,
+            );
+        };
+        if graph_source_oid != source_oid.as_str() {
+            return BranchGenerationOutcome::Drift;
+        }
+        let content_digest = match Self::content_digest(symbols) {
+            Ok(digest) => digest,
+            Err(reason) => return BranchGenerationOutcome::Unavailable(reason),
+        };
+        match Self::generation(scope, source_oid, content_digest) {
+            Ok(generation) => BranchGenerationOutcome::Current(generation),
+            Err(reason) => BranchGenerationOutcome::Unavailable(reason),
+        }
     }
 }
 
@@ -394,33 +533,92 @@ impl BranchSnapshotResolver for RegisteredBranchSnapshotResolver {
                 Ok(context) => context,
                 Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
             };
-            let scope = match self.branch_scope(branch) {
-                Ok(scope) => scope,
-                Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
-            };
-            match self.authorize(&scope, capability).await {
-                Ok(true) => {}
-                Ok(false) => return BranchResolutionOutcome::Denied,
-                Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
-            }
             let registered_scope = match Self::exact_graph_scope(&context, branch) {
                 Ok(scope) => scope,
                 Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
             };
-            let graph = match self.open_graph(branch, &registered_scope).await {
+            let (source, worktree_root) = match self.graph_source(branch, &registered_scope) {
+                Ok(source) => source,
+                Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
+            };
+            let repository_id = match RepositoryId::new(source.repository_id.clone()) {
+                Ok(id) => id,
+                Err(_) => {
+                    return BranchResolutionOutcome::Unavailable(
+                        BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable,
+                    );
+                }
+            };
+            let worktree_id = match WorktreeId::new(source.worktree_id.clone()) {
+                Ok(id) => id,
+                Err(_) => {
+                    return BranchResolutionOutcome::Unavailable(
+                        BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable,
+                    );
+                }
+            };
+            let scope = match self.branch_scope(branch, repository_id, worktree_id) {
+                Ok(scope) => scope,
+                Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
+            };
+            let authorization = match self.authorize(&scope, &worktree_root, capability).await {
+                Ok(access) => access,
+                Err(BranchQueryUnavailableReasonV1::ProjectUnavailable) => {
+                    return BranchResolutionOutcome::Denied;
+                }
+                Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
+            };
+            let live_oid = match self.live_ref_oid(&source.reference) {
+                Ok(oid) => oid,
+                Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
+            };
+            if live_oid.as_str() != source.source_oid {
+                return BranchResolutionOutcome::Stale(BranchQueryStaleReasonV1::ReferenceMoved);
+            }
+            let graph = match self
+                .open_graph(&worktree_root, branch, &registered_scope)
+                .await
+            {
                 Ok(graph) => graph,
                 Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
             };
             let graph: Arc<dyn BranchGraphReadPort> = Arc::new(TraceDecayBranchGraph { graph });
-            let generation = match Self::current_generation(graph.as_ref(), &registered_scope).await
+            let symbols = match graph.all_nodes().await {
+                Ok(symbols) => symbols,
+                Err(_) => {
+                    return BranchResolutionOutcome::Unavailable(
+                        BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable,
+                    );
+                }
+            };
+            let generation = match Self::current_generation(
+                graph.as_ref(),
+                &registered_scope,
+                &source,
+                &symbols,
+            )
+            .await
             {
-                Ok(generation) => generation,
-                Err(reason) => return BranchResolutionOutcome::Unavailable(reason),
+                BranchGenerationOutcome::Current(generation) => generation,
+                BranchGenerationOutcome::Drift => {
+                    return BranchResolutionOutcome::Stale(
+                        BranchQueryStaleReasonV1::GraphGenerationChanged,
+                    );
+                }
+                BranchGenerationOutcome::Unavailable(reason) => {
+                    return BranchResolutionOutcome::Unavailable(reason);
+                }
             };
             let Some(reference) = scope.reference.clone() else {
                 return BranchResolutionOutcome::Unavailable(
                     BranchQueryUnavailableReasonV1::BranchUnavailable,
                 );
+            };
+            let authorization_epoch = BranchAuthorizationEpochV1 {
+                configuration_revision: authorization.configuration_revision,
+                configuration_digest: authorization.configuration_digest,
+                configuration_provenance_digest: authorization.configuration_provenance_digest,
+                grant_expires_at: authorization.grant_expires_at,
             };
             BranchResolutionOutcome::Resolved(ResolvedBranchSnapshot {
                 identity: BranchSnapshotIdentityV1 {
@@ -429,9 +627,13 @@ impl BranchSnapshotResolver for RegisteredBranchSnapshotResolver {
                     worktree_id: scope.worktree_id,
                     reference,
                     scope_digest: scope.scope_digest,
+                    authorization: authorization_epoch.clone(),
                     generation,
                 },
                 registered_scope,
+                authorization: authorization_epoch,
+                worktree_root,
+                symbols,
                 graph,
             })
         })
@@ -457,30 +659,85 @@ impl BranchSnapshotResolver for RegisteredBranchSnapshotResolver {
                 Ok(context) => context,
                 Err(reason) => return BranchRevalidationOutcome::Unavailable(reason),
             };
-            let scope = match self.branch_scope(branch) {
+            let repository_id = snapshot.identity.repository_id.clone();
+            let worktree_id = snapshot.identity.worktree_id.clone();
+            let scope = match self.branch_scope(branch, repository_id, worktree_id) {
                 Ok(scope) => scope,
                 Err(reason) => return BranchRevalidationOutcome::Unavailable(reason),
             };
-            match self.authorize(&scope, capability).await {
-                Ok(true) => {}
-                Ok(false) => return BranchRevalidationOutcome::Denied,
+            let authorization = match self
+                .authorize(&scope, &snapshot.worktree_root, capability)
+                .await
+            {
+                Ok(access) => access,
+                Err(BranchQueryUnavailableReasonV1::ProjectUnavailable) => {
+                    return BranchRevalidationOutcome::Denied;
+                }
                 Err(reason) => return BranchRevalidationOutcome::Unavailable(reason),
+            };
+            let authorization_epoch = BranchAuthorizationEpochV1 {
+                configuration_revision: authorization.configuration_revision,
+                configuration_digest: authorization.configuration_digest,
+                configuration_provenance_digest: authorization.configuration_provenance_digest,
+                grant_expires_at: authorization.grant_expires_at,
+            };
+            if authorization_epoch != snapshot.authorization {
+                return BranchRevalidationOutcome::Stale(
+                    BranchQueryStaleReasonV1::AuthorizationEpochChanged,
+                );
             }
             let registered_scope = match Self::exact_graph_scope(&context, branch) {
                 Ok(scope) => scope,
                 Err(reason) => return BranchRevalidationOutcome::Unavailable(reason),
             };
-            let generation =
-                match Self::current_generation(snapshot.graph.as_ref(), &registered_scope).await {
-                    Ok(generation) => generation,
-                    Err(reason) => return BranchRevalidationOutcome::Unavailable(reason),
-                };
+            let (source, worktree_root) = match self.graph_source(branch, &registered_scope) {
+                Ok(source) => source,
+                Err(reason) => return BranchRevalidationOutcome::Unavailable(reason),
+            };
+            if worktree_root != snapshot.worktree_root {
+                return BranchRevalidationOutcome::Stale(
+                    BranchQueryStaleReasonV1::GraphGenerationChanged,
+                );
+            }
+            let live_oid = match self.live_ref_oid(&source.reference) {
+                Ok(oid) => oid,
+                Err(reason) => return BranchRevalidationOutcome::Unavailable(reason),
+            };
+            if live_oid != snapshot.identity.generation.source_oid {
+                return BranchRevalidationOutcome::Stale(BranchQueryStaleReasonV1::ReferenceMoved);
+            }
+            let symbols = match snapshot.graph.all_nodes().await {
+                Ok(symbols) => symbols,
+                Err(_) => {
+                    return BranchRevalidationOutcome::Unavailable(
+                        BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable,
+                    );
+                }
+            };
+            let generation = match Self::current_generation(
+                snapshot.graph.as_ref(),
+                &registered_scope,
+                &source,
+                &symbols,
+            )
+            .await
+            {
+                BranchGenerationOutcome::Current(generation) => generation,
+                BranchGenerationOutcome::Drift => {
+                    return BranchRevalidationOutcome::Stale(
+                        BranchQueryStaleReasonV1::GraphGenerationChanged,
+                    );
+                }
+                BranchGenerationOutcome::Unavailable(reason) => {
+                    return BranchRevalidationOutcome::Unavailable(reason);
+                }
+            };
             if registered_scope != snapshot.registered_scope
                 || scope.scope_digest != snapshot.identity.scope_digest
                 || generation != snapshot.identity.generation
             {
-                return BranchRevalidationOutcome::Unavailable(
-                    BranchQueryUnavailableReasonV1::GenerationDrift,
+                return BranchRevalidationOutcome::Stale(
+                    BranchQueryStaleReasonV1::GraphGenerationChanged,
                 );
             }
             BranchRevalidationOutcome::Current
@@ -488,7 +745,7 @@ impl BranchSnapshotResolver for RegisteredBranchSnapshotResolver {
     }
 }
 
-pub(super) fn daemon_branch_query_port(
+pub(super) async fn daemon_branch_query_port(
     active_graph: Arc<TraceDecay>,
     registry: Arc<RegisteredGlobalDb>,
     route_registered: Arc<AtomicBool>,
@@ -512,6 +769,14 @@ pub(super) fn daemon_branch_query_port(
         .map_err(|error| crate::errors::TraceDecayError::Config {
             message: format!("branch query project scope is invalid: {error}"),
         })?;
+    let cursor_keys = active_graph
+        .configuration_runtime()
+        .registered_database()
+        .load_session_cursor_key_provider_result()
+        .await
+        .map_err(|error| crate::errors::TraceDecayError::Config {
+            message: format!("branch query cursor authority is unavailable: {error}"),
+        })?;
     Ok(Arc::new(DaemonBranchQueryExecutor {
         resolver: Arc::new(RegisteredBranchSnapshotResolver {
             active_graph,
@@ -519,11 +784,15 @@ pub(super) fn daemon_branch_query_port(
             project_scope,
             route_registered,
         }),
+        cursor_key: cursor_keys.active_key_ref().clone(),
+        cursor_authenticator: Arc::new(cursor_keys),
     }))
 }
 
 struct DaemonBranchQueryExecutor {
     resolver: Arc<dyn BranchSnapshotResolver>,
+    cursor_key: SignedCursorKeyRefV1,
+    cursor_authenticator: Arc<dyn SessionCursorAuthenticator>,
 }
 
 impl BranchQueryPort for DaemonBranchQueryExecutor {
@@ -569,6 +838,9 @@ impl DaemonBranchQueryExecutor {
             Controlled::Value(BranchResolutionOutcome::Denied) => {
                 return BranchQueryOutcomeV1::Denied;
             }
+            Controlled::Value(BranchResolutionOutcome::Stale(reason)) => {
+                return BranchQueryOutcomeV1::Stale { reason };
+            }
             Controlled::Value(BranchResolutionOutcome::Unavailable(reason)) => {
                 return BranchQueryOutcomeV1::Unavailable { reason };
             }
@@ -577,7 +849,7 @@ impl DaemonBranchQueryExecutor {
         let mut items = match controlled(
             snapshot
                 .graph
-                .search(&request.query, request.limit as usize + 1),
+                .search(&request.query, BRANCH_SEARCH_CANDIDATE_LIMIT + 1),
             control,
         )
         .await
@@ -590,6 +862,54 @@ impl DaemonBranchQueryExecutor {
             }
             Controlled::Terminal(terminal) => return terminal.outcome(),
         };
+        if let Some(terminal) = control.terminal() {
+            return terminal.outcome();
+        }
+        items.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.file.cmp(&right.file))
+                .then_with(|| left.line.cmp(&right.line))
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| left.id.cmp(&right.id))
+                .then_with(|| left.signature.cmp(&right.signature))
+        });
+        let truncated = items.len() > BRANCH_SEARCH_CANDIDATE_LIMIT;
+        items.truncate(BRANCH_SEARCH_CANDIDATE_LIMIT);
+        let total = items.len() as u64;
+        let binding = match canonical_sha256(&(
+            BRANCH_QUERY_BINDING_DOMAIN_V1,
+            "search",
+            &snapshot.identity,
+            &request.branch,
+            &request.query,
+            request.limit,
+        )) {
+            Ok(binding) => binding,
+            Err(_) => {
+                return BranchQueryOutcomeV1::Unavailable {
+                    reason: BranchQueryUnavailableReasonV1::CursorUnavailable,
+                };
+            }
+        };
+        let (start, end, next_cursor) = match self.page_bounds(
+            &snapshot.identity,
+            &binding,
+            request.cursor.as_deref(),
+            request.limit as usize,
+            items.len(),
+        ) {
+            Ok(page) => page,
+            Err(reason) => return BranchQueryOutcomeV1::Unavailable { reason },
+        };
+        let result = BranchQueryResultV1::Search(BranchSearchResultV1 {
+            snapshot: snapshot.identity.clone(),
+            total,
+            items: items[start..end].to_vec(),
+            next_cursor,
+        });
         match controlled(
             self.resolver
                 .revalidate(&snapshot, BRANCH_SEARCH_CAPABILITY_ID_V1),
@@ -601,20 +921,14 @@ impl DaemonBranchQueryExecutor {
             Controlled::Value(BranchRevalidationOutcome::Denied) => {
                 return BranchQueryOutcomeV1::Denied;
             }
+            Controlled::Value(BranchRevalidationOutcome::Stale(reason)) => {
+                return BranchQueryOutcomeV1::Stale { reason };
+            }
             Controlled::Value(BranchRevalidationOutcome::Unavailable(reason)) => {
                 return BranchQueryOutcomeV1::Unavailable { reason };
             }
             Controlled::Terminal(terminal) => return terminal.outcome(),
         }
-        if let Some(terminal) = control.terminal() {
-            return terminal.outcome();
-        }
-        let truncated = items.len() > request.limit as usize;
-        items.truncate(request.limit as usize);
-        let result = BranchQueryResultV1::Search(BranchSearchResultV1 {
-            snapshot: snapshot.identity,
-            items,
-        });
         if truncated {
             BranchQueryOutcomeV1::Partial {
                 result,
@@ -648,6 +962,9 @@ impl DaemonBranchQueryExecutor {
             Controlled::Value(BranchResolutionOutcome::Denied) => {
                 return BranchQueryOutcomeV1::Denied;
             }
+            Controlled::Value(BranchResolutionOutcome::Stale(reason)) => {
+                return BranchQueryOutcomeV1::Stale { reason };
+            }
             Controlled::Value(BranchResolutionOutcome::Unavailable(reason)) => {
                 return BranchQueryOutcomeV1::Unavailable { reason };
             }
@@ -666,6 +983,9 @@ impl DaemonBranchQueryExecutor {
                 Controlled::Value(BranchResolutionOutcome::Denied) => {
                     return BranchQueryOutcomeV1::Denied;
                 }
+                Controlled::Value(BranchResolutionOutcome::Stale(reason)) => {
+                    return BranchQueryOutcomeV1::Stale { reason };
+                }
                 Controlled::Value(BranchResolutionOutcome::Unavailable(reason)) => {
                     return BranchQueryOutcomeV1::Unavailable { reason };
                 }
@@ -675,44 +995,8 @@ impl DaemonBranchQueryExecutor {
         let (base_nodes, head_nodes) = if base == head {
             (Vec::new(), Vec::new())
         } else {
-            let base_nodes = match controlled(base_snapshot.graph.all_nodes(), control).await {
-                Controlled::Value(Ok(nodes)) => nodes,
-                Controlled::Value(Err(_)) => {
-                    return BranchQueryOutcomeV1::Unavailable {
-                        reason: BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable,
-                    };
-                }
-                Controlled::Terminal(terminal) => return terminal.outcome(),
-            };
-            let head_nodes = match controlled(head_snapshot.graph.all_nodes(), control).await {
-                Controlled::Value(Ok(nodes)) => nodes,
-                Controlled::Value(Err(_)) => {
-                    return BranchQueryOutcomeV1::Unavailable {
-                        reason: BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable,
-                    };
-                }
-                Controlled::Terminal(terminal) => return terminal.outcome(),
-            };
-            (base_nodes, head_nodes)
+            (base_snapshot.symbols.clone(), head_snapshot.symbols.clone())
         };
-        for snapshot in [&base_snapshot, &head_snapshot] {
-            match controlled(
-                self.resolver
-                    .revalidate(snapshot, BRANCH_DIFF_CAPABILITY_ID_V1),
-                control,
-            )
-            .await
-            {
-                Controlled::Value(BranchRevalidationOutcome::Current) => {}
-                Controlled::Value(BranchRevalidationOutcome::Denied) => {
-                    return BranchQueryOutcomeV1::Denied;
-                }
-                Controlled::Value(BranchRevalidationOutcome::Unavailable(reason)) => {
-                    return BranchQueryOutcomeV1::Unavailable { reason };
-                }
-                Controlled::Terminal(terminal) => return terminal.outcome(),
-            }
-        }
         let (added, removed, changed) = match diff_symbols(
             base_nodes,
             head_nodes,
@@ -726,21 +1010,197 @@ impl DaemonBranchQueryExecutor {
         if let Some(terminal) = control.terminal() {
             return terminal.outcome();
         }
+        let summary = BranchDiffSummaryV1 {
+            added: added.len() as u64,
+            removed: removed.len() as u64,
+            changed: changed.len() as u64,
+        };
+        let total = added.len() + removed.len() + changed.len();
+        let binding = match canonical_sha256(&(
+            BRANCH_QUERY_BINDING_DOMAIN_V1,
+            "diff",
+            &base_snapshot.identity,
+            &head_snapshot.identity,
+            &request.file,
+            &request.kind,
+            request.limit,
+        )) {
+            Ok(binding) => binding,
+            Err(_) => {
+                return BranchQueryOutcomeV1::Unavailable {
+                    reason: BranchQueryUnavailableReasonV1::CursorUnavailable,
+                };
+            }
+        };
+        let (start, end, next_cursor) = match self.page_bounds(
+            &base_snapshot.identity,
+            &binding,
+            request.cursor.as_deref(),
+            request.limit as usize,
+            total,
+        ) {
+            Ok(page) => page,
+            Err(reason) => return BranchQueryOutcomeV1::Unavailable { reason },
+        };
+        let (added, removed, changed) = paginate_diff(added, removed, changed, start, end);
         let result = BranchQueryResultV1::Diff(BranchDiffResultV1 {
-            base: base_snapshot.identity,
-            head: head_snapshot.identity,
+            base: base_snapshot.identity.clone(),
+            head: head_snapshot.identity.clone(),
             note: (base == head).then(|| format!("base and head are the same branch: '{base}'")),
-            summary: BranchDiffSummaryV1 {
-                added: added.len() as u64,
-                removed: removed.len() as u64,
-                changed: changed.len() as u64,
-            },
+            summary,
             added,
             removed,
             changed,
+            next_cursor,
         });
+        for snapshot in [&base_snapshot, &head_snapshot] {
+            match controlled(
+                self.resolver
+                    .revalidate(snapshot, BRANCH_DIFF_CAPABILITY_ID_V1),
+                control,
+            )
+            .await
+            {
+                Controlled::Value(BranchRevalidationOutcome::Current) => {}
+                Controlled::Value(BranchRevalidationOutcome::Denied) => {
+                    return BranchQueryOutcomeV1::Denied;
+                }
+                Controlled::Value(BranchRevalidationOutcome::Stale(reason)) => {
+                    return BranchQueryOutcomeV1::Stale { reason };
+                }
+                Controlled::Value(BranchRevalidationOutcome::Unavailable(reason)) => {
+                    return BranchQueryOutcomeV1::Unavailable { reason };
+                }
+                Controlled::Terminal(terminal) => return terminal.outcome(),
+            }
+        }
         BranchQueryOutcomeV1::Complete { result }
     }
+
+    fn page_bounds(
+        &self,
+        identity: &BranchSnapshotIdentityV1,
+        request_binding: &ManifestDigest,
+        cursor: Option<&str>,
+        page_size: usize,
+        total: usize,
+    ) -> Result<(usize, usize, Option<String>), BranchQueryUnavailableReasonV1> {
+        let generation_hex = identity
+            .generation
+            .generation_digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or(BranchQueryUnavailableReasonV1::CursorUnavailable)?;
+        let generation = u64::from_str_radix(&generation_hex[..16], 16)
+            .map_err(|_| BranchQueryUnavailableReasonV1::CursorUnavailable)?
+            .max(1);
+        let request = TemporalSnapshotRequest::new(
+            SessionId::new("branch-query")
+                .map_err(|_| BranchQueryUnavailableReasonV1::CursorUnavailable)?,
+            identity.scope_digest.as_str(),
+            request_binding.as_str(),
+            identity
+                .authorization
+                .configuration_provenance_digest
+                .as_str(),
+            TemporalModeV1::Current,
+            RetrievalGrainV1::Occurrence,
+        )
+        .map_err(|_| BranchQueryUnavailableReasonV1::CursorUnavailable)?;
+        let configuration_digest = BindingDigest::new(
+            "branch query configuration digest",
+            identity.authorization.configuration_digest.as_str(),
+        )
+        .map_err(|_| BranchQueryUnavailableReasonV1::CursorUnavailable)?;
+        let snapshot = TemporalExecutionSnapshot::new_authorized(
+            request,
+            TemporalWatermarks {
+                generation,
+                source: generation,
+                projection: generation,
+                index: generation,
+                summary: generation,
+            },
+            KernelVersions {
+                schema: 1,
+                ranking: 1,
+                configuration_digest,
+            },
+            Some(self.cursor_key.clone()),
+            tracedecay_temporal_query::resolution::ValidatedAuthorization::Authorized,
+        )
+        .map_err(|_| BranchQueryUnavailableReasonV1::CursorUnavailable)?;
+        let start = match cursor {
+            Some(cursor) => {
+                let key = verify_cursor(cursor, &snapshot, self.cursor_authenticator.as_ref())
+                    .map_err(|_| BranchQueryUnavailableReasonV1::CursorUnavailable)?;
+                key.stable_id
+                    .strip_prefix("branch-query-offset:")
+                    .and_then(|offset| offset.parse::<usize>().ok())
+                    .filter(|offset| *offset <= total)
+                    .ok_or(BranchQueryUnavailableReasonV1::CursorUnavailable)?
+            }
+            None => 0,
+        };
+        let end = start.saturating_add(page_size).min(total);
+        let next_cursor = if end < total {
+            Some(
+                encode_cursor(
+                    &snapshot,
+                    &StableSortKey {
+                        normalized_score_micros: 0,
+                        knowledge_at_micros: 0,
+                        stable_id: format!("branch-query-offset:{end}"),
+                    },
+                    self.cursor_authenticator.as_ref(),
+                )
+                .map_err(|_| BranchQueryUnavailableReasonV1::CursorUnavailable)?,
+            )
+        } else {
+            None
+        };
+        Ok((start, end, next_cursor))
+    }
+}
+
+fn paginate_diff(
+    added: Vec<BranchDiffSymbolV1>,
+    removed: Vec<BranchDiffSymbolV1>,
+    changed: Vec<BranchChangedSymbolV1>,
+    start: usize,
+    end: usize,
+) -> (
+    Vec<BranchDiffSymbolV1>,
+    Vec<BranchDiffSymbolV1>,
+    Vec<BranchChangedSymbolV1>,
+) {
+    let added_len = added.len();
+    let removed_len = removed.len();
+    let added_page = added
+        .into_iter()
+        .skip(start)
+        .take(
+            end.saturating_sub(start)
+                .min(added_len.saturating_sub(start)),
+        )
+        .collect();
+    let removed_start = start.saturating_sub(added_len);
+    let removed_end = end.saturating_sub(added_len).min(removed_len);
+    let removed_page = removed
+        .into_iter()
+        .skip(removed_start)
+        .take(removed_end.saturating_sub(removed_start))
+        .collect();
+    let changed_start = start.saturating_sub(added_len + removed_len);
+    let changed_end = end
+        .saturating_sub(added_len + removed_len)
+        .min(changed.len());
+    let changed_page = changed
+        .into_iter()
+        .skip(changed_start)
+        .take(changed_end.saturating_sub(changed_start))
+        .collect();
+    (added_page, removed_page, changed_page)
 }
 
 fn diff_symbols(

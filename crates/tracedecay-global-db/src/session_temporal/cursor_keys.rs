@@ -193,6 +193,10 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
 }
 
 impl GlobalDbCursorKeyProvider {
+    pub fn active_key_ref(&self) -> &SignedCursorKeyRefV1 {
+        &self.active_key
+    }
+
     pub async fn from_registered_key_ref(
         read: &ReadSnapshot,
         expected: SignedCursorKeyRefV1,

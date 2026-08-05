@@ -11,8 +11,8 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CanonicalGitRefNameV1, CommitId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros,
-    WorktreeId,
+    CanonicalGitRefNameV1, ConfigurationRevisionId, GitOidV1, ManifestDigest, ProjectId, RefId,
+    RepositoryId, UtcMicros, WorktreeId,
 };
 
 use crate::{ApplicationContractError, CancellationSignal, Deadline};
@@ -24,6 +24,7 @@ pub const BRANCH_QUERY_MAX_LIMIT_V1: u32 = 500;
 pub const BRANCH_QUERY_DEFAULT_LIMIT_V1: u32 = 10;
 const BRANCH_NAME_MAX_BYTES_V1: usize = 1_024;
 const BRANCH_QUERY_MAX_BYTES_V1: usize = 8 * 1_024;
+const BRANCH_QUERY_MAX_CURSOR_BYTES_V1: usize = 128 * 1_024;
 
 const fn default_branch_query_limit() -> u32 {
     BRANCH_QUERY_DEFAULT_LIMIT_V1
@@ -37,6 +38,8 @@ pub struct BranchSearchRequestV1 {
     #[serde(default = "default_branch_query_limit")]
     #[schemars(range(min = 1, max = 500))]
     pub limit: u32,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 impl BranchSearchRequestV1 {
@@ -55,6 +58,7 @@ impl BranchSearchRequestV1 {
                 field: "branch search limit",
             });
         }
+        validate_cursor(self.cursor.as_deref())?;
         Ok(())
     }
 }
@@ -66,6 +70,11 @@ pub struct BranchDiffRequestV1 {
     pub head: Option<String>,
     pub file: Option<String>,
     pub kind: Option<String>,
+    #[serde(default = "default_branch_query_limit")]
+    #[schemars(range(min = 1, max = 500))]
+    pub limit: u32,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 impl BranchDiffRequestV1 {
@@ -94,8 +103,27 @@ impl BranchDiffRequestV1 {
                 field: "branch diff kind filter",
             });
         }
+        if self.limit == 0 || self.limit > BRANCH_QUERY_MAX_LIMIT_V1 {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "branch diff limit",
+            });
+        }
+        validate_cursor(self.cursor.as_deref())?;
         Ok(())
     }
+}
+
+fn validate_cursor(cursor: Option<&str>) -> Result<(), ApplicationContractError> {
+    if cursor.is_some_and(|cursor| {
+        cursor.is_empty()
+            || cursor.len() > BRANCH_QUERY_MAX_CURSOR_BYTES_V1
+            || cursor.chars().any(char::is_whitespace)
+    }) {
+        return Err(ApplicationContractError::InvalidRange {
+            field: "branch query cursor",
+        });
+    }
+    Ok(())
 }
 
 fn validate_branch_name(branch: &str) -> Result<(), ApplicationContractError> {
@@ -149,9 +177,19 @@ pub struct BranchQueryControlsV1 {
 #[serde(deny_unknown_fields)]
 pub struct BranchGraphGenerationV1 {
     pub graph_scope_id: String,
-    pub source_commit: CommitId,
+    pub source_oid: GitOidV1,
+    pub content_digest: ManifestDigest,
     pub recorded_sync_at: Option<UtcMicros>,
     pub generation_digest: ManifestDigest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BranchAuthorizationEpochV1 {
+    pub configuration_revision: ConfigurationRevisionId,
+    pub configuration_digest: ManifestDigest,
+    pub configuration_provenance_digest: ManifestDigest,
+    pub grant_expires_at: UtcMicros,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -162,6 +200,7 @@ pub struct BranchSnapshotIdentityV1 {
     pub worktree_id: WorktreeId,
     pub reference: RefId,
     pub scope_digest: ManifestDigest,
+    pub authorization: BranchAuthorizationEpochV1,
     pub generation: BranchGraphGenerationV1,
 }
 
@@ -181,7 +220,9 @@ pub struct BranchSearchMatchV1 {
 #[serde(deny_unknown_fields)]
 pub struct BranchSearchResultV1 {
     pub snapshot: BranchSnapshotIdentityV1,
+    pub total: u64,
     pub items: Vec<BranchSearchMatchV1>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -225,6 +266,7 @@ pub struct BranchDiffResultV1 {
     pub added: Vec<BranchDiffSymbolV1>,
     pub removed: Vec<BranchDiffSymbolV1>,
     pub changed: Vec<BranchChangedSymbolV1>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -249,7 +291,15 @@ pub enum BranchQueryUnavailableReasonV1 {
     BranchUnavailable,
     GraphAuthorityUnavailable,
     GenerationUnavailable,
-    GenerationDrift,
+    CursorUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchQueryStaleReasonV1 {
+    ReferenceMoved,
+    GraphGenerationChanged,
+    AuthorizationEpochChanged,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -265,6 +315,9 @@ pub enum BranchQueryOutcomeV1 {
     Denied,
     Cancelled,
     TimedOut,
+    Stale {
+        reason: BranchQueryStaleReasonV1,
+    },
     Unavailable {
         reason: BranchQueryUnavailableReasonV1,
     },
@@ -291,6 +344,7 @@ mod tests {
             branch: String::new(),
             query: "needle".to_owned(),
             limit: 10,
+            cursor: None,
         };
         assert!(empty.validate().is_err());
 
@@ -298,6 +352,7 @@ mod tests {
             branch: "main".to_owned(),
             query: "needle".to_owned(),
             limit: BRANCH_QUERY_MAX_LIMIT_V1 + 1,
+            cursor: None,
         };
         assert!(unbounded.validate().is_err());
 
@@ -306,6 +361,8 @@ mod tests {
             head: Some("feature".to_owned()),
             file: Some("../secret".to_owned()),
             kind: None,
+            limit: 10,
+            cursor: None,
         };
         assert!(invalid_filter.validate().is_err());
 
@@ -313,6 +370,7 @@ mod tests {
             branch: "refs/heads/main".to_owned(),
             query: "needle".to_owned(),
             limit: 10,
+            cursor: None,
         };
         assert!(transport_ref.validate().is_err());
 
@@ -320,6 +378,7 @@ mod tests {
             branch: "main".to_owned(),
             query: "needle\nsecond request".to_owned(),
             limit: 10,
+            cursor: None,
         };
         assert!(control_query.validate().is_err());
     }

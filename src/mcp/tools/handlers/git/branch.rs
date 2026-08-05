@@ -174,6 +174,9 @@ fn branch_query_failure_message(outcome: &tracedecay_application::BranchQueryOut
         tracedecay_application::BranchQueryOutcomeV1::TimedOut => {
             "branch query exceeded its deadline".to_owned()
         }
+        tracedecay_application::BranchQueryOutcomeV1::Stale { reason } => {
+            format!("branch query snapshot became stale: {reason:?}")
+        }
         tracedecay_application::BranchQueryOutcomeV1::Unavailable { reason } => {
             format!("branch query is unavailable: {reason:?}")
         }

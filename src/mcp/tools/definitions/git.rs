@@ -132,8 +132,14 @@ pub(super) fn def_branch_search() -> ToolDefinition {
                     "description": "Search query string to match against symbol names"
                 },
                 "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results to return (default: 10)"
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "description": "Page size (default: 10)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Authenticated continuation cursor returned by the previous page"
                 }
             },
             "required": ["branch", "query"]
@@ -164,6 +170,16 @@ pub(super) fn def_branch_diff() -> ToolDefinition {
                 "kind": {
                     "type": "string",
                     "description": "Optional kind filter — only show diffs for this symbol kind (e.g. 'function', 'struct')"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "description": "Page size (default: 10)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Authenticated continuation cursor returned by the previous page"
                 }
             }
         }),

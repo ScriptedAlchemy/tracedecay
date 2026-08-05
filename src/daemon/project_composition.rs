@@ -581,7 +581,8 @@ pub(super) async fn production_project_server(
         Arc::clone(&cg),
         Arc::clone(&registry_db),
         Arc::clone(&route_registered),
-    )?;
+    )
+    .await?;
     let mut core_context = crate::mcp::server::McpServerConstructionContext::daemon_owned_core(
         Arc::clone(&cg),
         handshake.scope_prefix.clone(),

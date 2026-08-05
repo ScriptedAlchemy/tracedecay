@@ -32,6 +32,39 @@ static GRAPH_REBUILD_TEST_HOLD_LEASE_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(test, feature = "test-transport"))]
 static GRAPH_REBUILD_TEST_DISABLE_SPAWN: AtomicBool = AtomicBool::new(false);
 
+fn branch_graph_source_for_root(
+    project_root: &Path,
+    project_id: String,
+    branch: &str,
+    source_oid: &str,
+) -> Result<crate::branch_meta::BranchGraphSourceV1> {
+    let worktree_root = project_root
+        .canonicalize()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("branch graph worktree root is unavailable: {error}"),
+        })?;
+    let repository_id = crate::daemon::code_index_scheduler::identity::repository_id_for(
+        &worktree_root,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("branch graph repository identity is unavailable: {error}"),
+    })?;
+    let worktree_id = crate::daemon::code_index_scheduler::identity::worktree_id_for(
+        &worktree_root,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("branch graph worktree identity is unavailable: {error}"),
+    })?;
+    Ok(crate::branch_meta::BranchGraphSourceV1 {
+        project_id,
+        repository_id: repository_id.to_string(),
+        worktree_id: worktree_id.to_string(),
+        worktree_root: worktree_root.to_string_lossy().into_owned(),
+        reference: format!("refs/heads/{branch}"),
+        source_oid: source_oid.to_owned(),
+    })
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct GraphRebuildCheckpointEntryV1 {
     file_path: String,
@@ -959,8 +992,8 @@ impl TraceDecay {
         transaction.commit().await?;
         // Stamp HEAD after releasing the full-index transaction: this helper
         // acquires its own writer lane, as do the incremental-sync call sites.
-        self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(&live_branch);
+        let source_oid = self.stamp_last_synced_commit().await;
+        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())?;
 
         let result = IndexResult {
             file_count: files.len(),
@@ -1215,8 +1248,8 @@ impl TraceDecay {
         // Advance the watcher's diff base even for targeted file syncs: if
         // HEAD is unchanged, re-stamping the same commit is idempotent; if a
         // hook-driven edit accompanied a commit, this keeps the base accurate.
-        self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(live_branch);
+        let source_oid = self.stamp_last_synced_commit().await;
+        self.publish_branch_meta_synced(live_branch, source_oid.as_deref())?;
         self.db
             .set_metadata(
                 "last_sync_duration_ms",
@@ -1640,8 +1673,8 @@ impl TraceDecay {
             self.db
                 .set_metadata("last_sync_at", &current_timestamp().to_string())
                 .await?;
-            self.stamp_last_synced_commit().await;
-            self.touch_branch_meta_synced(&live_branch);
+            let source_oid = self.stamp_last_synced_commit().await;
+            self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())?;
             self.db
                 .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
                 .await?;
@@ -1782,8 +1815,8 @@ impl TraceDecay {
             .set_metadata("last_sync_at", &current_timestamp().to_string())
             .await?;
         // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
-        self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(&live_branch);
+        let source_oid = self.stamp_last_synced_commit().await;
+        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())?;
         self.db
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
@@ -1952,39 +1985,61 @@ impl TraceDecay {
         walk.filter_map(std::result::Result::ok).count()
     }
 
-    /// Stamps the current git HEAD commit id into the `last_synced_commit`
-    /// metadata key so the git-metadata watcher can diff-scope future syncs
-    /// (see [`stale_files_since_commit`](Self::stale_files_since_commit)).
-    ///
-    /// Called on the success path of every sync alongside `last_sync_at`. On
-    /// any gix error (not a repo, detached/unborn HEAD, unreadable object)
-    /// this is a silent no-op — a missing/stale stamp only forces the watcher
-    /// to fall back to a full tree walk, never a failed sync.
-    /// Best-effort branch-meta freshness stamp on every successful sync, so
-    /// `branch_list` reflects real sync recency rather than branch-add time
-    /// only. No-op when the active branch cannot be resolved (detached HEAD)
-    /// or the branch is untracked.
-    fn touch_branch_meta_synced(&self, live_branch: &crate::branch::BranchMemo) {
-        if let Some(branch) = live_branch.resolve_for(&self.project_root) {
-            crate::branch_meta::update_synced_timestamp(&self.store_layout.data_root, &branch);
+    /// Publishes graph-owner evidence only for an already tracked branch.
+    fn publish_branch_meta_synced(
+        &self,
+        live_branch: &crate::branch::BranchMemo,
+        source_oid: Option<&str>,
+    ) -> Result<()> {
+        let Some(branch) = live_branch.resolve_for(&self.project_root) else {
+            return Ok(());
+        };
+        if !crate::branch_meta::load_branch_meta(&self.store_layout.data_root)
+            .is_some_and(|meta| meta.is_tracked(&branch))
+        {
+            return Ok(());
         }
+        let Some(source_oid) = source_oid else {
+            crate::branch_meta::update_synced_timestamp(&self.store_layout.data_root, &branch);
+            return Ok(());
+        };
+        let project_id = self
+            .store_layout
+            .identity
+            .project_id
+            .clone()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "branch graph publication requires a project identity".to_owned(),
+            })?;
+        let source =
+            branch_graph_source_for_root(&self.project_root, project_id, &branch, source_oid)?;
+        crate::branch_meta::publish_graph_source(&self.store_layout.data_root, &branch, source)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("branch graph source publication failed: {error}"),
+            })?;
+        Ok(())
     }
 
-    async fn stamp_last_synced_commit(&self) {
+    /// Stamps the current git HEAD commit id for watcher diff scoping.
+    ///
+    /// Missing native Git evidence remains a typed absence to the branch
+    /// publication caller and forces branch queries to stay unavailable.
+    async fn stamp_last_synced_commit(&self) -> Option<String> {
         // Scope the gix values so they drop before the `.await`:
         // `gix::Repository`/`Commit` are `!Send`, and holding them across the
         // await would make every sync future `!Send`, breaking `tokio::spawn`
         // of anything that syncs (sync-on-read, scheduler, git watcher).
         let hex_oid = {
             let Ok(repo) = gix::open(&self.project_root) else {
-                return;
+                return None;
             };
             let Ok(head) = repo.head_commit() else {
-                return;
+                return None;
             };
             head.id().to_hex().to_string()
         };
         let _ = self.db.set_metadata("last_synced_commit", &hex_oid).await;
+        Some(hex_oid)
     }
 
     /// Returns the git HEAD commit id recorded at the last successful sync,
@@ -2212,5 +2267,63 @@ mod graph_rebuild_tests {
         assert_eq!(restored.entries.len(), 1);
         assert_eq!(restored.entries[0].file_path, "src/lib.rs");
         assert_eq!(restored.entries[0].result.duration_ms, 7);
+    }
+}
+
+#[cfg(test)]
+mod branch_graph_source_tests {
+    use std::process::Command;
+
+    use super::branch_graph_source_for_root;
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let status = Command::new(crate::git::git_program())
+            .current_dir(root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+            .env("GIT_AUTHOR_EMAIL", "tracedecay@example.invalid")
+            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+            .env("GIT_COMMITTER_EMAIL", "tracedecay@example.invalid")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn linked_worktree_sync_source_uses_the_graph_owning_worktree() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let primary = fixture.path().join("primary");
+        let linked = fixture.path().join("linked");
+        std::fs::create_dir(&primary).expect("primary");
+        git(&primary, &["init", "-b", "main"]);
+        std::fs::write(primary.join("tracked.txt"), "main\n").expect("file");
+        git(&primary, &["add", "tracked.txt"]);
+        git(&primary, &["commit", "-m", "initial"]);
+        git(&primary, &["branch", "feature"]);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                linked.to_str().expect("linked"),
+                "feature",
+            ],
+        );
+        let oid = crate::git::git_capture(&linked, &["rev-parse", "HEAD"]).expect("oid");
+
+        let source =
+            branch_graph_source_for_root(&linked, "project.fixture".to_owned(), "feature", &oid)
+                .expect("source");
+        let primary_worktree =
+            crate::daemon::code_index_scheduler::identity::worktree_id_for(&primary)
+                .expect("primary worktree");
+
+        assert_eq!(
+            std::path::Path::new(&source.worktree_root),
+            linked.canonicalize().expect("canonical linked")
+        );
+        assert_ne!(source.worktree_id, primary_worktree.as_str());
+        assert_eq!(source.reference, "refs/heads/feature");
+        assert_eq!(source.source_oid, oid);
     }
 }
