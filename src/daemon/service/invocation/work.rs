@@ -76,10 +76,14 @@ pub(super) async fn execute_workflow_application(
         WorkflowApplicationInvocation::RegisterDefinition(request) => {
             let prepared =
                 match prepare_workflow_definition_registration(&context, request.definition) {
-                    Ok(definition) => WorkflowEffectPreparedV1::RegisterDefinition(definition),
-                    Err(error) => WorkflowEffectPreparedV1::Problem(workflow_effect_problem(
-                        workflow_coordination_problem(error),
-                    )),
+                    Ok(definition) => WorkflowEffectPreparedV1::register_definition(
+                        input_digest.clone(),
+                        definition,
+                    ),
+                    Err(error) => WorkflowEffectPreparedV1::problem(
+                        input_digest.clone(),
+                        workflow_effect_problem(workflow_coordination_problem(error)),
+                    ),
                 };
             execute_journaled_workflow_effect(
                 &registered,
@@ -183,10 +187,11 @@ pub(super) async fn execute_workflow_application(
             let prepared = match TaskHandoffToken::new(request.secret).and_then(|token| {
                 prepare_task_handoff_issue(&context, request.scope, &token, observed_at)
             }) {
-                Ok(grant) => WorkflowEffectPreparedV1::HandoffIssue(grant),
-                Err(error) => WorkflowEffectPreparedV1::Problem(workflow_effect_problem(
-                    task_handoff_problem(error),
-                )),
+                Ok(grant) => WorkflowEffectPreparedV1::handoff_issue(input_digest.clone(), grant),
+                Err(error) => WorkflowEffectPreparedV1::problem(
+                    input_digest.clone(),
+                    workflow_effect_problem(task_handoff_problem(error)),
+                ),
             };
             execute_journaled_workflow_effect(
                 &registered,
@@ -207,14 +212,16 @@ pub(super) async fn execute_workflow_application(
             let prepared = match TaskHandoffToken::new(request.secret)
                 .and_then(|token| prepare_task_handoff_redeem(&context, &token, &scope))
             {
-                Ok(token_digest) => WorkflowEffectPreparedV1::HandoffRedeem {
+                Ok(token_digest) => WorkflowEffectPreparedV1::handoff_redeem(
+                    input_digest.clone(),
                     token_digest,
-                    expected_scope: scope,
-                    consumed_at: observed_at,
-                },
-                Err(error) => WorkflowEffectPreparedV1::Problem(workflow_effect_problem(
-                    task_handoff_problem(error),
-                )),
+                    scope,
+                    observed_at,
+                ),
+                Err(error) => WorkflowEffectPreparedV1::problem(
+                    input_digest.clone(),
+                    workflow_effect_problem(task_handoff_problem(error)),
+                ),
             };
             execute_journaled_workflow_effect(
                 &registered,
@@ -305,12 +312,38 @@ fn execute_journaled_workflow_effect(
             );
         }
     };
+    let receipt_context = match workflow_effect_receipt_context(
+        registered,
+        context,
+        operation_key,
+        use_case,
+        &input_digest,
+        observed_at,
+    ) {
+        Ok(receipt_context) => receipt_context,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    let receipt_binding_digest = match receipt_context.binding_digest() {
+        Ok(digest) => digest,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
     let idempotency_digest = match canonical_sha256(&(
         "tracedecay.daemon.workflow-effect-idempotency.v1",
         operation_key,
         &input_digest,
         context.actor(),
         context.scope(),
+        receipt_binding_digest,
     )) {
         Ok(digest) => digest,
         Err(_) => {
@@ -338,22 +371,6 @@ fn execute_journaled_workflow_effect(
             );
         }
     };
-    let receipt_context = match workflow_effect_receipt_context(
-        registered,
-        context,
-        operation_key,
-        use_case,
-        &input_digest,
-        observed_at,
-    ) {
-        Ok(receipt_context) => receipt_context,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        }
-    };
     let identity = match WorkflowEffectIdentityV1::new(
         operation,
         idempotency_key,
@@ -363,7 +380,6 @@ fn execute_journaled_workflow_effect(
         input_digest,
         observed_at,
         deadline,
-        context.cancellation().clone(),
         receipt_context,
     ) {
         Ok(identity) => identity,
@@ -374,14 +390,13 @@ fn execute_journaled_workflow_effect(
             );
         }
     };
-    let prepared = match context.admission_at(current_micros()) {
-        RequestAdmission::Admitted => prepared,
-        RequestAdmission::Cancelled => {
-            WorkflowEffectPreparedV1::Problem(WorkflowEffectProblemV1::Cancelled)
-        }
-        RequestAdmission::TimedOut => {
-            WorkflowEffectPreparedV1::Problem(WorkflowEffectProblemV1::TimedOut)
-        }
+    let prepared = if identity.deadline().is_elapsed_at(current_micros()) {
+        WorkflowEffectPreparedV1::problem(
+            identity.input_digest().clone(),
+            WorkflowEffectProblemV1::TimedOut,
+        )
+    } else {
+        prepared
     };
     let record = match authority.execute_effect(&identity, &prepared, current_micros()) {
         Ok(record) => record,
@@ -500,7 +515,6 @@ fn workflow_effect_daemon_problem(problem: WorkflowEffectProblemV1) -> DaemonInv
         }
         WorkflowEffectProblemV1::InvalidRequest
         | WorkflowEffectProblemV1::Conflict
-        | WorkflowEffectProblemV1::Cancelled
         | WorkflowEffectProblemV1::TimedOut => DaemonInvocationProblem::InvalidRequest,
     }
 }
@@ -509,14 +523,8 @@ fn workflow_effect_outcome(
     terminal: &WorkflowEffectTerminalV1,
 ) -> Result<WorkflowApplicationOutcome, DaemonInvocationProblem> {
     match terminal.outcome() {
-        WorkflowEffectOutcomeV1::Problem(
-            problem @ (WorkflowEffectProblemV1::Cancelled | WorkflowEffectProblemV1::TimedOut),
-        ) => {
-            let termination = if *problem == WorkflowEffectProblemV1::Cancelled {
-                EffectTermination::Cancelled
-            } else {
-                EffectTermination::TimedOut
-            };
+        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::TimedOut) => {
+            let termination = EffectTermination::TimedOut;
             match terminal.identity().operation() {
                 WorkflowEffectOperationV1::RegisterDefinition => work_effect::<
                     tracedecay_domain::WorkflowDefinition,
@@ -718,14 +726,12 @@ where
         started_at: identity.started_at(),
         ended_at: terminal.ended_at(),
         effective_deadline: identity.deadline().clone(),
-        cancellation: matches!(
-            termination,
-            EffectTermination::Cancelled | EffectTermination::TimedOut
-        )
-        .then_some(CancellationObservation {
-            stage: CancellationStage::EffectInFlight,
-            observed_at: terminal.ended_at(),
-        }),
+        cancellation: (termination == EffectTermination::TimedOut).then_some(
+            CancellationObservation {
+                stage: CancellationStage::EffectInFlight,
+                observed_at: terminal.ended_at(),
+            },
+        ),
         budget: OperationBudgetUsage::default(),
         termination: termination.into(),
     };

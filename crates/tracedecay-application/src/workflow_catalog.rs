@@ -191,11 +191,7 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
                 CancellationPoint::DuringRead,
             ])?
         } else {
-            CancellationContract::cooperative(vec![
-                CancellationPoint::BeforeAdmission,
-                CancellationPoint::BeforeEffect,
-                CancellationPoint::EffectInFlight,
-            ])?
+            CancellationContract::NotCancellable
         },
         deadline: DeadlineContract::new(
             30_000,
@@ -266,8 +262,9 @@ fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
 #[cfg(test)]
 mod tests {
     use tracedecay_tool_catalog::{
-        CancellationPoint, DeadlineBehavior, EffectClass, IdempotencyContract, LifecycleClass,
-        ReceiptContract, ReconciliationContract, TerminalState,
+        CancellationContract, CancellationPoint, DeadlineBehavior, EffectClass,
+        IdempotencyContract, LifecycleClass, ReceiptContract, ReconciliationContract,
+        TerminalState,
     };
 
     use super::{workflow_executable_binding_registry, workflow_manifest};
@@ -309,13 +306,10 @@ mod tests {
                     .terminal_states()
                     .contains(TerminalState::EffectUnknown)
             );
-            for point in [
-                CancellationPoint::BeforeAdmission,
-                CancellationPoint::BeforeEffect,
-                CancellationPoint::EffectInFlight,
-            ] {
-                assert!(manifest.cancellation().observes(point));
-            }
+            assert!(matches!(
+                manifest.cancellation(),
+                CancellationContract::NotCancellable
+            ));
         }
     }
 

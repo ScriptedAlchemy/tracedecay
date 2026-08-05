@@ -7,8 +7,8 @@ use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros, WorkflowDefinition, 
 use tracedecay_tool_catalog::UseCaseId;
 
 use crate::{
-    AuthorityReceipt, CancellationContext, Deadline, EffectId, IdempotencyKey, RequestId,
-    ResolvedScope, TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope,
+    AuthorityReceipt, Deadline, EffectId, IdempotencyKey, RequestId, ResolvedScope,
+    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope,
 };
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,7 +40,6 @@ pub struct WorkflowEffectIdentityV1 {
     input_digest: ManifestDigest,
     started_at: UtcMicros,
     deadline: Deadline,
-    cancellation: CancellationContext,
     receipt_context: WorkflowEffectReceiptContextV1,
 }
 
@@ -55,7 +54,6 @@ impl WorkflowEffectIdentityV1 {
         input_digest: ManifestDigest,
         started_at: UtcMicros,
         deadline: Deadline,
-        cancellation: CancellationContext,
         receipt_context: WorkflowEffectReceiptContextV1,
     ) -> Result<Self, crate::ApplicationContractError> {
         let identity = Self {
@@ -67,7 +65,6 @@ impl WorkflowEffectIdentityV1 {
             input_digest,
             started_at,
             deadline,
-            cancellation,
             receipt_context,
         };
         identity.validate()?;
@@ -106,10 +103,6 @@ impl WorkflowEffectIdentityV1 {
         &self.deadline
     }
 
-    pub fn cancellation(&self) -> &CancellationContext {
-        &self.cancellation
-    }
-
     pub fn receipt_context(&self) -> &WorkflowEffectReceiptContextV1 {
         &self.receipt_context
     }
@@ -142,6 +135,7 @@ impl WorkflowEffectIdentityV1 {
             &self.actor,
             &self.scope,
             &self.input_digest,
+            self.receipt_context.binding_digest()?,
         ))
         .map_err(Into::into)
     }
@@ -213,11 +207,36 @@ impl WorkflowEffectReceiptContextV1 {
     pub fn privacy_digest(&self) -> &ManifestDigest {
         &self.privacy_digest
     }
+
+    pub fn binding_digest(&self) -> Result<ManifestDigest, crate::ApplicationContractError> {
+        canonical_sha256(&(
+            "tracedecay.application.workflow-effect-authority.v1",
+            &self.operation,
+            &self.authority.grant_id,
+            self.authority.grant_revision,
+            &self.authority.grant_digest,
+            &self.authority.authorized_scope_digest,
+            self.authority.disclosure,
+            &self.authority.policy,
+            &self.expected_state,
+            &self.configuration_digest,
+            &self.catalog_digest,
+            &self.privacy_digest,
+        ))
+        .map_err(Into::into)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowEffectPreparedV1 {
+    input_digest: ManifestDigest,
+    mutation: WorkflowEffectMutationV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "operation", content = "input")]
-pub enum WorkflowEffectPreparedV1 {
+pub enum WorkflowEffectMutationV1 {
     RegisterDefinition(WorkflowDefinition),
     HandoffIssue(TaskHandoffGrant),
     HandoffRedeem {
@@ -229,13 +248,75 @@ pub enum WorkflowEffectPreparedV1 {
 }
 
 impl WorkflowEffectPreparedV1 {
-    pub const fn operation(&self) -> Option<WorkflowEffectOperationV1> {
-        match self {
-            Self::RegisterDefinition(_) => Some(WorkflowEffectOperationV1::RegisterDefinition),
-            Self::HandoffIssue(_) => Some(WorkflowEffectOperationV1::HandoffIssue),
-            Self::HandoffRedeem { .. } => Some(WorkflowEffectOperationV1::HandoffRedeem),
-            Self::Problem(_) => None,
+    pub fn register_definition(
+        input_digest: ManifestDigest,
+        definition: WorkflowDefinition,
+    ) -> Self {
+        Self {
+            input_digest,
+            mutation: WorkflowEffectMutationV1::RegisterDefinition(definition),
         }
+    }
+
+    pub fn handoff_issue(input_digest: ManifestDigest, grant: TaskHandoffGrant) -> Self {
+        Self {
+            input_digest,
+            mutation: WorkflowEffectMutationV1::HandoffIssue(grant),
+        }
+    }
+
+    pub fn handoff_redeem(
+        input_digest: ManifestDigest,
+        token_digest: ManifestDigest,
+        expected_scope: TaskHandoffScope,
+        consumed_at: UtcMicros,
+    ) -> Self {
+        Self {
+            input_digest,
+            mutation: WorkflowEffectMutationV1::HandoffRedeem {
+                token_digest,
+                expected_scope,
+                consumed_at,
+            },
+        }
+    }
+
+    pub fn problem(input_digest: ManifestDigest, problem: WorkflowEffectProblemV1) -> Self {
+        Self {
+            input_digest,
+            mutation: WorkflowEffectMutationV1::Problem(problem),
+        }
+    }
+
+    pub fn input_digest(&self) -> &ManifestDigest {
+        &self.input_digest
+    }
+
+    pub fn mutation(&self) -> &WorkflowEffectMutationV1 {
+        &self.mutation
+    }
+
+    pub fn operation(&self) -> Option<WorkflowEffectOperationV1> {
+        match &self.mutation {
+            WorkflowEffectMutationV1::RegisterDefinition(_) => {
+                Some(WorkflowEffectOperationV1::RegisterDefinition)
+            }
+            WorkflowEffectMutationV1::HandoffIssue(_) => {
+                Some(WorkflowEffectOperationV1::HandoffIssue)
+            }
+            WorkflowEffectMutationV1::HandoffRedeem { .. } => {
+                Some(WorkflowEffectOperationV1::HandoffRedeem)
+            }
+            WorkflowEffectMutationV1::Problem(_) => None,
+        }
+    }
+
+    pub fn payload_digest(&self) -> Result<ManifestDigest, crate::ApplicationContractError> {
+        canonical_sha256(&(
+            "tracedecay.application.workflow-effect-preparation.v1",
+            self,
+        ))
+        .map_err(Into::into)
     }
 }
 
@@ -253,7 +334,6 @@ pub enum WorkflowEffectProblemV1 {
     InvalidRequest,
     NotFoundOrNotAuthorized,
     Conflict,
-    Cancelled,
     TimedOut,
 }
 
@@ -427,6 +507,7 @@ pub trait WorkflowEffectAuthorityPortV1: Send + Sync {
     fn reserve_effect(
         &self,
         identity: &WorkflowEffectIdentityV1,
+        prepared: &WorkflowEffectPreparedV1,
     ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1>;
 
     fn execute_effect(

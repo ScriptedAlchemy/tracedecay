@@ -1,5 +1,7 @@
 //! Durable workflow authority over the registered Work writer.
 
+use std::sync::{Arc, Barrier};
+
 use tracedecay_application::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, EffectId, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
@@ -85,7 +87,30 @@ fn authority(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
     WorkflowSqliteAuthority::from_registered(store.storage().clone()).unwrap()
 }
 
-fn effect_context(actor: &str) -> RequestContext {
+#[derive(Clone, Copy)]
+struct EffectAuthorityBinding {
+    grant_revision: u64,
+    grant_digest: char,
+    policy_revision: u64,
+    policy_digest: char,
+    configuration_digest: char,
+    catalog_digest: char,
+    privacy_digest: char,
+}
+
+impl EffectAuthorityBinding {
+    const BASE: Self = Self {
+        grant_revision: 1,
+        grant_digest: '1',
+        policy_revision: 1,
+        policy_digest: '6',
+        configuration_digest: '8',
+        catalog_digest: '9',
+        privacy_digest: 'a',
+    };
+}
+
+fn effect_context(actor: &str, grant_revision: u64, grant_digest: char) -> RequestContext {
     let scope = ResolvedScope::new(
         id("project.workflow.runtime-store"),
         id("repository.workflow.runtime-store"),
@@ -96,8 +121,8 @@ fn effect_context(actor: &str) -> RequestContext {
     let actor = id(actor);
     let grant = CapabilityGrantSnapshot::new(
         id::<CapabilityGrantId>("grant.workflow.runtime-store"),
-        1,
-        digest('1'),
+        grant_revision,
+        digest(grant_digest),
         actor.clone(),
         UtcMicros(1),
         UtcMicros(90_000_000),
@@ -127,23 +152,39 @@ fn effect_identity(
     actor: &str,
     input: char,
 ) -> WorkflowEffectIdentityV1 {
-    let context = effect_context(actor);
+    effect_identity_at(
+        operation,
+        actor,
+        input,
+        EffectAuthorityBinding::BASE,
+        UtcMicros(10),
+    )
+}
+
+fn effect_identity_at(
+    operation: WorkflowEffectOperationV1,
+    actor: &str,
+    input: char,
+    binding: EffectAuthorityBinding,
+    started_at: UtcMicros,
+) -> WorkflowEffectIdentityV1 {
+    let context = effect_context(actor, binding.grant_revision, binding.grant_digest);
     let policy = PolicyDecisionRef::new(
         "policy.workflow.runtime-store.v1",
-        1,
-        digest('6'),
+        binding.policy_revision,
+        digest(binding.policy_digest),
         ComponentVersion::new("workflow-runtime-store.v1").unwrap(),
     )
     .unwrap();
-    let authority = AuthorityReceipt::from_context(&context, policy, UtcMicros(10)).unwrap();
+    let authority = AuthorityReceipt::from_context(&context, policy, started_at).unwrap();
     let receipt_context = WorkflowEffectReceiptContextV1::new(
         id(&format!("use-case.workflow.{}", operation.as_str())),
         id::<EffectId>(&format!("effect.workflow.runtime-store.{input}")),
         authority,
         digest('7'),
-        digest('8'),
-        digest('9'),
-        digest('a'),
+        digest(binding.configuration_digest),
+        digest(binding.catalog_digest),
+        digest(binding.privacy_digest),
     );
     WorkflowEffectIdentityV1::new(
         operation,
@@ -152,9 +193,8 @@ fn effect_identity(
         context.actor().clone(),
         context.scope().clone(),
         digest(input),
-        UtcMicros(10),
+        started_at,
         context.deadline().clone(),
-        context.cancellation().clone(),
         receipt_context,
     )
     .unwrap()
@@ -427,7 +467,8 @@ fn lost_issue_response_replays_the_exact_committed_terminal() {
         "actor.workflow.source",
         '2',
     );
-    let prepared = WorkflowEffectPreparedV1::HandoffIssue(grant.clone());
+    let prepared =
+        WorkflowEffectPreparedV1::handoff_issue(identity.input_digest().clone(), grant.clone());
 
     let first = WorkflowEffectAuthorityPortV1::execute_effect(
         &authority,
@@ -472,11 +513,12 @@ fn lost_redeem_response_replays_success_instead_of_token_replay() {
         "actor.workflow.target",
         '3',
     );
-    let prepared = WorkflowEffectPreparedV1::HandoffRedeem {
-        token_digest: token_digest(&secret),
-        expected_scope: scope.clone(),
-        consumed_at: UtcMicros(20),
-    };
+    let prepared = WorkflowEffectPreparedV1::handoff_redeem(
+        identity.input_digest().clone(),
+        token_digest(&secret),
+        scope.clone(),
+        UtcMicros(20),
+    );
 
     let first = WorkflowEffectAuthorityPortV1::execute_effect(
         &authority,
@@ -522,7 +564,7 @@ fn rejected_effect_replays_the_exact_problem_without_reapplying() {
         "actor.workflow.source",
         '5',
     );
-    let prepared = WorkflowEffectPreparedV1::HandoffIssue(grant);
+    let prepared = WorkflowEffectPreparedV1::handoff_issue(identity.input_digest().clone(), grant);
 
     let first = WorkflowEffectAuthorityPortV1::execute_effect(
         &authority,
@@ -558,7 +600,12 @@ fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
         "actor.workflow.source",
         '4',
     );
-    let reserved = WorkflowEffectAuthorityPortV1::reserve_effect(&authority, &identity).unwrap();
+    let prepared = WorkflowEffectPreparedV1::register_definition(
+        identity.input_digest().clone(),
+        definition(1, "operation.prepare.v1"),
+    );
+    let reserved =
+        WorkflowEffectAuthorityPortV1::reserve_effect(&authority, &identity, &prepared).unwrap();
     assert_eq!(reserved.state(), WorkflowEffectJournalStateV1::BeforeEffect);
     store.inspect(|connection| {
         connection
@@ -572,9 +619,6 @@ fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
     });
     let restarted = store.restart("workflow-effect-in-flight");
     let authority = authority(&restarted);
-    let prepared =
-        WorkflowEffectPreparedV1::RegisterDefinition(definition(1, "operation.prepare.v1"));
-
     let reconciled = WorkflowEffectAuthorityPortV1::execute_effect(
         &authority,
         &identity,
@@ -585,4 +629,210 @@ fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
 
     assert_eq!(reconciled.state(), WorkflowEffectJournalStateV1::Reconciled);
     assert_eq!(restarted.count("workflow_definitions"), 1);
+}
+
+#[test]
+fn authority_drift_cannot_alias_an_existing_effect_reservation() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-authority-drift");
+    let authority = authority(&store);
+    let original = effect_identity_at(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'b',
+        EffectAuthorityBinding::BASE,
+        UtcMicros(10),
+    );
+    let prepared = WorkflowEffectPreparedV1::register_definition(
+        original.input_digest().clone(),
+        definition(1, "operation.prepare.v1"),
+    );
+    WorkflowEffectAuthorityPortV1::reserve_effect(&authority, &original, &prepared).unwrap();
+
+    let base = EffectAuthorityBinding::BASE;
+    for drifted_binding in [
+        EffectAuthorityBinding {
+            grant_revision: 2,
+            ..base
+        },
+        EffectAuthorityBinding {
+            grant_digest: '2',
+            ..base
+        },
+        EffectAuthorityBinding {
+            policy_revision: 2,
+            ..base
+        },
+        EffectAuthorityBinding {
+            policy_digest: '3',
+            ..base
+        },
+        EffectAuthorityBinding {
+            configuration_digest: '4',
+            ..base
+        },
+        EffectAuthorityBinding {
+            catalog_digest: '5',
+            ..base
+        },
+        EffectAuthorityBinding {
+            privacy_digest: 'b',
+            ..base
+        },
+    ] {
+        let drifted = effect_identity_at(
+            WorkflowEffectOperationV1::RegisterDefinition,
+            "actor.workflow.source",
+            'b',
+            drifted_binding,
+            UtcMicros(20),
+        );
+        assert_eq!(
+            WorkflowEffectAuthorityPortV1::execute_effect(
+                &authority,
+                &drifted,
+                &prepared,
+                UtcMicros(30),
+            )
+            .unwrap_err(),
+            tracedecay_application::WorkflowEffectAuthorityErrorV1::IdentityConflict
+        );
+    }
+    assert_eq!(store.count("workflow_definitions"), 0);
+}
+
+#[test]
+fn prepared_input_cannot_mutate_under_another_inputs_receipt() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-input-swap");
+    let authority = authority(&store);
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'c',
+    );
+    let prepared = WorkflowEffectPreparedV1::register_definition(
+        digest('d'),
+        definition(1, "operation.wrong-input.v1"),
+    );
+
+    assert_eq!(
+        WorkflowEffectAuthorityPortV1::execute_effect(
+            &authority,
+            &identity,
+            &prepared,
+            UtcMicros(20),
+        )
+        .unwrap_err(),
+        tracedecay_application::WorkflowEffectAuthorityErrorV1::IdentityConflict
+    );
+    assert_eq!(store.count("workflow_definitions"), 0);
+}
+
+#[test]
+fn restart_uses_the_reserved_preparation_and_timestamps() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-reserved-preparation");
+    let authority = authority(&store);
+    let identity = effect_identity_at(
+        WorkflowEffectOperationV1::HandoffIssue,
+        "actor.workflow.source",
+        'd',
+        EffectAuthorityBinding::BASE,
+        UtcMicros(10),
+    );
+    let original_grant = TaskHandoffGrant::new(
+        handoff_scope(),
+        token_digest(&"t".repeat(48)),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+    )
+    .unwrap();
+    let original = WorkflowEffectPreparedV1::handoff_issue(
+        identity.input_digest().clone(),
+        original_grant.clone(),
+    );
+    WorkflowEffectAuthorityPortV1::reserve_effect(&authority, &identity, &original).unwrap();
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE workflow_effect_journal SET state = 'in_flight'
+                 WHERE idempotency_key = ?1",
+                [identity.idempotency_key().as_str()],
+            )
+            .unwrap();
+    });
+    let store = store.restart("workflow-effect-reserved-preparation");
+    let authority = authority(&store);
+    let retry_identity = effect_identity_at(
+        WorkflowEffectOperationV1::HandoffIssue,
+        "actor.workflow.source",
+        'd',
+        EffectAuthorityBinding::BASE,
+        UtcMicros(40),
+    );
+    let recomputed = WorkflowEffectPreparedV1::handoff_issue(
+        retry_identity.input_digest().clone(),
+        TaskHandoffGrant::new(
+            handoff_scope(),
+            token_digest(&"t".repeat(48)),
+            UtcMicros(40),
+            UtcMicros(60_000_040),
+        )
+        .unwrap(),
+    );
+
+    let record = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &retry_identity,
+        &recomputed,
+        UtcMicros(50),
+    )
+    .unwrap();
+
+    assert_eq!(
+        record.terminal().unwrap().identity().started_at(),
+        UtcMicros(10)
+    );
+    assert_eq!(
+        record.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(original_grant))
+    );
+}
+
+#[test]
+fn concurrent_exact_replays_all_return_the_committed_terminal() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-concurrent-replay");
+    let authority = authority(&store);
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'e',
+    );
+    let prepared = WorkflowEffectPreparedV1::register_definition(
+        identity.input_digest().clone(),
+        definition(1, "operation.prepare.v1"),
+    );
+    let barrier = Arc::new(Barrier::new(8));
+    let handles = (0..8)
+        .map(|_| {
+            let authority = authority.clone();
+            let identity = identity.clone();
+            let prepared = prepared.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                WorkflowEffectAuthorityPortV1::execute_effect(
+                    &authority,
+                    &identity,
+                    &prepared,
+                    UtcMicros(20),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let records = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(records.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(store.count("workflow_definitions"), 1);
 }

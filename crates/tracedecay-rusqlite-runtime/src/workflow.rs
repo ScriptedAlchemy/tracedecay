@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowDefinitionAuthorityError,
+    TaskHandoffGrant, TaskHandoffScope, WorkflowDefinitionAuthorityError,
     WorkflowDefinitionAuthorityPort, WorkflowEffectAuthorityErrorV1, WorkflowEffectAuthorityPortV1,
     WorkflowEffectIdentityV1, WorkflowEffectJournalRecordV1, WorkflowEffectJournalStateV1,
     WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectProblemV1,
-    WorkflowEffectSuccessV1, WorkflowEffectTerminalV1,
+    WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{
     ManifestDigest, UtcMicros, WorkflowDefinition, WorkflowDefinitionId, canonical_sha256,
@@ -20,9 +20,17 @@ use crate::exact_sql::{
     ExactSqlStatement as MigrationSqlStatement, ExactSqlTransaction, ExactSqlValue,
     ExactSqlValue as MigrationSqlValue,
 };
+mod effect_mutation;
 mod schema;
 
 pub use schema::{WORKFLOW_SCHEMA_V1, install_workflow_schema};
+
+const WORKFLOW_EFFECT_SELECT: &str = "SELECT identity_digest, state, terminal_payload,
+        identity_payload, identity_payload_digest,
+        terminal_payload_digest, operation,
+        prepared_payload, prepared_payload_digest
+ FROM workflow_effect_journal
+ WHERE idempotency_key = ?1";
 
 /// Workflow persistence on the registered writer.
 #[derive(Clone)]
@@ -128,6 +136,8 @@ fn require_workflow_schema(
             ("identity_digest", "TEXT", 1, 0),
             ("identity_payload", "TEXT", 1, 0),
             ("identity_payload_digest", "TEXT", 1, 0),
+            ("prepared_payload", "TEXT", 1, 0),
+            ("prepared_payload_digest", "TEXT", 1, 0),
             ("operation", "TEXT", 1, 0),
             ("state", "TEXT", 1, 0),
             ("terminal_payload", "TEXT", 0, 0),
@@ -507,13 +517,26 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
     fn reserve_effect(
         &self,
         identity: &WorkflowEffectIdentityV1,
+        prepared: &WorkflowEffectPreparedV1,
     ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
+        if prepared.input_digest() != identity.input_digest()
+            || prepared
+                .operation()
+                .is_some_and(|operation| operation != identity.operation())
+        {
+            return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+        }
         let identity_digest = identity
             .identity_digest()
             .map_err(|_| workflow_effect_codec_unavailable())?;
         let identity_payload =
             encode_json(identity).map_err(|_| workflow_effect_codec_unavailable())?;
         let identity_payload_digest = identity
+            .payload_digest()
+            .map_err(|_| workflow_effect_codec_unavailable())?;
+        let prepared_payload =
+            encode_json(prepared).map_err(|_| workflow_effect_codec_unavailable())?;
+        let prepared_payload_digest = prepared
             .payload_digest()
             .map_err(|_| workflow_effect_codec_unavailable())?;
         let transaction = self
@@ -523,11 +546,7 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             .map_err(workflow_effect_unavailable)?;
         let existing = query_tx(
             &transaction,
-            "SELECT identity_digest, state, terminal_payload,
-                    identity_payload, identity_payload_digest,
-                    terminal_payload_digest, operation
-             FROM workflow_effect_journal
-             WHERE idempotency_key = ?1",
+            WORKFLOW_EFFECT_SELECT,
             vec![ExactSqlValue::Text(
                 identity.idempotency_key().as_str().to_owned(),
             )],
@@ -545,6 +564,15 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
                 .identity_digest()
                 .map_err(|_| workflow_effect_codec_unavailable())?
                 != identity_digest
+            {
+                let _ = transaction.rollback();
+                return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+            }
+            let persisted_prepared = decode_workflow_effect_preparation(&row.values)?;
+            if persisted_prepared.input_digest() != persisted_identity.input_digest()
+                || persisted_prepared
+                    .operation()
+                    .is_some_and(|operation| operation != persisted_identity.operation())
             {
                 let _ = transaction.rollback();
                 return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
@@ -572,14 +600,20 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             &transaction,
             "INSERT INTO workflow_effect_journal (
                  idempotency_key, identity_digest, identity_payload,
-                 identity_payload_digest, operation, state, terminal_payload,
+                 identity_payload_digest, prepared_payload,
+                 prepared_payload_digest, operation, state, terminal_payload,
                  terminal_payload_digest, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'before_effect', NULL, NULL, ?6, ?6)",
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                 'before_effect', NULL, NULL, ?8, ?8
+             )",
             vec![
                 ExactSqlValue::Text(identity.idempotency_key().as_str().to_owned()),
                 ExactSqlValue::Text(identity_digest.as_str().to_owned()),
                 ExactSqlValue::Text(identity_payload),
                 ExactSqlValue::Text(identity_payload_digest.as_str().to_owned()),
+                ExactSqlValue::Text(prepared_payload),
+                ExactSqlValue::Text(prepared_payload_digest.as_str().to_owned()),
                 ExactSqlValue::Text(identity.operation().as_str().to_owned()),
                 ExactSqlValue::Integer(identity.started_at().0),
             ],
@@ -595,7 +629,7 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         prepared: &WorkflowEffectPreparedV1,
         ended_at: UtcMicros,
     ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
-        let reserved = self.reserve_effect(identity)?;
+        let reserved = self.reserve_effect(identity, prepared)?;
         if reserved.terminal().is_some() {
             return reconcile_workflow_effect(&self.storage, identity, reserved);
         }
@@ -609,11 +643,7 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             .map_err(workflow_effect_unavailable)?;
         let current = query_tx(
             &transaction,
-            "SELECT identity_digest, state, terminal_payload,
-                    identity_payload, identity_payload_digest,
-                    terminal_payload_digest, operation
-             FROM workflow_effect_journal
-             WHERE idempotency_key = ?1",
+            WORKFLOW_EFFECT_SELECT,
             vec![ExactSqlValue::Text(
                 identity.idempotency_key().as_str().to_owned(),
             )],
@@ -632,7 +662,13 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             .identity_digest()
             .map_err(|_| workflow_effect_codec_unavailable())?
             != identity_digest
-            || prepared
+        {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+        }
+        let persisted_prepared = decode_workflow_effect_preparation(&row.values)?;
+        if persisted_prepared.input_digest() != persisted_identity.input_digest()
+            || persisted_prepared
                 .operation()
                 .is_some_and(|operation| operation != persisted_identity.operation())
         {
@@ -661,12 +697,10 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             let _ = transaction.rollback();
             return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
         }
-        let outcome = if persisted_identity.cancellation().is_cancelled() {
-            WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::Cancelled)
-        } else if persisted_identity.deadline().is_elapsed_at(ended_at) {
+        let outcome = if persisted_identity.deadline().is_elapsed_at(ended_at) {
             WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::TimedOut)
         } else {
-            apply_workflow_effect(&transaction, prepared)?
+            effect_mutation::apply_workflow_effect(&transaction, &persisted_prepared)?
         };
         let terminal = WorkflowEffectTerminalV1::new(persisted_identity, ended_at, outcome)?;
         let terminal_payload =
@@ -778,6 +812,24 @@ fn decode_workflow_effect_identity(
     Ok(identity)
 }
 
+fn decode_workflow_effect_preparation(
+    values: &[ExactSqlValue],
+) -> Result<WorkflowEffectPreparedV1, WorkflowEffectAuthorityErrorV1> {
+    let payload = sql_text(values, 7).ok_or_else(workflow_effect_codec_unavailable)?;
+    let expected_digest = sql_text(values, 8).ok_or_else(workflow_effect_codec_unavailable)?;
+    let prepared: WorkflowEffectPreparedV1 =
+        decode_json(payload).map_err(|_| workflow_effect_codec_unavailable())?;
+    if prepared
+        .payload_digest()
+        .map_err(|_| workflow_effect_codec_unavailable())?
+        .as_str()
+        != expected_digest
+    {
+        return Err(workflow_effect_codec_unavailable());
+    }
+    Ok(prepared)
+}
+
 fn reconcile_workflow_effect(
     storage: &ExactSqlHandle,
     identity: &WorkflowEffectIdentityV1,
@@ -808,164 +860,55 @@ fn reconcile_workflow_effect(
         ],
     )
     .map_err(workflow_effect_unavailable)?;
+    if changed == 0 {
+        let current = query_tx(
+            &transaction,
+            WORKFLOW_EFFECT_SELECT,
+            vec![ExactSqlValue::Text(
+                identity.idempotency_key().as_str().to_owned(),
+            )],
+        )
+        .map_err(workflow_effect_unavailable)?;
+        let row = current
+            .rows
+            .first()
+            .ok_or_else(workflow_effect_codec_unavailable)?;
+        let identity_digest = identity
+            .identity_digest()
+            .map_err(|_| workflow_effect_codec_unavailable())?;
+        let persisted_identity = decode_workflow_effect_identity(&row.values)?;
+        if sql_text(&row.values, 0) != Some(identity_digest.as_str())
+            || persisted_identity
+                .identity_digest()
+                .map_err(|_| workflow_effect_codec_unavailable())?
+                != identity_digest
+        {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+        }
+        let persisted_prepared = decode_workflow_effect_preparation(&row.values)?;
+        if persisted_prepared.input_digest() != persisted_identity.input_digest()
+            || persisted_prepared
+                .operation()
+                .is_some_and(|operation| operation != persisted_identity.operation())
+        {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+        }
+        let current_record = decode_workflow_effect_record(&row.values)?;
+        if current_record.state() != WorkflowEffectJournalStateV1::Reconciled
+            || current_record.terminal() != Some(&terminal)
+        {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
+        }
+        transaction.commit().map_err(workflow_effect_unavailable)?;
+        return Ok(current_record);
+    }
     if changed != 1 {
         let _ = transaction.rollback();
         return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
     }
     transaction.commit().map_err(workflow_effect_unavailable)?;
     WorkflowEffectJournalRecordV1::terminal(WorkflowEffectJournalStateV1::Reconciled, terminal)
-}
-
-fn apply_workflow_effect(
-    transaction: &ExactSqlTransaction,
-    prepared: &WorkflowEffectPreparedV1,
-) -> Result<WorkflowEffectOutcomeV1, WorkflowEffectAuthorityErrorV1> {
-    match prepared {
-        WorkflowEffectPreparedV1::RegisterDefinition(definition) => {
-            apply_definition_registration(transaction, definition)
-        }
-        WorkflowEffectPreparedV1::HandoffIssue(grant) => apply_handoff_issue(transaction, grant),
-        WorkflowEffectPreparedV1::HandoffRedeem {
-            token_digest,
-            expected_scope,
-            consumed_at,
-        } => apply_handoff_redeem(transaction, token_digest, expected_scope, *consumed_at),
-        WorkflowEffectPreparedV1::Problem(problem) => {
-            Ok(WorkflowEffectOutcomeV1::Problem(*problem))
-        }
-    }
-}
-
-fn apply_definition_registration(
-    transaction: &ExactSqlTransaction,
-    definition: &WorkflowDefinition,
-) -> Result<WorkflowEffectOutcomeV1, WorkflowEffectAuthorityErrorV1> {
-    let version = version_i64(definition.definition_version())
-        .map_err(|_| workflow_effect_codec_unavailable())?;
-    let payload = encode_definition(definition).map_err(|_| workflow_effect_codec_unavailable())?;
-    let digest = definition_digest(definition).map_err(|_| workflow_effect_codec_unavailable())?;
-    let existing = query_tx(
-        transaction,
-        "SELECT payload_digest FROM workflow_definitions
-         WHERE definition_id = ?1 AND definition_version = ?2",
-        vec![
-            ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
-            ExactSqlValue::Integer(version),
-        ],
-    )
-    .map_err(workflow_effect_unavailable)?;
-    if let Some(row) = existing.rows.first() {
-        let existing_digest =
-            sql_text(&row.values, 0).ok_or_else(workflow_effect_codec_unavailable)?;
-        return Ok(if existing_digest == digest.as_str() {
-            WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(
-                definition.clone(),
-            ))
-        } else {
-            WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::InvalidRequest)
-        });
-    }
-    execute_tx(
-        transaction,
-        "INSERT INTO workflow_definitions (
-             definition_id, definition_version, payload, payload_digest
-         ) VALUES (?1, ?2, ?3, ?4)",
-        vec![
-            ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
-            ExactSqlValue::Integer(version),
-            ExactSqlValue::Text(payload),
-            ExactSqlValue::Text(digest.as_str().to_owned()),
-        ],
-    )
-    .map_err(workflow_effect_unavailable)?;
-    Ok(WorkflowEffectOutcomeV1::Success(
-        WorkflowEffectSuccessV1::DefinitionRegistered(definition.clone()),
-    ))
-}
-
-fn apply_handoff_issue(
-    transaction: &ExactSqlTransaction,
-    grant: &TaskHandoffGrant,
-) -> Result<WorkflowEffectOutcomeV1, WorkflowEffectAuthorityErrorV1> {
-    let existing = query_tx(
-        transaction,
-        "SELECT 1 FROM workflow_handoffs WHERE token_digest = ?1",
-        vec![ExactSqlValue::Text(
-            grant.token_digest().as_str().to_owned(),
-        )],
-    )
-    .map_err(workflow_effect_unavailable)?;
-    if !existing.rows.is_empty() {
-        return Ok(WorkflowEffectOutcomeV1::Problem(
-            WorkflowEffectProblemV1::InvalidRequest,
-        ));
-    }
-    let scope_payload =
-        encode_json(grant.scope()).map_err(|_| workflow_effect_codec_unavailable())?;
-    execute_tx(
-        transaction,
-        "INSERT INTO workflow_handoffs (
-             token_digest, scope_payload, issued_at, expires_at, consumed
-         ) VALUES (?1, ?2, ?3, ?4, 0)",
-        vec![
-            ExactSqlValue::Text(grant.token_digest().as_str().to_owned()),
-            ExactSqlValue::Text(scope_payload),
-            ExactSqlValue::Integer(grant.issued_at().0),
-            ExactSqlValue::Integer(grant.expires_at().0),
-        ],
-    )
-    .map_err(workflow_effect_unavailable)?;
-    Ok(WorkflowEffectOutcomeV1::Success(
-        WorkflowEffectSuccessV1::HandoffIssued(grant.clone()),
-    ))
-}
-
-fn apply_handoff_redeem(
-    transaction: &ExactSqlTransaction,
-    token_digest: &ManifestDigest,
-    expected_scope: &TaskHandoffScope,
-    consumed_at: UtcMicros,
-) -> Result<WorkflowEffectOutcomeV1, WorkflowEffectAuthorityErrorV1> {
-    let rows = query_tx(
-        transaction,
-        "SELECT scope_payload, expires_at, consumed FROM workflow_handoffs
-         WHERE token_digest = ?1",
-        vec![ExactSqlValue::Text(token_digest.as_str().to_owned())],
-    )
-    .map_err(workflow_effect_unavailable)?;
-    let Some(row) = rows.rows.first() else {
-        return Ok(WorkflowEffectOutcomeV1::Problem(
-            WorkflowEffectProblemV1::NotFoundOrNotAuthorized,
-        ));
-    };
-    let scope_payload = sql_text(&row.values, 0).ok_or_else(workflow_effect_codec_unavailable)?;
-    let scope: TaskHandoffScope =
-        decode_json(scope_payload).map_err(|_| workflow_effect_codec_unavailable())?;
-    if &scope != expected_scope {
-        return Ok(WorkflowEffectOutcomeV1::Problem(
-            WorkflowEffectProblemV1::NotFoundOrNotAuthorized,
-        ));
-    }
-    let expires_at = sql_integer(&row.values, 1).ok_or_else(workflow_effect_codec_unavailable)?;
-    let consumed = sql_integer(&row.values, 2).ok_or_else(workflow_effect_codec_unavailable)?;
-    if consumed_at.0 >= expires_at || consumed != 0 {
-        return Ok(WorkflowEffectOutcomeV1::Problem(
-            WorkflowEffectProblemV1::InvalidRequest,
-        ));
-    }
-    let changed = execute_tx_changed(
-        transaction,
-        "UPDATE workflow_handoffs SET consumed = 1
-         WHERE token_digest = ?1 AND consumed = 0",
-        vec![ExactSqlValue::Text(token_digest.as_str().to_owned())],
-    )
-    .map_err(workflow_effect_unavailable)?;
-    if changed != 1 {
-        return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
-    }
-    Ok(WorkflowEffectOutcomeV1::Success(
-        WorkflowEffectSuccessV1::HandoffRedeemed(TaskHandoffRedeemed {
-            scope: expected_scope.clone(),
-        }),
-    ))
 }

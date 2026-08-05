@@ -3,9 +3,9 @@
 use rusqlite::Connection;
 
 /// Stable description hashed into `workflow_schema.definition_digest`.
-const WORKFLOW_SCHEMA_DEFINITION_V1: &str = "workflow_definitions(definition_id text not null,definition_version integer not null check >0,payload text not null,payload_digest text not null,primary key(definition_id,definition_version));workflow_effect_journal(idempotency_key text primary key,identity_digest text not null,identity_payload text not null,identity_payload_digest text not null,operation text not null,state text not null check in(before_effect,in_flight,committed,reconciled),terminal_payload text,terminal_payload_digest text,created_at integer not null,updated_at integer not null);workflow_handoffs(token_digest text primary key,scope_payload text not null,issued_at integer not null,expires_at integer not null check expires_at>issued_at,consumed integer not null check in(0,1));workflow_schema(singleton integer primary key check =1,schema_version integer check =1,definition_digest text not null);";
+const WORKFLOW_SCHEMA_DEFINITION_V1: &str = "workflow_definitions(definition_id text not null,definition_version integer not null check >0,payload text not null,payload_digest text not null,primary key(definition_id,definition_version));workflow_effect_journal(idempotency_key text primary key,identity_digest text not null,identity_payload text not null,identity_payload_digest text not null,prepared_payload text not null,prepared_payload_digest text not null,operation text not null,state text not null check in(before_effect,in_flight,committed,reconciled),terminal_payload text,terminal_payload_digest text,created_at integer not null,updated_at integer not null);workflow_handoffs(token_digest text primary key,scope_payload text not null,issued_at integer not null,expires_at integer not null check expires_at>issued_at,consumed integer not null check in(0,1));workflow_schema(singleton integer primary key check =1,schema_version integer check =1,definition_digest text not null);";
 pub(crate) const WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1: &str =
-    "sha256:4be3d911fdd5e15e50748cd446a49e6ae3f1a91e3f3687241e24c03819051477";
+    "sha256:ef3f0fdc0760f91f64f8cc567cee1174dbd94fec69c9de2a39f9683fd8b780da";
 
 pub const WORKFLOW_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS workflow_definitions (
@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS workflow_effect_journal (
     identity_digest TEXT NOT NULL,
     identity_payload TEXT NOT NULL,
     identity_payload_digest TEXT NOT NULL,
+    prepared_payload TEXT NOT NULL,
+    prepared_payload_digest TEXT NOT NULL,
     operation TEXT NOT NULL,
     state TEXT NOT NULL CHECK (
         state IN ('before_effect', 'in_flight', 'committed', 'reconciled')
@@ -49,7 +51,7 @@ INSERT OR IGNORE INTO workflow_schema (singleton, schema_version, definition_dig
 VALUES (
     1,
     1,
-    'sha256:4be3d911fdd5e15e50748cd446a49e6ae3f1a91e3f3687241e24c03819051477'
+    'sha256:ef3f0fdc0760f91f64f8cc567cee1174dbd94fec69c9de2a39f9683fd8b780da'
 );
 ";
 
