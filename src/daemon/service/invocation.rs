@@ -160,8 +160,9 @@ pub(crate) use crate::daemon_contract::{
     DaemonFeedbackResult, DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
-    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkAttemptInvocationV1,
-    WorkflowApplicationInvocation, WorkflowApplicationOutcome,
+    HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, WorkApplicationInvocationV1,
+    WorkApplicationOutcomeV1, WorkAttemptInvocationV1, WorkflowApplicationInvocation,
+    WorkflowApplicationOutcome,
 };
 // Wire-shape fixtures build application commands the dispatch path no longer
 // names directly now that request construction lives with the contract.
@@ -190,6 +191,7 @@ mod configuration;
 mod dispatch;
 mod feedback;
 mod git;
+mod handoff;
 mod lsp;
 mod plan26;
 mod primitive;
@@ -202,6 +204,7 @@ mod work;
 use configuration::*;
 use feedback::*;
 use git::*;
+use handoff::*;
 #[cfg(test)]
 use lsp::*;
 use plan26::*;

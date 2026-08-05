@@ -19,9 +19,9 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio_stream::StreamExt;
 use tracedecay_api::{
-    CanonicalInvocationResult, HttpApplicationControls, HttpApplicationInvocationFuture,
-    HttpApplicationOperation, HttpApplicationRequest, WorkOperation, WorkflowOperation,
-    application_problem_response, sse_response,
+    CanonicalInvocationResult, HandoffOperation, HttpApplicationControls,
+    HttpApplicationInvocationFuture, HttpApplicationOperation, HttpApplicationRequest,
+    WorkOperation, WorkflowOperation, application_problem_response, sse_response,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
@@ -104,8 +104,10 @@ use crate::daemon_contract::{
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
+mod handoff;
 mod workflow;
 
+use handoff::router_with_executor as handoff_application_router_with_executor;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
@@ -1019,15 +1021,15 @@ async fn invoke_work_operation(
     }
 }
 
-/// Refuse a Work request that never reached dispatch, in the canonical envelope.
+/// Refuse a registered request that never reached dispatch in the canonical envelope.
 ///
 /// Everything before the executor call is adapter territory: the catalog would
 /// not build, the operation is not advertised, or its binding carries no public
-/// route. A bare status here would answer a Work route with an empty body no
+/// route. A bare status here would answer a registered route with an empty body no
 /// client can read a code, a retry directive or a request id out of, so these
 /// failures are reported as the same `ApplicationProblemEnvelope` the dispatched
 /// path returns, owned by the adapter layer rather than the runtime.
-fn work_adapter_unavailable(request_id: RequestId, code: &str, message: &str) -> Response {
+fn registered_adapter_unavailable(request_id: RequestId, code: &str, message: &str) -> Response {
     let Ok(schema_id) = SchemaId::new("schema.tracedecay.http.adapter-problem.v1") else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -1047,7 +1049,7 @@ fn work_adapter_unavailable(request_id: RequestId, code: &str, message: &str) ->
     )
 }
 
-/// Dispatch one Work operation and encode its canonical result.
+/// Dispatch one registered operation and encode its canonical result.
 ///
 /// Core and attempt operations differ only in which daemon payload carries them
 /// and which outcome they answer with, so both arrive here: one binding lookup,
@@ -1055,6 +1057,8 @@ fn work_adapter_unavailable(request_id: RequestId, code: &str, message: &str) ->
 trait RegisteredHttpOperation: Copy {
     fn operation_id_str(self) -> &'static str;
     fn is_read_only(self) -> bool;
+    fn problem_family(self) -> &'static str;
+    fn display_family(self) -> &'static str;
     fn registry(
         self,
     ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError>;
@@ -1067,6 +1071,14 @@ impl RegisteredHttpOperation for WorkOperation {
 
     fn is_read_only(self) -> bool {
         WorkOperation::is_read_only(self)
+    }
+
+    fn problem_family(self) -> &'static str {
+        "work"
+    }
+
+    fn display_family(self) -> &'static str {
+        "Work"
     }
 
     fn registry(
@@ -1085,10 +1097,42 @@ impl RegisteredHttpOperation for WorkflowOperation {
         false
     }
 
+    fn problem_family(self) -> &'static str {
+        "workflow"
+    }
+
+    fn display_family(self) -> &'static str {
+        "Workflow"
+    }
+
     fn registry(
         self,
     ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError> {
         tracedecay_application::workflow_executable_binding_registry()
+    }
+}
+
+impl RegisteredHttpOperation for HandoffOperation {
+    fn operation_id_str(self) -> &'static str {
+        HandoffOperation::operation_id_str(self)
+    }
+
+    fn is_read_only(self) -> bool {
+        false
+    }
+
+    fn problem_family(self) -> &'static str {
+        "handoff"
+    }
+
+    fn display_family(self) -> &'static str {
+        "handoff-open"
+    }
+
+    fn registry(
+        self,
+    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError> {
+        tracedecay_application::handoff_executable_binding_registry()
     }
 }
 
@@ -1109,13 +1153,15 @@ where
     T: Serialize,
     O: RegisteredHttpOperation,
 {
+    let problem_code = |suffix: &str| format!("{}.{}", operation.problem_family(), suffix);
+    let family = operation.display_family();
     let registry = match operation.registry() {
         Ok(registry) => registry,
         Err(_) => {
-            return work_adapter_unavailable(
+            return registered_adapter_unavailable(
                 request_id,
-                "work.catalog_unavailable",
-                "The Work capability catalog is unavailable",
+                &problem_code("catalog_unavailable"),
+                &format!("The {family} capability catalog is unavailable"),
             );
         }
     };
@@ -1123,10 +1169,10 @@ where
         match tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned()) {
             Ok(operation_id) => operation_id,
             Err(_) => {
-                return work_adapter_unavailable(
+                return registered_adapter_unavailable(
                     request_id,
-                    "work.operation_identity_unavailable",
-                    "The Work operation identity is unavailable",
+                    &problem_code("operation_identity_unavailable"),
+                    &format!("The {family} operation identity is unavailable"),
                 );
             }
         };
@@ -1134,17 +1180,17 @@ where
         .get(&operation_id)
         .and_then(|availability| availability.binding())
     else {
-        return work_adapter_unavailable(
+        return registered_adapter_unavailable(
             request_id,
-            "work.binding_unavailable",
-            "The Work operation is not advertised by this build",
+            &problem_code("binding_unavailable"),
+            &format!("The {family} operation is not advertised by this build"),
         );
     };
     let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
-        return work_adapter_unavailable(
+        return registered_adapter_unavailable(
             request_id,
-            "work.route_unavailable",
-            "The Work operation binding carries no public route",
+            &problem_code("route_unavailable"),
+            &format!("The {family} operation binding carries no public route"),
         );
     };
     let result_contract = match ResultContractRef::new(
@@ -1153,10 +1199,10 @@ where
     ) {
         Ok(contract) => contract,
         Err(_) => {
-            return work_adapter_unavailable(
+            return registered_adapter_unavailable(
                 request_id,
-                "work.result_contract_unavailable",
-                "The Work operation result contract is unavailable",
+                &problem_code("result_contract_unavailable"),
+                &format!("The {family} operation result contract is unavailable"),
             );
         }
     };
@@ -1179,8 +1225,8 @@ where
                 | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
                     ApplicationProblem::InvalidRequest {
                         diagnostic: SafeDiagnostic {
-                            code: "work.invalid_request".to_owned(),
-                            message: "The Work application request is invalid".to_owned(),
+                            code: problem_code("invalid_request"),
+                            message: format!("The {family} application request is invalid"),
                         },
                         retry: RetryDirective::Never,
                         legal_actions: vec![LegalAction::CorrectRequest],
@@ -1197,8 +1243,8 @@ where
                 }
                 crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                     ApplicationProblem::unavailable(SafeDiagnostic {
-                        code: "work.unavailable".to_owned(),
-                        message: "The Work application runtime is unavailable".to_owned(),
+                        code: problem_code("unavailable"),
+                        message: format!("The {family} application runtime is unavailable"),
                     })
                 }
             },
@@ -1216,8 +1262,8 @@ where
                     .into_http_response();
                 }
                 None => ApplicationProblem::unavailable(SafeDiagnostic {
-                    code: "work.protocol_unavailable".to_owned(),
-                    message: "The Work application protocol is unavailable".to_owned(),
+                    code: problem_code("protocol_unavailable"),
+                    message: format!("The {family} application protocol is unavailable"),
                 }),
             },
         },
@@ -1232,8 +1278,8 @@ where
             | DaemonInvocationError::Backpressured { .. }
             | DaemonInvocationError::Unavailable,
         ) => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "work.transport_unavailable".to_owned(),
-            message: "The Work application transport is unavailable".to_owned(),
+            code: problem_code("transport_unavailable"),
+            message: format!("The {family} application transport is unavailable"),
         }),
     };
     CanonicalInvocationResult::<T>::new(
@@ -1298,6 +1344,7 @@ pub fn http_application_router_with_executor(
     let event_executor = Arc::clone(&executor);
     let work_router = work_application_router_with_executor(Arc::clone(&executor))?;
     let workflow_router = workflow_application_router_with_executor(Arc::clone(&executor))?;
+    let handoff_router = handoff_application_router_with_executor(Arc::clone(&executor))?;
     Ok(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
@@ -1306,6 +1353,7 @@ pub fn http_application_router_with_executor(
         )?)
         .merge(work_router)
         .merge(workflow_router)
+        .merge(handoff_router)
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cancellations),
             application_http_context,

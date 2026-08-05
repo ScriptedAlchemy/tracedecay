@@ -18,6 +18,7 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, UseCaseId};
 
+use super::handoff::validate_catalog_bindings as validate_handoff_catalog_bindings;
 use super::workflow::validate_catalog_bindings as validate_workflow_catalog_bindings;
 use super::{
     APPLICATION_PROTOCOL_REVISION, APPLICATION_SURFACE_OPERATIONS, ApplicationSurfaceAdapterError,
@@ -80,6 +81,11 @@ fn operation_context(project_id: &ProjectId) -> RequestContext {
 #[test]
 fn workflow_http_descriptors_match_every_executable_manifest_route() {
     validate_workflow_catalog_bindings().expect("every Workflow descriptor has one mounted route");
+}
+
+#[test]
+fn handoff_http_descriptors_match_every_executable_manifest_route() {
+    validate_handoff_catalog_bindings().expect("every handoff descriptor has one mounted route");
 }
 
 async fn response_text(response: axum::response::Response) -> String {

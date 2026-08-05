@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::code_intelligence::{
@@ -35,7 +36,7 @@ pub(crate) use crate::canonical_text::validate_canonical_string as validate_labe
 use crate::canonical_text::validated_string_newtype;
 
 validated_string_newtype!(
-    plain,
+    schema,
     DomainError,
     validate_label;
     FeedbackCycleId => "feedback cycle id",

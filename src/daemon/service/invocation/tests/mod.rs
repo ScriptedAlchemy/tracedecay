@@ -170,6 +170,7 @@ mod configuration_tests;
 mod dispatch_tests;
 mod feedback_tests;
 mod git_tests;
+mod handoff_tests;
 mod lsp_lease_tests;
 mod lsp_tests;
 mod plan26_tests;
