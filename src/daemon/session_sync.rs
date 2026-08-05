@@ -772,64 +772,6 @@ impl DaemonSessionSyncService {
             }
         }
     }
-
-    async fn cancel_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
-        let Some(context) = self.context_for(control.scope()) else {
-            return SessionSyncOutcomeV1::WrongScope;
-        };
-        let key = journal_key(control.scope(), control.idempotency_key());
-        let updated = self
-            .update_journal(&context, &key, |journal| {
-                if journal.scope == *control.scope()
-                    && journal.admission.idempotency_key == *control.idempotency_key()
-                    && journal.status != SessionSyncJournalStatusV1::Complete
-                    && journal.cancel_requested_at.is_none()
-                {
-                    journal.cancel_requested_at = Some(now_micros());
-                    journal.updated_at = now_micros();
-                }
-            })
-            .await;
-        let journal = match updated {
-            Ok(journal) => journal,
-            Err(error) => {
-                tracing::warn!(%error, "session sync cancellation journal write failed");
-                return SessionSyncOutcomeV1::Unavailable {
-                    reason_code: "session_sync_cancel_failed",
-                };
-            }
-        };
-        if journal.scope != *control.scope()
-            || journal.admission.idempotency_key != *control.idempotency_key()
-        {
-            return SessionSyncOutcomeV1::WrongScope;
-        }
-        if journal.status == SessionSyncJournalStatusV1::Complete {
-            return journal.outcome();
-        }
-        if let Some(signal) = self
-            .active
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&key)
-        {
-            signal.cancel(now_micros());
-            journal.outcome()
-        } else {
-            match self
-                .persist_interruption(&context, &key, OperationTermination::Cancelled)
-                .await
-            {
-                Ok(journal) => journal.outcome(),
-                Err(error) => {
-                    tracing::warn!(%error, "session sync cancellation completion failed");
-                    SessionSyncOutcomeV1::Unavailable {
-                        reason_code: "session_sync_cancel_failed",
-                    }
-                }
-            }
-        }
-    }
 }
 
 impl SessionSyncServicePort for DaemonSessionSyncService {

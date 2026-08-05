@@ -298,6 +298,120 @@ impl DaemonSessionSyncService {
         tasks.retain(|task| !task.is_finished());
         tasks.push(task);
     }
+
+    async fn cancel_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
+        let Some(context) = self.context_for(control.scope()) else {
+            return SessionSyncOutcomeV1::WrongScope;
+        };
+        let key = journal_key(control.scope(), control.idempotency_key());
+        let initial = match self.refresh_source_frontiers(&context, &key).await {
+            Ok(journal) => journal,
+            Err(error) => {
+                tracing::warn!(%error, "session sync cancellation journal read failed");
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_cancel_failed",
+                };
+            }
+        };
+        if initial.scope != *control.scope()
+            || initial.admission.idempotency_key != *control.idempotency_key()
+        {
+            return SessionSyncOutcomeV1::WrongScope;
+        }
+        if initial.status == SessionSyncJournalStatusV1::Complete {
+            return initial.outcome();
+        }
+        let primary_key = initial
+            .coalesced_primary
+            .as_ref()
+            .map(|primary| journal_key(control.scope(), primary));
+        if let Some(primary_key) = primary_key.as_deref() {
+            match self
+                .mirror_primary_terminal(&context, &key, primary_key)
+                .await
+            {
+                Ok(Some(journal)) => return journal.outcome(),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "session sync cancellation reconciliation failed");
+                    return SessionSyncOutcomeV1::Unavailable {
+                        reason_code: "session_sync_cancel_failed",
+                    };
+                }
+            }
+        }
+        let mut cancellation_owned = false;
+        let updated = self
+            .update_journal(&context, &key, |journal| {
+                cancellation_owned = false;
+                if journal.scope == *control.scope()
+                    && journal.admission.idempotency_key == *control.idempotency_key()
+                    && journal.status != SessionSyncJournalStatusV1::Complete
+                    && journal.cancel_requested_at.is_none()
+                {
+                    journal.cancel_requested_at = Some(now_micros());
+                    journal.updated_at = now_micros();
+                    cancellation_owned = true;
+                }
+            })
+            .await;
+        let journal = match updated {
+            Ok(journal) => journal,
+            Err(error) => {
+                tracing::warn!(%error, "session sync cancellation journal write failed");
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_cancel_failed",
+                };
+            }
+        };
+        if journal.scope != *control.scope()
+            || journal.admission.idempotency_key != *control.idempotency_key()
+        {
+            return SessionSyncOutcomeV1::WrongScope;
+        }
+        if journal.status == SessionSyncJournalStatusV1::Complete {
+            return journal.outcome();
+        }
+        if !cancellation_owned {
+            return journal.outcome();
+        }
+        if let Some(signal) = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
+            signal.cancel(now_micros());
+            return journal.outcome();
+        }
+        if let Some(primary_key) = primary_key.as_deref() {
+            match self
+                .mirror_primary_terminal(&context, &key, primary_key)
+                .await
+            {
+                Ok(Some(journal)) => return journal.outcome(),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "session sync cancellation reconciliation failed");
+                    return SessionSyncOutcomeV1::Unavailable {
+                        reason_code: "session_sync_cancel_failed",
+                    };
+                }
+            }
+        }
+        match self
+            .persist_interruption(&context, &key, OperationTermination::Cancelled)
+            .await
+        {
+            Ok(journal) => journal.outcome(),
+            Err(error) => {
+                tracing::warn!(%error, "session sync cancellation completion failed");
+                SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_cancel_failed",
+                }
+            }
+        }
+    }
 }
 
 impl SessionSyncProjectContext {
