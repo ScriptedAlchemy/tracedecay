@@ -82,11 +82,13 @@ fn distribution_background_acquisition_installs_verified_jina_model() {
         .worker
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
+        .handle
         .take()
         .expect("background acquisition worker must be retained");
     worker
         .join()
-        .expect("background acquisition worker must not panic");
+        .expect("background acquisition worker must not panic")
+        .expect("background acquisition must complete successfully");
 
     let status = owner.status();
     let Some(SemanticModelLifecycleStateV1::Installed {
