@@ -454,6 +454,52 @@ async fn daemon_http_cold_entry_resolves_project_before_canonical_dispatch() {
 }
 
 #[tokio::test]
+async fn daemon_http_cold_resolution_failure_returns_a_safe_typed_problem() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    registry
+        .install_resolver(|_| async {
+            Err(crate::errors::TraceDecayError::Config {
+                message: "sensitive resolver detail must not cross HTTP".to_owned(),
+            })
+        })
+        .expect("install failing project resolver");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+
+    let response = request(&service, Some(&authorization), Some(&origin)).await;
+
+    assert_eq!(status(&response), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.contains("\"kind\":\"problem\""));
+    assert!(response.contains("\"kind\":\"unavailable\""));
+    assert!(response.contains("\"code\":\"http.project_router_unavailable\""));
+    assert!(!response.contains("sensitive resolver detail"));
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn daemon_http_unknown_project_returns_a_concealed_typed_problem() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    registry
+        .install_resolver(|_| async { Ok(None) })
+        .expect("install empty project resolver");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+
+    let response = request(&service, Some(&authorization), Some(&origin)).await;
+
+    assert_eq!(status(&response), StatusCode::NOT_FOUND);
+    assert!(response.contains("\"kind\":\"problem\""));
+    assert!(response.contains("\"kind\":\"not_found_or_not_authorized\""));
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
 async fn daemon_http_shutdown_releases_loopback_listener() {
     let (service, _) = service_with_probe().await;
     let endpoint = service.endpoint();
