@@ -16,10 +16,12 @@ schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tower-http = { version = "0.6", features = ["compression-gzip"] }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 
 [dev-dependencies]
+flate2 = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
