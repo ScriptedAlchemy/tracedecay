@@ -1,17 +1,13 @@
 use super::*;
 
-fn final_database(path: &Path) {
-    let connection = rusqlite::Connection::open(path).unwrap();
-    connection
-        .pragma_update(
-            None,
-            "user_version",
-            tracedecay_runtime_core::db::schema::SCHEMA_VERSION,
-        )
+async fn final_database(path: &Path) {
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(path);
+    tracedecay_runtime_core::db::schema::create_schema_connection(&connection)
+        .await
         .unwrap();
 }
 
-fn final_profile(root: &Path) {
+async fn final_profile(root: &Path) {
     for name in [
         "global.db",
         "global.db-wal",
@@ -28,23 +24,23 @@ fn final_profile(root: &Path) {
     ] {
         let path = root.join(name);
         if name.ends_with(".db") {
-            final_database(&path);
+            final_database(&path).await;
         } else {
             fs::write(&path, format!("final fixture: {name}")).unwrap();
         }
     }
     fs::create_dir(root.join("projects")).unwrap();
-    final_database(&root.join("projects/project.final.db"));
+    final_database(&root.join("projects/project.final.db")).await;
 }
 
-#[test]
-fn complete_archive_rehearses_from_restored_isolated_copy() {
+#[tokio::test]
+async fn complete_archive_rehearses_from_restored_isolated_copy() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
     let archives = temp.path().join("archives");
     let restore = temp.path().join("restored");
     fs::create_dir(&profile).unwrap();
-    final_profile(&profile);
+    final_profile(&profile).await;
     let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile,
         "archive test",
@@ -72,8 +68,8 @@ fn complete_archive_rehearses_from_restored_isolated_copy() {
     );
 }
 
-#[test]
-fn rehearsal_rebinds_relocated_store_without_changing_durable_identity() {
+#[tokio::test]
+async fn rehearsal_rebinds_relocated_store_without_changing_durable_identity() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("final-profile");
     let archives = temp.path().join("archives");
@@ -82,7 +78,7 @@ fn rehearsal_rebinds_relocated_store_without_changing_durable_identity() {
     let project_id = "project.final";
     fs::create_dir(&profile).unwrap();
     fs::create_dir(&project).unwrap();
-    final_profile(&profile);
+    final_profile(&profile).await;
     fs::remove_file(profile.join("projects/project.final.db")).unwrap();
     let source_store = profile.join("projects").join(project_id);
     fs::create_dir(&source_store).unwrap();
@@ -96,7 +92,7 @@ fn rehearsal_rebinds_relocated_store_without_changing_durable_identity() {
     ] {
         let path = source_store.join(name);
         if name.ends_with(".db") {
-            final_database(&path);
+            final_database(&path).await;
         } else {
             fs::write(path, contents).unwrap();
         }
@@ -167,13 +163,13 @@ fn rehearsal_rebinds_relocated_store_without_changing_durable_identity() {
     );
 }
 
-#[test]
-fn rehearsal_rejects_corrupted_archive_material() {
+#[tokio::test]
+async fn rehearsal_rejects_corrupted_archive_material() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
     let archives = temp.path().join("archives");
     fs::create_dir(&profile).unwrap();
-    final_profile(&profile);
+    final_profile(&profile).await;
     let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile,
         "archive test",
@@ -184,15 +180,15 @@ fn rehearsal_rejects_corrupted_archive_material() {
 
     let error =
         rehearse_final_profile_restore(&archive, &temp.path().join("restored")).unwrap_err();
-    assert!(error.contains("checksum mismatch"));
+    assert!(error.to_string().contains("checksum mismatch"));
 }
 
-#[test]
-fn archive_refuses_destination_inside_live_profile() {
+#[tokio::test]
+async fn archive_refuses_destination_inside_live_profile() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
     fs::create_dir(&profile).unwrap();
-    final_profile(&profile);
+    final_profile(&profile).await;
     let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile,
         "archive test",
@@ -207,17 +203,17 @@ fn archive_refuses_destination_inside_live_profile() {
         &lease,
     )
     .unwrap_err();
-    assert!(error.contains("outside the source profile"));
+    assert!(error.to_string().contains("outside the source profile"));
 }
 
-fn sharded_final_archive(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+async fn sharded_final_archive(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
     let profile = temp.path().join("final-profile");
     let archives = temp.path().join("archives");
     let project = temp.path().join("final-project");
     let project_id = "project.final";
     fs::create_dir(&profile).unwrap();
     fs::create_dir(&project).unwrap();
-    final_profile(&profile);
+    final_profile(&profile).await;
     fs::remove_file(profile.join("projects/project.final.db")).unwrap();
     let source_store = profile.join("projects").join(project_id);
     fs::create_dir(&source_store).unwrap();
@@ -231,7 +227,7 @@ fn sharded_final_archive(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
     ] {
         let path = source_store.join(name);
         if name.ends_with(".db") {
-            final_database(&path);
+            final_database(&path).await;
         } else {
             fs::write(path, contents).unwrap();
         }
@@ -260,21 +256,23 @@ fn sharded_final_archive(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
     (archive, temp.path().join("rehearsed-profile"))
 }
 
-#[test]
-fn rehearsal_publication_faults_resume_or_rollback_at_each_boundary() {
+#[tokio::test]
+async fn rehearsal_publication_faults_resume_or_rollback_at_each_boundary() {
     for (fault, expect_staging, expect_published_marker) in [
         ("before_rename", true, false),
         ("after_rename_before_parent_sync", false, true),
         ("after_parent_sync_before_marker_removal", false, true),
     ] {
         let temp = tempfile::tempdir().unwrap();
-        let (archive, restore) = sharded_final_archive(&temp);
+        let (archive, restore) = sharded_final_archive(&temp).await;
         let staging = temp.path().join(".rehearsed-profile.tracedecay-rehearsal");
         set_rehearsal_publication_fault_for_test(fault);
 
         let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
         assert!(
-            error.contains("injected rehearsal publication fault"),
+            error
+                .to_string()
+                .contains("injected rehearsal publication fault"),
             "{fault}: unexpected error {error}"
         );
         assert_eq!(
@@ -296,10 +294,10 @@ fn rehearsal_publication_faults_resume_or_rollback_at_each_boundary() {
     }
 }
 
-#[test]
-fn rehearsal_rejects_project_store_missing_store_manifest() {
+#[tokio::test]
+async fn rehearsal_rejects_project_store_missing_store_manifest() {
     let temp = tempfile::tempdir().unwrap();
-    let (archive, restore) = sharded_final_archive(&temp);
+    let (archive, restore) = sharded_final_archive(&temp).await;
     let manifest_entry = format!(
         "projects/project.final/{}",
         tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME
@@ -319,7 +317,9 @@ fn rehearsal_rejects_project_store_missing_store_manifest() {
 
     let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
     assert!(
-        error.contains("missing required store_manifest.json"),
+        error
+            .to_string()
+            .contains("missing required store_manifest.json"),
         "unexpected error: {error}"
     );
     assert!(!restore.exists());

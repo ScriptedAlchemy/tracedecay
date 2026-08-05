@@ -12,6 +12,94 @@ use crate::errors::{Result, TraceDecayError};
 /// The one schema shape this binary creates and accepts. It is an identity
 /// stamp, not a ladder rung: a store at any other version is refused.
 pub const SCHEMA_VERSION: u32 = 25;
+pub const SCHEMA_IDENTITY_KEY: &str = "tracedecay.schema.identity";
+pub const SCHEMA_IDENTITY: &str = "tracedecay.final-v2.graph-schema.2026-08-05";
+
+pub const REQUIRED_SCHEMA_OBJECTS: &[(&str, &str)] = &[
+    ("table", "nodes"),
+    ("table", "edges"),
+    ("table", "files"),
+    ("table", "unresolved_refs"),
+    ("table", "vectors"),
+    ("table", "metadata"),
+    ("table", "nodes_fts"),
+    ("table", "node_fingerprints"),
+    ("table", "read_cache"),
+    ("table", "redundancy_pairs"),
+    ("table", "memory_facts"),
+    ("table", "memory_entities"),
+    ("table", "memory_fact_entities"),
+    ("table", "memory_feedback_events"),
+    ("table", "memory_v2_facts"),
+    ("table", "memory_v2_lineage_events"),
+    ("table", "memory_v2_current_facts"),
+    ("table", "memory_v2_assertions"),
+    ("table", "memory_v2_evidence"),
+    ("table", "memory_v2_fact_relations"),
+    ("table", "memory_v2_proposals"),
+    ("table", "evidence_spans"),
+    ("table", "evidence_source_occurrences"),
+    ("table", "evidence_assembly_receipts"),
+    ("index", "idx_nodes_file_path_start_line"),
+    ("index", "idx_edges_unique"),
+    ("index", "idx_memory_facts_updated_at"),
+    ("index", "idx_memory_v2_current_page"),
+    ("index", "idx_memory_v2_events_fact"),
+    ("index", "idx_evidence_occurrences_timeline"),
+    ("trigger", "nodes_fts_insert"),
+    ("trigger", "nodes_fts_delete"),
+    ("trigger", "nodes_fts_update"),
+    ("trigger", "memory_facts_fts_insert"),
+    ("trigger", "memory_facts_fts_delete"),
+    ("trigger", "memory_facts_fts_update"),
+    ("trigger", "memory_v2_facts_no_update"),
+    ("trigger", "memory_v2_events_no_update"),
+    ("trigger", "memory_v2_assertions_no_update"),
+    ("trigger", "evidence_spans_immutable_update"),
+];
+
+pub const REQUIRED_SCHEMA_COLUMNS: &[(&str, &[&str])] = &[
+    (
+        "nodes",
+        &[
+            "id",
+            "kind",
+            "qualified_name",
+            "file_path",
+            "attrs_start_line",
+            "parent_id",
+        ],
+    ),
+    ("edges", &["source", "target", "kind", "line"]),
+    (
+        "memory_facts",
+        &[
+            "fact_id",
+            "content",
+            "category",
+            "trust_score",
+            "updated_at",
+        ],
+    ),
+    (
+        "memory_v2_facts",
+        &["fact_id", "owner_kind", "project_id", "created_at"],
+    ),
+    (
+        "memory_v2_lineage_events",
+        &["event_id", "fact_id", "owner_kind", "project_id"],
+    ),
+    (
+        "evidence_spans",
+        &[
+            "span_id",
+            "owner_digest",
+            "occurrence_set_id",
+            "anchor_id",
+            "record_digest",
+        ],
+    ),
+];
 
 /// Metadata stamp for the extraction generation currently published in the
 /// core graph tables.
@@ -271,6 +359,15 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
     super::memory_v2::install_v23_fresh_schema(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
+    conn.execute(
+        "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+        crate::db::engine::params![SCHEMA_IDENTITY_KEY, SCHEMA_IDENTITY],
+    )
+    .await
+    .map_err(|error| TraceDecayError::Database {
+        message: format!("failed to record final schema identity: {error}"),
+        operation: "create_schema".to_owned(),
+    })?;
     set_version(conn, SCHEMA_VERSION).await?;
     Ok(())
 }
@@ -301,15 +398,90 @@ async fn store_has_objects(conn: &impl QueryExecutor) -> Result<bool> {
         .is_some())
 }
 
-fn unsupported_schema_version(current: u32) -> TraceDecayError {
-    TraceDecayError::Database {
-        message: format!(
-            "database schema v{current} is not the v{SCHEMA_VERSION} shape this binary creates; \
-             this store was created by an incompatible binary and cannot be upgraded in place. \
-             Remove the store directory and let this binary create a fresh one."
-        ),
-        operation: "ensure_schema_current".to_string(),
+fn reset_required(actual: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::ResetRequired {
+        store: "opened TraceDecay database".to_owned(),
+        expected: format!("schema v{SCHEMA_VERSION} ({SCHEMA_IDENTITY})"),
+        actual: actual.into(),
     }
+}
+
+pub async fn validate_schema_identity_connection(conn: &impl QueryExecutor) -> Result<()> {
+    let current = get_version(conn).await?;
+    if current != SCHEMA_VERSION {
+        return Err(reset_required(format!("schema version v{current}")));
+    }
+    let mut identity_rows = conn
+        .query(
+            "SELECT value FROM metadata WHERE key = ?1",
+            crate::db::engine::params![SCHEMA_IDENTITY_KEY],
+        )
+        .await
+        .map_err(|_| reset_required("missing canonical metadata table"))?;
+    let identity = identity_rows
+        .next()
+        .await
+        .map_err(|_| reset_required("unreadable canonical schema identity"))?
+        .and_then(|row| row.get::<String>(0).ok());
+    if identity.as_deref() != Some(SCHEMA_IDENTITY) {
+        return Err(reset_required(format!(
+            "schema identity {}",
+            identity.as_deref().unwrap_or("<missing>")
+        )));
+    }
+    for (object_type, name) in REQUIRED_SCHEMA_OBJECTS {
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2 LIMIT 1",
+                crate::db::engine::params![*object_type, *name],
+            )
+            .await
+            .map_err(|_| reset_required(format!("unreadable {object_type} {name}")))?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| reset_required(format!("unreadable {object_type} {name}")))?
+            .is_none()
+        {
+            return Err(reset_required(format!("missing {object_type} {name}")));
+        }
+    }
+    for (table, required_columns) in REQUIRED_SCHEMA_COLUMNS {
+        let mut rows = conn
+            .query(&format!("PRAGMA table_info({table})"), ())
+            .await
+            .map_err(|_| reset_required(format!("unreadable table {table}")))?;
+        let mut columns = std::collections::BTreeSet::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| reset_required(format!("unreadable table {table}")))?
+        {
+            let column = row
+                .get::<String>(1)
+                .map_err(|_| reset_required(format!("invalid columns for table {table}")))?;
+            columns.insert(column);
+        }
+        if let Some(missing) = required_columns
+            .iter()
+            .find(|column| !columns.contains(**column))
+        {
+            return Err(reset_required(format!("missing column {table}.{missing}")));
+        }
+    }
+    let mut violations = conn
+        .query("PRAGMA foreign_key_check", ())
+        .await
+        .map_err(|_| reset_required("foreign-key references are unreadable"))?;
+    if violations
+        .next()
+        .await
+        .map_err(|_| reset_required("foreign-key references are unreadable"))?
+        .is_some()
+    {
+        return Err(reset_required("foreign-key reference violations"));
+    }
+    Ok(())
 }
 
 /// Verifies an opened store carries the schema this binary creates, creating it
@@ -325,12 +497,12 @@ pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()>
 pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Result<()> {
     let current = get_version(conn).await?;
     if current == SCHEMA_VERSION {
-        return Ok(());
+        return validate_schema_identity_connection(conn).await;
     }
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_connection(conn).await;
     }
-    Err(unsupported_schema_version(current))
+    Err(reset_required(format!("schema version v{current}")))
 }
 
 async fn create_memory_fact_relations_schema(conn: &impl Executor, operation: &str) -> Result<()> {

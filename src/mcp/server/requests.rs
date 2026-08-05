@@ -142,7 +142,7 @@ fn dispatch_deadline_horizon_micros(
 }
 
 /// Hand-maintained schema documentation for the `tracedecay://schema` resource.
-/// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
+/// Mirrors `db::schema::create_schema`. Update both together.
 const SCHEMA_MARKDOWN: &str = r"# tracedecay SQLite schema
 
 The active project database lives in the user-level TraceDecay profile store
@@ -655,7 +655,7 @@ impl McpServer {
     }
 
     /// Returns the `SQLite` schema documentation as a markdown resource.
-    /// Sourced from `src/db/migrations.rs::create_schema` — keep in sync.
+    /// Sourced from `db::schema::create_schema` — keep in sync.
     pub(crate) fn read_resource_schema(id: Value) -> JsonRpcResponse {
         Self::resource_contents(id, "tracedecay://schema", "text/markdown", SCHEMA_MARKDOWN)
     }

@@ -615,6 +615,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
         TraceDecayError::File { .. } => "file",
         TraceDecayError::Parse { .. } => "parse",
         TraceDecayError::Database { .. } | TraceDecayError::DatabaseOperation { .. } => "database",
+        TraceDecayError::ResetRequired { .. } => "reset_required",
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",
         TraceDecayError::ProjectRoute { .. } => "project_route",

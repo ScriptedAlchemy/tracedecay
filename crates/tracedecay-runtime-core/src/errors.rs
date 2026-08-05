@@ -25,6 +25,15 @@ pub enum TraceDecayError {
     #[error("database error: {message} (operation: {operation})")]
     Database { message: String, operation: String },
 
+    #[error(
+        "store reset required: {store} has {actual}; expected {expected}. Remove the store and let TraceDecay recreate it"
+    )]
+    ResetRequired {
+        store: String,
+        expected: String,
+        actual: String,
+    },
+
     /// Retained for source compatibility. New database failures use
     /// [`Self::Database`] so callers receive one stable public classification.
     #[deprecated(note = "use TraceDecayError::Database")]
@@ -142,7 +151,10 @@ impl TraceDecayError {
 
     #[allow(deprecated)]
     pub fn is_database_error(&self) -> bool {
-        matches!(self, Self::Database { .. } | Self::DatabaseOperation { .. })
+        matches!(
+            self,
+            Self::Database { .. } | Self::DatabaseOperation { .. } | Self::ResetRequired { .. }
+        )
     }
 
     pub fn hook_runtime(

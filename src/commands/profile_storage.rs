@@ -288,7 +288,6 @@ fn handle_profile_storage_export_profile(
                 created_at,
                 lifecycle,
             )
-            .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })
         },
     )?;
     println!(
@@ -305,8 +304,7 @@ fn handle_profile_storage_rehearse_profile_restore(
     let manifest = tracedecay::global_db::profile_archive::rehearse_final_profile_restore(
         Path::new(&archive),
         Path::new(&restore),
-    )
-    .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+    )?;
     println!(
         "complete profile archive rehearsed: {} entries restored to {}",
         manifest.entries.len(),

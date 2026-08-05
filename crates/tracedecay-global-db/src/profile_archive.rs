@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::DirectorySyncPolicy;
 
+mod validation;
+use validation::validate_exact_final_databases;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RehearsalPublicationFault {
     None,
@@ -113,6 +116,24 @@ pub fn export_final_profile(
     archive_id: &str,
     created_at: i64,
     lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
+) -> tracedecay_runtime_core::errors::Result<PathBuf> {
+    validate_exact_final_databases(profile_root)?;
+    export_final_profile_inner(
+        profile_root,
+        archive_parent,
+        archive_id,
+        created_at,
+        lifecycle,
+    )
+    .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Config { message })
+}
+
+fn export_final_profile_inner(
+    profile_root: &Path,
+    archive_parent: &Path,
+    archive_id: &str,
+    created_at: i64,
+    lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> Result<PathBuf, String> {
     if archive_id.is_empty() || created_at <= 0 {
         return Err("archive identity and timestamp must be non-empty".to_owned());
@@ -124,7 +145,6 @@ pub fn export_final_profile(
             "complete profile archive requires the exact exclusive profile lease".to_owned(),
         );
     }
-    validate_exact_final_databases(&source)?;
     fs::create_dir_all(archive_parent).map_err(|error| {
         format!(
             "create archive parent '{}': {error}",
@@ -165,62 +185,17 @@ pub fn export_final_profile(
     Ok(final_root)
 }
 
-fn validate_exact_final_databases(profile_root: &Path) -> Result<(), String> {
-    let mut pending = vec![profile_root.to_path_buf()];
-    let mut found = false;
-    while let Some(path) = pending.pop() {
-        let mut entries = fs::read_dir(&path)
-            .map_err(|error| format!("read final profile directory '{}': {error}", path.display()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("read final profile entry: {error}"))?;
-        entries.sort_by_key(fs::DirEntry::file_name);
-        for entry in entries {
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).map_err(|error| {
-                format!("inspect final profile entry '{}': {error}", path.display())
-            })?;
-            if metadata.file_type().is_symlink() {
-                return Err(format!(
-                    "final profile archive source contains a symlink: '{}'",
-                    path.display()
-                ));
-            }
-            if metadata.is_dir() {
-                pending.push(path);
-                continue;
-            }
-            if metadata.is_file() && path.extension().is_some_and(|extension| extension == "db") {
-                found = true;
-                validate_exact_final_database(&path)?;
-            }
-        }
-    }
-    if !found {
-        return Err("final profile contains no TraceDecay databases".to_owned());
-    }
-    Ok(())
-}
-
-fn validate_exact_final_database(path: &Path) -> Result<(), String> {
-    let connection = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| format!("open final database '{}': {error}", path.display()))?;
-    let version = connection
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-        .map_err(|error| format!("read final database schema '{}': {error}", path.display()))?;
-    if version != tracedecay_runtime_core::db::schema::SCHEMA_VERSION {
-        return Err(format!(
-            "ResetRequired: database '{}' has schema v{version}; expected exact final schema v{}",
-            path.display(),
-            tracedecay_runtime_core::db::schema::SCHEMA_VERSION
-        ));
-    }
-    Ok(())
-}
-
 pub fn rehearse_final_profile_restore(
+    archive_root: &Path,
+    restore_root: &Path,
+) -> tracedecay_runtime_core::errors::Result<FinalProfileArchiveManifest> {
+    let manifest = rehearse_final_profile_restore_inner(archive_root, restore_root)
+        .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Config { message })?;
+    validate_exact_final_databases(restore_root)?;
+    Ok(manifest)
+}
+
+fn rehearse_final_profile_restore_inner(
     archive_root: &Path,
     restore_root: &Path,
 ) -> Result<FinalProfileArchiveManifest, String> {
@@ -643,7 +618,6 @@ fn verify_restored_rehearsal(
             ));
         }
     }
-    validate_exact_final_databases(restored_profile_root)?;
     Ok(())
 }
 

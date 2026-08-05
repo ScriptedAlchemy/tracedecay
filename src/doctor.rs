@@ -766,6 +766,7 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
                 || crate::daemon::error_message_is_read_deadline(message)
                 || message.contains(RUNTIME_TELEMETRY_PENDING)
         }
+        crate::errors::TraceDecayError::ResetRequired { .. } => false,
         crate::errors::TraceDecayError::ProjectRoute { retryable, .. } => *retryable,
         crate::errors::TraceDecayError::Automation(error) => {
             tracedecay_automation::backend::classify_agent_task_error_message(&error.to_string())

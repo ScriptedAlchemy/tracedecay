@@ -20,7 +20,7 @@
 //!
 //! Branch databases inherit `PRAGMA auto_vacuum = INCREMENTAL` from the
 //! ancestor they were cloned from (every fresh store is created with it, see
-//! `src/db/migrations.rs::configure_fresh_auto_vacuum`), so `incremental_vacuum`
+//! `db::schema::configure_fresh_auto_vacuum`), so `incremental_vacuum`
 //! reclaims pages here exactly as it does on the live graph store. A branch
 //! database predating that migration carries `auto_vacuum = NONE`, which makes
 //! `incremental_vacuum` a *silent no-op* -- reclaiming its free pages would

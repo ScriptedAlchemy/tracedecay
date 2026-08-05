@@ -150,16 +150,44 @@ async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy(
         let error = ensure_schema_current_connection(&conn)
             .await
             .expect_err("a store at another version must be refused");
-        let message = error.to_string();
         assert!(
-            message.contains("created by an incompatible binary"),
-            "v{stamped} refusal must name the cause: {message}"
-        );
-        assert!(
-            message.contains("Remove the store directory"),
-            "v{stamped} refusal must name the fresh-start remedy: {message}"
+            matches!(error, crate::errors::TraceDecayError::ResetRequired { .. }),
+            "v{stamped} must return typed ResetRequired: {error}"
         );
     }
+}
+
+#[tokio::test]
+async fn stamped_empty_partial_and_foreign_schemas_require_reset() {
+    let (empty, _empty_dir) = create_raw_db().await;
+    set_user_version(&empty, SCHEMA_VERSION).await;
+    assert!(matches!(
+        ensure_schema_current_connection(&empty).await,
+        Err(crate::errors::TraceDecayError::ResetRequired { .. })
+    ));
+
+    let (partial, _partial_dir) = create_schema_db().await;
+    partial
+        .execute("DROP INDEX idx_edges_unique", ())
+        .await
+        .unwrap();
+    assert!(matches!(
+        ensure_schema_current_connection(&partial).await,
+        Err(crate::errors::TraceDecayError::ResetRequired { .. })
+    ));
+
+    let (foreign, _foreign_dir) = create_schema_db().await;
+    foreign
+        .execute(
+            "UPDATE metadata SET value = 'foreign.schema' WHERE key = ?1",
+            crate::db::engine::params![super::SCHEMA_IDENTITY_KEY],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        ensure_schema_current_connection(&foreign).await,
+        Err(crate::errors::TraceDecayError::ResetRequired { .. })
+    ));
 }
 
 /// Creation is atomic: an interrupted create leaves neither DDL nor a version

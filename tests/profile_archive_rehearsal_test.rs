@@ -17,14 +17,14 @@ struct FinalProfileFixture {
     source_store: PathBuf,
 }
 
-fn seed_final_database(path: &Path) {
-    let connection = rusqlite::Connection::open(path).unwrap();
-    connection
-        .pragma_update(None, "user_version", tracedecay::db::schema::SCHEMA_VERSION)
+async fn seed_final_database(path: &Path) {
+    let connection = tracedecay::db::engine::TestConnection::open(path);
+    tracedecay::db::schema::create_schema_connection(&connection)
+        .await
         .unwrap();
 }
 
-fn seed_final_profile(temp: &TempDir) -> FinalProfileFixture {
+async fn seed_final_profile(temp: &TempDir) -> FinalProfileFixture {
     let profile = temp.path().join("final-profile");
     let project = temp.path().join("final-project");
     let project_id = "project.final";
@@ -53,7 +53,7 @@ fn seed_final_profile(temp: &TempDir) -> FinalProfileFixture {
     ] {
         let path = profile.join(name);
         if name.ends_with(".db") {
-            seed_final_database(&path);
+            seed_final_database(&path).await;
         } else {
             fs::write(path, format!("final fixture: {name}")).unwrap();
         }
@@ -68,7 +68,7 @@ fn seed_final_profile(temp: &TempDir) -> FinalProfileFixture {
     ] {
         let path = source_store.join(name);
         if name.ends_with(".db") {
-            seed_final_database(&path);
+            seed_final_database(&path).await;
         } else {
             fs::write(path, contents).unwrap();
         }
@@ -116,10 +116,10 @@ fn read_bytes(root: &Path, relative: &str) -> Vec<u8> {
     fs::read(root.join(relative)).unwrap()
 }
 
-#[test]
-fn final_profile_rehearsal_rebinds_store_and_preserves_identity() {
+#[tokio::test]
+async fn final_profile_rehearsal_rebinds_store_and_preserves_identity() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_final_profile(&temp);
+    let fixture = seed_final_profile(&temp).await;
     let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let expected_profile_identity = read_bytes(&fixture.profile, "profile-identity.json");
@@ -156,17 +156,21 @@ fn final_profile_rehearsal_rebinds_store_and_preserves_identity() {
     assert_eq!(read_bytes(&restore, "config.toml"), expected_config);
 }
 
-#[test]
-fn final_profile_rehearsal_recovers_owned_interrupted_staging() {
+#[tokio::test]
+async fn final_profile_rehearsal_recovers_owned_interrupted_staging() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_final_profile(&temp);
+    let fixture = seed_final_profile(&temp).await;
     let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let staging = temp.path().join(".rehearsed-profile.tracedecay-rehearsal");
     set_rehearsal_publication_fault_for_test("before_rename");
 
     let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
-    assert!(error.contains("injected rehearsal publication fault"));
+    assert!(
+        error
+            .to_string()
+            .contains("injected rehearsal publication fault")
+    );
     assert!(staging.join(".tracedecay-profile-rehearsal.json").is_file());
 
     rehearse_final_profile_restore(&archive, &restore).unwrap();
@@ -175,10 +179,10 @@ fn final_profile_rehearsal_recovers_owned_interrupted_staging() {
     assert!(!staging.exists());
 }
 
-#[test]
-fn final_profile_rehearsal_rejects_missing_store_manifest() {
+#[tokio::test]
+async fn final_profile_rehearsal_rejects_missing_store_manifest() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_final_profile(&temp);
+    let fixture = seed_final_profile(&temp).await;
     let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let manifest_entry = format!(
@@ -204,22 +208,28 @@ fn final_profile_rehearsal_rejects_missing_store_manifest() {
 
     let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
     assert!(
-        error.contains("missing required store_manifest.json"),
+        error
+            .to_string()
+            .contains("missing required store_manifest.json"),
         "unexpected error: {error}"
     );
     assert!(!restore.exists());
 }
 
-#[test]
-fn final_profile_rehearsal_resumes_after_rename_before_marker_removal() {
+#[tokio::test]
+async fn final_profile_rehearsal_resumes_after_rename_before_marker_removal() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_final_profile(&temp);
+    let fixture = seed_final_profile(&temp).await;
     let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
 
     let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
-    assert!(error.contains("injected rehearsal publication fault"));
+    assert!(
+        error
+            .to_string()
+            .contains("injected rehearsal publication fault")
+    );
     assert!(restore.join(".tracedecay-profile-rehearsal.json").is_file());
 
     set_rehearsal_publication_fault_for_test("");
@@ -228,10 +238,10 @@ fn final_profile_rehearsal_resumes_after_rename_before_marker_removal() {
     assert!(!restore.join(".tracedecay-profile-rehearsal.json").exists());
 }
 
-#[test]
-fn marked_publication_recovery_rejects_tampered_durable_bytes() {
+#[tokio::test]
+async fn marked_publication_recovery_rejects_tampered_durable_bytes() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_final_profile(&temp);
+    let fixture = seed_final_profile(&temp).await;
     let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let marker = restore.join(".tracedecay-profile-rehearsal.json");
@@ -247,7 +257,7 @@ fn marked_publication_recovery_rejects_tampered_durable_bytes() {
     let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
 
     assert!(
-        error.contains("checksum mismatch"),
+        error.to_string().contains("checksum mismatch"),
         "unexpected error: {error}"
     );
     assert_eq!(fs::read(&marker).unwrap(), expected_marker);
@@ -257,10 +267,10 @@ fn marked_publication_recovery_rejects_tampered_durable_bytes() {
     );
 }
 
-#[test]
-fn marked_publication_recovery_rejects_partially_durable_restore() {
+#[tokio::test]
+async fn marked_publication_recovery_rejects_partially_durable_restore() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_final_profile(&temp);
+    let fixture = seed_final_profile(&temp).await;
     let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let marker = restore.join(".tracedecay-profile-rehearsal.json");
@@ -272,17 +282,17 @@ fn marked_publication_recovery_rejects_partially_durable_restore() {
     let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
 
     assert!(
-        error.contains("user-sessions.db"),
+        error.to_string().contains("user-sessions.db"),
         "unexpected error: {error}"
     );
     assert_eq!(fs::read(&marker).unwrap(), expected_marker);
     assert!(!restore.join("user-sessions.db").exists());
 }
 
-#[test]
-fn marked_publication_recovery_rejects_tampered_rebound_manifest() {
+#[tokio::test]
+async fn marked_publication_recovery_rejects_tampered_rebound_manifest() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_final_profile(&temp);
+    let fixture = seed_final_profile(&temp).await;
     let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let marker = restore.join(".tracedecay-profile-rehearsal.json");
@@ -300,7 +310,7 @@ fn marked_publication_recovery_rejects_tampered_rebound_manifest() {
     let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
 
     assert!(
-        error.contains("rebound archive manifest"),
+        error.to_string().contains("rebound archive manifest"),
         "unexpected error: {error}"
     );
     assert_eq!(fs::read(&marker).unwrap(), expected_marker);
@@ -310,10 +320,10 @@ fn marked_publication_recovery_rejects_tampered_rebound_manifest() {
     );
 }
 
-#[test]
-fn final_profile_rehearsal_rejects_same_id_from_another_archive_root() {
+#[tokio::test]
+async fn final_profile_rehearsal_rejects_same_id_from_another_archive_root() {
     let original_temp = TempDir::new().unwrap();
-    let original_fixture = seed_final_profile(&original_temp);
+    let original_fixture = seed_final_profile(&original_temp).await;
     let original_archive = create_archive(&original_temp, &original_fixture);
     let restore = original_temp.path().join("rehearsed-profile");
     let marker_path = restore.join(".tracedecay-profile-rehearsal.json");
@@ -324,7 +334,7 @@ fn final_profile_rehearsal_rejects_same_id_from_another_archive_root() {
     let expected_marker = fs::read(&marker_path).unwrap();
 
     let foreign_temp = TempDir::new().unwrap();
-    let foreign_fixture = seed_final_profile(&foreign_temp);
+    let foreign_fixture = seed_final_profile(&foreign_temp).await;
     fs::write(
         foreign_fixture.profile.join("profile-identity.json"),
         b"foreign profile identity",
@@ -335,7 +345,9 @@ fn final_profile_rehearsal_rejects_same_id_from_another_archive_root() {
     let error = rehearse_final_profile_restore(&foreign_archive, &restore).unwrap_err();
 
     assert!(
-        error.contains("belongs to another restore attempt"),
+        error
+            .to_string()
+            .contains("belongs to another restore attempt"),
         "unexpected error: {error}"
     );
     assert_eq!(fs::read(&marker_path).unwrap(), expected_marker);

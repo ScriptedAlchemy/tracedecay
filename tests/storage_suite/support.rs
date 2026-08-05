@@ -19,22 +19,13 @@ use fs2::FileExt;
 /// its own process, where this lock is uncontended.
 pub static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// FNV-1a hash of everything that can change a template's contents: the
-/// schema-defining sources, the template name, and any builder-specific
-/// fingerprint supplied by the caller (for templates whose contents also
-/// depend on sources outside `tracedecay-runtime-core`'s `db` module, such as
-/// fixture SQL defined in a test file).
+/// FNV-1a hash of the public schema identity, template name, and any
+/// builder-specific fingerprint supplied by the caller.
 fn template_hash(name: &str, builder_fingerprint: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
-    for byte in include_bytes!("../../crates/tracedecay-runtime-core/src/db/migrations.rs")
+    for byte in tracedecay::db::schema::SCHEMA_VERSION
+        .to_le_bytes()
         .iter()
-        .chain(include_bytes!(
-            "../../crates/tracedecay-runtime-core/src/db/connection.rs"
-        ))
-        .chain(include_bytes!(
-            "../../crates/tracedecay-runtime-core/src/db/engine/test_support.rs"
-        ))
-        .chain(include_bytes!("../common/mod.rs"))
         .chain(name.as_bytes())
         .chain(builder_fingerprint)
     {
@@ -60,12 +51,9 @@ fn template_cache_exists(path: &Path) -> bool {
 /// Returns the path of the cached template database named `name`, building
 /// it first if this machine has no template for the current schema revision.
 ///
-/// `builder_fingerprint` must cover every input to `build` that lives
-/// outside the `tracedecay-runtime-core` `db` module — typically
-/// `include_bytes!` of the defining test file —
-/// so that editing the fixture-building code invalidates the cached
-/// template. Pass `&[]` when `build` depends only on the production schema
-/// code that `template_hash` already covers.
+/// `builder_fingerprint` must cover fixture inputs beyond the public production
+/// schema identity. Pass `&[]` when the builder only creates the canonical
+/// production schema.
 ///
 /// `build` must write a fully checkpointed database (no live WAL) at the
 /// path it is given. Concurrent test processes coordinate through an
