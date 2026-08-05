@@ -223,6 +223,8 @@ pub(super) fn diagnostic_refresh_is_partial(failure_class: &str) -> bool {
             | "document-content-stale"
             | "managed-diagnostic-content-identity-unavailable"
             | "managed-diagnostic-content-stale"
+            | "managed-diagnostic-generation-stale"
+            | "workspace-code-generation-stale"
             | "workspace-code-generation-warming"
     )
 }

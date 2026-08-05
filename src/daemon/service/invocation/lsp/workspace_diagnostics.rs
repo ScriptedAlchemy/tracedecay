@@ -16,35 +16,29 @@ pub(super) struct PublishedCodeIndexWorkspaceDocuments {
     registry: CodeIndexSchedulerRegistryV1,
     scope: ResolvedScope,
     project_root: Option<PathBuf>,
-    mounted: bool,
 }
 
 impl PublishedCodeIndexWorkspaceDocuments {
-    pub(super) async fn mount(
+    pub(super) fn new(
         registry: CodeIndexSchedulerRegistryV1,
         scope: ResolvedScope,
         project_root: PathBuf,
     ) -> Self {
         let project_root = project_root.canonicalize().ok();
-        let mounted = match project_root.as_ref() {
-            Some(project_root) => registry
-                .latest_complete_ready_decoded_for_root_scope(project_root, &scope)
-                .await
-                .is_some(),
-            None => false,
-        };
         Self {
             registry,
             scope,
             project_root,
-            mounted,
         }
     }
 }
 
 impl LspWorkspaceDocumentIndexPort for PublishedCodeIndexWorkspaceDocuments {
     fn is_mounted(&self) -> bool {
-        self.mounted
+        self.project_root.as_ref().is_some_and(|project_root| {
+            self.registry
+                .has_current_ready_decoded_for_root_scope(project_root, &self.scope)
+        })
     }
 
     fn indexed_documents(
@@ -55,13 +49,12 @@ impl LspWorkspaceDocumentIndexPort for PublishedCodeIndexWorkspaceDocuments {
         let registry = self.registry.clone();
         let scope = self.scope.clone();
         let project_root = self.project_root.clone();
-        let mounted = self.mounted;
         Box::pin(async move {
-            if !mounted {
+            let Some(project_root) = project_root else {
                 return Err(LspRuntimeFailure::new(
                     "workspace-code-generation-unavailable",
                 ));
-            }
+            };
             if root.scope_digest() != Some(&scope.scope_digest) {
                 return Err(LspRuntimeFailure::new("workspace-root-scope-mismatch"));
             }
@@ -81,7 +74,7 @@ impl LspWorkspaceDocumentIndexPort for PublishedCodeIndexWorkspaceDocuments {
                 .map_err(|()| LspRuntimeFailure::new("workspace-root-uri-invalid"))?
                 .canonicalize()
                 .map_err(|_| LspRuntimeFailure::new("workspace-root-unavailable"))?;
-            if project_root.as_ref() != Some(&root_path) {
+            if project_root != root_path {
                 return Err(LspRuntimeFailure::new("workspace-root-scope-mismatch"));
             }
             let latest = registry

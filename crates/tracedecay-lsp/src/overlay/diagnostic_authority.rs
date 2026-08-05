@@ -1,4 +1,4 @@
-use tracedecay_domain::{ContentDigest, ManifestDigest};
+use tracedecay_domain::{CodeGenerationId, ContentDigest, ManifestDigest};
 
 use crate::diagnostics::GatewayDiagnostic;
 use crate::gateway::{AdmittedRoot, LspRuntimeFailure, LspRuntimeFuture};
@@ -16,11 +16,15 @@ pub struct CanonicalDiagnosticRefreshRequest {
     pub overlay: Option<OverlaySnapshot>,
     pub source_generation: Option<u64>,
     pub expected_content_digest: Option<ContentDigest>,
+    pub expected_code_generation_id: Option<CodeGenerationId>,
+    pub expected_snapshot_digest: Option<ManifestDigest>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagedDiagnosticSnapshot {
     pub generation: u64,
+    pub code_generation_id: CodeGenerationId,
+    pub snapshot_digest: ManifestDigest,
     pub authority_digest: ManifestDigest,
     pub diagnostics: Vec<GatewayDiagnostic>,
 }
