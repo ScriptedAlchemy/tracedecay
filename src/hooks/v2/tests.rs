@@ -707,6 +707,87 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
 }
 
 #[test]
+fn cursor_saved_edits_distinguish_files_within_one_generation() {
+    let first = native_material(
+        r#"{
+                "conversation_id": "conversation-29",
+                "generation_id": "generation-31",
+                "session_id": "session-29",
+                "file_path": "/project/src/first.rs",
+                "edits": [{"old_string": "before", "new_string": "after"}]
+            }"#,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(43),
+    )
+    .unwrap();
+    let second = native_material(
+        r#"{
+                "conversation_id": "conversation-29",
+                "generation_id": "generation-31",
+                "session_id": "session-29",
+                "file_path": "/project/src/second.rs",
+                "edits": [{"old_string": "before", "new_string": "after"}]
+            }"#,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(43),
+    )
+    .unwrap();
+
+    assert_ne!(first.event_id, second.event_id);
+    assert_eq!(first.file_id, Some(hash16(b"/project/src/first.rs")));
+    assert_eq!(second.file_id, Some(hash16(b"/project/src/second.rs")));
+}
+
+#[test]
+fn timeout_retry_reuses_the_spooled_envelope_bytes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let host = HookHostV1::CursorDesktop;
+    let binding = HookScopeBindingV1 {
+        host,
+        project_id: [1; 16],
+        repository_id: [2; 16],
+        worktree_id: [3; 16],
+        worktree_epoch: 4,
+        binding_token: [5; 32],
+        capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
+            family: tracedecay_hooks::HookEventFamily::SavedEdit,
+            support: tracedecay_hooks::stock_event_support(
+                host,
+                tracedecay_hooks::HookEventFamily::SavedEdit,
+            ),
+        }],
+    };
+    let first = HookEventEnvelopeV2 {
+        schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+        event_id: [6; 16],
+        producer: host,
+        protected_session_id: [7; 32],
+        project_id: binding.project_id,
+        repository_id: binding.repository_id,
+        worktree_id: binding.worktree_id,
+        worktree_epoch: binding.worktree_epoch,
+        binding_token: binding.binding_token,
+        ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+        observed_at: UtcMicros(10),
+        event: tracedecay_hooks::HookEventV2::SavedEdit {
+            file_id: [8; 16],
+            changed_range_count: 1,
+        },
+    };
+    assert_eq!(
+        append_for_replay(temporary.path(), host, &first, &binding, UtcMicros(10)),
+        SpoolAppendOutcomeV1::Accepted,
+    );
+
+    let mut retry = first.clone();
+    retry.observed_at = UtcMicros(99);
+    assert_eq!(
+        replay_envelope_if_pending(temporary.path(), host, &binding, &retry, UtcMicros(99)),
+        Some(first),
+    );
+}
+
+#[test]
 fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
     let fixture =
         include_str!("../../../tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json")

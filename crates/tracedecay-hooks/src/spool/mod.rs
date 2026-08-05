@@ -222,6 +222,16 @@ impl HookSpoolV1 {
         self.lease
     }
 
+    /// Return the durable pending envelope for an exact provider event ID.
+    /// Callers use this only to preserve a prior transport attempt's envelope
+    /// on retry; it does not grant replay or acknowledgement authority.
+    pub fn pending_envelope(&self, event_id: [u8; 16]) -> Option<HookEventEnvelopeV2> {
+        self.pending
+            .iter()
+            .find(|record| record.envelope.event_id == event_id)
+            .map(|record| record.envelope.clone())
+    }
+
     /// Append one validated envelope. An exact pending `event_id` duplicate
     /// returns its existing record; reusing that ID for a different envelope
     /// is rejected. The append intent is persisted before frame publication,
