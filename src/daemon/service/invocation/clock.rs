@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::clock::now_micros;
+use tracedecay_application::clock::now_micros as application_now_micros;
 use tracedecay_domain::UtcMicros;
 
 pub(super) fn now_millis() -> u64 {
@@ -14,4 +14,8 @@ pub(super) fn now_millis() -> u64 {
 
 pub(super) fn current_micros() -> UtcMicros {
     now_micros()
+}
+
+pub(super) fn now_micros() -> UtcMicros {
+    application_now_micros()
 }
