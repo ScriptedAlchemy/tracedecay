@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-tool-catalog"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "Inert capability catalog contracts for TraceDecay V2"

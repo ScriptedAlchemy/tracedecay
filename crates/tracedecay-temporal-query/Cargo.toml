@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-temporal-query"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay temporal retrieval and context assembly kernel"

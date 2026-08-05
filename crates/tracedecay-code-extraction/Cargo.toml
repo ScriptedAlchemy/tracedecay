@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-code-extraction"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay tree-sitter language extraction leaf"

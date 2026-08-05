@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-semantic"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay semantic code runtime: artifact store, model lifecycle, and embedding projection"

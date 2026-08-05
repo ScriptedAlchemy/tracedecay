@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-sessions"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay session contracts, provider-neutral ports, and the session runtime"
