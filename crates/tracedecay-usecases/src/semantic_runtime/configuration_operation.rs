@@ -27,6 +27,8 @@ use tracedecay_search_eval::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,
 };
 
+use super::accepted_profile_authority::SemanticEvaluationPublicationIdentityV1;
+
 /// Unevaluated fusion material. No evaluation-result anchor is accepted from
 /// the caller; production derives it from the genuine direct-evaluator PASS.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +155,15 @@ impl SemanticEvaluationAuthorityPublicationV1 {
                 self.report,
                 self.accepted_profile,
                 expected.runtime.clone(),
+                SemanticEvaluationPublicationIdentityV1 {
+                    scope_digest: expected.scope.scope_digest.clone(),
+                    code_generation: expected.code_generation.clone(),
+                    code_source_manifest_digest: expected.code_source_manifest_digest.clone(),
+                    code_snapshot_digest: expected.code_snapshot_digest.clone(),
+                    semantic_source_generation: expected.semantic_source_generation.clone(),
+                    vector_state_revision: expected.vector_state_revision,
+                    vector_generation_id: expected.vector_generation_id.clone(),
+                },
                 expected.code_snapshot_digest.clone(),
             )
             .await
