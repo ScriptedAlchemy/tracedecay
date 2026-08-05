@@ -60,14 +60,9 @@ impl AgentIntegration for CodexIntegration {
 
     fn preflight_non_interactive_install(
         &self,
-        _ctx: &InstallContext,
+        ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
-        Ok(NonInteractiveInstallOutcome::DeferredUserAction(
-            DeferredUserAction {
-                remediation: "Codex activates plugins through its native cache. Run `codex plugin add tracedecay@personal` after TraceDecay stages the source package.".to_string(),
-                staged_paths: Vec::new(),
-            },
-        ))
+        codex_non_interactive_install_state(&ctx.home, Vec::new())
     }
 
     fn interactive_activation_guidance(&self) -> Option<String> {
@@ -80,19 +75,17 @@ impl AgentIntegration for CodexIntegration {
         &self,
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
+        if codex_plugin_is_natively_active(&ctx.home)? {
+            return Ok(NonInteractiveInstallOutcome::Ready);
+        }
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        let marketplace_name = codex_cached_marketplace_name(&ctx.home);
-        Ok(NonInteractiveInstallOutcome::DeferredUserAction(
-            DeferredUserAction {
-                remediation: format!(
-                    "Codex plugin source is staged. Run `codex plugin add tracedecay@{marketplace_name}`, then re-trust any changed hooks."
-                ),
-                staged_paths: vec![
-                    codex_plugin_manifest_path(&ctx.home),
-                    codex_personal_marketplace_path(&ctx.home),
-                ],
-            },
-        ))
+        codex_non_interactive_install_state(
+            &ctx.home,
+            vec![
+                codex_plugin_manifest_path(&ctx.home),
+                codex_personal_marketplace_path(&ctx.home),
+            ],
+        )
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
@@ -119,6 +112,19 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
+        if !codex_plugin_is_natively_active(&ctx.home)? {
+            let install_dir = codex_plugin_install_dir(&ctx.home);
+            if install_dir.join(".codex-plugin/plugin.json").is_file()
+                && codex_plugin_dir_is_tracedecay(&install_dir)
+            {
+                remove_codex_plugin_install(&install_dir)?;
+            }
+            remove_codex_marketplace_entry_at(
+                &codex_personal_marketplace_path(&ctx.home),
+                "personal",
+            )?;
+            return Ok(());
+        }
         let marketplace_name = codex_cached_marketplace_name(&ctx.home);
         Err(TraceDecayError::Config {
             message: format!(
@@ -334,6 +340,9 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        if codex_plugin_is_natively_active(&ctx.home)? {
+            return Ok(());
+        }
         let marketplace_name = codex_cached_marketplace_name(&ctx.home);
         Err(TraceDecayError::Config {
             message: format!(
@@ -343,6 +352,9 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        if !codex_plugin_is_natively_active(&ctx.home)? {
+            return Ok(());
+        }
         let marketplace_name = codex_cached_marketplace_name(&ctx.home);
         Err(TraceDecayError::Config {
             message: format!(
@@ -1000,6 +1012,33 @@ fn codex_plugin_activation_state(home: &Path) -> std::result::Result<bool, ()> {
                 .unwrap_or(false)
     });
     Ok(enabled && !codex_plugin_cached_install_dirs(home).is_empty())
+}
+
+fn codex_plugin_is_natively_active(home: &Path) -> Result<bool> {
+    codex_plugin_activation_state(home).map_err(|()| TraceDecayError::Config {
+        message: format!(
+            "could not read Codex native plugin activation state at {}",
+            codex_config_path(home).display()
+        ),
+    })
+}
+
+fn codex_non_interactive_install_state(
+    home: &Path,
+    staged_paths: Vec<PathBuf>,
+) -> Result<NonInteractiveInstallOutcome> {
+    if codex_plugin_is_natively_active(home)? {
+        return Ok(NonInteractiveInstallOutcome::Ready);
+    }
+    let marketplace_name = codex_cached_marketplace_name(home);
+    Ok(NonInteractiveInstallOutcome::DeferredUserAction(
+        DeferredUserAction {
+            remediation: format!(
+                "Codex activates plugins through its native cache. Run `codex plugin add tracedecay@{marketplace_name}` after TraceDecay stages the source package."
+            ),
+            staged_paths,
+        },
+    ))
 }
 
 fn codex_hook_state_table_is_explicit(contents: &str) -> bool {

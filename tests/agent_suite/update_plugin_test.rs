@@ -247,8 +247,8 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
 
     // An unmanaged user file inside the plugin dir must survive the refresh.
     std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
-    // An unreceipted historical skill directory must be preserved. Fresh V2
-    // installs do not assume ownership of prior source trees.
+    // A retired TraceDecay-authored skill must be removed while a same-name
+    // user-authored workflow stays untouched.
     std::fs::create_dir_all(plugin_dir.join("skills/reading-code-cheaply")).unwrap();
     std::fs::write(
         plugin_dir.join("skills/reading-code-cheaply/SKILL.md"),
@@ -273,10 +273,10 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     assert_eq!(bytes(&user_mcp), user_mcp_before);
     assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
     assert!(
-        plugin_dir
+        !plugin_dir
             .join("skills/reading-code-cheaply/SKILL.md")
             .exists(),
-        "update-plugin must preserve unreceipted historical Cursor skills"
+        "update-plugin must remove retired TraceDecay-authored Cursor skills"
     );
     assert!(
         plugin_dir.join("skills/project-status/SKILL.md").exists(),

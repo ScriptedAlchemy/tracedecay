@@ -562,7 +562,7 @@ fn component_assets(
             .into_iter()
             .map(|(relative, body)| {
                 (
-                    format!(".kimi-code/plugins/managed/tracedecay/{relative}"),
+                    format!("{}/{relative}", super::kimi::KIMI_STAGED_PLUGIN_RELATIVE),
                     body.into_bytes(),
                 )
             })
@@ -829,7 +829,10 @@ mod tests {
 
         assert_eq!(bundle.contents.len(), rendered.len());
         for (relative, body) in rendered {
-            let path = format!(".kimi-code/plugins/managed/tracedecay/{relative}");
+            let path = format!(
+                "{}/{relative}",
+                super::super::kimi::KIMI_STAGED_PLUGIN_RELATIVE
+            );
             let content = bundle
                 .contents
                 .iter()

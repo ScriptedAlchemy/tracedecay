@@ -201,9 +201,21 @@ TraceDecay works as an MCP (Model Context Protocol) server. AI coding agents con
 tracedecay install
 ```
 
-This is the default. It registers the MCP server in `~/.claude/settings.json`, grants tool permissions so Claude doesn't have to ask you every time, installs lifecycle hooks, and adds prompt rules to `~/.claude/CLAUDE.md` that tell Claude to prefer tracedecay tools (including the CLI fallback for MCP transport failures). The hooks submit bounded native lifecycle envelopes only: `SessionStart`, `Stop`, and saved-edit `PostToolUse` (`Edit|MultiEdit|Write|NotebookEdit`). The daemon owns all later capture, indexing, staleness checks, compaction, and advisory work; a hook never routes tools, reads a store, or starts a model.
-
-The install also ships three read-only custom subagents into `~/.claude/agents/` — `code-explorer`, `code-health-auditor`, and `session-historian` — the same tracedecay subagents the Cursor plugin bundles. They are only replaced or removed when the file is tracedecay-managed; a same-named agent you authored yourself is left untouched. `tracedecay update-plugin` refreshes installed copies.
+This stages the Claude plugin source at
+`~/.claude/plugins/marketplaces/tracedecay`. Claude Code owns marketplace
+registration, enabled state, cache, hook trust, and permissions: run the
+printed `claude plugin marketplace add …` and `claude plugin install
+tracedecay@tracedecay` commands, then rerun TraceDecay to record the staged
+source. The plugin bundles the MCP server, lifecycle hooks, subagents, skills,
+and slash commands. `tracedecay update-plugin --agent claude` refreshes only
+the source and asks Claude Code to perform its native update. To uninstall,
+remove the plugin with Claude Code first, then rerun TraceDecay to clean the
+staged source. TraceDecay does not migrate or rewrite Claude's host config.
+The installed hooks submit bounded native lifecycle envelopes only:
+`SessionStart`, `Stop`, and saved-edit `PostToolUse`
+(`Edit|MultiEdit|Write|NotebookEdit`). The daemon owns all later capture,
+indexing, staleness checks, compaction, and advisory work; a hook never routes
+tools, reads a store, or starts a model.
 
 ### Other agents
 
@@ -231,8 +243,8 @@ Each agent gets the configuration its host supports: MCP registration or native 
 
 - Hermes installs one native user plugin through Hermes' plugin API.
 - Cursor installs a local plugin in `~/.cursor/plugins/local/tracedecay` that bundles MCP, hooks, and the tracedecay rule.
-- Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay writes the source bundle and marketplace entry, then `codex plugin add tracedecay@personal` installs Codex's cache from that source. The plugin owns MCP, hooks, and skills. Codex global install does not write `~/.codex/AGENTS.md` or `~/.codex/hooks.json`.
-- Kimi Code CLI installs a native plugin in `~/.kimi-code/plugins/managed/tracedecay` (registered in `~/.kimi-code/plugins/installed.json`; `$KIMI_CODE_HOME` overrides the home) that bundles MCP, skills, and commands; `--local` writes `<project>/.kimi-code/mcp.json` and project `AGENTS.md` rules. Older `~/.kimi` installs are no longer written — uninstall removes them as a one-time cleanup.
+- Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then `codex plugin add tracedecay@personal` installs Codex's cache from that source. The plugin owns MCP, hooks, and skills. Codex global install does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, activation config, or cache entries.
+- Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; run the printed `/plugins install <staged-path>` command in Kimi Code, then rerun TraceDecay so it can record the staged source. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths; `--local` writes `<project>/.kimi-code/mcp.json` and project `AGENTS.md` rules.
 
 Hermes setup writes the single user integration to
 `~/.hermes/plugins/tracedecay/` and enables it in `~/.hermes/config.yaml` under
@@ -335,14 +347,14 @@ ln -s /path/to/tracedecay/cursor-plugin ~/.cursor/plugins/local/tracedecay
 Reload Cursor after installing or replacing the plugin. The plugin expects the `tracedecay` binary to be available on `PATH`; ensure your shell PATH resolves the intended installed binary.
 
 Codex global install is plugin-based for MCP, hooks, and skills. TraceDecay
-writes the plugin source bundle and marketplace entry; Codex CLI installs the
-installed cache from that source. First install writes
+stages the plugin source bundle and marketplace entry; Codex CLI installs its
+cache from that source. First install writes
 `~/plugins/tracedecay/`, updates `~/.agents/plugins/marketplace.json`, and prints
 `codex plugin add tracedecay@personal`. Run that command in Codex to copy the
-source into `~/.codex/plugins/cache/personal/tracedecay/<version>`. Re-running
-`tracedecay install --agent codex` refreshes the source bundle and any detected
-installed Codex cache, including legacy `caveman-home` cache installs, into the
-canonical `tracedecay@personal` namespace.
+source into `~/.codex/plugins/cache/personal/tracedecay/<version>`, then rerun
+`tracedecay install --agent codex` to record the staged source. `tracedecay
+update-plugin --agent codex` refreshes only the source and tells Codex to update
+its own cache; it never rewrites Codex activation or cache state.
 
 Skill visibility follows Codex's plugin model. `codex plugin list` and
 `codex plugin add` inspect the marketplace source bundle. Active Codex sessions
@@ -356,10 +368,18 @@ and the repository marketplace to `.agents/plugins/marketplace.json`. It does
 not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, project
 `.codex/config.toml`, project `.codex/hooks.json`, or `AGENTS.md`.
 
-Current Codex limitations: TraceDecay can write and refresh the plugin source,
-marketplace entry, and known managed cache directories, but it cannot force
-Codex to run `plugin add`, reload an active session, or trust plugin command
-hooks for you. The legacy Codex config surfaces are intentionally left alone.
+Current Codex limitations: TraceDecay can refresh the plugin source and
+marketplace entry, but it cannot force Codex to run `plugin add`, update or
+remove its cache, reload an active session, or trust plugin command hooks for
+you. Remove the native plugin with `codex plugin remove tracedecay@personal`,
+then rerun `tracedecay uninstall --agent codex` to clean its staged source. The
+legacy Codex config surfaces are intentionally left alone.
+
+Kimi's global lifecycle is also two-step: TraceDecay stages source, then Kimi
+Code's `/plugins install <staged-path>` registers it. To remove it, use Kimi
+Code's `/plugins remove tracedecay` first, then rerun `tracedecay uninstall
+--agent kimi` to remove the staged source. TraceDecay never writes Kimi's
+managed plugin directory or `installed.json`.
 
 The generated MCP entries use the resolved absolute path to the current `tracedecay` executable. A local install does not update `~/.tracedecay/config.toml`, installed-agent tracking, the last installed version, or the optional global git post-commit hint-hook prompt. Antigravity and Cline do not currently have documented project-local config paths, so `tracedecay install --local --agent antigravity` and `tracedecay install --local --agent cline` are rejected with unsupported-agent errors.
 

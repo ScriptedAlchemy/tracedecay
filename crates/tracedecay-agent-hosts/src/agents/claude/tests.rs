@@ -1,3 +1,4 @@
+use super::super::safe_write_json_file;
 use super::*;
 use serde_json::json;
 
@@ -59,7 +60,7 @@ fn missing_manifest_with_partial_settings_residue_is_repairable() {
 }
 
 #[test]
-fn missing_manifest_with_project_only_residue_is_repairable() {
+fn project_only_legacy_residue_does_not_claim_plugin_registration() {
     use crate::agents::AgentIntegration;
     use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 
@@ -78,7 +79,7 @@ fn missing_manifest_with_project_only_residue_is_repairable() {
             project_path: project.path().to_path_buf(),
         },
     );
-    assert_eq!(state, HostBundleRegistrationStateV1::Repairable);
+    assert_eq!(state, HostBundleRegistrationStateV1::Missing);
 }
 
 fn plugin_subdir_names(rel: &str) -> Vec<String> {
@@ -272,85 +273,6 @@ fn deploy_is_a_clean_replace_dropping_stale_files() {
     );
 }
 
-#[test]
-fn registered_cache_refresh_replaces_same_version_stale_bundle() {
-    let home = tempfile::tempdir().unwrap();
-    let cache_dir = home.path().join(format!(
-        ".claude/plugins/cache/tracedecay/tracedecay/{}",
-        crate::PRODUCT_VERSION
-    ));
-    write_rendered_plugin_bundle(&cache_dir, "/old/bin/tracedecay").unwrap();
-    let hooks_path = cache_dir.join("hooks/hooks.json");
-    let mut hooks: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
-    hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] = json!(5);
-    std::fs::write(&hooks_path, serde_json::to_vec_pretty(&hooks).unwrap()).unwrap();
-    std::fs::write(cache_dir.join("stale-file"), "stale").unwrap();
-
-    let registry_path = home.path().join(".claude/plugins/installed_plugins.json");
-    std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
-    let mut registry = json!({ "plugins": {} });
-    registry["plugins"][PLUGIN_IDENTIFIER] = json!([{
-        "installPath": cache_dir,
-        "version": crate::PRODUCT_VERSION,
-        "scope": "user"
-    }]);
-    std::fs::write(
-        &registry_path,
-        serde_json::to_vec_pretty(&registry).unwrap(),
-    )
-    .unwrap();
-
-    assert_eq!(
-        refresh_registered_claude_plugin_cache(home.path(), "/new/bin/tracedecay").unwrap(),
-        1
-    );
-    let refreshed_hooks: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
-    let prompt_hook = &refreshed_hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0];
-    assert_eq!(prompt_hook["command"], json!("/new/bin/tracedecay"));
-    assert!(
-        prompt_hook.get("timeout").is_none(),
-        "same-version cache refresh must remove retired timeout masking"
-    );
-    assert!(
-        !cache_dir.join("stale-file").exists(),
-        "cache refresh must be an exact clean replacement"
-    );
-}
-
-#[test]
-fn registered_cache_refresh_refuses_registry_path_outside_cache_root() {
-    let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join(".claude/plugins/cache")).unwrap();
-    let outside_root = tempfile::tempdir().unwrap();
-    let outside = outside_root.path().join("tracedecay-cache");
-    write_rendered_plugin_bundle(&outside, "/bin/tracedecay").unwrap();
-    let sentinel = outside.join("sentinel");
-    std::fs::write(&sentinel, "preserve").unwrap();
-    let registry_path = home.path().join(".claude/plugins/installed_plugins.json");
-    std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
-    let mut registry = json!({ "plugins": {} });
-    registry["plugins"][PLUGIN_IDENTIFIER] = json!([{
-        "installPath": outside,
-        "version": crate::PRODUCT_VERSION,
-        "scope": "user"
-    }]);
-    std::fs::write(
-        &registry_path,
-        serde_json::to_vec_pretty(&registry).unwrap(),
-    )
-    .unwrap();
-
-    let error = refresh_registered_claude_plugin_cache(home.path(), "/bin/tracedecay")
-        .expect_err("an external registry path must be rejected");
-    assert!(error.to_string().contains("outside"));
-    assert!(
-        sentinel.exists(),
-        "rejected external paths must stay untouched"
-    );
-}
-
 /// The clean replace must refuse to delete a marketplace dir tracedecay
 /// does not own (no tracedecay plugin/marketplace manifest), so an
 /// unrelated dir squatting on the path is never nuked.
@@ -378,208 +300,24 @@ fn deploy_refuses_to_replace_non_tracedecay_dir() {
     );
 }
 
-/// Running install twice must yield byte-identical config files.
+/// Staging must leave host-native marketplace and settings files untouched.
 #[test]
-fn install_is_idempotent() {
+fn install_stages_source_without_rewriting_host_state() {
     let home = tempfile::tempdir().unwrap();
     let ctx = install_ctx(home.path());
-
-    ClaudeIntegration.install(&ctx).unwrap();
-    let read = |p: &Path| std::fs::read_to_string(p).ok();
     let settings_path = home.path().join(".claude/settings.json");
     let known_path = home.path().join(".claude/plugins/known_marketplaces.json");
-    let plugin_path = home
-        .path()
-        .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/plugin.json");
-    let s1 = read(&settings_path);
-    let k1 = read(&known_path);
-    let p1 = read(&plugin_path);
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(&settings_path, br#"{"enabledPlugins":{"other":true}}"#).unwrap();
+    std::fs::write(&known_path, br#"{"other":{"source":{"source":"github"}}}"#).unwrap();
+    let settings_before = std::fs::read(&settings_path).unwrap();
+    let known_before = std::fs::read(&known_path).unwrap();
 
-    ClaudeIntegration.install(&ctx).unwrap();
-    assert_eq!(s1, read(&settings_path), "settings.json must be stable");
-    assert_eq!(
-        k1,
-        read(&known_path),
-        "known_marketplaces.json must be stable"
-    );
-    assert_eq!(p1, read(&plugin_path), "plugin.json must be stable");
-}
-
-/// `register_marketplace` merges without clobbering existing marketplaces.
-#[test]
-fn register_marketplace_preserves_existing() {
-    let home = tempfile::tempdir().unwrap();
-    let path = known_marketplaces_path(home.path());
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &path,
-        r#"{"claude-plugins-official":{"source":{"source":"github","repo":"x/y"}}}"#,
-    )
-    .unwrap();
-
-    register_marketplace(home.path(), &plugin_deploy_dir(home.path())).unwrap();
-
-    let known: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert!(known.get("claude-plugins-official").is_some());
-    assert_eq!(
-        known["tracedecay"]["source"]["source"].as_str().unwrap(),
-        "directory"
-    );
-}
-
-/// A settings.json whose `enabledPlugins`/`permissions` parents are the
-/// wrong JSON type (a string / an array) must not panic install — the
-/// guards coerce them to objects. Regression for `Value`'s `IndexMut`
-/// panicking on a non-object parent.
-#[test]
-fn install_handles_malformed_settings_parents() {
-    let home = tempfile::tempdir().unwrap();
-    let claude_dir = home.path().join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap();
-    std::fs::write(
-        claude_dir.join("settings.json"),
-        r#"{"enabledPlugins":"nope","permissions":[]}"#,
-    )
-    .unwrap();
-
-    ClaudeIntegration
-        .install(&install_ctx(home.path()))
-        .expect("install must handle malformed settings parents gracefully");
-
-    let settings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
-            .unwrap();
-    assert_eq!(settings["enabledPlugins"][PLUGIN_IDENTIFIER], json!(true));
-    assert!(settings["permissions"]["allow"].is_array());
-}
-
-/// `enable_plugin` guards a non-object `enabledPlugins` parent.
-#[test]
-fn enable_plugin_coerces_non_object_parent() {
-    let mut settings = json!({ "enabledPlugins": "garbage" });
-    enable_plugin(&mut settings);
-    assert_eq!(settings["enabledPlugins"][PLUGIN_IDENTIFIER], json!(true));
-}
-
-/// `install_permissions` guards a non-object `permissions` parent.
-#[test]
-fn install_permissions_coerces_non_object_parent() {
-    let mut settings = json!({ "permissions": [] });
-    install_permissions(&mut settings, &["mcp__tracedecay__search".to_string()]);
-    assert!(settings["permissions"].is_object());
-    let allow: Vec<&str> = settings["permissions"]["allow"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    assert!(allow.contains(&"mcp__tracedecay__search"));
-    assert!(
-        allow.contains(&"mcp__plugin_tracedecay_graph__search"),
-        "legacy entries must gain their plugin-namespace twin"
-    );
-    let mut sorted = allow.clone();
-    sorted.sort_unstable();
-    assert_eq!(allow, sorted, "allowlist must be written sorted");
-}
-
-/// `enable_plugin` merges into existing `enabledPlugins` without dropping keys.
-#[test]
-fn enable_plugin_preserves_other_plugins() {
-    let mut settings = json!({ "enabledPlugins": { "other@mkt": true } });
-    enable_plugin(&mut settings);
-    assert_eq!(settings["enabledPlugins"]["other@mkt"], json!(true));
-    assert_eq!(settings["enabledPlugins"][PLUGIN_IDENTIFIER], json!(true));
-}
-
-/// Migration strips the loose MCP entry, the tracedecay hooks (all events),
-/// and the loose subagents — but leaves non-tracedecay siblings intact.
-#[test]
-fn migration_removes_config_managed_but_keeps_foreign_entries() {
-    let home = tempfile::tempdir().unwrap();
-    let claude_dir = home.path().join(".claude");
-    std::fs::create_dir_all(claude_dir.join("agents")).unwrap();
-
-    std::fs::write(
-        home.path().join(".claude.json"),
-        r#"{"mcpServers":{"tracedecay":{"command":"tracedecay"},"other":{"command":"x"}}}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        claude_dir.join("settings.json"),
-        r#"{"hooks":{"Stop":[
-                {"hooks":[{"type":"command","command":"tracedecay hook-stop"}]},
-                {"hooks":[{"type":"command","command":"other-tool"}]}
-            ]}}"#,
-    )
-    .unwrap();
-    // A tracedecay-managed subagent plus a user file squatting on a name.
-    std::fs::write(
-        claude_dir.join("agents/code-explorer.md"),
-        "managed tracedecay agent",
-    )
-    .unwrap();
-    std::fs::write(
-        claude_dir.join("agents/session-historian.md"),
-        "my own agent, unrelated",
-    )
-    .unwrap();
-
-    migrate_off_config_managed(home.path()).unwrap();
-
-    let claude_json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(home.path().join(".claude.json")).unwrap())
-            .unwrap();
-    assert!(claude_json["mcpServers"].get("tracedecay").is_none());
-    assert!(claude_json["mcpServers"].get("other").is_some());
-
-    let settings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
-            .unwrap();
-    let stop = settings["hooks"]["Stop"].as_array().unwrap();
-    assert_eq!(stop.len(), 1, "only the foreign hook should survive");
-    assert!(
-        stop[0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("other-tool")
-    );
-
-    assert!(
-        !claude_dir.join("agents/code-explorer.md").exists(),
-        "managed subagent removed"
-    );
-    assert!(
-        claude_dir.join("agents/session-historian.md").exists(),
-        "user subagent preserved"
-    );
-}
-
-#[test]
-fn migration_is_idempotent() {
-    let home = tempfile::tempdir().unwrap();
-    let claude_dir = home.path().join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap();
-    std::fs::write(
-        home.path().join(".claude.json"),
-        r#"{"mcpServers":{"tracedecay":{"command":"tracedecay"}}}"#,
-    )
-    .unwrap();
-
-    migrate_off_config_managed(home.path()).unwrap();
-    let after_first = std::fs::read_to_string(home.path().join(".claude.json")).ok();
-    let first_contents = after_first
-        .as_deref()
-        .expect("first migration must preserve valid JSON state");
-    assert!(
-        !first_contents.contains("\"tracedecay\""),
-        "first migration must remove tracedecay"
-    );
-    migrate_off_config_managed(home.path()).unwrap();
-    let after_second = std::fs::read_to_string(home.path().join(".claude.json")).ok();
-    assert_eq!(after_first, after_second);
-    assert!(!config_managed_mcp_present(home.path()));
+    let error = ClaudeIntegration.install(&ctx).unwrap_err().to_string();
+    assert!(error.contains("Claude Code owns marketplace registration"));
+    assert!(plugin_marketplace_manifest_path(home.path()).is_file());
+    assert_eq!(std::fs::read(settings_path).unwrap(), settings_before);
+    assert_eq!(std::fs::read(known_path).unwrap(), known_before);
 }
 
 /// The managed-block range must extend across only its own owned
@@ -615,34 +353,21 @@ fn uninstall_preserves_user_tracedecay_heading_after_block() {
 }
 
 #[test]
-fn uninstall_permissions_removes_tracedecay_entries() {
-    let mut settings = json!({
-        "permissions": {
-            "allow": [
-                "Bash",
-                "mcp__tracedecay__search",
-                "mcp__tracedecay__lookup",
-                "mcp__plugin_tracedecay_tracedecay__search",
-                "Read"
-            ]
-        }
-    });
-    let modified = uninstall_permissions(&mut settings);
-    assert!(modified);
-    let remaining: Vec<&str> = settings["permissions"]["allow"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    assert_eq!(remaining, vec!["Bash", "Read"]);
-}
-
-#[test]
-fn uninstall_removes_plugin_and_marketplace() {
+fn uninstall_after_native_removal_cleans_source_without_rewriting_host_state() {
     let home = tempfile::tempdir().unwrap();
     let ctx = install_ctx(home.path());
-    ClaudeIntegration.install(&ctx).unwrap();
+    deploy_plugin_bundle(home.path(), &ctx.tracedecay_bin).unwrap();
+    let settings_path = home.path().join(".claude/settings.json");
+    let marketplace_path = known_marketplaces_path(home.path());
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(&settings_path, br#"{"enabledPlugins":{"other":true}}"#).unwrap();
+    std::fs::write(
+        &marketplace_path,
+        br#"{"other":{"source":{"source":"github"}}}"#,
+    )
+    .unwrap();
+    let settings_before = std::fs::read(&settings_path).unwrap();
+    let marketplace_before = std::fs::read(&marketplace_path).unwrap();
     assert!(plugin_marketplace_manifest_path(home.path()).exists());
 
     ClaudeIntegration.uninstall(&ctx).unwrap();
@@ -650,39 +375,8 @@ fn uninstall_removes_plugin_and_marketplace() {
         !plugin_deploy_dir(home.path()).exists(),
         "deploy dir removed"
     );
-    let known = known_marketplaces_path(home.path());
-    if known.exists() {
-        let val: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&known).unwrap()).unwrap();
-        assert!(val.get(MARKETPLACE_NAME).is_none());
-    }
-    let settings: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(),
-    )
-    .unwrap();
-    assert!(
-        settings
-            .get("enabledPlugins")
-            .and_then(|p| p.get(PLUGIN_IDENTIFIER))
-            .is_none()
-    );
-}
-
-#[test]
-fn install_returns_contextual_error_when_claude_dir_is_not_a_directory() {
-    let home = tempfile::tempdir().unwrap();
-    let claude_path = home.path().join(".claude");
-    std::fs::write(&claude_path, "not a directory").unwrap();
-
-    let err = ClaudeIntegration
-        .install(&install_ctx(home.path()))
-        .unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("failed to create Claude settings directory")
-            && msg.contains(&claude_path.display().to_string()),
-        "unexpected error message: {msg}"
-    );
+    assert_eq!(std::fs::read(settings_path).unwrap(), settings_before);
+    assert_eq!(std::fs::read(marketplace_path).unwrap(), marketplace_before);
 }
 
 #[cfg(target_os = "linux")]
@@ -697,11 +391,15 @@ fn install_claude_md_rules_surfaces_append_failures() {
 }
 
 /// Every managed subagent definition the plugin ships must have valid
-/// frontmatter and reference tracedecay so migration recognizes copies.
+/// frontmatter and reference tracedecay.
 #[test]
 fn managed_subagent_definitions_have_valid_frontmatter() {
     let files = claude_embedded_plugin_files();
-    for &file_name in LEGACY_SUBAGENT_FILES {
+    for file_name in [
+        "code-explorer.md",
+        "code-health-auditor.md",
+        "session-historian.md",
+    ] {
         let contents = files
             .iter()
             .find_map(|&(relative, body)| {

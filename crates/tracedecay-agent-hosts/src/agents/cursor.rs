@@ -615,8 +615,10 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
             ),
         });
     }
-    // The directory is tracedecay-owned. Remove only its explicit managed
-    // overlay; V2 lifecycle never sweeps historical plugin siblings or skills.
+    // The directory is tracedecay-owned. Retired bundle skills are still
+    // receipt-owned artifacts; remove them without touching user-authored
+    // same-name skills or historical sibling directories.
+    sweep_retired_bundle_skill_dirs(install_dir)?;
     remove_cursor_managed_skill_overlay(install_dir);
     if cursor_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
@@ -632,6 +634,71 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
 
 fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
+}
+
+/// Remove a retired skill only when its source is demonstrably TraceDecay's.
+/// The keep-set is derived from the live bundle so the cleanup follows the
+/// active artifact contract rather than a compatibility inventory.
+fn sweep_retired_bundle_skill_dirs(install_dir: &Path) -> Result<()> {
+    let skills_root = install_dir.join("skills");
+    let entries = match std::fs::read_dir(&skills_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect retired Cursor plugin skills at {}: {error}",
+                    skills_root.display()
+                ),
+            });
+        }
+    };
+    let shipped: std::collections::BTreeSet<String> = embedded_plugin_files()
+        .into_iter()
+        .filter_map(|(relative, _)| {
+            relative
+                .strip_prefix("skills/")
+                .and_then(|rest| rest.split('/').next())
+                .map(str::to_string)
+        })
+        .collect();
+    for entry in entries {
+        let entry = entry.map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to inspect retired Cursor plugin skills at {}: {error}",
+                skills_root.display()
+            ),
+        })?;
+        if !entry
+            .file_type()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect retired Cursor plugin skill at {}: {error}",
+                    entry.path().display()
+                ),
+            })?
+            .is_dir()
+        {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "agent-managed" || shipped.contains(&name) {
+            continue;
+        }
+        let skill_file = entry.path().join("SKILL.md");
+        if !std::fs::read_to_string(&skill_file)
+            .is_ok_and(|contents| super::skill_contents_have_tracedecay_marker(&contents))
+        {
+            continue;
+        }
+        std::fs::remove_dir_all(entry.path()).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to remove retired Cursor plugin skill at {}: {error}",
+                entry.path().display()
+            ),
+        })?;
+    }
+    Ok(())
 }
 
 fn cursor_plugin_dir_is_tracedecay(install_dir: &Path) -> bool {

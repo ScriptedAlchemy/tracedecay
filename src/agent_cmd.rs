@@ -3076,25 +3076,26 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
             agents.join(", ")
         );
         let results = reinstall_agent_integrations(&agents, &home, &tracedecay_bin).await;
-        let deferred_any = results
-            .iter()
-            .any(|(_, result)| matches!(result, Ok(AgentReinstallOutcome::DeferredUserAction(_))));
         // Reporting lives in `partition_reinstall_results`, which every
         // reinstall pass shares. Keep the reason with the name — a bare id list
         // left "failed for: claude, cursor, hermes, kimi" undiagnosable.
-        if let crate::update_cmd::ReinstallOutcome::PartialFailure { failed } =
-            crate::update_cmd::partition_reinstall_results(results)
-        {
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: format!("failed to reinstall agent(s): {}", failed.join("; ")),
-            });
-        }
-        if deferred_any {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Agent refresh completed; deferred user actions remain above"
-            );
-        } else {
-            eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
+        match crate::update_cmd::partition_reinstall_results(results) {
+            crate::update_cmd::ReinstallOutcome::AllOk => {
+                eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
+            }
+            crate::update_cmd::ReinstallOutcome::PartialFailure { failed } => {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!("failed to reinstall agent(s): {}", failed.join("; ")),
+                });
+            }
+            crate::update_cmd::ReinstallOutcome::DeferredUserAction { deferred } => {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "agent reinstall requires native host action: {}",
+                        deferred.join("; ")
+                    ),
+                });
+            }
         }
         // Advance BOTH markers: `previous_version` is what arms the startup
         // silent reinstall, so recording only `last_installed_version` here
@@ -5205,6 +5206,185 @@ mod tests {
         assert_eq!(std::fs::read(&installed_path).unwrap(), original);
         assert!(!code_home.join("plugins/managed/tracedecay").exists());
         assert!(staged.join(".kimi-plugin/plugin.json").is_file());
+    }
+
+    #[tokio::test]
+    async fn kimi_native_activated_retry_tracks_staged_source() {
+        use tracedecay::agents::host_bundle_v2::{
+            HostBundleComponentV1, HostKindV1, latest_host_component_receipt_at,
+            resolved_host_bundle_lifecycle_root,
+        };
+
+        let _profile = pinned_host_profile();
+        let home = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        let _kimi_home = EnvVarGuard::set(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &code_home);
+        let integration = tracedecay::agents::get_integration("kimi").unwrap();
+        let ctx = tracedecay::agents::InstallContext {
+            home: home.path().to_path_buf(),
+            tracedecay_bin: "new-tracedecay".to_string(),
+            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            project_root: None,
+            dashboard: true,
+        };
+        assert!(matches!(
+            integration.prepare_non_interactive_install(&ctx).unwrap(),
+            tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(_)
+        ));
+        let staged = home
+            .path()
+            .join(".tracedecay/host-bundle-stage/kimi/tracedecay")
+            .canonicalize()
+            .unwrap();
+        let installed_path = code_home.join("plugins/installed.json");
+        std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &installed_path,
+            serde_json::json!({
+                "version": 1,
+                "plugins": [{
+                    "id": "tracedecay",
+                    "enabled": true,
+                    "source": "local-path",
+                    "root": staged,
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let results =
+            reinstall_agent_integrations(&["kimi".to_string()], home.path(), "new-tracedecay")
+                .await;
+        assert!(matches!(
+            results.as_slice(),
+            [(id, Ok(AgentReinstallOutcome::Installed))] if id == "kimi"
+        ));
+        let lifecycle_root = resolved_host_bundle_lifecycle_root().unwrap();
+        assert!(
+            latest_host_component_receipt_at(
+                &lifecycle_root,
+                HostKindV1::KimiCode,
+                HostBundleComponentV1::Core,
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_native_activated_retry_tracks_component_set() {
+        use tracedecay::agents::host_bundle_v2::{
+            HostBundleComponentV1, HostKindV1, latest_host_component_receipt_at,
+            resolved_host_bundle_lifecycle_root,
+        };
+
+        let _profile = pinned_host_profile();
+        let home = tempfile::tempdir().unwrap();
+        let integration = tracedecay::agents::get_integration("codex").unwrap();
+        let ctx = tracedecay::agents::InstallContext {
+            home: home.path().to_path_buf(),
+            tracedecay_bin: "new-tracedecay".to_string(),
+            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            project_root: None,
+            dashboard: true,
+        };
+        assert!(matches!(
+            integration.prepare_non_interactive_install(&ctx).unwrap(),
+            tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(_)
+        ));
+        let config_path = home.path().join(".codex/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            "[plugins.\"tracedecay@personal\"]\nenabled = true\n",
+        )
+        .unwrap();
+        let cache_manifest = home
+            .path()
+            .join(".codex/plugins/cache/personal/tracedecay/native/.codex-plugin/plugin.json");
+        std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
+        std::fs::write(&cache_manifest, br#"{"name":"tracedecay"}"#).unwrap();
+
+        let results =
+            reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
+                .await;
+        assert!(matches!(
+            results.as_slice(),
+            [(id, Ok(AgentReinstallOutcome::Installed))] if id == "codex"
+        ));
+        let lifecycle_root = resolved_host_bundle_lifecycle_root().unwrap();
+        assert!(
+            latest_host_component_receipt_at(
+                &lifecycle_root,
+                HostKindV1::Codex,
+                HostBundleComponentV1::Core,
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_native_removed_retry_cleans_receipt_owned_source() {
+        let _profile = pinned_host_profile();
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let tracedecay_bin = "new-tracedecay";
+        let component_set =
+            canonical_host_component_set_with_tracedecay_bin("codex", None, 0, tracedecay_bin)
+                .unwrap()
+                .unwrap();
+        let source_manifest = home
+            .path()
+            .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json");
+        let config_path = home.path().join(".codex/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            "[plugins.\"tracedecay@personal\"]\nenabled = true\n",
+        )
+        .unwrap();
+        let cache_root = home
+            .path()
+            .join(".codex/plugins/cache/personal/tracedecay/native");
+        let cache_manifest = cache_root.join(".codex-plugin/plugin.json");
+        std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
+        std::fs::write(&cache_manifest, br#"{"name":"tracedecay"}"#).unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        };
+        apply_canonical_component_set_with_tracedecay_bin(
+            "codex",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+            tracedecay_bin,
+        )
+        .unwrap();
+        assert!(source_manifest.is_file());
+
+        std::fs::remove_file(config_path).unwrap();
+        std::fs::remove_dir_all(cache_root).unwrap();
+        apply_canonical_component_set_with_tracedecay_bin(
+            "codex",
+            HostBundleCliOperation::Uninstall,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+            tracedecay_bin,
+        )
+        .unwrap();
+        assert!(
+            !source_manifest.exists(),
+            "native removal must let the receipt transaction clean its staged source"
+        );
     }
 
     #[tokio::test]
