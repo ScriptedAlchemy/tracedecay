@@ -3,8 +3,9 @@
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
 Cursor, Kimi Code, and OpenCode. The installed bundles expose a host-specific MCP server
 key (`graph` for Claude/Codex, `tracedecay` for Cursor and Kimi Code), shared
-workflow skills, and host-specific lifecycle hooks (Kimi Code ships none in
-older installs; the current manifest ships native `PostToolUse` and `Stop`).
+workflow skills, and host-specific lifecycle hooks. Each hook is a bounded
+daemon-admission adapter; capture, sync, compaction, and advisory work stay in
+the daemon.
 
 The manifest-driven package inventory also exposes an MCP-free core and
 independently installable MCP companions. See `README-host-bundles.md` for the
@@ -32,10 +33,9 @@ doubled `tracedecay` — and that single convention is applied to every
 ## Source Layout
 
 - `skills/`: shared `SKILL.md` workflow instructions.
-- `hooks/hooks-claude.json`: Claude Code lifecycle hooks. `PostToolUse`
-  observes edit, shell, grep, glob, and read tools; `PostToolUseFailure`
-  observes Bash failures so real compiler failures route to structured
-  diagnostics without treating successful command text as failure evidence.
+- `hooks/hooks-claude.json`: Claude Code lifecycle hooks for session, stop,
+  and saved-edit admission. They do not route tools or run local follow-up
+  work.
 - `hooks/hooks-codex.json`: repo-local Codex hook seed. It is intentionally
   empty; the global Codex plugin fills hooks at install time.
 - `hooks/hooks-cursor.json`: Cursor lifecycle hooks.

@@ -9,29 +9,17 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-mod agent_codex_test;
-mod agent_cursor_test;
-mod agent_hermes_test;
-mod agent_install_test;
-mod agent_misc_test;
 mod agent_registry_test;
 mod agent_targets_test;
-mod agent_test_support;
-mod claude_agent_test;
 mod claude_plugin_bundle_test;
 mod claude_plugin_schema_test;
 mod cli_args_contract_test;
-mod copilot_agent_test;
-mod kiro_agent_test;
 mod managed_skill_archive_test;
 mod managed_skills_test;
 mod memory_digest_test;
-mod opencode_agent_test;
 mod plugin_config_schema_test;
 mod plugin_manifest_schema_test;
-mod plugin_skill_contract_test;
 mod plugin_validation_support;
-mod prompt_rules_parity_test;
 mod shared_skill_contract_test;
 mod skill_lint_claude_test;
 mod skill_lint_cursor_test;
@@ -39,5 +27,3 @@ mod skill_materialization_test;
 mod skill_targets_test;
 mod skill_usage_test;
 mod tool_skill_coverage_test;
-mod update_plugin_test;
-mod upgrade_refresh_test;

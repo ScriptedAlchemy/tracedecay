@@ -125,7 +125,8 @@ impl DecodedNativeHookEventV1 {
 
 /// Opaque material that a binding-aware host adapter may attach after native
 /// decoding. It never accepts a provider's raw ID, source, path, or payload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeEnvelopeMaterialV1 {
     pub event_id: [u8; 16],
     pub protected_session_id: [u8; 32],
@@ -134,6 +135,27 @@ pub struct NativeEnvelopeMaterialV1 {
     pub effect_receipt_id: Option<[u8; 16]>,
     pub file_id: Option<[u8; 16]>,
     pub changed_range_count: u8,
+}
+
+/// Content-free native material submitted by a projectless host hook.
+///
+/// The hook has no project route, so it cannot read a project binding or
+/// decide a fallback action. The daemon reconstructs the profile-scoped V2
+/// envelope from its authenticated profile identity before accepting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileScopedNativeHookAdmissionV1 {
+    pub decoded: DecodedNativeHookEventV1,
+    pub material: NativeEnvelopeMaterialV1,
+}
+
+impl ProfileScopedNativeHookAdmissionV1 {
+    pub fn into_envelope(
+        self,
+        binding: &HookScopeBindingV1,
+    ) -> Result<HookEventEnvelopeV2, NativeHookDecodeError> {
+        self.decoded.into_envelope(binding, self.material)
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -319,6 +341,18 @@ struct CodexStopEvent {
     permission_mode: String,
     stop_hook_active: bool,
     last_assistant_message: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct CodexPostToolUseEvent {
+    session_id: String,
+    turn_id: String,
+    cwd: String,
+    tool_name: String,
+    tool_use_id: String,
+    tool_input: Value,
+    tool_response: Value,
 }
 
 #[allow(dead_code)]
@@ -526,6 +560,15 @@ fn decode_claude(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
 fn decode_codex(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
     match event_name(raw, "hook_event_name")? {
         "SessionStart" => Ok(NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start)),
+        "PostToolUse" => {
+            let event = decode_shape::<CodexPostToolUseEvent>(raw)?;
+            if event.tool_name.is_empty() || event.tool_use_id.is_empty() {
+                return Err(NativeHookDecodeError::MissingTypedIdentity);
+            }
+            Ok(NativeHookSignalV1::ToolLifecycle(
+                HookLifecyclePhaseV1::Completed,
+            ))
+        }
         "Stop" => {
             decode_shape::<CodexStopEvent>(raw)?;
             Ok(NativeHookSignalV1::SessionBoundary(
@@ -562,7 +605,7 @@ fn decode_cursor(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
 fn decode_hermes(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
     if let Some(event_bus_name) = raw.get("event") {
         return match event_bus_name.as_str().filter(|value| !value.is_empty()) {
-            Some("turnIngested") => Ok(NativeHookSignalV1::SessionBoundary(
+            Some("turnCompleted" | "turnIngested") => Ok(NativeHookSignalV1::SessionBoundary(
                 HookBoundaryV1::TurnComplete,
             )),
             Some("terminalReceipt") => {
@@ -883,6 +926,30 @@ mod tests {
     }
 
     #[test]
+    fn hermes_turn_completion_and_ingestion_are_truthful_native_boundaries() {
+        for event in ["turnCompleted", "turnIngested"] {
+            let payload = serde_json::json!({
+                "agent": "hermes",
+                "event": event,
+                "route": {"session_id": "session.hermes"},
+                "receipt": {
+                    "status": "success",
+                    "transcript_watermark": "message.hermes"
+                }
+            });
+            assert_eq!(
+                decode_native_hook_event(
+                    NativeHostIdentityV1::Hermes,
+                    &serde_json::to_vec(&payload).unwrap(),
+                )
+                .unwrap()
+                .signal,
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete)
+            );
+        }
+    }
+
+    #[test]
     fn kiro_documented_unverified_events_are_rejected_instead_of_emulated() {
         let kiro = include_str!("../fixtures/host_events/kiro.json");
         assert_eq!(
@@ -906,18 +973,20 @@ mod tests {
     }
 
     #[test]
-    fn codex_documented_unverified_post_tool_use_stays_unavailable() {
+    fn codex_documented_post_tool_use_preserves_native_tool_lifecycle() {
         let codex = include_str!("../fixtures/host_events/codex.json");
         assert_eq!(
             decode_native_hook_event(
                 NativeHostIdentityV1::Codex,
                 fixture_request(codex, "saved_edit").as_slice()
-            ),
-            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            )
+            .unwrap()
+            .signal,
+            NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed)
         );
         assert_eq!(
             stock_event_support(NativeHostIdentityV1::Codex, HookEventFamily::ToolLifecycle),
-            HookEventSupportV1::Unavailable
+            HookEventSupportV1::Native
         );
     }
 

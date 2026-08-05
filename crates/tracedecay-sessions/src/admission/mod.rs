@@ -415,6 +415,7 @@ pub(crate) mod test_support {
         parse_offsets: Vec<(ObservationScopeV1, String, ParseOffset)>,
         capture_failures_remaining: usize,
         session_message_failures_remaining: usize,
+        session_message_reads: usize,
     }
 
     #[derive(Clone, Default)]
@@ -564,6 +565,7 @@ pub(crate) mod test_support {
     #[derive(Clone, Default)]
     pub(crate) struct MemoryHostAdmission {
         store: MemoryObservationStore,
+        cancel_on_cursor_read: Arc<Mutex<Option<ObservationCancellation>>>,
     }
 
     impl MemoryHostAdmission {
@@ -588,6 +590,17 @@ pub(crate) mod test_support {
                 .iter()
                 .filter(|stored| !state.projected_sequences.contains(&stored.sequence()))
                 .count()
+        }
+
+        pub(crate) fn cancel_on_next_cursor_read(&self, cancellation: ObservationCancellation) {
+            *self
+                .cancel_on_cursor_read
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(cancellation);
+        }
+
+        pub(crate) fn session_message_read_count(&self) -> usize {
+            self.store.state().session_message_reads
         }
 
         fn application(
@@ -650,6 +663,14 @@ pub(crate) mod test_support {
             scope: &'a ObservationScopeV1,
         ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
             Box::pin(async move {
+                if let Some(cancellation) = self
+                    .cancel_on_cursor_read
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    cancellation.cancel();
+                }
                 self.store
                     .read_source_cursor(source, scope)
                     .await
@@ -715,6 +736,7 @@ pub(crate) mod test_support {
             Box::pin(async move {
                 {
                     let mut state = self.store.state();
+                    state.session_message_reads = state.session_message_reads.saturating_add(1);
                     if state.session_message_failures_remaining > 0 {
                         state.session_message_failures_remaining -= 1;
                         return Err(HostAdmissionOutcome::registered_authority_unavailable());
