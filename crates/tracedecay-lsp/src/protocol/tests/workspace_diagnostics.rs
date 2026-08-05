@@ -125,6 +125,18 @@ struct MutableWorkspaceDiagnostics {
 }
 
 impl DiagnosticSnapshotPort for MutableWorkspaceDiagnostics {
+    fn document_diagnostics(
+        &self,
+        _root: &AdmittedRoot,
+        _document_uri: &str,
+        _overlay: Option<&OverlaySnapshot>,
+    ) -> DiagnosticSnapshotOutcome {
+        DiagnosticSnapshotOutcome::Failed {
+            source_generation: None,
+            failure_class: "document-diagnostics-not-used".to_owned(),
+        }
+    }
+
     fn supports_workspace_diagnostics(&self) -> bool {
         true
     }

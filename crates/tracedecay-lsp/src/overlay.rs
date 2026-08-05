@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::diagnostics::{LspRange, PositionError, utf16_position_to_byte_offset};
 use crate::gateway::operation_table::{BoundedOperationTable, OperationAdmission, OperationPoll};
-use crate::gateway::{AdmittedRoot, LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner};
+use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner};
 use crate::provider::{
     DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome,
     DiagnosticSnapshotPort,
@@ -554,7 +554,9 @@ impl OverlayDiagnosticDebouncer {
 mod tests {
     use super::*;
     use crate::diagnostics::{LspPosition, LspRange};
-    use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask};
+    use crate::gateway::{
+        AdmittedRoot, LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask,
+    };
     use crate::provider::{
         DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome,
         DiagnosticSnapshotPort, GenerationDiagnostics,

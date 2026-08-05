@@ -88,24 +88,14 @@ where
     type Error = Infallible;
 
     fn try_send_client_frame(&mut self, frame: &[u8]) -> Result<FrameSend, Self::Error> {
-        if matches!(
-            self.session.lifecycle(),
-            SessionLifecycle::Exited | SessionLifecycle::Expired
-        ) {
-            return Ok(FrameSend::Closed);
-        }
-        // Do not consume a frame when the typed session cannot reserve any
-        // response capacity. The bridge retains exactly one frame and retries
-        // once the daemon-to-client direction makes progress.
-        if !self.session.has_client_frame_outbound_capacity() {
-            return Ok(FrameSend::Backpressured);
-        }
-        let dispatch = self.session.handle_payload(frame, self.now_ms);
-        Ok(if dispatch.closed {
-            FrameSend::Closed
-        } else {
-            FrameSend::Sent
-        })
+        Ok(
+            match self.session.try_handle_client_payload(frame, self.now_ms) {
+                ClientFrameAdmission::Consumed(dispatch) if dispatch.closed => FrameSend::Closed,
+                ClientFrameAdmission::Consumed(_) => FrameSend::Sent,
+                ClientFrameAdmission::Backpressured => FrameSend::Backpressured,
+                ClientFrameAdmission::Closed => FrameSend::Closed,
+            },
+        )
     }
 
     fn poll_daemon_frame(&mut self) -> Result<FramePoll, Self::Error> {

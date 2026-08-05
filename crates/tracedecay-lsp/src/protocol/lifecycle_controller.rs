@@ -2,14 +2,15 @@ use super::{
     AdmittedRoot, AnalyzerCancellationPort, Arc, AuthorizedLspWorkspace, BTreeMap,
     CancellationOutcome, CapabilityAvailability, CapabilityParseError, ClientCapabilities,
     ContextController, ContextProjectionPort, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspGateway,
-    DaemonLspProtocolSession, DiagnosticSnapshotPort, DiagnosticsController, EffectiveCapabilities,
-    FeedbackCyclePort, GatewayCapabilities, GatewayMethod, LifecycleError, LspRequestFailure,
-    LspRequestId, LspSessionControl, MAX_CONTEXT_PROJECTION_KINDS, Map, MethodUnavailableReason,
-    OutboundController, OverlayError, OverlayStore, RpcFailure, SemanticController,
-    SemanticProviderPort, SessionLifecycle, TRACEDECAY_CONTEXT_EXPAND_METHOD,
-    TRACEDECAY_CONTEXT_METHOD, UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, Value,
-    error_response, initialized_workspace_uris, is_supported_context_projection, json,
-    negotiate_capabilities, overlay_failure, request_id, request_id_value, success_response,
+    DaemonLspProtocolSession, DiagnosticSnapshotPort, DiagnosticsController,
+    DynamicDiagnosticsController, EffectiveCapabilities, FeedbackCyclePort, GatewayCapabilities,
+    GatewayMethod, LifecycleError, LspRequestFailure, LspRequestId, LspSessionControl,
+    MAX_CONTEXT_PROJECTION_KINDS, Map, MethodUnavailableReason, OutboundController, OverlayError,
+    OverlayStore, RpcFailure, SemanticController, SemanticProviderPort, SessionLifecycle,
+    TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD,
+    UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, Value, error_response,
+    initialized_workspace_uris, is_supported_context_projection, json, negotiate_capabilities,
+    overlay_failure, request_id, request_id_value, success_response,
 };
 
 pub(super) struct LifecycleController<P, S>

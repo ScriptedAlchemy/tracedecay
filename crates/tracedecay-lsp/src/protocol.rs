@@ -95,8 +95,19 @@ use semantic_controller::SemanticController;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProtocolDispatch {
     pub queued_messages: usize,
-    pub backpressured: bool,
     pub closed: bool,
+}
+
+/// Ownership result for one client-to-daemon frame.
+///
+/// `Consumed` means the caller must release its copy even when dispatch filled
+/// the outbound queue. `Backpressured` is returned only before payload
+/// decoding or routing, so retaining and retrying that frame is lossless.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientFrameAdmission {
+    Consumed(ProtocolDispatch),
+    Backpressured,
+    Closed,
 }
 
 /// One authenticated daemon LSP session. It owns no durable state and is
@@ -121,17 +132,44 @@ where
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
-    /// Decodes and routes one opaque JSON-RPC payload. Responses and server
-    /// notifications remain queued until a typed daemon-session transport
-    /// acknowledges delivery to the bridge.
+    /// Admits one bridge-owned frame without ambiguous post-dispatch
+    /// backpressure. A consumed frame is never reported as retryable.
+    pub fn try_handle_client_payload(
+        &mut self,
+        payload: &[u8],
+        now_ms: u64,
+    ) -> ClientFrameAdmission {
+        if matches!(
+            self.lifecycle.control.lifecycle(),
+            SessionLifecycle::Exited | SessionLifecycle::Expired
+        ) {
+            return ClientFrameAdmission::Closed;
+        }
+        self.prepare_payload_dispatch(now_ms);
+        if !self.has_client_frame_outbound_capacity() {
+            return ClientFrameAdmission::Backpressured;
+        }
+        ClientFrameAdmission::Consumed(self.handle_prepared_payload(payload, now_ms))
+    }
+
+    /// Decodes and routes one already-admitted JSON-RPC payload. Responses and
+    /// server notifications remain queued until a typed daemon-session
+    /// transport acknowledges delivery to the bridge.
     pub fn handle_payload(&mut self, payload: &[u8], now_ms: u64) -> ProtocolDispatch {
+        self.prepare_payload_dispatch(now_ms);
+        self.handle_prepared_payload(payload, now_ms)
+    }
+
+    fn prepare_payload_dispatch(&mut self, now_ms: u64) {
         self.expire_requests(now_ms);
         // Capability loss closes admission before the triggering client
         // request is dispatched. Capability gain is projected only through
         // the dynamic-registration acknowledgement path.
         self.reconcile_dynamic_diagnostics();
+    }
+
+    fn handle_prepared_payload(&mut self, payload: &[u8], now_ms: u64) -> ProtocolDispatch {
         let before = self.outbound.queue.len();
-        let backpressured_before = !self.has_client_frame_outbound_capacity();
         if payload.len() > MAX_LSP_FRAME_BYTES {
             self.enqueue_value(error_response(
                 Value::Null,
@@ -143,7 +181,6 @@ where
             ));
             return ProtocolDispatch {
                 queued_messages: self.outbound.queue.len().saturating_sub(before),
-                backpressured: true,
                 closed: false,
             };
         }
@@ -159,7 +196,6 @@ where
             self.flush_debounced_diagnostics(now_ms);
             return ProtocolDispatch {
                 queued_messages: self.outbound.queue.len().saturating_sub(before),
-                backpressured: backpressured_before,
                 closed: false,
             };
         };
@@ -172,7 +208,6 @@ where
         self.flush_context_changes();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
-            backpressured: backpressured_before || !self.has_client_frame_outbound_capacity(),
             closed: matches!(
                 self.lifecycle.control.lifecycle(),
                 SessionLifecycle::Exited | SessionLifecycle::Expired
@@ -193,7 +228,6 @@ where
         self.flush_context_changes();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
-            backpressured: !self.has_client_frame_outbound_capacity(),
             closed: matches!(
                 self.lifecycle.control.lifecycle(),
                 SessionLifecycle::Exited | SessionLifecycle::Expired
