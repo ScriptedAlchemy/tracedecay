@@ -76,6 +76,7 @@ async fn prepared_restart_with_completed_edit_rolls_forward_and_preserves_bytes(
     );
     // Every written byte is preserved on disk.
     fixture.assert_postimages();
+    fixture.assert_postimage_graph().await;
 }
 
 /// The write never landed: after the fixture the worktree still holds every

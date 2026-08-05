@@ -34,6 +34,7 @@ impl TraceDecay {
             self.reindex_file(&file.relative_path, expected, &authority)
                 .await?;
         }
+        self.sync().await?;
         Ok(())
     }
 
@@ -53,6 +54,7 @@ impl TraceDecay {
             self.reindex_file(&file.relative_path, intended, &authority)
                 .await?;
         }
+        self.sync().await?;
         Ok(())
     }
 }
