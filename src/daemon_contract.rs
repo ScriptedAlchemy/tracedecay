@@ -399,24 +399,28 @@ pub(crate) enum DaemonInvocationPayload {
         event: Plan26FeedbackSourceEventV1,
     },
     PrimitiveImpact {
+        binding_id: BindingId,
         request: tracedecay_application::retrieval::GraphImpactPrimitiveRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
     },
     PrimitiveAffectedTests {
+        binding_id: BindingId,
         request: tracedecay_application::retrieval::AffectedFileTestsPrimitiveRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
     },
     PrimitiveTestResults {
+        binding_id: BindingId,
         page: PageRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
     },
     PrimitiveRead {
+        binding_id: BindingId,
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
         request: Pr12PrimitiveRequest,
         observed_at: UtcMicros,
@@ -424,6 +428,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     PrimitiveCode {
+        binding_id: BindingId,
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
         request: crate::application_surface::PrimitiveCodeSurfaceRequest,
         page: PageRequest,
@@ -777,6 +782,7 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn primitive(
         request_id: impl Into<String>,
+        binding_id: BindingId,
         operation: crate::application_surface::ApplicationSurfaceOperation,
         request: Pr12PrimitiveRequest,
         observed_at: UtcMicros,
@@ -788,6 +794,7 @@ impl DaemonInvocationRequest {
                 crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact,
                 Pr12PrimitiveRequest::Impact(request),
             ) => DaemonInvocationPayload::PrimitiveImpact {
+                binding_id,
                 request,
                 observed_at,
                 deadline,
@@ -797,6 +804,7 @@ impl DaemonInvocationRequest {
                 crate::application_surface::ApplicationSurfaceOperation::AffectedTests,
                 Pr12PrimitiveRequest::AffectedFileTests(request),
             ) => DaemonInvocationPayload::PrimitiveAffectedTests {
+                binding_id,
                 request,
                 observed_at,
                 deadline,
@@ -806,6 +814,7 @@ impl DaemonInvocationRequest {
                 crate::application_surface::ApplicationSurfaceOperation::TestResults,
                 Pr12PrimitiveRequest::RecentTestResults(page),
             ) => DaemonInvocationPayload::PrimitiveTestResults {
+                binding_id,
                 page,
                 observed_at,
                 deadline,
@@ -864,6 +873,7 @@ impl DaemonInvocationRequest {
                 request @ Pr12PrimitiveRequest::DiagnosticsRead(_),
             ) => {
                 DaemonInvocationPayload::PrimitiveRead {
+                    binding_id,
                     surface_operation,
                     request,
                     observed_at,
@@ -1130,6 +1140,7 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn primitive_code(
         request_id: impl Into<String>,
+        binding_id: BindingId,
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
         request: crate::application_surface::PrimitiveCodeSurfaceRequest,
         page: PageRequest,
@@ -1143,6 +1154,7 @@ impl DaemonInvocationRequest {
             request_id: request_id.into(),
             delivery_route: None,
             payload: DaemonInvocationPayload::PrimitiveCode {
+                binding_id,
                 surface_operation,
                 request,
                 page,
@@ -1645,6 +1657,7 @@ impl DaemonInvocationRequest {
                 observed_at,
                 deadline,
                 cancellation,
+                ..
             } => {
                 if observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0

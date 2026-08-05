@@ -2882,6 +2882,7 @@ pub async fn execute_application_surface(
         ApplicationSurfaceRequest::TestResults(_) => {
             crate::daemon_contract::DaemonInvocationRequest::primitive(
                 request_id.as_str(),
+                binding_id.clone(),
                 operation,
                 crate::application::primitives::Pr12PrimitiveRequest::RecentTestResults(
                     invocation.page,
@@ -2906,6 +2907,7 @@ pub async fn execute_application_surface(
         ApplicationSurfaceRequest::PrimitiveCode(request) => {
             crate::daemon_contract::DaemonInvocationRequest::primitive_code(
                 request_id.as_str(),
+                binding_id.clone(),
                 operation,
                 request,
                 invocation.page,
@@ -2917,6 +2919,7 @@ pub async fn execute_application_surface(
         ApplicationSurfaceRequest::Primitive(request) => {
             crate::daemon_contract::DaemonInvocationRequest::primitive(
                 request_id.as_str(),
+                binding_id.clone(),
                 operation,
                 request,
                 observed_at,

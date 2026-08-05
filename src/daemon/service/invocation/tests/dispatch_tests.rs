@@ -74,8 +74,10 @@ async fn lsp_gateway_control_terminates_before_owner_lookup() {
 #[test]
 fn test_results_invocation_retains_the_transport_page() {
     let page = PageRequest::first(17).expect("page");
+    let binding_id = BindingId::new("binding.http.test_results.v1").expect("binding");
     let request = DaemonInvocationRequest::primitive(
         "request.test-results.page",
+        binding_id.clone(),
         crate::application_surface::ApplicationSurfaceOperation::TestResults,
         Pr12PrimitiveRequest::RecentTestResults(page.clone()),
         UtcMicros(1),
@@ -87,11 +89,14 @@ fn test_results_invocation_retains_the_transport_page() {
         .expect("daemon protocol")
         .expect("valid request");
     let DaemonInvocationPayload::PrimitiveTestResults {
-        page: decoded_page, ..
+        binding_id: decoded_binding,
+        page: decoded_page,
+        ..
     } = decoded.payload
     else {
         panic!("test-results request must retain its typed payload");
     };
+    assert_eq!(decoded_binding, binding_id);
     assert_eq!(decoded_page, page);
 }
 

@@ -28,12 +28,16 @@ pub(super) async fn execute_primitive(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
     wire_request_id: String,
+    binding_id: BindingId,
     surface_operation: crate::application_surface::ApplicationSurfaceOperation,
     request: Pr12PrimitiveRequest,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
+    if !primitive_binding_matches(&binding_id, surface_operation) {
+        return concealed_application_problem(wire_request_id);
+    }
     let Some(project_root) = project_root else {
         return concealed_application_problem(wire_request_id);
     };
@@ -92,6 +96,7 @@ pub(super) async fn execute_primitive(
     };
     if let Err(error) = page_admission::admit_primitive_page(
         Arc::clone(&dispatch),
+        binding_id,
         surface_operation,
         &request,
         &context,
@@ -139,6 +144,46 @@ pub(super) async fn execute_primitive(
             },
         ),
         Err(problem) => application_problem(wire_request_id, problem),
+    }
+}
+
+fn primitive_binding_matches(
+    binding_id: &BindingId,
+    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+) -> bool {
+    let Ok(catalog) = crate::application_surface::application_surface_catalog_ref() else {
+        return false;
+    };
+    let Some(binding) = catalog.binding(binding_id) else {
+        return false;
+    };
+    let Some(capability) = catalog.capability(binding.capability_id()) else {
+        return false;
+    };
+    binding.operation().as_str() == surface_operation.as_str()
+        && capability.availability().is_callable()
+        && capability.binding_ids().binary_search(binding_id).is_ok()
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    #[test]
+    fn primitive_binding_validation_rejects_a_binding_from_another_operation() {
+        let test_results =
+            BindingId::new("binding.http.test_results.v1").expect("test-results binding");
+        let storage_status =
+            BindingId::new("binding.http.storage_status.v1").expect("storage binding");
+
+        assert!(primitive_binding_matches(
+            &test_results,
+            crate::application_surface::ApplicationSurfaceOperation::TestResults,
+        ));
+        assert!(!primitive_binding_matches(
+            &storage_status,
+            crate::application_surface::ApplicationSurfaceOperation::TestResults,
+        ));
     }
 }
 

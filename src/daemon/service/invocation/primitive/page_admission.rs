@@ -33,13 +33,19 @@ struct PrimitivePageAdmissionInput {
 
 pub(super) async fn admit_primitive_page(
     dispatch: Arc<dyn Pr12PrimitiveDispatch>,
+    binding_id: BindingId,
     surface_operation: crate::application_surface::ApplicationSurfaceOperation,
     primitive: &Pr12PrimitiveRequest,
     context: &RequestContext,
     observed_at: UtcMicros,
 ) -> Result<(), tracedecay_application::PageAdmissionError> {
-    let Some(input) =
-        primitive_page_admission_input(surface_operation, primitive, context, observed_at)?
+    let Some(input) = primitive_page_admission_input(
+        binding_id,
+        surface_operation,
+        primitive,
+        context,
+        observed_at,
+    )?
     else {
         return Ok(());
     };
@@ -53,6 +59,7 @@ pub(super) async fn admit_primitive_page(
 }
 
 fn primitive_page_admission_input(
+    binding_id: BindingId,
     surface_operation: crate::application_surface::ApplicationSurfaceOperation,
     primitive: &Pr12PrimitiveRequest,
     context: &RequestContext,
@@ -147,14 +154,8 @@ fn primitive_page_admission_input(
     };
     let operation = ApplicationWireOperation::from_catalog_name(surface_operation.as_str())
         .ok_or(PageAdmissionError::Unsupported)?;
-    let binding = crate::application_surface::resolve_catalog_tool_binding(
-        tracedecay_tool_catalog::BindingSurface::Http,
-        surface_operation.as_str(),
-    )
-    .map_err(|_| PageAdmissionError::Unavailable)?
-    .ok_or(PageAdmissionError::BindingMismatch)?;
     let request = tracedecay_application::PageAdmissionRequest::new(
-        binding.binding_id,
+        binding_id,
         operation,
         context.clone(),
         observed_at,

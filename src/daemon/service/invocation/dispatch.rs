@@ -296,6 +296,7 @@ impl DaemonInvocationService {
                 }
             }
             DaemonInvocationPayload::PrimitiveImpact {
+                binding_id,
                 request,
                 observed_at,
                 deadline,
@@ -305,6 +306,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
+                    binding_id,
                     crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact,
                     Pr12PrimitiveRequest::Impact(request),
                     observed_at,
@@ -314,6 +316,7 @@ impl DaemonInvocationService {
                 .await
             }
             DaemonInvocationPayload::PrimitiveAffectedTests {
+                binding_id,
                 request,
                 observed_at,
                 deadline,
@@ -323,6 +326,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
+                    binding_id,
                     crate::application_surface::ApplicationSurfaceOperation::AffectedTests,
                     Pr12PrimitiveRequest::AffectedFileTests(request),
                     observed_at,
@@ -332,6 +336,7 @@ impl DaemonInvocationService {
                 .await
             }
             DaemonInvocationPayload::PrimitiveTestResults {
+                binding_id,
                 page,
                 observed_at,
                 deadline,
@@ -341,6 +346,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
+                    binding_id,
                     crate::application_surface::ApplicationSurfaceOperation::TestResults,
                     Pr12PrimitiveRequest::RecentTestResults(page),
                     observed_at,
@@ -350,6 +356,7 @@ impl DaemonInvocationService {
                 .await
             }
             DaemonInvocationPayload::PrimitiveRead {
+                binding_id,
                 surface_operation,
                 request,
                 observed_at,
@@ -360,6 +367,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
+                    binding_id,
                     surface_operation,
                     request,
                     observed_at,
@@ -369,6 +377,7 @@ impl DaemonInvocationService {
                 .await
             }
             DaemonInvocationPayload::PrimitiveCode {
+                binding_id,
                 surface_operation,
                 request,
                 page,
@@ -395,6 +404,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
+                    binding_id,
                     surface_operation,
                     request,
                     observed_at,

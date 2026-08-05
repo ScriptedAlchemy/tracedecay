@@ -8,6 +8,7 @@ use tracedecay_application::{
     ApplicationProblemKind, CancellationContext, Deadline, WorkProjectionSnapshotRequestV1,
 };
 use tracedecay_domain::UtcMicros;
+use tracedecay_tool_catalog::BindingId;
 
 use super::{
     enter_test_daemon_database_scope, initialize_test_project, test_client_identity_for,
@@ -104,6 +105,7 @@ async fn assert_mounted_invocations(engine: &DaemonEngine, handshake: &DaemonHan
         handshake,
         DaemonInvocationRequest::primitive(
             "request.project-open.primitive",
+            BindingId::new("binding.http.storage_status.v1").expect("binding"),
             ApplicationSurfaceOperation::StorageStatus,
             Pr12PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
                 include_details: false,
