@@ -332,4 +332,49 @@ fn unsolicited_partial_and_stale_evidence_are_typed_suppressions() {
             reason: ContextScoutSuppressionV1::EvidenceStale,
         }
     );
+
+    let scope = resolved_scope();
+    let mixed = ContextScoutEvidenceEnvelopeV1::claim(
+        feedback_scope(),
+        scope.clone(),
+        FeedbackContentIdentityV1::SavedContent {
+            generation_digest: digest('c'),
+            file_digest: digest('d'),
+        },
+        id("generation.scout.1"),
+        authority(&scope),
+        ContextScoutRedactionReceiptV1::MetadataOnly {
+            disclosure: DisclosureClass::Evidence,
+        },
+        vec![
+            source_receipt(
+                ContextScoutEvidenceSourceKindV1::Git,
+                "anchor.git.current",
+                RetrieverContributionState::Completed,
+                CoverageCompleteness::Complete,
+            ),
+            source_receipt(
+                ContextScoutEvidenceSourceKindV1::Code,
+                "anchor.code.stale",
+                RetrieverContributionState::Stale,
+                CoverageCompleteness::Unknown,
+            ),
+        ],
+        UtcMicros(110),
+    )
+    .unwrap();
+    assert_eq!(
+        mixed.availability,
+        ContextScoutEvidenceAvailabilityV1::Stale
+    );
+    assert_eq!(
+        select_deterministic_context_scout(
+            &selection(mixed, ContextScoutDeliveryWindowV1::OnRequest),
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap(),
+        ContextScoutDecisionV1::Suppressed {
+            reason: ContextScoutSuppressionV1::EvidenceStale,
+        }
+    );
 }
