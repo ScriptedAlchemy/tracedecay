@@ -13,12 +13,18 @@
 import { describe, expect, it } from 'vitest';
 
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
+import {
+  DashboardEnvelopeV1Schema,
+  GraphNeighborsPayloadV1Schema,
+} from '../../contracts/generated.ts';
 import { TRACE_BUDGET, buildTraceModel, type NeighborsPayload } from './model.ts';
 import { legendPanels, readoutCells, type ReadoutValue } from './readout.ts';
 import type { TraceModel, TraceNode } from './types.ts';
 
 function neighbors(id: string): NeighborsPayload {
-  return resolveFixture(`/api/plugins/graph/node/${id}/neighbors`) as NeighborsPayload;
+  return DashboardEnvelopeV1Schema(GraphNeighborsPayloadV1Schema).parse(
+    resolveFixture(`/api/plugins/graph/node/${id}/neighbors`),
+  ).payload;
 }
 
 /** The same wire-true model the field is drawn from. */

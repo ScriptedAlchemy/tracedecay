@@ -608,13 +608,14 @@ preflight/preview/apply/receipt through the same authorized scope.
 
 **Library-first implementation defaults.** Retain existing `gix`, `notify`,
 and Tokio for Git object/ref intelligence, filesystem observation, and bounded
-async work; use `petgraph` only for branch-stack DAG/SCC mechanics. This
-replaces new Git parsers, watcher loops, async coordination, and bespoke
-topological/SCC code while retaining TraceDecay's stable identities, frozen
-scope, exact native snapshots, preflight/apply separation, compare-and-swap,
-journaling, and receipts. If `gix` or the fixed native plumbing cannot prove a
-state, keep it read-only or block apply; do not add `git2`, and do not let
-`petgraph` become Git or authorization authority.
+async work. Persist and query branch-stack relationships through the canonical
+embedded Grafeo authority in `tracedecay-graph-db`; use small standard-library
+collections only to validate one bounded admitted snapshot. This replaces new
+Git parsers, watcher loops, async coordination, and a second graph model while
+retaining TraceDecay's stable identities, frozen scope, exact native snapshots,
+preflight/apply separation, compare-and-swap, journaling, and receipts. If
+`gix` or the fixed native plumbing cannot prove a state, keep it read-only or
+block apply; do not add `git2` or another graph authority.
 
 **Direct acceptance.** Query and diagnose across multiple authorized roots,
 resume against frozen state, follow evidence to its owning root, reject scope
@@ -720,13 +721,15 @@ retry, review, outcome, and calibration, and returns a non-auto-applied replan.
   task-specific databases/projector runtimes, board query DSLs, and universal
   query ASTs.
 
-**Library-first implementation defaults.** Use `petgraph` for task/workflow
-DAG and SCC mechanics, `tokio-util` for cancellation, existing Tokio timers
-and `DelayQueue` only for mechanical waiting, Serde plus
+**Library-first implementation defaults.** Persist and query task/workflow DAGs
+through the canonical embedded Grafeo authority in `tracedecay-graph-db`; use
+small standard-library collections only to validate one immutable definition.
+Use `tokio-util` for cancellation, existing Tokio timers and `DelayQueue` only
+for mechanical waiting, Serde plus
 `schemars`/`jsonschema` for definition validation, rusqlite transactions for
 atomic claims/effects/publication, `process-wrap` for admitted child-process
-containment, and `d3-dag` for dashboard layout. These replace bespoke graph
-algorithms, cancellation tokens, waiting queues, schema walkers, transaction
+containment, and `d3-dag` for dashboard layout. These replace a second graph
+model, cancellation tokens, waiting queues, schema walkers, transaction
 choreography, process-tree handling, and DAG layout while retaining Plan 24
 task semantics, explicit admission, one runtime clock, cumulative budgets,
 leases/fences, exact provider identity, effect receipts, and non-auto-applied

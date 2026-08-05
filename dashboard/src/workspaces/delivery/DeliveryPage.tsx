@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { ReadSection, type ReadState } from '../../ui/ReadSection.tsx';
 import { FreshnessMeter } from '../../ui/OpsLayout.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
@@ -29,13 +29,17 @@ import {
 import { cn } from '../../ui/cn';
 import { formatCount } from '../../ui/format.ts';
 import { freshnessTier, relativeAge } from '../../ui/time.ts';
-import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
+import {
+  useProjectRegistry,
+  type ProjectRegistryResult,
+} from '../../data/query/projectRegistry.ts';
 import { DeliveryFieldPlot } from './DeliveryField.tsx';
 import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
 import {
   type DeliveryOverviewV1,
   DeliveryOverviewV1Schema,
   type ProjectRepoGroup,
+  type ProjectsPayloadV1,
 } from '../../contracts/generated.ts';
 
 /**
@@ -72,10 +76,10 @@ export function DeliveryPage() {
         title="Delivery"
         note="repositories, changes and commit history · external authorities explicit"
       />
-      <LegacyBoundary
+      <ReadSection
         title="Delivery"
-        pending={projects.isPending}
-        result={projects.data}
+        chrome="centered"
+        state={projectListingReadState(projects.isPending, projects.data)}
       >
         {(data) => {
           if (data.status === 'missing_registry') {
@@ -108,9 +112,29 @@ export function DeliveryPage() {
             />
           );
         }}
-      </LegacyBoundary>
+      </ReadSection>
     </div>
   );
+}
+
+function projectListingReadState(
+  pending: boolean,
+  result: ProjectRegistryResult<ProjectsPayloadV1> | undefined,
+): ReadState<ProjectsPayloadV1> {
+  if (pending) {
+    return { kind: 'blocked', state: 'loading', detail: 'reading the project registry' };
+  }
+  if (!result) {
+    return { kind: 'blocked', state: 'unknown', detail: 'no response recorded' };
+  }
+  if (result.outcome === 'transport') {
+    return {
+      kind: 'blocked',
+      state: result.state,
+      detail: result.detail ?? 'the project registry could not be read',
+    };
+  }
+  return { kind: 'ready', value: result.envelope.payload };
 }
 
 function DeliveryBody_({
@@ -687,4 +711,3 @@ function PipelineStage({
     </div>
   );
 }
-

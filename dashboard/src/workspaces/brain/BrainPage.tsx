@@ -4,12 +4,14 @@ import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
 import { buildAdjacency, neighborsOf } from '../../viz/graph/adjacency.ts';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
-import { CenteredState, LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { Legend, Readout } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
-import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
+import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import type { ProjectsPayloadV1 } from '../../contracts/generated.ts';
 import { useScope } from '../../data/scope/store.ts';
+import { EnvelopeTruth } from '../../ui/EnvelopeTruth.tsx';
 import { SignalPanel } from './SignalPanel.tsx';
 import {
   composeRegistryField,
@@ -37,14 +39,19 @@ import {
 export function BrainPage() {
   const scope = useScope((s) => s.scope);
   const projects = useProjectRegistry();
+  const registryRead = envelopeReadState(projects.isPending, toEnvelopeResult(projects.data), {
+    loading: 'reading the project registry',
+    transport: 'the project registry could not be read',
+  });
 
   if (scope.kind === 'project') {
     return <ScopedBrain projectId={scope.projectId} label={scope.label} />;
   }
 
   return (
-    <LegacyBoundary title="Brain" pending={projects.isPending} result={projects.data} statusInBody>
-      {(data) => {
+    <ReadSection title="Brain" state={registryRead} chrome="centered">
+      {(envelope) => {
+        const data = envelope.payload;
         switch (data.status) {
           // Each carries the daemon's own `error`, which is the only part that
           // says which registry path was expected or what failed to open it.
@@ -108,6 +115,11 @@ export function BrainPage() {
         const holdings = summarizeHoldings(groups.flatMap((group) => group.projects));
         return (
           <div className="flex h-full min-h-0 flex-col">
+            <EnvelopeTruth
+              envelope={envelope}
+              refreshing={projects.isFetching}
+              onRefresh={() => void projects.refetch()}
+            />
             <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
               <h1 className="text-sm font-semibold tracking-tight">Brain</h1>
               <span className="text-2xs text-text-muted">
@@ -157,8 +169,21 @@ export function BrainPage() {
           </div>
         );
       }}
-    </LegacyBoundary>
+    </ReadSection>
   );
+}
+
+function toEnvelopeResult(
+  result: ReturnType<typeof useProjectRegistry>['data'],
+): EnvelopeResult<ProjectsPayloadV1> | undefined {
+  if (!result) return undefined;
+  if (result.outcome === 'envelope') {
+    return { outcome: 'envelope', envelope: result.envelope };
+  }
+  if (result.outcome === 'transport') {
+    return { outcome: 'transport', state: result.state, detail: result.detail };
+  }
+  return undefined;
 }
 
 /** The all-projects field. Position, size and brightness are all measurements
