@@ -139,6 +139,7 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
     project_path: &Path,
     progress: &GitHistoryProgressRow,
     opts: &BackfillOptions,
+    graph_budget: &mut GraphPageBudget,
     control: &BoundedGitControl,
     committed: &mut bool,
 ) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
@@ -184,6 +185,7 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
                 .map_err(|_| BoundedBackfillInterruption::HistoryLimitReached)?,
         )
         .ok_or(BoundedBackfillInterruption::HistoryLimitReached)?;
+    let (remaining_examined_nodes, remaining_examined_bytes) = graph_budget.remaining()?;
     let graph_pending = pending
         .iter()
         .map(|pending| native::GraphPending {
@@ -203,11 +205,22 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
             &scan_source,
             graph_pending,
             remaining,
+            remaining_examined_nodes,
+            remaining_examined_bytes,
             &native_control,
         )
     })
     .await?;
-    apply_graph_chunk(session_store, progress, segment, chunk, control, committed).await
+    apply_graph_chunk(
+        session_store,
+        progress,
+        segment,
+        chunk,
+        graph_budget,
+        control,
+        committed,
+    )
+    .await
 }
 
 async fn verify_repository_without_writer(
@@ -353,9 +366,13 @@ async fn apply_graph_chunk<S: GitCorrelationSessionStore>(
     progress: &GitHistoryProgressRow,
     segment: GitHistorySegmentRow,
     chunk: native::GraphChunk,
+    graph_budget: &mut GraphPageBudget,
     control: &BoundedGitControl,
     committed: &mut bool,
 ) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
+    let examined_nodes = chunk.examined_nodes;
+    let examined_bytes = chunk.examined_bytes;
+    let budget_exhausted = chunk.budget_exhausted;
     let transaction = session_store
         .open_write_transaction()
         .await
@@ -434,7 +451,11 @@ async fn apply_graph_chunk<S: GitCorrelationSessionStore>(
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     *committed = true;
-    Ok(StreamGitEvidenceOutcome::Progressed)
+    if budget_exhausted || graph_budget.record(examined_nodes, examined_bytes) {
+        Err(BoundedBackfillInterruption::HistoryTraversalBudgetReached)
+    } else {
+        Ok(StreamGitEvidenceOutcome::Progressed)
+    }
 }
 
 async fn seal_for_publish<S: GitCorrelationSessionStore>(
@@ -513,7 +534,7 @@ pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
         .await;
     }
 
-    let worktree = normalize_worktree(progress.project_path.trim());
+    let worktree = canonical_worktree_evidence(progress)?;
     let transaction = session_store
         .open_write_transaction()
         .await

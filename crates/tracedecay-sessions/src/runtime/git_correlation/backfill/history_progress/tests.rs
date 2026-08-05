@@ -298,6 +298,16 @@ async fn exact_reset_cascades_children_and_transaction_rollback_leaves_no_state(
     };
     assert!(upsert_staged_span(&conn, &span).await.unwrap());
     assert!(upsert_staged_commit(&conn, &commit).await.unwrap());
+    let mut conflicting_span = span.clone();
+    conflicting_span.timestamp = 101;
+    assert!(!upsert_staged_span(&conn, &conflicting_span).await.unwrap());
+    let mut conflicting_commit = commit.clone();
+    conflicting_commit.committed_at = 151;
+    assert!(
+        !upsert_staged_commit(&conn, &conflicting_commit)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         read_staged_span_page(&conn, key, 128).await.unwrap(),
         vec![span]

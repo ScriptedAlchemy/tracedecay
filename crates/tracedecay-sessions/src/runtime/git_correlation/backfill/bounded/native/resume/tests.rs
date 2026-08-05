@@ -175,6 +175,8 @@ fn sealed_graph_ignores_later_head_drift_and_keeps_nonmonotonic_parent_time() {
         &source.repository_seal(),
         vec![GraphPending { oid: tip }],
         10,
+        128,
+        256 * 1024,
         &control(),
     )
     .unwrap();
@@ -187,6 +189,8 @@ fn sealed_graph_ignores_later_head_drift_and_keeps_nonmonotonic_parent_time() {
         &source.repository_seal(),
         first.pending,
         10,
+        128,
+        256 * 1024,
         &control(),
     )
     .unwrap();

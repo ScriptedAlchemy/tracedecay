@@ -11,7 +11,34 @@ use super::{
     SessionActivityRow,
 };
 
-const UNSUPPORTED_SOURCE_FRAMING: &str = "unsupported_source_framing";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GitHistoryFailureReason {
+    UnsupportedSourceFraming,
+    UnsupportedCanonicalWorktreeEncoding,
+}
+
+impl GitHistoryFailureReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedSourceFraming => "unsupported_source_framing",
+            Self::UnsupportedCanonicalWorktreeEncoding => "unsupported_canonical_worktree_encoding",
+        }
+    }
+
+    fn from_interruption(
+        interruption: BoundedBackfillInterruption,
+    ) -> Result<Self, BoundedBackfillInterruption> {
+        match interruption {
+            BoundedBackfillInterruption::UnsupportedSourceFraming => {
+                Ok(Self::UnsupportedSourceFraming)
+            }
+            BoundedBackfillInterruption::UnsupportedCanonicalWorktreeEncoding => {
+                Ok(Self::UnsupportedCanonicalWorktreeEncoding)
+            }
+            other => Err(other),
+        }
+    }
+}
 
 pub(in super::super) async fn install_final_schema(
     conn: &(impl Executor + ?Sized),
@@ -26,7 +53,10 @@ pub(in super::super) async fn install_final_schema(
             window_start INTEGER NOT NULL,
             window_end INTEGER NOT NULL,
             reason TEXT NOT NULL
-                CHECK(reason = 'unsupported_source_framing'),
+                CHECK(reason IN (
+                    'unsupported_source_framing',
+                    'unsupported_canonical_worktree_encoding'
+                )),
             source_generation TEXT,
             reflog_digest TEXT,
             CHECK(window_start <= window_end),
@@ -55,6 +85,7 @@ pub(super) struct GitHistoryFailureRow {
     pub project_path: String,
     pub window_start: i64,
     pub window_end: i64,
+    pub reason: GitHistoryFailureReason,
     pub source_generation: Option<String>,
     pub reflog_digest: Option<String>,
 }
@@ -74,12 +105,16 @@ impl GitHistoryFailureRow {
             project_path: row.project_path.clone(),
             window_start,
             window_end,
+            reason: GitHistoryFailureReason::UnsupportedSourceFraming,
             source_generation: None,
             reflog_digest: None,
         }
     }
 
-    pub(super) fn from_progress(progress: &GitHistoryProgressRow) -> Self {
+    pub(super) fn from_progress(
+        progress: &GitHistoryProgressRow,
+        reason: GitHistoryFailureReason,
+    ) -> Self {
         Self {
             source_rowid: progress.key.source_rowid,
             activity_timestamp: progress.activity_timestamp,
@@ -88,6 +123,7 @@ impl GitHistoryFailureRow {
             project_path: progress.project_path.clone(),
             window_start: progress.window_start,
             window_end: progress.window_end,
+            reason,
             source_generation: Some(progress.source_generation.clone()),
             reflog_digest: Some(progress.reflog_digest.clone()),
         }
@@ -127,10 +163,12 @@ pub(super) async fn record_candidate<S: GitCorrelationSessionStore>(
 pub(super) async fn record_progress<S: GitCorrelationSessionStore>(
     session_store: &S,
     progress: &GitHistoryProgressRow,
+    interruption: BoundedBackfillInterruption,
     control: &BoundedGitControl,
     committed: &mut bool,
 ) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
-    let failure = GitHistoryFailureRow::from_progress(progress);
+    let reason = GitHistoryFailureReason::from_interruption(interruption)?;
+    let failure = GitHistoryFailureRow::from_progress(progress, reason);
     record(session_store, &failure, Some(progress), control, committed).await
 }
 
@@ -276,7 +314,7 @@ async fn upsert_unresolved(
             &failure.project_path,
             failure.window_start,
             failure.window_end,
-            UNSUPPORTED_SOURCE_FRAMING,
+            failure.reason.as_str(),
             failure.source_generation.as_deref(),
             failure.reflog_digest.as_deref(),
         ],
