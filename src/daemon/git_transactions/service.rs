@@ -258,18 +258,9 @@ where
         let repository_id = preview.repository_snapshot.repository_id.clone();
         let result = self
             .queue
-            .with_repository_cancellable(
-                &repository_id,
-                &cancellation_requested,
-                |cancellation_observed| {
-                    self.apply_serialized(
-                        request,
-                        &preview,
-                        cancellation_observed,
-                        &cancellation_requested,
-                    )
-                },
-            )
+            .with_repository_cancellable(&repository_id, &cancellation_requested, |cancelled_at| {
+                self.apply_serialized(request, &preview, cancelled_at, &cancellation_requested)
+            })
             .map_err(map_queue_error);
         if result.is_err() {
             self.native.discard_preview(&request.preview_id);

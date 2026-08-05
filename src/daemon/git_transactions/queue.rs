@@ -65,6 +65,12 @@ impl RepositoryMutationQueue {
         self.with_repository_cancellable(repository_id, || None, |_| operation())
     }
 
+    /// Waits for the exact repository permit while polling cancellation.
+    ///
+    /// A `Some(cancelled_at)` callback runs without the repository permit and
+    /// therefore must only publish a proven-no-change outcome. This lets
+    /// callers durably record cancellation without waiting behind unrelated
+    /// native work.
     pub(crate) fn with_repository_cancellable<T>(
         &self,
         repository_id: &RepositoryId,
@@ -90,7 +96,10 @@ impl RepositoryMutationQueue {
                     .or_insert_with(|| Arc::new(Mutex::new(()))),
             )
         };
-        let mut cancellation_observed = cancellation_requested();
+        if let Some(cancelled_at) = cancellation_requested() {
+            self.release_idle_gate(repository_id, &gate)?;
+            return Ok(operation(Some(cancelled_at)));
+        }
         let _guard = loop {
             match gate.try_lock() {
                 Ok(guard) => break guard,
@@ -98,13 +107,20 @@ impl RepositoryMutationQueue {
                     return Err(RepositoryMutationQueueError::Unavailable);
                 }
                 Err(TryLockError::WouldBlock) => {
-                    cancellation_observed = cancellation_observed.or_else(&cancellation_requested);
+                    if let Some(cancelled_at) = cancellation_requested() {
+                        self.release_idle_gate(repository_id, &gate)?;
+                        return Ok(operation(Some(cancelled_at)));
+                    }
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }
         };
-        cancellation_observed = cancellation_observed.or_else(cancellation_requested);
-        let result = operation(cancellation_observed);
+        if let Some(cancelled_at) = cancellation_requested() {
+            drop(_guard);
+            self.release_idle_gate(repository_id, &gate)?;
+            return Ok(operation(Some(cancelled_at)));
+        }
+        let result = operation(None);
         drop(_guard);
         self.release_idle_gate(repository_id, &gate)?;
         Ok(result)
