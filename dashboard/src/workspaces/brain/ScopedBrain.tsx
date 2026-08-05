@@ -6,7 +6,7 @@ import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSect
 import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
 import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
-import { useProjectEntry } from '../../data/query/projectRegistry.ts';
+import { PROJECT_NOT_FOUND, useProjectEntry } from '../../data/query/projectRegistry.ts';
 import { type EnvelopeResult } from '../../data/query/envelope.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
@@ -267,7 +267,27 @@ function projectContextReadState(
       detail: result.detail ?? 'the project registry could not be read',
     };
   }
-  return { kind: 'ready', value: result.envelope.payload };
+  const payload = result.envelope.payload;
+  if (payload.status === 'ok') return { kind: 'ready', value: payload };
+  if (payload.status === PROJECT_NOT_FOUND) {
+    return {
+      kind: 'blocked',
+      state: 'complete_zero_findings',
+      detail: payload.error ?? 'this project is not in the registry',
+    };
+  }
+  if (payload.status === 'missing_registry' || payload.status === 'registry_unavailable') {
+    return {
+      kind: 'blocked',
+      state: 'unavailable',
+      detail: payload.error ?? 'the project registry could not be read',
+    };
+  }
+  return {
+    kind: 'blocked',
+    state: 'unknown',
+    detail: `the project registry reported an unrecognised status: ${payload.status}`,
+  };
 }
 
 /**

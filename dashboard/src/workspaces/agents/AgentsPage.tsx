@@ -311,7 +311,10 @@ export function AgentsPage() {
                     const hintData = envelope.payload;
                     return (
                     hintData.available === false ? (
-                      <ReadFailure label="Hint diagnostics unavailable" />
+                      <ReadFailure
+                        label="Hint diagnostics unavailable"
+                        detail={envelope.coverage.omission_reasons[0]}
+                      />
                     ) : (
                       <FamilyList rows={hintData.families ?? []} />
                     )

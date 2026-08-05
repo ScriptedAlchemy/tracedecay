@@ -242,7 +242,17 @@ pub async fn overview(
             ));
         }
     };
-    let underused = underused_tool_families(state.lcm_db.as_deref()).await;
+    let underused = match underused_tool_families(state.lcm_db.as_deref()).await {
+        Ok(Some(families)) => families,
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            return Json(DashboardEnvelopeV1::unavailable(
+                scope_from_state(&state),
+                None,
+                error,
+            ));
+        }
+    };
 
     let payload = AnalyticsOverviewPayloadV1 {
         available: state.lcm_db.is_some() || durable_events.is_some(),
@@ -563,23 +573,37 @@ pub async fn diagnostics(
 pub async fn underused(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsUnderusedPayloadV1>>> {
-    let payload = AnalyticsUnderusedPayloadV1 {
-        available: state.lcm_db.is_some(),
-        db: state.lcm_db_path.clone(),
-        families: underused_tool_families(state.lcm_db.as_deref()).await,
-    };
-    if !payload.available {
-        Json(DashboardEnvelopeV1::unavailable(
+    match underused_tool_families(state.lcm_db.as_deref()).await {
+        Ok(Some(families)) => {
+            let payload = AnalyticsUnderusedPayloadV1 {
+                available: true,
+                db: state.lcm_db_path.clone(),
+                families,
+            };
+            Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(payload.families.len() as u64, "tool_families"),
+                Some(payload),
+            ))
+        }
+        Ok(None) => Json(DashboardEnvelopeV1::unavailable(
             scope_from_state(&state),
-            Some(payload),
-            "analytics_usage_source_unavailable",
-        ))
-    } else {
-        Json(DashboardEnvelopeV1::ready(
+            Some(AnalyticsUnderusedPayloadV1 {
+                available: false,
+                db: state.lcm_db_path.clone(),
+                families: Vec::new(),
+            }),
+            "analytics_underused_source_unavailable",
+        )),
+        Err(error) => Json(DashboardEnvelopeV1::unavailable(
             scope_from_state(&state),
-            DashboardCoverageV1::complete(payload.families.len() as u64, "tool_families"),
-            Some(payload),
-        ))
+            Some(AnalyticsUnderusedPayloadV1 {
+                available: false,
+                db: state.lcm_db_path.clone(),
+                families: Vec::new(),
+            }),
+            error,
+        )),
     }
 }
 
@@ -902,8 +926,12 @@ async fn hint_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[
     })
 }
 
-async fn session_message_rows(db: Option<&RegisteredGlobalDb>) -> Option<Vec<Value>> {
-    let db = db?;
+async fn session_message_rows(
+    db: Option<&RegisteredGlobalDb>,
+) -> Result<Option<Vec<Value>>, String> {
+    let Some(db) = db else {
+        return Ok(None);
+    };
     query_rows(
         db.read_connection(),
         "SELECT COALESCE(tool_names, '') AS tool_names,
@@ -915,7 +943,8 @@ async fn session_message_rows(db: Option<&RegisteredGlobalDb>) -> Option<Vec<Val
         (),
     )
     .await
-    .ok()
+    .map(Some)
+    .map_err(|error| format!("session-message query failed: {error}"))
 }
 
 fn usage_summary_from_events(events: &[Value]) -> Value {
@@ -1014,22 +1043,25 @@ async fn typed_usage_summary(
     db: Option<&RegisteredGlobalDb>,
     durable_events: Option<&[Value]>,
 ) -> Result<AnalyticsUsageSummaryV1, String> {
-    let usage = usage_summary(db, durable_events).await;
+    let usage = usage_summary(db, durable_events).await?;
     serde_json::from_value::<AnalyticsUsageSummaryV1>(usage)
         .map_err(|error| format!("analytics usage summary did not match its contract: {error}"))
 }
 
-async fn usage_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[Value]>) -> Value {
+async fn usage_summary(
+    db: Option<&RegisteredGlobalDb>,
+    durable_events: Option<&[Value]>,
+) -> Result<Value, String> {
     if let Some(events) = durable_events {
-        return usage_summary_from_events(events);
+        return Ok(usage_summary_from_events(events));
     }
 
-    let Some(rows) = session_message_rows(db).await else {
-        return json!({
+    let Some(rows) = session_message_rows(db).await? else {
+        return Ok(json!({
             "available": false,
             "message_count": 0,
             "by_category": [],
-        });
+        }));
     };
 
     let mut counts: BTreeMap<(String, String), i64> = BTreeMap::new();
@@ -1043,11 +1075,11 @@ async fn usage_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&
         }
     }
 
-    json!({
+    Ok(json!({
         "available": true,
         "message_count": rows.len() as i64,
         "by_category": usage_count_rows(counts),
-    })
+    }))
 }
 
 fn usage_count_rows(counts: BTreeMap<(String, String), i64>) -> Vec<Value> {
@@ -1063,12 +1095,18 @@ fn usage_count_rows(counts: BTreeMap<(String, String), i64>) -> Vec<Value> {
         .collect()
 }
 
-async fn diagnostics_summary(state: &DashboardState, durable_events: Option<&[Value]>) -> Value {
-    let message_count = session_message_rows(state.lcm_db.as_deref())
-        .await
-        .map_or(0, |rows| rows.len() as i64);
+async fn diagnostics_summary(
+    state: &DashboardState,
+    durable_events: Option<&[Value]>,
+) -> Result<Value, String> {
+    let message_count =
+        session_message_rows(state.lcm_db.as_deref())?.map_or(0, |rows| rows.len() as i64);
     let hook_analytics = read_hook_analytics_rows(state);
-    diagnostics_summary_from_parts(message_count, &hook_analytics, durable_events)
+    Ok(diagnostics_summary_from_parts(
+        message_count,
+        &hook_analytics,
+        durable_events,
+    ))
 }
 
 async fn typed_diagnostics_summary(
@@ -1076,7 +1114,7 @@ async fn typed_diagnostics_summary(
     durable_events: Option<&[Value]>,
 ) -> Result<AnalyticsDiagnosticsPayloadV1, String> {
     decode_analytics_contract(
-        diagnostics_summary(state, durable_events).await,
+        diagnostics_summary(state, durable_events).await?,
         "analytics diagnostics",
     )
 }
@@ -1559,28 +1597,30 @@ fn recent_hook_rows(rows: &[Value], limit: usize) -> Vec<Value> {
 
 async fn underused_tool_families(
     db: Option<&RegisteredGlobalDb>,
-) -> Vec<AnalyticsUnderusedFamilyV1> {
-    let Some(rows) = session_message_rows(db).await else {
-        return Vec::new();
+) -> Result<Option<Vec<AnalyticsUnderusedFamilyV1>>, String> {
+    let Some(rows) = session_message_rows(db).await? else {
+        return Ok(None);
     };
 
-    underused_tool_family_signals(rows.iter().map(|row| {
-        let text = str_field(row, "text");
-        ToolUsageObservation {
-            tool_names: Some(str_field(row, "tool_names")),
-            metadata_json: Some(str_field(row, "metadata_json")),
-            text: Some(text),
-        }
-    }))
-    .into_iter()
-    .map(|signal| AnalyticsUnderusedFamilyV1 {
-        family: signal.family,
-        relevant_events: signal.relevant_events,
-        usage_events: signal.usage_events,
-        missed_events: signal.missed_events,
-        underused: signal.underused,
-    })
-    .collect()
+    Ok(Some(
+        underused_tool_family_signals(rows.iter().map(|row| {
+            let text = str_field(row, "text");
+            ToolUsageObservation {
+                tool_names: Some(str_field(row, "tool_names")),
+                metadata_json: Some(str_field(row, "metadata_json")),
+                text: Some(text),
+            }
+        }))
+        .into_iter()
+        .map(|signal| AnalyticsUnderusedFamilyV1 {
+            family: signal.family,
+            relevant_events: signal.relevant_events,
+            usage_events: signal.usage_events,
+            missed_events: signal.missed_events,
+            underused: signal.underused,
+        })
+        .collect(),
+    ))
 }
 
 fn normalize(value: &str) -> String {
