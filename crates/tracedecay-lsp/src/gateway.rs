@@ -2218,10 +2218,26 @@ where
 
     /// Binds the capability intersection negotiated during this authenticated
     /// session's `initialize` request. The protocol actor invokes this before
-    /// transitioning the session to `Ready`; clients cannot dynamically widen
-    /// the gateway's capabilities afterward.
+    /// transitioning the session to `Ready`.
     pub fn bind_initialized_capabilities(&mut self, capabilities: EffectiveCapabilities) {
         self.capabilities = capabilities;
+    }
+
+    /// Applies the result of one exact LSP dynamic diagnostic registration.
+    ///
+    /// This is deliberately narrower than rebinding the negotiated capability
+    /// set: only the standard diagnostic provider can change, and only the
+    /// protocol actor that owns the corresponding client registration may do
+    /// so.
+    pub(crate) fn bind_dynamic_diagnostics(
+        &mut self,
+        registered: bool,
+        workspace_diagnostics: bool,
+        refresh: bool,
+    ) {
+        self.capabilities.supports_document_diagnostics = registered;
+        self.capabilities.workspace_diagnostics_supported = registered && workspace_diagnostics;
+        self.capabilities.supports_workspace_diagnostic_refresh = registered && refresh;
     }
 
     pub fn initialization_availability(&self) -> CapabilityAvailability {
