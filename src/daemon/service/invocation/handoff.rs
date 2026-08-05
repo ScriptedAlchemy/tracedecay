@@ -110,7 +110,7 @@ fn current_feedback_finding(
         ApplicationOutcome::Evidence(evidence) => evidence
             .payload
             .ok_or(HandoffOpenTargetError::Unavailable)
-            .map(Some),
+            .map(|result| Some(result.finding)),
         ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => {
             Err(HandoffOpenTargetError::Unavailable)
         }

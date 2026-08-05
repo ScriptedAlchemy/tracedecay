@@ -22,7 +22,6 @@ pub(super) fn concealed_application_problem(request_id: String) -> DaemonInvocat
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_workflow_application(
     registered: RegisteredWorkRuntime,
-    project_root: &Path,
     request_id: String,
     request: WorkflowApplicationInvocation,
     _observed_at: UtcMicros,

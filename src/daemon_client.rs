@@ -480,24 +480,31 @@ impl DaemonInvocationClient {
         Option<String>,
     )> {
         let confirmation = confirmation_token
-            .map(|token| {
-                let bytes =
-                    hex::decode(token).map_err(|_| crate::errors::TraceDecayError::Config {
+            .map(
+                |token| -> crate::errors::Result<
+                    tracedecay_application::ConfigurationResetConfirmationV1,
+                > {
+                    let bytes =
+                        hex::decode(token).map_err(|_| crate::errors::TraceDecayError::Config {
+                            message: "configuration reset confirmation is not a valid token"
+                                .to_owned(),
+                        })?;
+                    let confirmation = serde_json::from_slice::<
+                        tracedecay_application::ConfigurationResetConfirmationV1,
+                    >(&bytes)
+                    .map_err(|_| crate::errors::TraceDecayError::Config {
                         message: "configuration reset confirmation is not a valid token".to_owned(),
                     })?;
-                let confirmation = serde_json::from_slice::<
-                    tracedecay_application::ConfigurationResetConfirmationV1,
-                >(&bytes)
-                .map_err(|_| crate::errors::TraceDecayError::Config {
-                    message: "configuration reset confirmation is not a valid token".to_owned(),
-                })?;
-                confirmation.validate().map_err(|error| {
-                    crate::errors::TraceDecayError::Config {
-                        message: format!("configuration reset confirmation is invalid: {error}"),
-                    }
-                })?;
-                Ok(confirmation)
-            })
+                    confirmation.validate().map_err(|error| {
+                        crate::errors::TraceDecayError::Config {
+                            message: format!(
+                                "configuration reset confirmation is invalid: {error}"
+                            ),
+                        }
+                    })?;
+                    Ok(confirmation)
+                },
+            )
             .transpose()?;
         let handshake = crate::daemon::DaemonHandshake::for_current_client(
             Some(project_root),
@@ -1260,7 +1267,7 @@ fn invocation_outcome_error(
                 InvocationError::Denied
             }
             crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
-                "daemon invocation store requires an explicit reset"
+                InvocationError::Unavailable
             }
             crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                 InvocationError::Unavailable
