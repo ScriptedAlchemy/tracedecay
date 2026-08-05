@@ -756,6 +756,7 @@ impl McpServer {
             }
         };
         let active_project_id = cg.store_layout().identity.project_id.clone();
+        let current_graph = Arc::new(tokio::sync::RwLock::new(Arc::clone(&cg)));
         let accounting_authority = accounting_db
             .as_ref()
             .zip(profile_identity.as_ref())
@@ -765,6 +766,7 @@ impl McpServer {
                     Arc::clone(accounting),
                     transcript_source_home.clone(),
                     Arc::clone(&cg),
+                    Arc::clone(&current_graph),
                     registered_session_db.clone(),
                     registered_user_session_db.clone(),
                 )
@@ -843,7 +845,7 @@ impl McpServer {
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
 
         let server = Arc::new(Self {
-            cg: Arc::new(tokio::sync::RwLock::new(cg)),
+            cg: current_graph,
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
             branch_reopen_completions: Arc::new(AtomicU64::new(0)),
             stats: ServerStats::new(),

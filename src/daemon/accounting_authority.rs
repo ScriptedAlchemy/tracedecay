@@ -23,7 +23,7 @@ use crate::tracedecay::TraceDecay;
 struct ProjectAccountingAuthority {
     scope: AccountingProjectScopeV1,
     root: PathBuf,
-    graph: Arc<TraceDecay>,
+    graph: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
 }
 
 /// One profile database authority with an optional exact project scope.
@@ -44,7 +44,7 @@ pub(crate) struct DaemonAccountingOwners {
     pub(crate) transcript_source_home: Option<PathBuf>,
     pub(crate) project_id: Option<ProjectId>,
     pub(crate) project_root: Option<PathBuf>,
-    pub(crate) graph: Option<Arc<TraceDecay>>,
+    pub(crate) graph: Option<Arc<tokio::sync::RwLock<Arc<TraceDecay>>>>,
     pub(crate) project_sessions: Option<Arc<RegisteredGlobalDb>>,
     pub(crate) profile_sessions: Option<Arc<RegisteredGlobalDb>>,
 }
@@ -55,6 +55,7 @@ impl DaemonAccountingAuthority {
         accounting: Arc<RegisteredGlobalDb>,
         transcript_source_home: Option<PathBuf>,
         graph: Arc<TraceDecay>,
+        current_graph: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
         project_sessions: Option<Arc<RegisteredGlobalDb>>,
         profile_sessions: Option<Arc<RegisteredGlobalDb>>,
     ) -> Option<Arc<dyn AccountingAuthorityPort>> {
@@ -72,7 +73,7 @@ impl DaemonAccountingAuthority {
             transcript_source_home,
             project_id: Some(project_id),
             project_root: Some(project_root),
-            graph: Some(graph),
+            graph: Some(current_graph),
             project_sessions,
             profile_sessions,
         })
@@ -248,10 +249,10 @@ impl DaemonAccountingAuthority {
         no_sync: bool,
     ) -> Result<ServedAccountingPayload, String> {
         let project_root = self.project.as_ref().map(|project| project.root.as_path());
-        let project_store_root = self
-            .project
-            .as_ref()
-            .map(|project| project.graph.store_layout().data_root.as_path());
+        let project_store_root = match self.project.as_ref() {
+            Some(project) => Some(project.graph.read().await.store_layout().data_root.clone()),
+            None => None,
+        };
         if !all_projects && project_root.is_some() && self.project_sessions.is_none() {
             return Err("registered project session authority is unavailable".to_owned());
         }
@@ -267,7 +268,7 @@ impl DaemonAccountingAuthority {
             self.project_sessions.as_deref(),
             self.profile_sessions.as_deref(),
             project_root,
-            project_store_root,
+            project_store_root.as_deref(),
             hook_sources,
             all_projects,
             no_sync,
@@ -322,8 +323,8 @@ impl DaemonAccountingAuthority {
             .project
             .as_ref()
             .ok_or_else(|| "project accounting authority is unavailable".to_owned())?;
-        let tokens_saved = project
-            .graph
+        let graph = project.graph.read().await.clone();
+        let tokens_saved = graph
             .get_tokens_saved()
             .await
             .map_err(|error| error.to_string())?;
@@ -355,12 +356,9 @@ impl DaemonAccountingAuthority {
     ) -> Result<Vec<crate::analytics_bridge::HookImportSource>, String> {
         let mut sources = Vec::new();
         if let Some(project) = self.project.as_ref() {
+            let graph = project.graph.read().await;
             sources.push(crate::analytics_bridge::HookImportSource {
-                path: project
-                    .graph
-                    .store_layout()
-                    .data_root
-                    .join("hook_analytics.jsonl"),
+                path: graph.store_layout().data_root.join("hook_analytics.jsonl"),
                 default_project_root: Some(project.root.clone()),
             });
         }
