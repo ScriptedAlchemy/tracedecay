@@ -60,10 +60,12 @@ defaults:
 | `TRACEDECAY_BIN` | Selects the `tracedecay` executable used when the wrapper starts the dashboard. |
 | `TRACEDECAY_DASHBOARD_PROJECT` | Selects the project root passed to the dashboard; when unset, the wrapper uses the Hermes process working directory. |
 
-Hermes homes and profiles never select a TraceDecay project or store. The
-wrapper's server is loopback-bound and inherits Hermes dashboard-session
-protection; use the variables only for the wrapper's runtime route, not as a
-store selector.
+Hermes homes and profiles never select a TraceDecay project or store. When the
+wrapper starts the dashboard itself, that server is loopback-bound and inherits
+Hermes dashboard-session protection. `TRACEDECAY_DASHBOARD_URL` instead accepts
+an arbitrary HTTP(S) endpoint; setting it changes the network and trust
+boundary, so the operator must secure that endpoint and its transport. Use the
+variables only for the wrapper's runtime route, not as a store selector.
 
 For a Hermes problem, run the doctor command first. For a session or
 compression problem, inspect `lcm_status` and `lcm_doctor` (or the matching
