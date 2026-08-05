@@ -4,7 +4,10 @@ Thanks for downloading TraceDecay!
 
 TraceDecay is a code intelligence tool that builds a semantic knowledge graph of your codebase. It gives AI coding agents (like Claude Code) instant, structured access to your code's symbols, relationships, and dependencies — so they spend fewer tokens scanning files and more time writing code.
 
-Everything runs locally. Your code never leaves your machine.
+Core indexing and retrieval run through the local daemon by default. Configured
+remote sources and authorities are separate, policy-bound effects; see
+[Privacy and Network](#privacy-and-network) before assuming an offline-only
+deployment.
 
 ---
 
@@ -803,7 +806,9 @@ For each supported language, tracedecay extracts:
 
 TraceDecay's core functionality is local-first. Indexing, search, graph queries,
 and the MCP server run through the local daemon and its embedded Grafeo/SQLite
-authority. Clients do not open database files directly. No API keys are needed.
+authority. Clients do not open database files directly. Default local and
+public-repository behavior needs no credential, but configured remote sources
+and authorities are distinct policy-bound effects.
 
 Network effects are separate from local indexing and retrieval. They can be
 disabled, unavailable, or denied without turning those states into successful
@@ -839,12 +844,40 @@ receives ordinary request metadata, including the connection source address and
 the TraceDecay user agent. A timeout or unavailable service means release
 metadata is unavailable, not that no update exists.
 
+### Private GitHub review sources
+
+An explicitly configured private GitHub review source can use an optional
+read-only credential from the operating-system keyring. Configuration stores a
+keyring locator rather than the secret itself. The daemon mounts the source only
+after verifying the exact read-only permission set; missing, ambiguous,
+write-capable, or unverifiable credentials fail closed.
+
 ### Pricing refresh
 
 `tracedecay cost` may refresh public model-pricing data and cache it locally.
 The pricing host receives ordinary transport metadata. When it is unavailable,
 cached or embedded pricing is a fallback estimate rather than proof that the
 price is current.
+
+### Semantic-model acquisition
+
+When semantic auto-download is enabled, TraceDecay can download missing,
+revision-pinned semantic-model artifacts from Hugging Face hosts. Artifacts are
+verified against catalog-pinned lengths and SHA-256 digests before publication.
+If acquisition is unavailable or disabled, semantic retrieval reports its model
+state or failure while exact, lexical, and graph retrieval remain available.
+
+### Configured remote authority
+
+An explicitly configured, authenticated remote authority can perform
+policy-authorized remote retrieval, replication, backup, restore, or failover.
+Only authorized, sanitized, classified records can be exchanged, with exact
+source, retention, coverage, and receipt identity. The remote path fails closed
+with typed `unavailable`, `denied`, or `stale-peer` state; it does not turn a
+host, transport, or arbitrary endpoint into a TraceDecay storage authority.
+
+See [Security](../SECURITY.md#network-access) for the complete outbound-access,
+credential, and local-listener boundary.
 
 ---
 

@@ -1,73 +1,42 @@
-# tracedecay vs lean-ctx
+# TraceDecay and lean-ctx
 
-> Historical comparison snapshot. The ranked import list records ideas at the
-> time of review; it is not a current capability or gap list.
+TraceDecay and lean-ctx both try to reduce the amount of context an AI coding
+agent has to process, but they center different product journeys. This is a
+current-state comparison, not an import list, roadmap, or a statement that one
+product replaces the other. Verify lean-ctx behavior in its current
+[documentation](https://github.com/yvgude/lean-ctx) and TraceDecay behavior
+through its daemon and product contract.
 
-Both projects compress context for AI coding agents but with different centers of gravity:
+## Product focus
 
-- **tracedecay** — daemon-owned code intelligence and agent-memory product.
-  Grafeo owns graph/vector data; SQLite owns relational/content records. Its
-  typed MCP operations focus on symbol evidence, impact, code health, session
-  recall, and daemon-owned freshness.
-- **lean-ctx** — a context runtime that also compresses arbitrary file reads
-  and shell output, with multi-mode file reads, hybrid search, portable context
-  bundles, and persistent knowledge features.
+| Concern | TraceDecay | lean-ctx |
+|---|---|---|
+| Code and evidence | A daemon-owned authority serves code, project-memory, and session evidence with exact provenance, generation, coverage, and receipts. | Describes a local context layer for read modes, shell output, request-context compression, and context-use visibility. |
+| Graph and durable state | Grafeo owns admitted graph/vector data; SQLite owns relational/content records. Clients do not open either store directly. | Describes a property graph and portable context packages alongside its context-management features. |
+| Session context | Lossless Context Memory retains raw-message evidence and summary nodes, with bounded replay and drill-down through daemon operations. | Describes persistent session memory and recovery across chats. |
+| Workflow and multi-agent work | The V2 product includes the daemon-owned work graph and typed workflow runtime: task evidence, ownership, authorization, execution, cancellation, recovery, collaboration, and receipts are product data, not host scripts. | Describes agent handoff and shared-context features. |
+| Operating model | Hosts submit bounded hints and typed operations; daemon convergence, freshness, and maintenance remain explicit. | Describes agent wrappers, shell hooks, and an optional request proxy that can mediate context on the read and model-request paths. |
 
-The two overlap in graph/impact analysis but diverge on read modes, shell-output compression, and persistent knowledge. TraceDecay is deeper on graph quality metrics; lean-ctx is broader on the I/O surface.
+## Choosing a boundary
 
----
+Use TraceDecay when the job requires attributable code, memory, session, task,
+or workflow evidence through one daemon authority and explicit state semantics.
+Use lean-ctx when its documented context-compression or mediation journey is the
+one you need. The products may address different parts of an agent workflow;
+neither comparison should be read as authorization to bypass its storage,
+policy, or host-integration boundaries.
 
-## Useful features to import (ranked)
+For TraceDecay, inspect the installed product rather than assuming freshness or
+availability:
 
-### High value
+```bash
+tracedecay status --json
+tracedecay doctor
+tracedecay tool
+```
 
-1. **Mode-aware file read primitive** — `tracedecay_read` with modes `full | map | signatures | diff | lines:N-M | entropy | auto`. tracedecay already has the symbol graph (`tracedecay_node`, `tracedecay_module_api`) but no whole-file `Read` replacement. Exposing one would let agents skip raw `Read` for huge files. The `signatures` and `map` modes can be served almost for free from the existing graph.
-
-2. **Shell-output compression patterns** — lean-ctx's declarative patterns for
-   `git` / `cargo` / `npm` / `docker` output. Orthogonal to tracedecay's graph;
-   addresses the *other half* of agent token spend (Bash tool results). Could
-   ship as `tracedecay compress -c <cmd>` plus a Claude Code Bash post-tool
-   hook. Pattern registry stays declarative and easy to extend.
-
-3. **Hybrid search with RRF** — extend `tracedecay_search` / `tracedecay_context` with Reciprocal Rank Fusion over (FTS5 BM25, graph proximity, optional local embeddings). tracedecay already has the first two; adding a small embedding model behind a feature flag would meaningfully improve recall on conceptual queries (the `keywords` arg on `tracedecay_context` is the manual workaround for the same problem).
-
-4. **Persistent knowledge facts** — `knowledge remember / recall / search / export / import` with category/key. Distinct from tracedecay's `session_start` / `session_end` (which are *health-metric* snapshots, not free-form facts). Useful for "the test command is X", "this module owner is Y" — survives across sessions and could be exposed as an MCP tool plus a `tracedecay://knowledge` resource.
-
-5. **Read/result caching layer** — lean-ctx's "cached re-reads compress to ~13 tokens." For MCP responses keyed by `(file, mtime, args)`, return a tiny "unchanged since last call" stub. Lowers token cost on revisits without changing tool semantics.
-
-### Medium value
-
-6. **Portable context packages (`.lctxpkg`)** — SHA-256-stamped bundle of `{knowledge, graph subset, session, gotchas}`. tracedecay already produces per-branch DBs; a portable export/import format would help team sharing and CI ("seed the cache"). Naturally pairs with #4.
-
-7. **PR context packs as artifacts** — wrap the existing `tracedecay_pr_context` output into a saveable bundle (changed files + related tests + impact + diff context) so it can be attached to PR descriptions or CI artifacts.
-
-8. **Weekly "wrapped" report** — `tracedecay wrapped --week`. Light addition over `tracedecay cost` / `monitor` that surfaces top files, top tools, peak-savings days. Strong UX hook for users.
-
-9. **Compaction-survival session recovery** — structured queries the agent can run after Claude's auto-compaction to rehydrate task state. tracedecay's `session_*` could grow a `tracedecay_session_recover` companion that emits a deterministic "what was I doing" summary.
-
-10. **Cross-file block dedup** — `tracedecay_simplify_scan` finds duplications in *changed* files; lean-ctx's `ctx_dedup` does it cross-repo. Could be added as `tracedecay_dedup` over the existing AST data.
-
-11. **Directory tree tool** — `tracedecay_tree` returning a compact directory outline. Cheap to add from the existing `files` index; saves an agent from running `find` / `ls`.
-
-### Lower value / situational
-
-12. **Streamable HTTP MCP transport** — `tracedecay serve --http` for clients that don't speak stdio. Useful for browser-based or remote agents; less urgent for the current CLI-agent userbase.
-
-13. **API route extraction** — surface HTTP endpoints (e.g., axum / express / flask handlers) as a first-class node kind. Niche but high-leverage when present.
-
-14. **Smart-read intent routing** — `auto` mode that picks `signatures` vs `full` vs `diff` from task hints. Pairs with #1; not worth adding alone.
-
----
-
-## Things to skip
-
-- **Multi-agent handoff / share / workflow tools** — tracedecay is deliberately a backend, not an orchestrator. Adding these would blur scope.
-- **Sandboxed shell execution (`ctx_execute`)** — Claude Code already runs Bash; duplicating it inside the MCP server invites support burden without obvious payoff.
-- **`ctx_heatmap` / agent telemetry tools** — `tracedecay monitor` and `tracedecay cost` already cover this lane.
-
----
-
-## Sources
-
-- tracedecay: `README.md`, `src/mcp/tools/definitions.rs`
-- lean-ctx: <https://github.com/yvgude/lean-ctx> (`README.md`, `LEANCTX_FEATURE_CATALOG.md`)
+`status` reports selected authority and generation. `doctor` is read-only and
+does not synchronize, repair, or recreate a store. The [V2 product contract](plans/tracedecay-v2/00-plan-set-index.md),
+[work graph](plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md),
+and [workflow runtime](plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md)
+define the supported TraceDecay boundaries.
