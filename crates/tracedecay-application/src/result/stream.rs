@@ -173,16 +173,15 @@ pub fn validate_stream<T>(events: &[StreamEvent<T>]) -> Result<(), StreamValidat
     let mut expected = events.first().map(|event| event.sequence);
 
     for event in events {
-        if Some(event.sequence) != expected {
-            return Err(StreamValidationError::NonContiguousSequence);
-        }
-
         if terminal_seen {
             return Err(if event.kind.is_terminal() {
                 StreamValidationError::MultipleTerminalEvents
             } else {
                 StreamValidationError::EventAfterTerminal
             });
+        }
+        if Some(event.sequence) != expected {
+            return Err(StreamValidationError::NonContiguousSequence);
         }
         if let StreamEventKind::Gap(gap) = &event.kind {
             if event.sequence != gap.first_missing_sequence {
