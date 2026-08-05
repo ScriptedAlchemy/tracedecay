@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{
     AccessPolicyDigest, CapabilityId, ComponentVersion, LocatorDigest, ManifestDigest,
@@ -7,13 +7,16 @@ use tracedecay_domain::{
     ScopeResolutionId, SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1,
     SourceAggregateFrontierV1, SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1,
     SourceContentStateV1, SourceCoverageV1, SourceCursorV1, SourceDefinitionV1,
-    SourceDeletionSemanticsV1, SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1,
+    SourceDeletionSemanticsV1, SourceEventAdmissionDispositionV1, SourceEventAdmissionReceiptV1,
+    SourceEventV1, SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1,
     SourceObjectRevisionV1, SourcePartitionFrontierV1, SourcePartitionIdV1,
-    SourceRefetchStrategyV1, SourceSnapshotCompletionV1, SourceSnapshotIdV1, canonical_sha256,
+    SourceRefetchStrategyV1, SourceRefreshCauseV1, SourceRefreshReceiptV1,
+    SourceSnapshotCompletionV1, SourceSnapshotIdV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_store::{
-    SourceAuthorityPublicationV1, SourceObjectMutationV1, SourceObjectTransitionV1,
-    SourceObservationEvidenceV1, build_source_projection,
+    SourceAcquisitionQueueCasV1, SourceAcquisitionQueueStateV1, SourceAuthorityPublicationV1,
+    SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
+    SourceScheduledRefetchV1, build_source_projection,
 };
 
 use super::*;
@@ -123,6 +126,128 @@ fn fixture() -> (SourceCommitV1, SourceBindingIdentityV1) {
     )
     .unwrap();
     (commit, identity)
+}
+
+fn acquisition_state() -> (SourceAcquisitionQueueStateV1, SourceBindingIdentityV1) {
+    let definition = SourceDefinitionV1::new(
+        SourceInstanceId::new("source.runtime-acquisition-fixture").unwrap(),
+        1,
+        SourceAcquisitionContractV1::new(
+            ProviderId::new("github").unwrap(),
+            SourceAcquisitionCapabilitiesV1::new(
+                BTreeSet::from([SourceCaptureModeV1::Event]),
+                BTreeSet::from([SourceRefetchStrategyV1::WholeRoot]),
+                BTreeSet::from([SourceDeletionSemanticsV1::ExplicitOnly]),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+        SourceCaptureModeV1::Event,
+        SourceRefetchStrategyV1::WholeRoot,
+        SourceDeletionSemanticsV1::ExplicitOnly,
+        1,
+    )
+    .unwrap();
+    let binding = SourceBindingV1::new(
+        &definition,
+        SourceBindingOwnerV1::Project(ProjectId::new("project.runtime-fixture").unwrap()),
+        PrivacyDomainId::new("privacy.runtime-fixture").unwrap(),
+        LocatorDigest::new(digest('9').as_str()).unwrap(),
+        1,
+    )
+    .unwrap();
+    let identity = binding.immutable_identity().unwrap();
+    let event = SourceEventV1::new(identity.clone(), digest('a')).unwrap();
+    let refresh = SourceRefreshReceiptV1::new(
+        identity.clone(),
+        definition.provider.clone(),
+        digest('b'),
+        SourceRefreshCauseV1::Event,
+        SourceCaptureModeV1::Event,
+        SourceRefetchStrategyV1::WholeRoot,
+    )
+    .unwrap();
+    let receipt = SourceEventAdmissionReceiptV1::new(
+        &event,
+        event.event_key().clone(),
+        refresh,
+        SourceEventAdmissionDispositionV1::Enqueued,
+    )
+    .unwrap();
+    let scheduled = SourceScheduledRefetchV1::new(
+        definition.clone(),
+        binding.clone(),
+        receipt.clone(),
+        None,
+        0,
+        UtcMicros(10),
+    )
+    .unwrap();
+    let state = SourceAcquisitionQueueStateV1::new(
+        definition,
+        binding,
+        Some(scheduled),
+        None,
+        BTreeMap::from([(receipt.event_key().clone(), receipt)]),
+    )
+    .unwrap();
+    (state, identity)
+}
+
+#[test]
+fn acquisition_queue_cas_survives_restart_and_rejects_stale_writers() {
+    let temporary = tempfile::tempdir().unwrap();
+    let database_path = temporary.path().join("external-source-acquisition.sqlite");
+    let (state, binding) = acquisition_state();
+    {
+        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        ExternalSourceExecutor
+            .execute_acquisition_state_cas(
+                &savepoint,
+                &SourceAcquisitionQueueCasV1::new(binding.clone(), None, state.clone()).unwrap(),
+            )
+            .unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(
+        ExternalSourceExecutor
+            .execute_read(
+                &transaction,
+                &ExternalSourceReadOperationV1::AcquisitionState {
+                    binding: binding.clone(),
+                },
+            )
+            .unwrap(),
+        ExternalSourceReadResultV1::AcquisitionState(Some(Box::new(state.clone())))
+    );
+    assert_eq!(
+        ExternalSourceExecutor
+            .execute_read(
+                &transaction,
+                &ExternalSourceReadOperationV1::NextReadyAcquisition { now: UtcMicros(10) },
+            )
+            .unwrap(),
+        ExternalSourceReadResultV1::AcquisitionState(Some(Box::new(state.clone())))
+    );
+    drop(transaction);
+
+    let mut transaction = connection.transaction().unwrap();
+    let savepoint = transaction.savepoint().unwrap();
+    assert!(
+        ExternalSourceExecutor
+            .execute_acquisition_state_cas(
+                &savepoint,
+                &SourceAcquisitionQueueCasV1::new(binding, None, state).unwrap(),
+            )
+            .is_err(),
+        "a restarted stale writer must not replace the durable queue state"
+    );
 }
 
 fn empty_successor(prior: &SourceStoreStateV1, sequence: u64, seed: char) -> SourceCommitV1 {

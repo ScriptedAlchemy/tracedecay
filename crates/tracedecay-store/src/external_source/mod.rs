@@ -18,6 +18,13 @@ use tracedecay_domain::{
     SourceSnapshotCompletionV1, canonical_sha256,
 };
 
+mod acquisition;
+pub use acquisition::{
+    MAX_SOURCE_ACQUISITION_ATTEMPTS_V1, SourceAcquisitionQueueCasV1,
+    SourceAcquisitionQueueContractErrorV1, SourceAcquisitionQueueResultV1,
+    SourceAcquisitionQueueStateV1, SourceScheduledRefetchV1,
+};
+
 pub const MAX_SOURCE_COMMIT_OBSERVATIONS_V1: usize = 10_000;
 
 #[derive(Debug, Error)]

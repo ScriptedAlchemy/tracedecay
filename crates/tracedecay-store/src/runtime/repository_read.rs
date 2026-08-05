@@ -18,6 +18,7 @@ use tracedecay_domain::{
     ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId, RepositoryId,
     RetrievalAnchorId, RetrievalAnchorRecordV2, SessionId, SessionProjectionGenerationV1,
     SessionSummaryIdV1, SessionSummaryRecordV1, SourceBindingIdentityV1, SourceBindingOwnerV1,
+    UtcMicros,
 };
 
 use crate::{
@@ -25,10 +26,10 @@ use crate::{
     FactCurrentQuery, FactLineageQuery, GitIndexTransactionRecordV1,
     RepositoryProvenanceAttachmentV1, RetrievalAnchorDerivativeV1,
     RetrievalAnchorDispositionRecordV1, RetrievalAnchorOwnerV1, RetrievalAnchorTombstoneV1,
-    SessionTemporalProjectionBatchV1, SourceCommitReceiptV1, SourcePendingProjectionV1,
-    SourceStoreStateV1, StorageRuntimeContractErrorV1, StoreEffectIdV1, StoreRuntimeBindingV1,
-    StoreShardIdV1, StoreShardScopeV1, StoredFactV1, StoredRetrievalAnchorRecordV1,
-    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    SessionTemporalProjectionBatchV1, SourceAcquisitionQueueStateV1, SourceCommitReceiptV1,
+    SourcePendingProjectionV1, SourceStoreStateV1, StorageRuntimeContractErrorV1, StoreEffectIdV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1, StoredFactV1,
+    StoredRetrievalAnchorRecordV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 /// One repository read operation, dispatched across the profile, project,
@@ -182,11 +183,14 @@ fn external_source_read_matches_shard(
 ) -> bool {
     let binding = match operation {
         ExternalSourceReadOperationV1::State { binding }
-        | ExternalSourceReadOperationV1::CommitReceipt { binding, .. } => binding,
+        | ExternalSourceReadOperationV1::CommitReceipt { binding, .. }
+        | ExternalSourceReadOperationV1::AcquisitionState { binding } => binding,
         ExternalSourceReadOperationV1::NextPendingProjection {
             binding: Some(binding),
         } => binding,
-        ExternalSourceReadOperationV1::NextPendingProjection { binding: None } => return true,
+        ExternalSourceReadOperationV1::NextPendingProjection { binding: None }
+        | ExternalSourceReadOperationV1::NextReadyAcquisition { .. }
+        | ExternalSourceReadOperationV1::AcquisitionPendingCount => return true,
     };
     binding.validate().is_ok()
         && match (&binding.owner, &shard.scope) {
@@ -349,6 +353,13 @@ pub enum ExternalSourceReadOperationV1 {
     NextPendingProjection {
         binding: Option<SourceBindingIdentityV1>,
     },
+    AcquisitionState {
+        binding: SourceBindingIdentityV1,
+    },
+    NextReadyAcquisition {
+        now: UtcMicros,
+    },
+    AcquisitionPendingCount,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -357,6 +368,8 @@ pub enum ExternalSourceReadResultV1 {
     State(Option<Box<SourceStoreStateV1>>),
     CommitReceipt(Option<Box<SourceCommitReceiptV1>>),
     PendingProjection(Option<Box<SourcePendingProjectionV1>>),
+    AcquisitionState(Option<Box<SourceAcquisitionQueueStateV1>>),
+    AcquisitionPendingCount(u64),
 }
 
 /// Retrieval-anchor authority reads. Application authorization must run before

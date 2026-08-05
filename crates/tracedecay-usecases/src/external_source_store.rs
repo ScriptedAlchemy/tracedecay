@@ -845,3 +845,6 @@ fn invalid(error: impl std::fmt::Display) -> RuntimeExternalSourceErrorV1 {
 fn host_external_source_projector() -> Result<ComponentVersion, RuntimeExternalSourceErrorV1> {
     ComponentVersion::new(HOST_EXTERNAL_SOURCE_PROJECTOR).map_err(invalid)
 }
+
+#[path = "external_source_store_acquisition.rs"]
+pub(crate) mod acquisition;

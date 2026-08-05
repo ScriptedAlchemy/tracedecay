@@ -3,7 +3,8 @@
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{SourceBindingIdentityV1, SourceBindingOwnerV1};
 use tracedecay_store::{
-    ExternalSourceReadOperationV1, ExternalSourceReadResultV1, SourceAuthorityPublicationReceiptV1,
+    ExternalSourceReadOperationV1, ExternalSourceReadResultV1, SourceAcquisitionQueueCasV1,
+    SourceAcquisitionQueueStateV1, SourceAuthorityPublicationReceiptV1,
     SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
     SourceCommitV1, SourceObjectMutationV1, SourcePendingProjectionV1,
     SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1, SourceStoreStateV1,
@@ -141,6 +142,15 @@ CREATE TABLE IF NOT EXISTS external_source_projected_objects_v1 (
     mutation_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, native_object_digest)
 );
+CREATE TABLE IF NOT EXISTS external_source_acquisition_queue_v1 (
+    binding_id TEXT PRIMARY KEY,
+    state_digest TEXT NOT NULL,
+    not_before_micros INTEGER,
+    state_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_external_source_acquisition_ready_v1
+    ON external_source_acquisition_queue_v1(not_before_micros, binding_id)
+    WHERE not_before_micros IS NOT NULL;
 ";
 
 #[derive(Clone, Default)]
@@ -240,6 +250,53 @@ impl ExternalSourceExecutor {
         }
     }
 
+    pub fn execute_acquisition_state_cas(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        command: &SourceAcquisitionQueueCasV1,
+    ) -> rusqlite::Result<()> {
+        command.validate().map_err(invalid)?;
+        let current_digest = savepoint
+            .prepare(
+                "SELECT state_digest
+                 FROM external_source_acquisition_queue_v1
+                 WHERE binding_id = ?1",
+            )?
+            .query_row(params![command.binding().binding_id.as_str()], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?;
+        if current_digest.as_deref()
+            != command
+                .expected_state_digest()
+                .map(tracedecay_domain::ManifestDigest::as_str)
+        {
+            return Err(invalid(
+                "external source acquisition queue compare-and-swap conflict",
+            ));
+        }
+        let not_before_micros = command
+            .next()
+            .active()
+            .map(|scheduled| scheduled.not_before().0);
+        savepoint.execute(
+            "INSERT INTO external_source_acquisition_queue_v1 (
+                 binding_id, state_digest, not_before_micros, state_json
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(binding_id) DO UPDATE SET
+                 state_digest = excluded.state_digest,
+                 not_before_micros = excluded.not_before_micros,
+                 state_json = excluded.state_json",
+            params![
+                command.binding().binding_id.as_str(),
+                command.next().state_digest().as_str(),
+                not_before_micros,
+                encode(command.next())?,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn execute_read(
         &mut self,
         snapshot: &Transaction<'_>,
@@ -276,8 +333,83 @@ impl ExternalSourceExecutor {
                     pending.map(Box::new),
                 ))
             }
+            ExternalSourceReadOperationV1::AcquisitionState { binding } => {
+                binding.validate().map_err(invalid)?;
+                load_acquisition_state(snapshot, binding)
+                    .map(|state| ExternalSourceReadResultV1::AcquisitionState(state.map(Box::new)))
+            }
+            ExternalSourceReadOperationV1::NextReadyAcquisition { now } => {
+                load_next_ready_acquisition(snapshot, *now)
+                    .map(|state| ExternalSourceReadResultV1::AcquisitionState(state.map(Box::new)))
+            }
+            ExternalSourceReadOperationV1::AcquisitionPendingCount => snapshot
+                .query_row(
+                    "SELECT COUNT(*)
+                     FROM external_source_acquisition_queue_v1
+                    WHERE not_before_micros IS NOT NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .and_then(|count| {
+                    u64::try_from(count)
+                        .map_err(|_| invalid("external source acquisition count is negative"))
+                })
+                .map(ExternalSourceReadResultV1::AcquisitionPendingCount),
         }
     }
+}
+
+fn load_acquisition_state(
+    connection: &rusqlite::Connection,
+    binding: &SourceBindingIdentityV1,
+) -> rusqlite::Result<Option<SourceAcquisitionQueueStateV1>> {
+    let state = connection
+        .prepare(
+            "SELECT state_json
+             FROM external_source_acquisition_queue_v1
+             WHERE binding_id = ?1",
+        )?
+        .query_row(params![binding.binding_id.as_str()], |row| {
+            decode::<SourceAcquisitionQueueStateV1>(row.get(0)?)
+        })
+        .optional()?;
+    if state
+        .as_ref()
+        .is_some_and(|state| state.binding_identity().ok().as_ref() != Some(binding))
+    {
+        return Err(invalid(
+            "external source acquisition queue binding identity mismatch",
+        ));
+    }
+    state
+        .as_ref()
+        .map_or(Ok(()), SourceAcquisitionQueueStateV1::validate)
+        .map_err(invalid)?;
+    Ok(state)
+}
+
+fn load_next_ready_acquisition(
+    connection: &rusqlite::Connection,
+    now: tracedecay_domain::UtcMicros,
+) -> rusqlite::Result<Option<SourceAcquisitionQueueStateV1>> {
+    let state = connection
+        .prepare(
+            "SELECT state_json
+             FROM external_source_acquisition_queue_v1
+             WHERE not_before_micros IS NOT NULL
+               AND not_before_micros <= ?1
+             ORDER BY not_before_micros, binding_id
+             LIMIT 1",
+        )?
+        .query_row(params![now.0], |row| {
+            decode::<SourceAcquisitionQueueStateV1>(row.get(0)?)
+        })
+        .optional()?;
+    state
+        .as_ref()
+        .map_or(Ok(()), SourceAcquisitionQueueStateV1::validate)
+        .map_err(invalid)?;
+    Ok(state)
 }
 
 fn load_state(
