@@ -137,9 +137,18 @@ pub(super) async fn dispatch_graph_tools(
             )
             .await
         }
-        "tracedecay_grep" => grep::handle_grep(cg, args, selected_scope_prefix).await,
+        "tracedecay_grep" => {
+            grep::handle_grep(cg, args, selected_scope_prefix, deadline, cancellation).await
+        }
         "tracedecay_ast_grep_search" => {
-            ast_grep_search::handle_ast_grep_search(cg, args, selected_scope_prefix).await
+            ast_grep_search::handle_ast_grep_search(
+                cg,
+                args,
+                selected_scope_prefix,
+                deadline,
+                cancellation,
+            )
+            .await
         }
         "tracedecay_retrieve" => handle_retrieve(cg, &args),
         "tracedecay_context" => graph::handle_context(cg, args, selected_scope_prefix).await,

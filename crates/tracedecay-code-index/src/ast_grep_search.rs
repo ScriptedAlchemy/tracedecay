@@ -25,17 +25,17 @@ use std::path::Path;
 use ast_grep_core::matcher::PatternBuilder;
 use ast_grep_core::tree_sitter::{LanguageExt, StrDoc, TSLanguage};
 use ast_grep_core::{AstGrep, Language, Pattern, PatternError};
-use ignore::WalkBuilder;
-use ignore::overrides::{Override, OverrideBuilder};
 
 use tracedecay_code_extraction::ts_provider;
+
+use crate::grep_search::MAX_INTERACTIVE_SOURCE_BYTES;
+use crate::source_walk::source_walk;
 use tracedecay_domain::repository_path_matches_scope;
 
 /// Bytes sniffed from the head of each file to classify it as binary.
 const BINARY_SNIFF_BYTES: usize = 8_192;
 /// Skip files larger than this; structural search of a multi-MB generated blob
 /// is never what the caller wants and dominates the scan budget.
-const MAX_FILE_BYTES: usize = 2_000_000;
 
 /// A tree-sitter language wired into `ast_grep_core`'s pattern engine.
 ///
@@ -192,6 +192,7 @@ pub struct AstGrepSearchResult {
     pub matches: Vec<AstGrepSearchMatch>,
     pub files_scanned: usize,
     pub truncated: bool,
+    pub cancelled: bool,
 }
 
 /// Why a structural search could not run at all (as opposed to returning zero
@@ -312,23 +313,14 @@ where
         }
     }
 
-    let overrides = build_overrides(project_root, path_glob)?;
-
-    let mut builder = WalkBuilder::new(project_root);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true);
-    if let Some(overrides) = overrides {
-        builder.overrides(overrides);
-    }
+    let walker = source_walk(project_root, path_glob)
+        .map_err(|error| AstGrepSearchError::InvalidGlob(error.glob))?;
 
     let mut result = AstGrepSearchResult::default();
 
-    for entry in builder.build() {
+    for entry in walker {
         if is_cancelled() {
+            result.cancelled = true;
             return Ok(result);
         }
         let Ok(entry) = entry else { continue };
@@ -359,10 +351,20 @@ where
             continue;
         }
 
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() > MAX_INTERACTIVE_SOURCE_BYTES {
+            continue;
+        }
+        if is_cancelled() {
+            result.cancelled = true;
+            return Ok(result);
+        }
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        if bytes.len() > MAX_FILE_BYTES || looks_binary(&bytes) {
+        if looks_binary(&bytes) {
             continue;
         }
         let Ok(source) = String::from_utf8(bytes) else {
@@ -389,6 +391,7 @@ where
         let ast = AstGrep::doc(doc);
         for node in ast.root().find_all(compiled) {
             if is_cancelled() {
+                result.cancelled = true;
                 return Ok(result);
             }
             let start = node.start_pos();
@@ -418,25 +421,6 @@ where
     }
 
     Ok(result)
-}
-
-fn build_overrides(
-    project_root: &Path,
-    path_glob: Option<&str>,
-) -> Result<Option<Override>, AstGrepSearchError> {
-    match path_glob {
-        Some(raw) if !raw.trim().is_empty() => {
-            let mut builder = OverrideBuilder::new(project_root);
-            builder
-                .add(raw)
-                .map_err(|_| AstGrepSearchError::InvalidGlob(raw.to_string()))?;
-            let overrides = builder
-                .build()
-                .map_err(|_| AstGrepSearchError::InvalidGlob(raw.to_string()))?;
-            Ok(Some(overrides))
-        }
-        _ => Ok(None),
-    }
 }
 
 /// Collapses a (possibly multi-line) matched snippet to a single display line,
@@ -525,8 +509,91 @@ mod tests {
         )
         .unwrap();
 
+        assert!(res.cancelled);
         assert_eq!(res.files_scanned, 0);
         assert!(res.matches.is_empty());
+    }
+
+    #[test]
+    fn files_above_two_mibibytes_are_not_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut oversized = b"fn oversized() { target(1); }\n".to_vec();
+        oversized.resize(MAX_INTERACTIVE_SOURCE_BYTES as usize + 1, b' ');
+        fs::write(dir.path().join("oversized.rs"), oversized).unwrap();
+        write(dir.path(), "tracked.rs", "fn tracked() { target(2); }\n");
+
+        let result = search_tree(dir.path(), "target($A)", Some("rust"), None, 50).unwrap();
+
+        assert_eq!(result.files_scanned, 1);
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].file, "tracked.rs");
+    }
+
+    #[test]
+    fn generated_trees_are_pruned_unless_the_path_glob_selects_them() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::create_dir_all(dir.path().join("dist")).unwrap();
+        fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        write(
+            dir.path(),
+            "src/tracked.rs",
+            "fn tracked() { target(1); }\n",
+        );
+        write(
+            dir.path(),
+            "dist/generated.rs",
+            "fn generated() { target(2); }\n",
+        );
+        write(
+            dir.path(),
+            "node_modules/pkg/unrelated.rs",
+            "fn unrelated() { target(3); }\n",
+        );
+
+        let default = search_tree(dir.path(), "target($A)", Some("rust"), None, 50).unwrap();
+        assert_eq!(
+            default
+                .matches
+                .iter()
+                .map(|item| item.file.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/tracked.rs"]
+        );
+
+        let selected =
+            search_tree(dir.path(), "target($A)", Some("rust"), Some("dist/**"), 50).unwrap();
+        assert_eq!(
+            selected
+                .matches
+                .iter()
+                .map(|item| item.file.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dist/generated.rs"]
+        );
+    }
+
+    #[test]
+    fn basename_glob_can_select_a_file_inside_a_generated_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("dist/nested")).unwrap();
+        write(
+            dir.path(),
+            "dist/nested/generated.rs",
+            "fn generated() { target(1); }\n",
+        );
+
+        let selected = search_tree(
+            dir.path(),
+            "target($A)",
+            Some("rust"),
+            Some("generated.rs"),
+            50,
+        )
+        .unwrap();
+
+        assert_eq!(selected.matches.len(), 1);
+        assert_eq!(selected.matches[0].file, "dist/nested/generated.rs");
     }
 
     #[test]

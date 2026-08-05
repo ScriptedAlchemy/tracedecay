@@ -22,6 +22,7 @@ pub mod extract;
 pub mod generations;
 pub mod git_join;
 pub mod graph_projection;
+pub mod grep_search;
 pub mod impact_join;
 pub mod incremental;
 pub mod intake;
@@ -32,6 +33,7 @@ pub mod production;
 pub mod projection;
 pub mod provider;
 pub mod receipts;
+mod source_walk;
 pub mod test_attribution;
 
 pub use self::intake::CodeIndexIntake;

@@ -7,19 +7,16 @@
 //! matches symbol *names*, not file *content*.
 
 use std::fmt::Write as _;
-use std::path::Path;
 
-use ignore::WalkBuilder;
-use ignore::overrides::{Override, OverrideBuilder};
-use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
+use tracedecay_code_index::grep_search::{GrepSearchHit, GrepSearchQuery, search_tree_with_cancel};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};
-use super::support::{filter_by_scope, unique_file_paths};
+use super::support::{filter_by_scope, run_bounded_search, unique_file_paths};
 
 /// Hard cap on `max_results` regardless of what the caller requests.
 const MAX_RESULTS_CAP: usize = 200;
@@ -27,25 +24,31 @@ const MAX_RESULTS_CAP: usize = 200;
 const DEFAULT_MAX_RESULTS: usize = 50;
 /// Hard cap on `context_lines`.
 const MAX_CONTEXT_LINES: usize = 3;
-/// Per-file hit cap, so one noisy file cannot crowd out the rest of the tree.
-const MAX_HITS_PER_FILE: usize = 20;
-/// Bytes sniffed from the head of each file to classify it as binary.
-const BINARY_SNIFF_BYTES: usize = 8_192;
-/// Skip individual lines longer than this (minified bundles, embedded blobs).
-const MAX_LINE_BYTES: usize = 4_096;
-
 /// A single content-search hit, enriched with the enclosing graph symbol.
-/// Fields are crate-visible: the application primitives layer projects hits
-/// into typed primitive results without re-running the scan.
-pub(crate) struct GrepHit {
-    pub(crate) file: String,
-    pub(crate) line: u32,
-    pub(crate) text: String,
-    pub(crate) before: Vec<String>,
-    pub(crate) after: Vec<String>,
-    pub(crate) symbol_name: Option<String>,
-    pub(crate) symbol_id: Option<String>,
-    pub(crate) symbol_kind: Option<String>,
+struct GrepHit {
+    file: String,
+    line: u32,
+    text: String,
+    before: Vec<String>,
+    after: Vec<String>,
+    symbol_name: Option<String>,
+    symbol_id: Option<String>,
+    symbol_kind: Option<String>,
+}
+
+impl From<GrepSearchHit> for GrepHit {
+    fn from(hit: GrepSearchHit) -> Self {
+        Self {
+            file: hit.file,
+            line: hit.line,
+            text: hit.text,
+            before: hit.before,
+            after: hit.after,
+            symbol_name: None,
+            symbol_id: None,
+            symbol_kind: None,
+        }
+    }
 }
 
 /// Handles `tracedecay_grep` tool calls.
@@ -53,6 +56,8 @@ pub(super) async fn handle_grep(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
     let pattern =
         args.get("pattern")
@@ -74,7 +79,10 @@ pub(super) async fn handle_grep(
         .get("case_sensitive")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let path_glob = args.get("path_glob").and_then(Value::as_str);
+    let path_glob = args
+        .get("path_glob")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let max_results = args
         .get("max_results")
         .and_then(Value::as_u64)
@@ -85,38 +93,38 @@ pub(super) async fn handle_grep(
         .and_then(Value::as_u64)
         .map_or(0, |v| (v as usize).min(MAX_CONTEXT_LINES));
 
-    let matcher = build_matcher(pattern, fixed_strings, case_sensitive)?;
-
     let project_root = cg.project_root().to_path_buf();
-
-    // Optional path filter. A caller-supplied glob whitelists candidate files
-    // via the `ignore` crate's override mechanism (same glob semantics as a
-    // `.gitignore` line), so it prunes at the walker level.
-    let overrides = match path_glob {
-        Some(raw) if !raw.trim().is_empty() => {
-            let mut builder = OverrideBuilder::new(&project_root);
-            builder.add(raw).map_err(|err| TraceDecayError::Config {
-                message: format!("invalid path_glob '{raw}': {err}"),
-            })?;
-            Some(builder.build().map_err(|err| TraceDecayError::Config {
-                message: format!("invalid path_glob '{raw}': {err}"),
-            })?)
-        }
-        _ => None,
-    };
-
-    // Collect one extra past the cap so we can honestly report truncation.
-    let scan = scan_tree(
-        &project_root,
-        &matcher,
-        overrides,
+    let query = GrepSearchQuery {
+        pattern: pattern.to_owned(),
+        fixed_strings,
+        case_sensitive,
+        path_glob,
         context_lines,
         max_results,
-    );
+    };
+    let scan = run_bounded_search(
+        "tracedecay_grep",
+        pattern.to_owned(),
+        deadline,
+        cancellation,
+        move |cancelled, transport_cancellation| {
+            search_tree_with_cancel(&project_root, &query, || {
+                cancelled.load(std::sync::atomic::Ordering::Acquire)
+                    || transport_cancellation
+                        .as_ref()
+                        .is_some_and(|signal| signal.is_cancelled())
+            })
+        },
+    )
+    .await?;
 
     // Scope filtering mirrors `tracedecay_search`: when the client pins a
     // subtree, only hits under it are returned.
-    let mut hits = filter_by_scope(scan.hits, scope_prefix, |hit| hit.file.as_str());
+    let mut hits = filter_by_scope(
+        scan.hits.into_iter().map(GrepHit::from).collect(),
+        scope_prefix,
+        |hit| hit.file.as_str(),
+    );
     let truncated = scan.truncated || hits.len() > max_results;
     hits.truncate(max_results);
 
@@ -139,146 +147,6 @@ pub(super) async fn handle_grep(
         json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files,
     ))
-}
-
-/// Builds the line matcher. Fixed-string search escapes the pattern so regex
-/// metacharacters are treated literally; case-insensitivity is the default.
-pub(crate) fn build_matcher(
-    pattern: &str,
-    fixed_strings: bool,
-    case_sensitive: bool,
-) -> Result<Regex> {
-    let source = if fixed_strings {
-        regex::escape(pattern)
-    } else {
-        pattern.to_string()
-    };
-    RegexBuilder::new(&source)
-        .case_insensitive(!case_sensitive)
-        .build()
-        .map_err(|err| TraceDecayError::Config {
-            message: format!("invalid regex pattern '{pattern}': {err}"),
-        })
-}
-
-pub(crate) struct ScanResult {
-    pub(crate) hits: Vec<GrepHit>,
-    pub(crate) files_scanned: usize,
-    pub(crate) truncated: bool,
-}
-
-/// Walks the working tree respecting `.gitignore`, skipping binary files, and
-/// collects matching lines. Stops early once `max_results` + 1 hits are found
-/// so the caller can report truncation without scanning the whole tree.
-pub(crate) fn scan_tree(
-    project_root: &Path,
-    matcher: &Regex,
-    overrides: Option<Override>,
-    context_lines: usize,
-    max_results: usize,
-) -> ScanResult {
-    let mut builder = WalkBuilder::new(project_root);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .add_custom_ignore_filename(".gitignore");
-    if let Some(overrides) = overrides {
-        builder.overrides(overrides);
-    }
-    let walker = builder.build();
-
-    let mut hits: Vec<GrepHit> = Vec::new();
-    let mut files_scanned = 0usize;
-    let mut truncated = false;
-
-    for entry in walker {
-        let Ok(entry) = entry else { continue };
-        let Some(ft) = entry.file_type() else {
-            continue;
-        };
-        if !ft.is_file() {
-            continue;
-        }
-        let path = entry.path();
-        let Ok(rel) = path.strip_prefix(project_root) else {
-            continue;
-        };
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        if looks_binary(&bytes) {
-            continue;
-        }
-        let Ok(content) = String::from_utf8(bytes) else {
-            continue;
-        };
-        files_scanned += 1;
-
-        let lines: Vec<&str> = content.lines().collect();
-        let mut file_hits = 0usize;
-        for (idx, line) in lines.iter().enumerate() {
-            if line.len() > MAX_LINE_BYTES {
-                continue;
-            }
-            if !matcher.is_match(line) {
-                continue;
-            }
-            if file_hits >= MAX_HITS_PER_FILE {
-                truncated = true;
-                break;
-            }
-            file_hits += 1;
-
-            let before = context_slice(&lines, idx.saturating_sub(context_lines), idx);
-            let after = context_slice(&lines, idx + 1, (idx + 1 + context_lines).min(lines.len()));
-            hits.push(GrepHit {
-                file: rel_str.clone(),
-                line: (idx as u32) + 1,
-                text: (*line).to_string(),
-                before,
-                after,
-                symbol_name: None,
-                symbol_id: None,
-                symbol_kind: None,
-            });
-
-            // Collect one past the cap so truncation is honest without paying
-            // for a full-tree scan on high-frequency patterns.
-            if hits.len() > max_results {
-                truncated = true;
-                return ScanResult {
-                    hits,
-                    files_scanned,
-                    truncated,
-                };
-            }
-        }
-    }
-
-    ScanResult {
-        hits,
-        files_scanned,
-        truncated,
-    }
-}
-
-fn context_slice(lines: &[&str], start: usize, end: usize) -> Vec<String> {
-    if start >= end {
-        return Vec::new();
-    }
-    lines[start..end].iter().map(|l| (*l).to_string()).collect()
-}
-
-/// Classifies a byte buffer as binary when a NUL byte appears in the head.
-/// This is the same heuristic `git` and `ripgrep` use for text detection.
-fn looks_binary(bytes: &[u8]) -> bool {
-    let head = &bytes[..bytes.len().min(BINARY_SNIFF_BYTES)];
-    head.contains(&0)
 }
 
 fn build_output_value(hits: &[GrepHit], truncated: bool, files_scanned: usize) -> Value {
