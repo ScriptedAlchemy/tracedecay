@@ -402,22 +402,22 @@ fn archive_column_expression(
         return format!("archive_row.{column}");
     }
     let prefix = database.prefix();
-    let terminal = format!(
+    let eligible = format!(
         "EXISTS (
             SELECT 1 FROM {prefix}memory_v2_current_facts AS current
             WHERE current.fact_id=archive_row.fact_id
               AND current.owner_kind=archive_row.owner_kind
               AND current.project_id=archive_row.project_id
-              AND current.payload_access <> 'eligible'
+              AND current.payload_access = 'eligible'
         )"
     );
     if column == "details_availability" {
         format!(
-            "CASE WHEN {terminal} THEN 'legacy_redacted'
-                  ELSE archive_row.details_availability END"
+            "CASE WHEN {eligible} THEN archive_row.details_availability
+                  ELSE 'legacy_redacted' END"
         )
     } else {
-        format!("CASE WHEN {terminal} THEN NULL ELSE archive_row.{column} END")
+        format!("CASE WHEN {eligible} THEN archive_row.{column} ELSE NULL END")
     }
 }
 
@@ -433,12 +433,12 @@ fn archive_visibility_predicate(
     }
     let prefix = database.prefix();
     format!(
-        "NOT EXISTS (
+        "EXISTS (
             SELECT 1 FROM {prefix}memory_v2_current_facts AS current
             WHERE current.fact_id=archive_row.fact_id
               AND current.owner_kind=archive_row.owner_kind
               AND current.project_id=archive_row.project_id
-              AND current.payload_access <> 'eligible'
+              AND current.payload_access = 'eligible'
         )"
     )
 }

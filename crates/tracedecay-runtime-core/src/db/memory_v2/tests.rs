@@ -270,13 +270,21 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
 }
 
 #[tokio::test]
-async fn owner_archive_omits_payloads_and_redacts_feedback_for_denied_facts() {
+async fn owner_archive_requires_affirmative_eligibility_for_private_details() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
     let owner = owner();
     let owner_key = owner_key(&owner).unwrap();
 
-    for (ordinal, payload_access) in ["quarantined", "retention_expired"].into_iter().enumerate() {
+    for (ordinal, payload_access) in [
+        Some("quarantined"),
+        Some("retention_expired"),
+        None,
+        Some("eligible"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let fact_id = format!("archive.denied.fact.{ordinal}");
         let assertion_id = format!("archive.denied.assertion.{ordinal}");
         let event_id = format!("archive.denied.event.{ordinal}");
@@ -349,22 +357,24 @@ async fn owner_archive_omits_payloads_and_redacts_feedback_for_denied_facts() {
         )
         .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO memory_v2_current_facts(
-                fact_id, owner_kind, project_id, payload_access, trust_score,
-                active_assertion_id, last_event_id, updated_at
-             ) VALUES(?1, ?2, ?3, ?4, 0.5, ?5, ?6, 100)",
-            params![
-                fact_id.as_str(),
-                owner_key.kind,
-                owner_key.project_id.as_str(),
-                payload_access,
-                assertion_id.as_str(),
-                event_id.as_str(),
-            ],
-        )
-        .await
-        .unwrap();
+        if let Some(payload_access) = payload_access {
+            conn.execute(
+                "INSERT INTO memory_v2_current_facts(
+                    fact_id, owner_kind, project_id, payload_access, trust_score,
+                    active_assertion_id, last_event_id, updated_at
+                 ) VALUES(?1, ?2, ?3, ?4, 0.5, ?5, ?6, 100)",
+                params![
+                    fact_id.as_str(),
+                    owner_key.kind,
+                    owner_key.project_id.as_str(),
+                    payload_access,
+                    assertion_id.as_str(),
+                    event_id.as_str(),
+                ],
+            )
+            .await
+            .unwrap();
+        }
         conn.execute(
             "INSERT INTO memory_v2_feedback_history(
                 owner_kind, project_id, fact_id, event_id, action, old_trust, new_trust,
@@ -385,20 +395,49 @@ async fn owner_archive_omits_payloads_and_redacts_feedback_for_denied_facts() {
     let archive = export_memory_v2_owner_archive(&conn, MemoryV2ArchiveDatabase::Main, &owner)
         .await
         .unwrap();
-    assert!(
-        !archive.records().iter().any(|record| matches!(
-            record.family(),
-            MemoryV2ArchiveFamilyV1::AssertionPayload | MemoryV2ArchiveFamilyV1::AssertionVector
-        )),
-        "denied payload and vector content must not leave the owner store"
+    assert_eq!(
+        archive
+            .records()
+            .iter()
+            .filter(|record| record.family() == MemoryV2ArchiveFamilyV1::AssertionPayload)
+            .count(),
+        1,
+        "only an affirmatively eligible payload may leave the owner store"
+    );
+    assert_eq!(
+        archive
+            .records()
+            .iter()
+            .filter(|record| record.family() == MemoryV2ArchiveFamilyV1::AssertionVector)
+            .count(),
+        1,
+        "only an affirmatively eligible vector may leave the owner store"
     );
     let feedback_records = archive
         .records()
         .iter()
         .filter(|record| record.family() == MemoryV2ArchiveFamilyV1::FeedbackHistory)
         .collect::<Vec<_>>();
-    assert_eq!(feedback_records.len(), 2);
-    for record in feedback_records {
+    assert_eq!(feedback_records.len(), 4);
+    assert_eq!(
+        feedback_records
+            .iter()
+            .filter(|record| {
+                record.fields().get("source")
+                    == Some(&MemoryV2ArchiveScalarV1::Text("private source".to_owned()))
+                    && record.fields().get("note")
+                        == Some(&MemoryV2ArchiveScalarV1::Text("private note".to_owned()))
+                    && record.fields().get("details_availability")
+                        == Some(&MemoryV2ArchiveScalarV1::Text("available".to_owned()))
+            })
+            .count(),
+        1,
+        "only affirmatively eligible feedback may retain private details"
+    );
+    for record in feedback_records.into_iter().filter(|record| {
+        record.fields().get("details_availability")
+            != Some(&MemoryV2ArchiveScalarV1::Text("available".to_owned()))
+    }) {
         assert_eq!(
             record.fields().get("source"),
             Some(&MemoryV2ArchiveScalarV1::Null)
