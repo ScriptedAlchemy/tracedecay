@@ -461,7 +461,7 @@ fn workflow_runtime_problem(error: WorkflowFanOutRuntimeError) -> DaemonInvocati
 }
 
 #[allow(clippy::too_many_arguments)]
-fn work_request_context(
+pub(super) fn work_request_context(
     registered: &RegisteredWorkRuntime,
     request_id: &str,
     capability: &str,

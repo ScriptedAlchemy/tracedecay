@@ -17,12 +17,18 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::context::{RequestAdmission, RequestContext, RequestId};
 use crate::error::ApplicationContractError;
+use crate::feedback::FeedbackFindingReadV1;
 use crate::identity::application_identifier;
 
 pub const MAX_HANDOFF_OPEN_LIFETIME_MICROS: i64 = 60_000_000;
 
 pub const HANDOFF_ISSUE_CAPABILITY_ID_V1: &str = "capability.handoff.issue";
 pub const HANDOFF_ISSUE_USE_CASE_ID_V1: &str = "use-case.handoff.issue";
+pub const HANDOFF_ISSUE_OPERATION_ID_V1: (&str, &str, &str) = (
+    "issue",
+    HANDOFF_ISSUE_CAPABILITY_ID_V1,
+    HANDOFF_ISSUE_USE_CASE_ID_V1,
+);
 pub const OPEN_INVESTIGATION_HANDOFF_CAPABILITY_ID_V1: &str =
     "capability.handoff.open_investigation_handoff";
 pub const OPEN_INVESTIGATION_HANDOFF_USE_CASE_ID_V1: &str =
@@ -264,6 +270,19 @@ impl HandoffOpenBindingV1 {
     pub fn target(&self) -> &HandoffOpenTargetV1 {
         &self.target
     }
+}
+
+pub fn investigation_owner_version_digest(
+    finding: &FeedbackFindingReadV1,
+) -> Result<ManifestDigest, ApplicationContractError> {
+    canonical_sha256(&(
+        "tracedecay.application.handoff-open.investigation-version.v1",
+        &finding.result_id,
+        &finding.cycle_id,
+        &finding.scope,
+        &finding.finding,
+    ))
+    .map_err(Into::into)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

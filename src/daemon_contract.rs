@@ -24,10 +24,11 @@ use tracedecay_application::{
     AuthorizedScopeSet, CancellationContext, CreateWorkCommand, Deadline, EffectId, EffectReceipt,
     EffectResult, EvidenceAuthority, EvidenceCoverage, EvidencePacket, EvidenceScore,
     IdempotencyKey, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
-    MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, Omission, OperationReceipt,
-    PageRequest, PageState, PreviewId, PreviewResult, ReconciliationState,
-    ReplanDependenciesCommand, RequestId, ResolvedScope, RetrieverContribution,
-    ReviewProposalRequestV1, TaskHandoffGrantV1, TaskHandoffIssueRequestV1,
+    MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, Omission,
+    OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1,
+    OpenTaskHandoffResultV1, OperationReceipt, PageRequest, PageState, PreviewId, PreviewResult,
+    ReconciliationState, ReplanDependenciesCommand, RequestId, ResolvedScope,
+    RetrieverContribution, ReviewProposalRequestV1, TaskHandoffGrantV1, TaskHandoffIssueRequestV1,
     TaskHandoffRedeemRequestV1, TaskHandoffRedeemedV1, TemporalState,
     WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
     WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
@@ -161,6 +162,7 @@ pub(crate) enum DaemonInvocationOperation {
     MultiRootExecute,
     WorkApplication,
     WorkflowApplication,
+    HandoffApplication,
     WorkAttempt,
     SemanticEvaluateAndPublish,
     LspOpen,
@@ -209,6 +211,7 @@ impl DaemonInvocationOperation {
             Self::MultiRootExecute => "multi_root_execute",
             Self::WorkApplication => "work_application",
             Self::WorkflowApplication => "workflow_application",
+            Self::HandoffApplication => "handoff_application",
             Self::WorkAttempt => "work_attempt",
             Self::SemanticEvaluateAndPublish => "semantic_evaluate_and_publish",
             Self::LspOpen => "lsp_open",
@@ -306,6 +309,22 @@ impl WorkflowApplicationInvocationV1 {
             Self::ExecuteFanOut(_) => "execute_fan_out",
             Self::HandoffIssue(_) => "handoff_issue",
             Self::HandoffRedeem(_) => "handoff_redeem",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "request", rename_all = "snake_case")]
+pub(crate) enum HandoffApplicationInvocationV1 {
+    OpenInvestigationHandoff(OpenInvestigationHandoffRequestV1),
+    OpenTaskHandoff(OpenTaskHandoffRequestV1),
+}
+
+impl HandoffApplicationInvocationV1 {
+    pub(crate) const fn operation_key(&self) -> &'static str {
+        match self {
+            Self::OpenInvestigationHandoff(_) => "open_investigation_handoff",
+            Self::OpenTaskHandoff(_) => "open_task_handoff",
         }
     }
 }
@@ -477,6 +496,12 @@ pub(crate) enum DaemonInvocationPayload {
     },
     WorkflowApplication {
         request: WorkflowApplicationInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    HandoffApplication {
+        request: HandoffApplicationInvocationV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1040,6 +1065,27 @@ impl DaemonInvocationRequest {
         }
     }
 
+    pub(crate) fn handoff_application(
+        request_id: impl Into<String>,
+        request: HandoffApplicationInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::HandoffApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub(crate) fn semantic_evaluate_and_publish(
         request_id: impl Into<String>,
         candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
@@ -1360,6 +1406,9 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::WorkflowApplication { .. } => {
                 DaemonInvocationOperation::WorkflowApplication
             }
+            DaemonInvocationPayload::HandoffApplication { .. } => {
+                DaemonInvocationOperation::HandoffApplication
+            }
             DaemonInvocationPayload::WorkAttempt { .. } => DaemonInvocationOperation::WorkAttempt,
             DaemonInvocationPayload::SemanticEvaluateAndPublish { .. } => {
                 DaemonInvocationOperation::SemanticEvaluateAndPublish
@@ -1407,6 +1456,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::MultiRootExecute
                 | DaemonInvocationOperation::WorkApplication
                 | DaemonInvocationOperation::WorkflowApplication
+                | DaemonInvocationOperation::HandoffApplication
                 | DaemonInvocationOperation::WorkAttempt
                 | DaemonInvocationOperation::SemanticEvaluateAndPublish
                 | DaemonInvocationOperation::LspOpen
@@ -1521,6 +1571,12 @@ impl DaemonInvocationRequest {
                 ..
             }
             | DaemonInvocationPayload::WorkflowApplication {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::HandoffApplication {
                 observed_at,
                 deadline,
                 cancellation,
@@ -2117,6 +2173,10 @@ pub(crate) enum DaemonInvocationOutcome {
         scope: ResolvedScope,
         outcome: WorkflowApplicationOutcomeV1,
     },
+    HandoffApplication {
+        scope: ResolvedScope,
+        outcome: HandoffApplicationOutcomeV1,
+    },
     WorkAttempt {
         scope: ResolvedScope,
         outcome: Box<ApplicationOutcome<WorkAttemptResponseV1>>,
@@ -2183,6 +2243,13 @@ pub(crate) enum WorkflowApplicationOutcomeV1 {
     ExecuteFanOut(ApplicationOutcome<WorkflowExecutionTruthV1>),
     HandoffIssue(ApplicationOutcome<TaskHandoffGrantV1>),
     HandoffRedeem(ApplicationOutcome<TaskHandoffRedeemedV1>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
+pub(crate) enum HandoffApplicationOutcomeV1 {
+    OpenInvestigationHandoff(ApplicationOutcome<OpenInvestigationHandoffResultV1>),
+    OpenTaskHandoff(ApplicationOutcome<OpenTaskHandoffResultV1>),
 }
 
 impl DaemonInvocationResponse {
