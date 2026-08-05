@@ -10,7 +10,7 @@ use crate::cli::WorkflowInvocationArgs;
 pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay::errors::Result<()> {
     let body = read_request(&invocation.request_file)?;
     let project_root = tracedecay::config::resolve_path_with_discovery(invocation.project);
-    let operation = invocation.operation.into_runtime();
+    let operation = invocation.operation;
     let outcome =
         tracedecay::workflow_cli::invoke_workflow_cli(project_root.clone(), operation, body)
             .await?;
@@ -20,7 +20,7 @@ pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay::error
         let outcome = outcome.map_err(|problem| tracedecay::errors::TraceDecayError::Config {
             message: format!("{}: {}", problem.problem.code, problem.problem.message),
         })?;
-        println!("Workflow {}", operation.as_str().replace('_', " "));
+        println!("Workflow {}", operation.route_segment().replace('-', " "));
         println!("Project: {}", project_root.display());
         println!("{}", serde_json::to_string_pretty(&outcome)?);
     }
