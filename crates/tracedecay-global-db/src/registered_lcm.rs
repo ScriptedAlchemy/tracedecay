@@ -271,6 +271,31 @@ impl RegisteredGlobalDb {
         schema::load_raw_message(&snapshot, provider, message_id).await
     }
 
+    /// Resolves only the persisted locator for admission and readiness checks.
+    ///
+    /// Production callers that do not need content must use this metadata-only
+    /// route. Content hydration remains owned by authorized temporal execution.
+    pub async fn lcm_raw_message_store_id(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Result<Option<i64>, LcmError> {
+        let snapshot = self.read_snapshot().await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT store_id
+                 FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2",
+                params![provider, message_id],
+            )
+            .await?;
+        rows.next()
+            .await?
+            .map(|row| row.get(0))
+            .transpose()
+            .map_err(Into::into)
+    }
+
     pub async fn lcm_status_with_options(
         &self,
         provider: &str,

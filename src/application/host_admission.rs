@@ -457,8 +457,8 @@ impl HostAdmissionTestRuntimeV1 {
         }
         let mut store_ids = Vec::with_capacity(messages.len());
         for message in messages {
-            let raw = database
-                .lcm_load_raw_message(&message.provider, &message.message_id)
+            let store_id = database
+                .lcm_raw_message_store_id(&message.provider, &message.message_id)
                 .await
                 .map_err(|error| TraceDecayError::Database {
                     operation: "read registered transcript fixture store id".to_owned(),
@@ -471,7 +471,7 @@ impl HostAdmissionTestRuntimeV1 {
                         message.provider, message.message_id
                     ),
                 })?;
-            store_ids.push(raw.store_id);
+            store_ids.push(store_id);
         }
         Ok(store_ids)
     }
@@ -550,7 +550,7 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> Result<bool> {
         Ok(self
             .project_database_for_test()?
-            .lcm_load_raw_message(provider, message_id)
+            .lcm_raw_message_store_id(provider, message_id)
             .await
             .map_err(|error| TraceDecayError::Database {
                 operation: "check registered project LCM raw message".to_owned(),
