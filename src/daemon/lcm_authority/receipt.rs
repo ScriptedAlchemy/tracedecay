@@ -27,25 +27,6 @@ pub(super) fn unavailable(
     )
 }
 
-pub(super) fn unavailable_with_state(
-    context: &RequestContext,
-    operation: LcmAuthorityOperation,
-    started_at: UtcMicros,
-    reason: LcmAuthorityUnavailableReason,
-    committed_state: ManifestDigest,
-) -> LcmAuthorityResponse {
-    terminal(
-        context,
-        operation,
-        started_at,
-        LcmAuthorityOutcome::Unavailable { reason },
-        OperationTermination::Unavailable,
-        Some(committed_state),
-        None,
-        None,
-    )
-}
-
 pub(super) fn terminal_failure(
     context: &RequestContext,
     operation: LcmAuthorityOperation,

@@ -24,7 +24,11 @@ use tracedecay_usecases::session::lcm::{
 };
 
 use super::DaemonLcmAuthority;
+use super::canonical_source::DaemonCanonicalCompactionSource;
 use crate::global_db::RegisteredGlobalDb;
+use crate::mcp::tools::handlers::session::message_search::{
+    SessionRetrievalServicePort, SessionRetrievalStoreScope,
+};
 
 const LCM_ACTOR_ID: &str = "actor.daemon.lcm";
 const LCM_GRANT_ID: &str = "grant.daemon.lcm";
@@ -214,14 +218,26 @@ pub(crate) fn mount_registered_lcm_authority(
     database: Arc<RegisteredGlobalDb>,
     identity: ResolvedSessionIdentity,
     expected_shard: &StoreShardIdV1,
+    canonical_retrieval: Option<Arc<dyn SessionRetrievalServicePort>>,
 ) -> Option<Arc<dyn MountedLcmAuthorityPort>> {
     if &database.binding().shard_id != expected_shard
         || !identity_matches_shard(&identity, expected_shard)
     {
         return None;
     }
+    let store_scope = if identity.project_id().is_some() {
+        SessionRetrievalStoreScope::Project
+    } else {
+        SessionRetrievalStoreScope::Profile
+    };
+    let mut authority = DaemonLcmAuthority::registered(database);
+    if let Some(retrieval) = canonical_retrieval {
+        authority = authority.with_canonical_source(Arc::new(
+            DaemonCanonicalCompactionSource::new(retrieval, store_scope),
+        ));
+    }
     Some(Arc::new(MountedLcmAuthority {
-        authority: DaemonLcmAuthority::registered(database),
+        authority,
         identity,
     }))
 }

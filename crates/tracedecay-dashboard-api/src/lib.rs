@@ -7,8 +7,7 @@
 //!
 //! - `/api/plugins/holographic/*`  → project memory store
 //!   (`memory_facts` / `memory_entities` / `memory_banks` in the project DB)
-//! - `/api/plugins/hermes-lcm/*`   → typed unavailable until the daemon mounts
-//!   canonical temporal retrieval for the dashboard
+//! - `/api/plugins/hermes-lcm/*`   → daemon-owned canonical temporal retrieval
 //!
 //! The endpoint paths and JSON payload shapes intentionally mirror the
 //! original Hermes plugin APIs (`plugins/memory/holographic_plus/dashboard/
@@ -89,6 +88,10 @@ mod graph_service;
 mod graph_structure_api;
 pub mod hooks;
 mod lcm_api;
+pub use lcm_api::{
+    DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmReadFutureV1,
+    DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1, DashboardLcmReadRequestV1,
+};
 mod loom_api;
 mod memory_analysis;
 mod memory_api;
@@ -218,6 +221,7 @@ pub struct DashboardStateCompositionV1 {
     pub project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
     pub registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     pub registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
+    pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
     pub doctor_report_reader: Option<DoctorReportReader>,
@@ -298,6 +302,9 @@ pub struct DashboardState {
     pub lcm_db_path: String,
     /// Which store `lcm_db` points at: project storage mode or `"unavailable"`.
     pub lcm_scope: String,
+    /// Daemon-owned temporal retrieval adapter. This is the only dashboard
+    /// authority permitted to hydrate session content.
+    pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     /// Global accounting DB (savings ledger, lifetime counters, turns) used
     /// by the Savings & Cost tab, when available.
     pub savings_db: Option<Arc<RegisteredGlobalDb>>,
@@ -514,6 +521,7 @@ async fn build_state_inner(
         project_graph_resolver,
         registered_project_session_db,
         registered_savings_db,
+        lcm_read_authority,
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader,
@@ -561,6 +569,7 @@ async fn build_state_inner(
         lcm_db: lcm.lcm_db,
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
+        lcm_read_authority,
         savings_db: registered_savings_db,
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
@@ -606,6 +615,7 @@ pub async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
             project_graph_resolver: None,
             registered_project_session_db: None,
             registered_savings_db: None,
+            lcm_read_authority: None,
             automation_scheduler_reconciler: None,
             automation_writer: standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
@@ -641,6 +651,7 @@ pub async fn build_selected_project_state(
             project_graph_resolver: active.project_graph_resolver.clone(),
             registered_project_session_db: None,
             registered_savings_db: active.savings_db.clone(),
+            lcm_read_authority: None,
             automation_scheduler_reconciler: None,
             automation_writer: Arc::clone(&active.automation_writer),
             // Doctor authority is bound to the active project's exact scope.
@@ -825,6 +836,7 @@ where
                 .map(|authority| Arc::clone(&authority.project_sessions)),
             registered_savings_db: test_authority
                 .map(|authority| Arc::clone(&authority.profile_database)),
+            lcm_read_authority: None,
             automation_scheduler_reconciler: None,
             automation_writer: standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
@@ -1624,7 +1636,7 @@ async fn forward_project_request(
 /// Capability discovery for hosts and future delegated-host extensions. The UI
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
 async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
-    let has_lcm = state.lcm_db.is_some();
+    let has_lcm = state.lcm_db.is_some() && state.lcm_read_authority.is_some();
     let global_automation = crate::user_config::UserConfig::load().automation;
     let project_automation = automation_config::load_project_config(&state.dashboard_root)
         .await
@@ -1712,6 +1724,32 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
 mod authority_tests {
     use super::*;
 
+    struct FakeDashboardLcmRead;
+
+    impl DashboardLcmReadPortV1 for FakeDashboardLcmRead {
+        fn read(
+            &self,
+            _request: DashboardLcmReadRequestV1,
+        ) -> crate::lcm_api::DashboardLcmReadFutureV1<'_> {
+            Box::pin(async move {
+                DashboardLcmReadOutcomeV1::Ready(DashboardLcmCanonicalPageV1 {
+                    messages: vec![DashboardLcmCanonicalMessageV1 {
+                        session_id: "session.dashboard".to_owned(),
+                        provider: "claude".to_owned(),
+                        role: "assistant".to_owned(),
+                        timestamp: Some(1),
+                        ordinal: 1,
+                        content: "canonically hydrated".to_owned(),
+                        message_id: "message.dashboard".to_owned(),
+                        metadata_json: None,
+                        tool_names: None,
+                    }],
+                    has_more: false,
+                })
+            })
+        }
+    }
+
     struct DashboardStateFixture {
         state: DashboardState,
         layout: StoreLayout,
@@ -1775,6 +1813,7 @@ mod authority_tests {
                 lcm_db: None,
                 lcm_db_path: layout.sessions_db_path.display().to_string(),
                 lcm_scope: "unavailable".to_owned(),
+                lcm_read_authority: None,
                 savings_db: None,
                 savings_db_path: String::new(),
                 project_root: project_root.clone(),
@@ -2244,8 +2283,9 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn lcm_browse_reads_are_typed_unavailable_until_temporal_hydration_mounts() {
-        let fixture = DashboardStateFixture::open("project.dashboard-lcm-envelope").await;
+    async fn lcm_browse_reads_use_the_mounted_daemon_temporal_authority() {
+        let mut fixture = DashboardStateFixture::open("project.dashboard-lcm-envelope").await;
+        fixture.state.lcm_read_authority = Some(Arc::new(FakeDashboardLcmRead));
         let app = router_with_active_application(fixture.state, None, Router::new());
 
         for uri in [
@@ -2271,13 +2311,8 @@ mod authority_tests {
             let value: Value = serde_json::from_slice(&body).expect("LCM browse json");
 
             assert_eq!(value["schema_revision"], 1, "{uri}");
-            assert_eq!(value["domain_state"], "unknown", "{uri}");
-            assert!(value["payload"].is_null(), "{uri}");
-            assert_eq!(
-                value["coverage"]["omission_reasons"],
-                serde_json::json!(["lcm_temporal_retrieval_not_mounted"]),
-                "{uri}",
-            );
+            assert_eq!(value["domain_state"], "ready", "{uri}");
+            assert!(value["payload"].is_object(), "{uri}");
         }
     }
 

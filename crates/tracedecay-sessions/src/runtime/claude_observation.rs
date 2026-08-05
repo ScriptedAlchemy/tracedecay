@@ -131,6 +131,8 @@ pub enum ClaudeObservationIngestError {
     InvalidFrameState,
     #[error("Claude observation scanner returned non-contiguous coverage")]
     NonContiguousCoverage,
+    #[error("Claude transcript path is outside the canonical Claude source root")]
+    UntrustedTranscriptPath,
     #[error(
         "Claude observation ingestion failed for {failed_sources} source(s); first reason: {first_reason_code}"
     )]
@@ -864,6 +866,47 @@ where
             first_retryable,
         });
     }
+    Ok(stats.merge(projection_stats))
+}
+
+/// Ingests one host-identified Claude transcript through the same observation,
+/// sanitization, scope, cursor, and projection authorities as scheduled
+/// recovery.
+///
+/// The source adapter still verifies frame ownership against `project_root`
+/// and `scope`; `transcript_path` selects work but never grants access.
+pub async fn ingest_exact_source_with_observations_with_admission<A>(
+    source: &ClaudeSource,
+    transcript_path: &Path,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    admission: &A,
+    max_new_bytes: Option<u64>,
+    cancellation: ObservationCancellation,
+) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
+where
+    A: HostAdmission + ?Sized,
+{
+    if cancellation.is_cancelled() {
+        return Err(ObservationApplicationError::Cancelled.into());
+    }
+    if !source.owns_transcript_path(transcript_path) {
+        return Err(ClaudeObservationIngestError::UntrustedTranscriptPath);
+    }
+    let processing_context = SourceProcessingContext {
+        admission,
+        source_adapter: source,
+        project_root,
+        scope: &scope,
+        cancellation: &cancellation,
+    };
+    let stats = process_source(
+        &processing_context,
+        transcript_path,
+        Some(max_new_bytes.unwrap_or(CLAUDE_HOOK_MAX_NEW_BYTES)),
+    )
+    .await?;
+    let projection_stats = drain_projection_queue(admission, &scope, &cancellation).await?;
     Ok(stats.merge(projection_stats))
 }
 

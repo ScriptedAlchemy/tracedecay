@@ -804,29 +804,9 @@ impl McpServer {
             Arc::new(DaemonProjectRegistryReadService::new(Arc::clone(registry)))
                 as Arc<dyn ProjectRegistryReadPort>
         });
-        let project_lcm_authority = project_session_retrieval_root
-            .as_ref()
-            .zip(registered_session_db.as_ref())
-            .and_then(|(root, database)| {
-                crate::daemon::lcm_authority::mount_registered_lcm_authority(
-                    Arc::clone(database),
-                    root.identity().clone(),
-                    root.expected_runtime_shard()?,
-                )
-            });
-        let user_lcm_authority = profile_session_retrieval_root
-            .as_ref()
-            .zip(registered_user_session_db.as_ref())
-            .and_then(|(root, database)| {
-                crate::daemon::lcm_authority::mount_registered_lcm_authority(
-                    Arc::clone(database),
-                    root.identity().clone(),
-                    root.expected_runtime_shard()?,
-                )
-            });
         let project_session_retrieval_service = session_db
             .as_ref()
-            .zip(project_session_retrieval_root)
+            .zip(project_session_retrieval_root.clone())
             .and_then(|(database, root)| match registered_session_db.as_ref() {
                 Some(registered) => DaemonSessionRetrievalService::new_registered(
                     Arc::clone(database),
@@ -843,7 +823,7 @@ impl McpServer {
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
         let user_session_retrieval_service = user_session_db
             .as_ref()
-            .zip(profile_session_retrieval_root)
+            .zip(profile_session_retrieval_root.clone())
             .and_then(
                 |(database, root)| match registered_user_session_db.as_ref() {
                     Some(registered) => DaemonSessionRetrievalService::new_registered(
@@ -856,6 +836,28 @@ impl McpServer {
                 },
             )
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
+        let project_lcm_authority = project_session_retrieval_root
+            .as_ref()
+            .zip(registered_session_db.as_ref())
+            .and_then(|(root, database)| {
+                crate::daemon::lcm_authority::mount_registered_lcm_authority(
+                    Arc::clone(database),
+                    root.identity().clone(),
+                    root.expected_runtime_shard()?,
+                    project_session_retrieval_service.clone(),
+                )
+            });
+        let user_lcm_authority = profile_session_retrieval_root
+            .as_ref()
+            .zip(registered_user_session_db.as_ref())
+            .and_then(|(root, database)| {
+                crate::daemon::lcm_authority::mount_registered_lcm_authority(
+                    Arc::clone(database),
+                    root.identity().clone(),
+                    root.expected_runtime_shard()?,
+                    user_session_retrieval_service.clone(),
+                )
+            });
 
         let server = Arc::new(Self {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),

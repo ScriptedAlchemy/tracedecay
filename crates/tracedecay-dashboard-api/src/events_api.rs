@@ -882,6 +882,7 @@ pub(crate) async fn dashboard_state_fixture(
         lcm_db: None,
         lcm_db_path: String::new(),
         lcm_scope: "unavailable".to_owned(),
+        lcm_read_authority: None,
         savings_db: None,
         savings_db_path: String::new(),
         project_root,

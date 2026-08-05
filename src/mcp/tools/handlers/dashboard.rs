@@ -20,6 +20,8 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
+use super::SessionRetrievalServicePort;
+use super::dashboard_lcm::DashboardLcmReadAdapter;
 use super::support::generic_tool_result;
 
 use crate::dashboard::{
@@ -200,6 +202,7 @@ pub(super) async fn handle_dashboard(
     retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
+    lcm_retrieval: Option<Arc<dyn SessionRetrievalServicePort>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
@@ -292,6 +295,10 @@ pub(super) async fn handle_dashboard(
                     project_graph_resolver: dashboard_project_graph_resolver,
                     registered_project_session_db,
                     registered_savings_db,
+                    lcm_read_authority: lcm_retrieval.map(|retrieval| {
+                        Arc::new(DashboardLcmReadAdapter::new(retrieval))
+                            as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
+                    }),
                     automation_scheduler_reconciler,
                     automation_writer,
                     doctor_report_reader,

@@ -57,6 +57,7 @@ pub(crate) fn hook_input(command: &Commands) -> Option<HookInput> {
         Commands::HookPreToolUse => Some(HookInput::NoInput),
         Commands::HookClaudeSessionStart
         | Commands::HookClaudePostToolUse
+        | Commands::HookClaudePostCompact
         | Commands::HookClaudeSubagentStart
         | Commands::HookPromptSubmit
         | Commands::HookStop
@@ -107,6 +108,9 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         }
         Commands::HookClaudePostToolUse => {
             exit_if_nonzero(tracedecay::hooks::hook_claude_post_tool_use().await);
+        }
+        Commands::HookClaudePostCompact => {
+            exit_if_nonzero(tracedecay::hooks::hook_claude_post_compact().await);
         }
         Commands::HookClaudeSubagentStart => {
             exit_if_nonzero(tracedecay::hooks::hook_claude_subagent_start().await);
@@ -213,6 +217,7 @@ mod tests {
             (Commands::HookStop, HookInput::Stdin),
             (Commands::HookClaudeSessionStart, HookInput::Stdin),
             (Commands::HookClaudePostToolUse, HookInput::Stdin),
+            (Commands::HookClaudePostCompact, HookInput::Stdin),
             (Commands::HookClaudeSubagentStart, HookInput::Stdin),
             (Commands::HookKiroPreToolUse, HookInput::Stdin),
             (Commands::HookKiroPromptSubmit, HookInput::Stdin),

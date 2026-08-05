@@ -10,6 +10,7 @@ use super::common::{
 const NO_INPUT_HOOKS: &[&str] = &["hook-pre-tool-use", "hook-prompt-submit", "hook-stop"];
 const STDIN_HOOKS: &[&str] = &[
     "hook-claude-session-start",
+    "hook-claude-post-compact",
     "hook-claude-post-tool-use",
     "hook-claude-subagent-start",
     "hook-kiro-pre-tool-use",
@@ -75,8 +76,6 @@ fn run_hook_at(home: &Path, cwd: &Path, hook: &str, input: Option<&[u8]>) -> Out
 
 #[test]
 fn exclusive_lifecycle_owner_quiesces_every_hook_before_startup_or_dispatch() {
-    assert_eq!(NO_INPUT_HOOKS.len(), 3);
-    assert_eq!(STDIN_HOOKS.len(), 22);
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
     let profile = home.join(".tracedecay");

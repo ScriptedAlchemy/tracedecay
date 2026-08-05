@@ -113,6 +113,7 @@ transcript_capture_kernels! {
     CursorProfileKernelV1 => capture_cursor_profile,
     HermesProfileKernelV1 => capture_hermes_profile,
     KiroProfileKernelV1 => capture_kiro_profile,
+    ClaudeProjectKernelV1 => capture_claude_project,
     CodexProjectKernelV1 => capture_codex_project,
     CursorProjectKernelV1 => capture_cursor_project,
     HermesProjectKernelV1 => capture_hermes_project,
@@ -126,6 +127,7 @@ const TRANSCRIPT_CAPTURE_KERNELS: &[(&str, bool, &dyn TranscriptCaptureKernelV1)
     ("cursor", true, &CursorProfileKernelV1),
     ("hermes", true, &HermesProfileKernelV1),
     ("kiro", true, &KiroProfileKernelV1),
+    ("claude", false, &ClaudeProjectKernelV1),
     ("codex", false, &CodexProjectKernelV1),
     ("cursor", false, &CursorProjectKernelV1),
     ("hermes", false, &HermesProjectKernelV1),
@@ -151,18 +153,35 @@ async fn capture_claude_profile(
     let session_id = required_str(ctx.args, "session_id")?.to_string();
     required_user_db(ctx.session_authorities)?;
     let roots = registered_project_roots(global_db).await?;
-    let stats = crate::sessions::claude_observation::ingest_user_sessions_with_admission(
-        profile_root,
-        Some(session_id),
-        roots,
-        ctx.facade,
-        Some(
-            ctx.max_new_bytes
-                .unwrap_or(crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES),
-        ),
-        ctx.cancellation.clone(),
-    )
-    .await
+    let stats = if let Some(transcript_path) =
+        ctx.args.get("transcript_path").and_then(Value::as_str)
+    {
+        let source = crate::sessions::claude::ClaudeSource::with_home(profile_root)
+            .for_user_scope(Some(session_id), roots);
+        crate::sessions::claude_observation::ingest_exact_source_with_observations_with_admission(
+            &source,
+            Path::new(transcript_path),
+            profile_root,
+            ObservationScopeV1::Profile,
+            ctx.facade,
+            ctx.max_new_bytes,
+            ctx.cancellation.clone(),
+        )
+        .await
+    } else {
+        crate::sessions::claude_observation::ingest_user_sessions_with_admission(
+            profile_root,
+            Some(session_id),
+            roots,
+            ctx.facade,
+            Some(
+                ctx.max_new_bytes
+                    .unwrap_or(crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES),
+            ),
+            ctx.cancellation.clone(),
+        )
+        .await
+    }
     .map_err(|error| map_claude_observation_ingest_error(&error))?;
     Ok(TranscriptCaptureOutcome {
         messages_upserted: stats.transcript.messages_upserted,
@@ -309,6 +328,38 @@ async fn capture_codex_project(
     Ok(TranscriptCaptureOutcome {
         messages_upserted,
         source_deferred,
+        ..TranscriptCaptureOutcome::default()
+    })
+}
+
+async fn capture_claude_project(
+    ctx: TranscriptCaptureContext<'_>,
+) -> Result<TranscriptCaptureOutcome> {
+    let cg = ctx.project()?;
+    let profile_root = ctx
+        .session_authorities
+        .profile_identity
+        .map(|identity| identity.profile_root())
+        .ok_or_else(|| config_error("Claude profile identity is unavailable"))?;
+    let source = crate::sessions::claude::ClaudeSource::with_home(profile_root);
+    let transcript_path = Path::new(required_str(ctx.args, "transcript_path")?);
+    let project_id = project_observation_id(cg)?;
+    let scope = ObservationScopeV1::Project { project_id };
+    let stats =
+        crate::sessions::claude_observation::ingest_exact_source_with_observations_with_admission(
+            &source,
+            transcript_path,
+            cg.project_root(),
+            scope,
+            ctx.facade,
+            ctx.max_new_bytes,
+            ctx.cancellation.clone(),
+        )
+        .await
+        .map_err(|error| map_claude_observation_ingest_error(&error))?;
+    Ok(TranscriptCaptureOutcome {
+        messages_upserted: stats.transcript.messages_upserted,
+        claude_observation: Some(stats),
         ..TranscriptCaptureOutcome::default()
     })
 }

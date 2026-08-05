@@ -17,7 +17,10 @@ use serde_json::{Map, Value, json};
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 
-use super::lcm_api::{LcmMessageV1, LcmSummaryNodeV1};
+use super::lcm_api::{
+    DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmReadOutcomeV1,
+    DashboardLcmReadRequestV1, LcmMessageV1, LcmSummaryNodeV1,
+};
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
@@ -614,14 +617,61 @@ async fn code_source(
 }
 
 async fn session_source(
-    _state: &DashboardState,
-    _request: &ExplorerQueryRequestV1,
+    state: &DashboardState,
+    request: &ExplorerQueryRequestV1,
 ) -> ExplorerSourceProgressV1 {
-    ExplorerSourceProgressV1::unavailable(
-        ExplorerSourceIdV1::Sessions,
-        "lcm_temporal_retrieval_not_mounted",
-        "canonical temporal retrieval and redaction hydration are not mounted",
-    )
+    let Some(authority) = state.lcm_read_authority.as_ref() else {
+        return ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::Sessions,
+            "lcm_daemon_authority_unavailable",
+            "daemon LCM retrieval authority is unavailable",
+        );
+    };
+    match authority
+        .read(DashboardLcmReadRequestV1::Search {
+            query: request.query.clone(),
+            limit: request.limit,
+            offset: request.offset,
+            role: None,
+            source: None,
+            session_id: None,
+            since: None,
+            until: None,
+        })
+        .await
+    {
+        DashboardLcmReadOutcomeV1::Ready(page) => {
+            let has_more = page.has_more;
+            let rows = page
+                .messages
+                .into_iter()
+                .skip(usize::try_from(request.offset).unwrap_or(usize::MAX))
+                .map(explorer_lcm_message)
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>();
+            match rows {
+                Ok(rows) => ready_source(
+                    ExplorerSourceIdV1::Sessions,
+                    request,
+                    rows,
+                    None,
+                    json!({"query": request.query, "has_more": has_more}),
+                    "messages",
+                    Vec::new(),
+                ),
+                Err(error) => ExplorerSourceProgressV1::error(
+                    ExplorerSourceIdV1::Sessions,
+                    "lcm_dashboard_contract_invalid",
+                    error.to_string(),
+                ),
+            }
+        }
+        DashboardLcmReadOutcomeV1::Unavailable { reason } => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::Sessions,
+            "lcm_temporal_authority_unavailable",
+            format!("canonical temporal retrieval is unavailable: {reason}"),
+        ),
+    }
 }
 
 async fn knowledge_source(
@@ -748,25 +798,156 @@ pub(super) struct ExplorerReadContextV1 {
 
 pub async fn session_size(
     State(state): State<DashboardState>,
-    Path(_session_id): Path<String>,
+    Path(session_id): Path<String>,
 ) -> Response {
-    Json(DashboardEnvelopeV1::unavailable(
-        scope_from_state(&state),
-        None::<ExplorerSessionSizeV1>,
-        "lcm_temporal_retrieval_not_mounted",
-    ))
-    .into_response()
+    let outcome = read_session_page(&state, &session_id, 500, 0, "asc").await;
+    match outcome {
+        DashboardLcmReadOutcomeV1::Ready(page) if page.has_more => {
+            Json(DashboardEnvelopeV1::unavailable(
+                scope_from_state(&state),
+                None::<ExplorerSessionSizeV1>,
+                "lcm_session_size_incomplete",
+            ))
+            .into_response()
+        }
+        DashboardLcmReadOutcomeV1::Ready(page) => {
+            let payload = ExplorerSessionSizeV1 {
+                session_id,
+                storage_scope: "project".to_owned(),
+                counts: explorer_session_counts(&page.messages),
+            };
+            Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::unknown(),
+                Some(payload),
+            ))
+            .into_response()
+        }
+        DashboardLcmReadOutcomeV1::Unavailable { reason } => {
+            Json(DashboardEnvelopeV1::unavailable(
+                scope_from_state(&state),
+                None::<ExplorerSessionSizeV1>,
+                reason,
+            ))
+            .into_response()
+        }
+    }
 }
 
 pub async fn read_context(
     State(state): State<DashboardState>,
-    Path(_session_id): Path<String>,
-    Query(_params): Query<ReadContextParams>,
+    Path(session_id): Path<String>,
+    Query(params): Query<ReadContextParams>,
 ) -> Response {
-    Json(DashboardEnvelopeV1::unavailable(
-        scope_from_state(&state),
-        None::<ExplorerReadContextV1>,
-        "lcm_temporal_retrieval_not_mounted",
-    ))
-    .into_response()
+    let limit = params.limit.unwrap_or(100).clamp(1, 500);
+    let offset = params.offset.unwrap_or(0).max(0);
+    let order = if params.order.as_deref() == Some("desc") {
+        "desc"
+    } else {
+        "asc"
+    };
+    match read_session_page(&state, &session_id, limit, offset, order).await {
+        DashboardLcmReadOutcomeV1::Ready(mut page) => {
+            let mut messages = page
+                .messages
+                .drain(..)
+                .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+                .collect::<Vec<_>>();
+            if order == "desc" {
+                messages.reverse();
+            }
+            let counts = explorer_session_counts(&messages);
+            let messages = messages
+                .into_iter()
+                .map(explorer_lcm_message)
+                .collect::<Vec<_>>();
+            let payload = ExplorerReadContextV1 {
+                session_id,
+                storage_scope: "project".to_owned(),
+                limit,
+                offset,
+                order: order.to_owned(),
+                counts,
+                messages,
+                summary_nodes: Vec::new(),
+                has_more: page.has_more,
+                has_more_messages: page.has_more,
+                has_more_summary_nodes: false,
+            };
+            Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::unknown(),
+                Some(payload),
+            ))
+            .into_response()
+        }
+        DashboardLcmReadOutcomeV1::Unavailable { reason } => {
+            Json(DashboardEnvelopeV1::unavailable(
+                scope_from_state(&state),
+                None::<ExplorerReadContextV1>,
+                reason,
+            ))
+            .into_response()
+        }
+    }
+}
+
+async fn read_session_page(
+    state: &DashboardState,
+    session_id: &str,
+    limit: i64,
+    offset: i64,
+    order: &str,
+) -> DashboardLcmReadOutcomeV1 {
+    let Some(authority) = state.lcm_read_authority.as_ref() else {
+        return DashboardLcmReadOutcomeV1::Unavailable {
+            reason: "lcm_daemon_authority_unavailable".to_owned(),
+        };
+    };
+    authority
+        .read(DashboardLcmReadRequestV1::Session {
+            session_id: session_id.to_owned(),
+            limit,
+            offset,
+            order: order.to_owned(),
+        })
+        .await
+}
+
+fn explorer_lcm_message(message: DashboardLcmCanonicalMessageV1) -> LcmMessageV1 {
+    LcmMessageV1 {
+        store_id: None,
+        session_id: message.session_id,
+        role: Some(message.role),
+        source: Some(message.provider),
+        timestamp: message.timestamp,
+        token_estimate: Some(explorer_token_estimate(&message.content)),
+        content: Some(message.content),
+        message_id: message.message_id,
+        ordinal: Some(message.ordinal),
+        storage_kind: Some("canonical_temporal".to_owned()),
+        metadata_json: message.metadata_json,
+        tool_name: message.tool_names,
+        pinned: None,
+        summary_node_ids: Vec::new(),
+        snippet: None,
+    }
+}
+
+fn explorer_session_counts(messages: &[DashboardLcmCanonicalMessageV1]) -> ExplorerSessionCountsV1 {
+    let source_token_count = messages
+        .iter()
+        .map(|message| explorer_token_estimate(&message.content))
+        .sum();
+    ExplorerSessionCountsV1 {
+        message_count: i64::try_from(messages.len()).unwrap_or(i64::MAX),
+        summary_node_count: 0,
+        token_estimate_total: source_token_count,
+        summary_token_count: 0,
+        source_token_count,
+    }
+}
+
+fn explorer_token_estimate(content: &str) -> i64 {
+    i64::try_from(content.chars().count().div_ceil(4)).unwrap_or(i64::MAX)
 }

@@ -542,6 +542,26 @@ impl RegisteredGlobalDb {
         &self,
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
+        self.lcm_compress_inner(request, false).await
+    }
+
+    /// Publishes a host-native compaction only when its immutable summary and
+    /// source relations were created in the same transaction as raw content.
+    ///
+    /// A zero-summary response is rolled back rather than exposing an ingested
+    /// prefix that falsely looks like a completed native compaction.
+    pub async fn lcm_compress_required_summary(
+        &self,
+        request: LcmCompressionRequest,
+    ) -> Result<LcmCompressionResponse, LcmError> {
+        self.lcm_compress_inner(request, true).await
+    }
+
+    async fn lcm_compress_inner(
+        &self,
+        request: LcmCompressionRequest,
+        require_summary: bool,
+    ) -> Result<LcmCompressionResponse, LcmError> {
         let storage_root = self.lcm_storage_root()?;
         let transaction = self
             .begin_write_transaction()
@@ -559,6 +579,15 @@ impl RegisteredGlobalDb {
             &mut payload_rollback,
         )
         .await?;
+        if require_summary && response.summary_nodes_created == 0 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| LcmError::Db(error.to_string()))?;
+            return Err(LcmError::Db(
+                "native compaction did not publish an immutable summary".to_owned(),
+            ));
+        }
         transaction.commit().await?;
         payload_rollback.disarm();
         Ok(response)

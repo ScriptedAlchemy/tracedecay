@@ -37,7 +37,9 @@ use context_scout::{
 };
 use errors::map_host_admission_outcome;
 use hermes::{hermes_receipt, user_review};
-use ingest::{accounting_receipt, codex_compact, cursor_compact, ingest_transcript};
+use ingest::{
+    accounting_receipt, claude_compact, codex_compact, cursor_compact, ingest_transcript,
+};
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
@@ -89,6 +91,17 @@ pub async fn handle_hook_runtime(
             )));
         }
         "codex_compact" => codex_compact(cg, &args, session_authorities).await?,
+        "claude_compact" => {
+            let ingest_args = claude_compact_ingest_args(&args, false)?;
+            let ingest =
+                ingest_transcript(Some(cg), &ingest_args, None, global_db, session_authorities)
+                    .await?;
+            if ingest.get("completed").and_then(Value::as_bool) == Some(true) {
+                claude_compact(&args, session_authorities).await?
+            } else {
+                incomplete_claude_compaction_source(&ingest)
+            }
+        }
         "cursor_compact" => cursor_compact(cg, &args, session_authorities).await?,
         other => {
             return Err(config_error(format!(
@@ -163,6 +176,22 @@ pub(crate) async fn handle_projectless_hook_runtime(
             )
             .await?
         }
+        "claude_compact" => {
+            let ingest_args = claude_compact_ingest_args(&args, true)?;
+            let ingest = ingest_transcript(
+                None,
+                &ingest_args,
+                Some(profile_root),
+                Some(global_db),
+                session_authorities,
+            )
+            .await?;
+            if ingest.get("completed").and_then(Value::as_bool) == Some(true) {
+                claude_compact(&args, session_authorities).await?
+            } else {
+                incomplete_claude_compaction_source(&ingest)
+            }
+        }
         _ => unreachable!("projectless hook action validated above"),
     };
     Ok(tool_json(None, &args, &output))
@@ -170,8 +199,60 @@ pub(crate) async fn handle_projectless_hook_runtime(
 
 fn projectless_action_allowed(action: &str, args: &Value) -> bool {
     matches!(action, "user_review" | "hermes_receipt")
+        || (action == "claude_compact"
+            && args.get("user_scope").and_then(Value::as_bool) == Some(true))
         || (action == "ingest_transcript"
             && args.get("user_scope").and_then(Value::as_bool) == Some(true))
+}
+
+fn claude_compact_ingest_args(args: &Value, user_scope: bool) -> Result<Value> {
+    let event_json = required_str(args, "event_json")?;
+    let event: Value = serde_json::from_str(event_json)?;
+    if event.get("hook_event_name").and_then(Value::as_str) != Some("PostCompact")
+        || !matches!(
+            event.get("trigger").and_then(Value::as_str),
+            Some("manual" | "auto")
+        )
+    {
+        return Err(config_error(
+            "Claude compaction requires a native PostCompact event",
+        ));
+    }
+    let session_id = required_str(&event, "session_id")?;
+    let transcript_path = required_str(&event, "transcript_path")?;
+    let summary = required_str(&event, "compact_summary")?;
+    if tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(summary)
+        .filter(|summary| !summary.trim().is_empty())
+        .is_none()
+    {
+        return Err(config_error(
+            "Claude compact summary failed canonical privacy policy",
+        ));
+    }
+    Ok(json!({
+        "action": "ingest_transcript",
+        "provider": "claude",
+        "session_id": session_id,
+        "transcript_path": transcript_path,
+        "user_scope": user_scope,
+        "max_new_bytes": crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES,
+    }))
+}
+
+fn incomplete_claude_compaction_source(ingest: &Value) -> Value {
+    json!({
+        "action": "claude_compact",
+        "status": "unavailable",
+        "reason": "canonical_transcript_incomplete",
+        "messages_upserted": ingest
+            .get("messages_upserted")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        "deferred_sources": ingest
+            .get("deferred_sources")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    })
 }
 
 fn required_value(args: &Value, key: &str) -> Result<Value> {
