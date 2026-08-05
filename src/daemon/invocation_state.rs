@@ -306,6 +306,40 @@ impl DaemonInvocationState {
                 );
             }
         };
+        let continuation = match &request.continuation {
+            Some(continuation) => {
+                match multi_root_continuation::open(
+                    continuation,
+                    &cursor_authenticator,
+                    observed_at,
+                ) {
+                    Ok(state)
+                        if state.scope_set_id == request.scope_set_id
+                            && state.scope_set_revision == request.scope_set_revision
+                            && state.scope_set_digest == request.scope_set_digest
+                            && state.query_digest == query_digest
+                            && state.order_digest == order_digest
+                            && state.next_page == request.page
+                            && state.root_generations.len() == scope_set.roots().len() =>
+                    {
+                        Some(state)
+                    }
+                    Ok(_) | Err(_) => {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                        );
+                    }
+                }
+            }
+            None if request.page == 0 => None,
+            None => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            }
+        };
         let mut contexts = Vec::new();
         let mut root_contexts = Vec::with_capacity(scope_set.roots().len());
         let mut generations = Vec::with_capacity(scope_set.roots().len());
@@ -370,44 +404,38 @@ impl DaemonInvocationState {
                 resolved_roots.push(None);
                 continue;
             };
-            let Some(latest) = self
-                .code_index_schedulers
-                .latest_complete_ready_for_scope(scope)
-                .await
-            else {
-                let Ok(generation) = unavailable_root_generation(
-                    scope,
-                    tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
-                ) else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        service::invocation::DaemonInvocationProblem::InvalidRequest,
-                    );
-                };
-                generations.push(generation);
-                root_contexts.push(None);
-                resolved_roots.push(None);
-                continue;
-            };
-            let Ok(generation) = published_root_generation(scope, &latest) else {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    service::invocation::DaemonInvocationProblem::InvalidRequest,
-                );
-            };
             contexts.push(context.clone());
             root_contexts.push(Some(context));
-            let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
-                scope.scope_digest.clone(),
-                tracedecay_domain::ScopeOutcome::Exact(generation),
-            ) else {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    service::invocation::DaemonInvocationProblem::InvalidRequest,
-                );
+            let sealed = continuation
+                .as_ref()
+                .and_then(|state| state.root_generations.get(ordinal));
+            let completed = match multi_root::completed_root_generation(
+                continuation.as_ref(),
+                ordinal,
+                scope,
+            ) {
+                Ok(completed) => completed,
+                Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+            };
+            if let Some(completed) = completed {
+                generations.push(completed);
+                resolved_roots.push(None);
+                continue;
+            }
+            let (generation, latest) = match multi_root::resolve_root_query_generation(
+                &self.code_index_schedulers,
+                scope,
+                sealed,
+            )
+            .await
+            {
+                Ok(resolved) => resolved,
+                Err(problem) => {
+                    return DaemonInvocationResponse::problem(request_id, problem);
+                }
             };
             generations.push(generation);
-            resolved_roots.push(Some((root, latest)));
+            resolved_roots.push(latest.map(|latest| (root, latest)));
         }
         let authorization =
             match tracedecay_application::MultiRootAuthorizationBindingV1::from_contexts(&contexts)
@@ -420,39 +448,9 @@ impl DaemonInvocationState {
                     );
                 }
             };
-        let continuation = match &request.continuation {
-            Some(continuation) => {
-                match multi_root_continuation::open(
-                    continuation,
-                    &cursor_authenticator,
-                    observed_at,
-                ) {
-                    Ok(state) => Some(state),
-                    Err(_) => {
-                        return DaemonInvocationResponse::problem(
-                            request_id,
-                            service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                        );
-                    }
-                }
-            }
-            None if request.page == 0 => None,
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    service::invocation::DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-        };
         if let Some(state) = &continuation {
-            let binding_matches = state.scope_set_id == request.scope_set_id
-                && state.scope_set_revision == request.scope_set_revision
-                && state.scope_set_digest == request.scope_set_digest
-                && state.root_generations == generations
-                && state.query_digest == query_digest
-                && state.order_digest == order_digest
-                && state.authorization == authorization
-                && state.next_page == request.page;
+            let binding_matches =
+                state.root_generations == generations && state.authorization == authorization;
             if !binding_matches {
                 return DaemonInvocationResponse::problem(
                     request_id,
@@ -523,7 +521,17 @@ impl DaemonInvocationState {
             .enumerate()
         {
             let scope = authorized_root.scope();
+            if multi_root::cursor_is_complete(&root_cursors[ordinal]) {
+                multi_root::terminalize_cursor(&mut next_root_cursors[ordinal]);
+                multi_root::insert_completed_root_outcome(&mut outcomes, scope, generation);
+                continue;
+            }
             let Some((root, pinned_generation)) = root else {
+                multi_root::retain_unexecuted_cursor(
+                    generation,
+                    &root_cursors[ordinal],
+                    &mut next_root_cursors[ordinal],
+                );
                 continue;
             };
             let Some(admitted_context) = &root_contexts[ordinal] else {
@@ -534,18 +542,6 @@ impl DaemonInvocationState {
                 tracedecay_domain::ScopeOutcome::Exact(_)
                     | tracedecay_domain::ScopeOutcome::Partial { .. }
             ) {
-                continue;
-            }
-            if matches!(
-                root_cursors[ordinal].cursor.as_ref(),
-                Some(tracedecay_application::MultiRootRootContinuationV1::Complete)
-            ) {
-                next_root_cursors[ordinal].cursor =
-                    Some(tracedecay_application::MultiRootRootContinuationV1::Complete);
-                outcomes.insert(
-                    scope.scope_digest.clone(),
-                    tracedecay_domain::ScopeOutcome::Exact(Vec::new()),
-                );
                 continue;
             }
             let Some(revalidated_context) = self
@@ -562,6 +558,7 @@ impl DaemonInvocationState {
                 )
                 .await
             else {
+                multi_root::terminalize_cursor(&mut next_root_cursors[ordinal]);
                 outcomes.insert(
                     scope.scope_digest.clone(),
                     tracedecay_domain::ScopeOutcome::Denied,
@@ -569,6 +566,7 @@ impl DaemonInvocationState {
                 continue;
             };
             if &revalidated_context != admitted_context {
+                multi_root::terminalize_cursor(&mut next_root_cursors[ordinal]);
                 outcomes.insert(
                     scope.scope_digest.clone(),
                     tracedecay_domain::ScopeOutcome::Denied,
@@ -621,11 +619,15 @@ impl DaemonInvocationState {
                     tracedecay_domain::ScopeOutcome::Exact(vec![value])
                 }
                 Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
+                    multi_root::terminalize_cursor(&mut next_root_cursors[ordinal]);
                     tracedecay_domain::ScopeOutcome::Denied
                 }
-                Err(_) => tracedecay_domain::ScopeOutcome::Unavailable {
-                    reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
-                },
+                Err(_) => {
+                    next_root_cursors[ordinal] = root_cursors[ordinal].clone();
+                    tracedecay_domain::ScopeOutcome::Unavailable {
+                        reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+                    }
+                }
             };
             outcomes.insert(scope.scope_digest.clone(), outcome);
         }

@@ -90,6 +90,126 @@ pub(super) async fn resolve_authorized_root(
     Ok(exact_root)
 }
 
+pub(super) async fn resolve_root_query_generation(
+    schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    scope: &tracedecay_application::ResolvedScope,
+    sealed: Option<&tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>>,
+) -> std::result::Result<
+    (
+        tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
+        Option<code_index_scheduler::LatestCompleteCodeIndexV1>,
+    ),
+    service::invocation::DaemonInvocationProblem,
+> {
+    let Some(sealed) = sealed else {
+        let Some(latest) = schedulers.latest_complete_ready_for_scope(scope).await else {
+            return Ok((
+                unavailable_root_generation(
+                    scope,
+                    tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+                )?,
+                None,
+            ));
+        };
+        let generation = published_root_generation(scope, &latest)?;
+        return Ok((
+            tracedecay_domain::RootScopeOutcomeV1::new(
+                scope.scope_digest.clone(),
+                tracedecay_domain::ScopeOutcome::Exact(generation),
+            )
+            .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?,
+            Some(latest),
+        ));
+    };
+    if sealed.scope_digest != scope.scope_digest {
+        return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
+    }
+    let retained = match &sealed.outcome {
+        tracedecay_domain::ScopeOutcome::Exact(generation)
+        | tracedecay_domain::ScopeOutcome::Partial {
+            value: generation, ..
+        } => schedulers
+            .generation_for(scope, &generation.index_generation)
+            .await
+            .filter(|latest| {
+                published_root_generation(scope, latest)
+                    .is_ok_and(|published| published == *generation)
+            }),
+        tracedecay_domain::ScopeOutcome::Denied
+        | tracedecay_domain::ScopeOutcome::Unavailable { .. } => None,
+    };
+    Ok((sealed.clone(), retained))
+}
+
+pub(super) fn completed_root_generation(
+    continuation: Option<&tracedecay_application::MultiRootContinuationStateV1>,
+    ordinal: usize,
+    scope: &tracedecay_application::ResolvedScope,
+) -> std::result::Result<
+    Option<tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>>,
+    service::invocation::DaemonInvocationProblem,
+> {
+    let Some(state) = continuation else {
+        return Ok(None);
+    };
+    let cursor = state
+        .root_cursors
+        .get(ordinal)
+        .ok_or(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
+    if !cursor_is_complete(cursor) {
+        return Ok(None);
+    }
+    state
+        .root_generations
+        .get(ordinal)
+        .filter(|sealed| sealed.scope_digest == scope.scope_digest)
+        .cloned()
+        .map(Some)
+        .ok_or(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized)
+}
+
+pub(super) fn cursor_is_complete(cursor: &tracedecay_application::MultiRootRootCursorV1) -> bool {
+    matches!(
+        cursor.cursor.as_ref(),
+        Some(tracedecay_application::MultiRootRootContinuationV1::Complete)
+    )
+}
+
+pub(super) fn terminalize_cursor(cursor: &mut tracedecay_application::MultiRootRootCursorV1) {
+    cursor.cursor = Some(tracedecay_application::MultiRootRootContinuationV1::Complete);
+}
+
+pub(super) fn insert_completed_root_outcome(
+    outcomes: &mut BTreeMap<
+        tracedecay_domain::ManifestDigest,
+        tracedecay_domain::ScopeOutcome<Vec<Value>>,
+    >,
+    scope: &tracedecay_application::ResolvedScope,
+    generation: &tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
+) {
+    if matches!(
+        &generation.outcome,
+        tracedecay_domain::ScopeOutcome::Exact(_) | tracedecay_domain::ScopeOutcome::Partial { .. }
+    ) {
+        outcomes.insert(
+            scope.scope_digest.clone(),
+            tracedecay_domain::ScopeOutcome::Exact(Vec::new()),
+        );
+    }
+}
+
+pub(super) fn retain_unexecuted_cursor(
+    generation: &tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
+    current: &tracedecay_application::MultiRootRootCursorV1,
+    next: &mut tracedecay_application::MultiRootRootCursorV1,
+) {
+    if matches!(&generation.outcome, tracedecay_domain::ScopeOutcome::Denied) {
+        terminalize_cursor(next);
+    } else {
+        *next = current.clone();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_one_multi_root_operation(
     state: &DaemonInvocationState,
@@ -112,7 +232,6 @@ pub(super) async fn execute_one_multi_root_operation(
 > {
     match operation {
         tracedecay_application::MultiRootOperationV1::Work { request } => {
-            ensure_pinned_generation(state, scope, pinned_generation).await?;
             let mut request = serde_json::from_value::<
                 service::invocation::WorkApplicationInvocationV1,
             >(request.clone())
@@ -148,7 +267,7 @@ pub(super) async fn execute_one_multi_root_operation(
             let response = Box::pin(state.invoke_for_project(
                 store_administration,
                 Some(root),
-                Some((scope.clone(), pinned_generation.clone())),
+                None,
                 DaemonInvocationRequest::work_application(
                     format!("request.multi-root.work.{ordinal}"),
                     request,
@@ -169,7 +288,6 @@ pub(super) async fn execute_one_multi_root_operation(
                 return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
             }
             let result = extract_work_application_payload(&outcome)?;
-            ensure_pinned_generation(state, scope, pinned_generation).await?;
             Ok(result)
         }
         tracedecay_application::MultiRootOperationV1::Git { request }
@@ -243,4 +361,67 @@ pub(super) async fn ensure_pinned_generation(
         return Err(service::invocation::DaemonInvocationProblem::Unavailable);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(byte: char) -> tracedecay_domain::ManifestDigest {
+        tracedecay_domain::ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
+            .expect("digest")
+    }
+
+    #[test]
+    fn denial_terminalizes_cursor_and_restored_authority_cannot_restart_root() {
+        let scope = tracedecay_application::ResolvedScope::new(
+            tracedecay_domain::ProjectId::new("project.denied-root").expect("project"),
+            tracedecay_domain::RepositoryId::new("repository.denied-root").expect("repository"),
+            tracedecay_domain::WorktreeId::new("worktree.denied-root").expect("worktree"),
+            None,
+        )
+        .expect("scope");
+        let current = tracedecay_application::MultiRootRootCursorV1::new(
+            scope.scope_digest.clone(),
+            Some(tracedecay_application::MultiRootRootContinuationV1::Page(
+                tracedecay_application::OpaqueCursor::new("cursor.denied-root")
+                    .expect("page cursor"),
+            )),
+        )
+        .expect("root cursor");
+        let denied = tracedecay_domain::RootScopeOutcomeV1::new(
+            scope.scope_digest.clone(),
+            tracedecay_domain::ScopeOutcome::Denied,
+        )
+        .expect("denied root");
+        let mut next =
+            tracedecay_application::MultiRootRootCursorV1::new(scope.scope_digest.clone(), None)
+                .expect("next root cursor");
+
+        retain_unexecuted_cursor(&denied, &current, &mut next);
+        assert!(cursor_is_complete(&next));
+
+        let restored = tracedecay_domain::RootGenerationV1::new(
+            scope.scope_digest.clone(),
+            tracedecay_domain::CodeGenerationId::new("generation.denied-root.restored")
+                .expect("generation"),
+            digest('a'),
+            digest('b'),
+        )
+        .expect("restored generation");
+        let restored = tracedecay_domain::RootScopeOutcomeV1::new(
+            scope.scope_digest.clone(),
+            tracedecay_domain::ScopeOutcome::Exact(restored),
+        )
+        .expect("restored root");
+        let mut outcomes: BTreeMap<
+            tracedecay_domain::ManifestDigest,
+            tracedecay_domain::ScopeOutcome<Vec<Value>>,
+        > = BTreeMap::new();
+        insert_completed_root_outcome(&mut outcomes, &scope, &restored);
+        assert!(matches!(
+            outcomes.get(&scope.scope_digest),
+            Some(tracedecay_domain::ScopeOutcome::Exact(values)) if values.is_empty()
+        ));
+    }
 }

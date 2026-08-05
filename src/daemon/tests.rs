@@ -30,6 +30,7 @@ mod handshake;
 mod invocation_ownership;
 mod lifecycle;
 mod logging;
+mod multi_root_generation_helpers;
 mod multi_root_journey;
 mod ownership;
 mod replay;

@@ -13,7 +13,7 @@ use tracedecay_application::{
     MultiRootOperationV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1,
     MultiRootScopeSetReadRequestV1, RegisteredRootSelectorV1,
 };
-use tracedecay_domain::{ScopeSetId, TaskId, UtcMicros, WorkCommandId};
+use tracedecay_domain::{ScopeOutcome, ScopeSetId, TaskId, UtcMicros, WorkCommandId};
 
 use super::{
     enter_test_daemon_database_scope, test_client_identity_for, test_daemon_engine_for_profile,
@@ -658,11 +658,26 @@ async fn run_authenticated_multi_root_journey() {
     }
 
     // Seed enough real Work state in every root to require a second page.
+    let long_running_root = &stored.roots()[0]
+        .locator()
+        .expect("registered root locator")
+        .canonical_root;
     for (root_ordinal, handshake) in [&first_handshake, &second_handshake, &third_handshake]
         .into_iter()
         .enumerate()
     {
-        for task_ordinal in 0..2 {
+        let task_count = if handshake
+            .project_path
+            .as_deref()
+            .and_then(|root| root.canonicalize().ok())
+            .as_ref()
+            == Some(long_running_root)
+        {
+            4
+        } else {
+            3
+        };
+        for task_ordinal in 0..task_count {
             let observed_at = now();
             let (deadline, cancellation) = controls(
                 &format!("seed-work-{root_ordinal}-{task_ordinal}"),
@@ -774,7 +789,20 @@ async fn run_authenticated_multi_root_journey() {
         continuation_state.last_order_key.is_some(),
         "a page with emitted evidence must freeze its total-order key"
     );
-
+    let retained_generation = match &continuation_state.root_generations[0].outcome {
+        ScopeOutcome::Exact(generation) => generation.index_generation.clone(),
+        outcome => panic!("page one must retain an exact generation: {outcome:?}"),
+    };
+    let changed_root = &stored.roots()[0]
+        .locator()
+        .expect("registered root locator")
+        .canonical_root;
+    super::multi_root_generation_helpers::publish_generation_after(
+        &engine,
+        changed_root,
+        &retained_generation,
+    )
+    .await;
     let resumed_at = now();
     let (deadline, cancellation) = controls("resume-execute", resumed_at);
     let resumed = execute_daemon_invocation(
@@ -810,9 +838,19 @@ async fn run_authenticated_multi_root_journey() {
     else {
         panic!("resumed Work page must carry multi-root evidence");
     };
-    assert!(
-        resumed_page.continuation.is_none(),
-        "the second underlying Work page must terminate the aggregate cursor"
+    let resumed_continuation = resumed_page
+        .continuation
+        .as_ref()
+        .expect("the third Work item must retain a continuation");
+    let resumed_state = super::super::multi_root_continuation::open(
+        resumed_continuation,
+        &cursor_authenticator,
+        resumed_at,
+    )
+    .expect("authenticated page-two continuation");
+    assert_eq!(
+        resumed_state.root_generations,
+        continuation_state.root_generations
     );
     for root in resumed_page.roots {
         let tracedecay_domain::ScopeOutcome::Exact(values) = root.outcome else {
@@ -828,6 +866,17 @@ async fn run_authenticated_multi_root_journey() {
             "each root must advance to its second Work item instead of replaying page one"
         );
     }
+    super::multi_root_generation_helpers::assert_unavailable_recovery_resumes_cursor(
+        &engine,
+        &first_handshake,
+        registry.as_ref(),
+        &stored,
+        &resumable_operation,
+        &first_page,
+        &cursor_authenticator,
+        &continuation_state,
+    )
+    .await;
 
     let mut tampered = continuation.as_str().to_owned();
     let replacement = if tampered.ends_with('0') { '1' } else { '0' };
