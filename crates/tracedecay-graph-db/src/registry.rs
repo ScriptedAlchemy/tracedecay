@@ -15,6 +15,7 @@ use self::identity::{
     binding, entry_binding, require_binding, require_closing, validate_registration,
 };
 use self::path::{GraphPathAnchor, validate_managed_graph_path};
+use crate::error::rollback_failure;
 
 #[path = "registry/identity.rs"]
 mod identity;
@@ -830,29 +831,54 @@ fn open_registered_graph(
         registration.deadline,
     )?;
     let mut path_anchor = GraphPathAnchor::acquire(path)?;
-    check_request(
-        registration.lifecycle_cancellation.as_ref(),
-        registration.deadline,
-    )?;
-    let owner = GraphDbOwner::open(GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(path.to_path_buf()),
-        expected_format,
-        durability: GraphDurability::Sync,
-        cancellation: Arc::clone(&registration.lifecycle_cancellation),
-    })?;
     if let Err(error) = check_request(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
     ) {
-        owner.close()?;
-        return Err(error);
+        return Err(path_anchor.abort(error));
+    }
+    let owner = match GraphDbOwner::open(GraphDbOpenOptions {
+        location: GraphDbLocation::Persistent(path.to_path_buf()),
+        expected_format,
+        durability: GraphDurability::Sync,
+        cancellation: Arc::clone(&registration.lifecycle_cancellation),
+    }) {
+        Ok(owner) => owner,
+        Err(error) => return Err(path_anchor.abort(error)),
+    };
+    if let Err(error) = check_request(
+        registration.lifecycle_cancellation.as_ref(),
+        registration.deadline,
+    ) {
+        return Err(close_and_abort_graph_open(
+            &owner,
+            path_anchor,
+            "cancel registered graph open",
+            error,
+        ));
     }
     if let Err(error) = path_anchor.verify(path) {
-        owner.close()?;
-        return Err(error);
+        return Err(close_and_abort_graph_open(
+            &owner,
+            path_anchor,
+            "reject replaced registered graph open",
+            error,
+        ));
     }
     path_anchor.commit();
     Ok(owner)
+}
+
+fn close_and_abort_graph_open(
+    owner: &GraphDbOwner,
+    path_anchor: GraphPathAnchor,
+    context: &str,
+    primary: GraphDbError,
+) -> GraphDbError {
+    match owner.close() {
+        Ok(()) => path_anchor.abort(primary),
+        Err(close_error) => rollback_failure(context, primary, close_error),
+    }
 }
 
 fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {

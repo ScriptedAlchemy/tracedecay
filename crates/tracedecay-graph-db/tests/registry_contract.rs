@@ -141,8 +141,7 @@ fn create_private_graph_directory(root: &std::path::Path) {
 
 #[cfg(windows)]
 fn create_private_graph_directory(root: &std::path::Path) {
-    let path = root.join(GRAPH_STORE_PRIVATE_DIRECTORY);
-    match tracedecay_runtime_core::windows_security::create_private_directory(&path) {
+    match std::fs::create_dir(root.join(GRAPH_STORE_PRIVATE_DIRECTORY)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => panic!("create private graph directory: {error}"),
@@ -608,6 +607,72 @@ fn cancelled_open_does_not_create_or_register_a_store() {
 }
 
 #[test]
+fn lifecycle_cancellation_after_file_initialization_rolls_back_the_file() {
+    let temp = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let store_identity = identity("profile-a", "project-a");
+    let mut request = registration(store_identity.clone(), temp.path());
+    request.lifecycle_cancellation = Arc::new(CancelOnPoll {
+        polls: AtomicUsize::new(0),
+        cancel_on: 2,
+    });
+
+    assert_eq!(
+        registry.resolve(request).unwrap_err(),
+        GraphDbError::Cancelled
+    );
+    assert_eq!(
+        registry
+            .status(&registration(store_identity, temp.path()))
+            .unwrap(),
+        None
+    );
+    assert!(!graph_path(temp.path()).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn non_private_graph_directory_is_rejected_without_creating_a_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    create_private_graph_directory(temp.path());
+    let directory = temp.path().join(GRAPH_STORE_PRIVATE_DIRECTORY);
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+
+    assert!(matches!(
+        registry.resolve(registration(
+            identity("profile-a", "project-a"),
+            temp.path(),
+        )),
+        Err(GraphDbError::InvalidRequest { .. })
+    ));
+    assert!(!graph_path(temp.path()).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn non_private_existing_graph_file_is_rejected() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    create_private_graph_directory(temp.path());
+    let path = graph_path(temp.path());
+    std::fs::write(&path, b"not a private graph").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+
+    assert!(matches!(
+        registry.resolve(registration(
+            identity("profile-a", "project-a"),
+            temp.path(),
+        )),
+        Err(GraphDbError::InvalidRequest { .. })
+    ));
+}
+
+#[test]
 fn expired_deadline_does_not_open_or_close_a_registered_store() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
@@ -680,6 +745,7 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
     .unwrap();
     raw.create_node(&["Foreign"]);
     raw.close().unwrap();
+    make_graph_file_private(&graph_path);
 
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
@@ -699,3 +765,13 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
     let reopened = registry.reopen(request).unwrap();
     assert!(reopened.snapshot().is_ok());
 }
+
+#[cfg(unix)]
+fn make_graph_file_private(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn make_graph_file_private(_path: &std::path::Path) {}

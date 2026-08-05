@@ -5977,7 +5977,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
- "tracedecay-runtime-core",
+ "tracedecay-domain",
  "tracedecay-store",
 ]
 
