@@ -120,19 +120,41 @@ impl WorkflowDefinitionAuthorityPort for FakeDefinitionAuthority {
             .copied())
     }
 
+    fn list(
+        &self,
+        definition_id: Option<&WorkflowDefinitionId>,
+    ) -> Result<Vec<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .definitions
+            .values()
+            .filter(|definition| {
+                definition_id
+                    .is_none_or(|definition_id| definition.definition_id() == definition_id)
+            })
+            .cloned()
+            .collect())
+    }
+
     fn compare_and_swap_activation(
         &self,
         definition_id: &WorkflowDefinitionId,
         expected_version: Option<u64>,
-        replacement_version: u64,
+        replacement_version: Option<u64>,
     ) -> Result<(), WorkflowDefinitionAuthorityError> {
         let mut state = self.state.lock().unwrap();
         if state.active.get(definition_id).copied() != expected_version {
             return Err(WorkflowDefinitionAuthorityError::Conflict);
         }
-        state
-            .active
-            .insert(definition_id.clone(), replacement_version);
+        if let Some(replacement_version) = replacement_version {
+            state
+                .active
+                .insert(definition_id.clone(), replacement_version);
+        } else {
+            state.active.remove(definition_id);
+        }
         Ok(())
     }
 }
@@ -181,6 +203,51 @@ fn immutable_definition_versions_and_activation_use_compare_and_swap() {
             .unwrap()
             .active_version,
         2
+    );
+}
+
+#[test]
+fn definition_lifecycle_lists_validates_diffs_and_retires_without_rewriting_history() {
+    let authority = FakeDefinitionAuthority::default();
+    let service = WorkflowDefinitionService::new(authority);
+    let first = definition(1);
+    let second = definition(2);
+    service.register(first.clone()).unwrap();
+    service.register(second.clone()).unwrap();
+
+    assert_eq!(service.validate(first.clone()).unwrap().definition, first);
+    assert_eq!(
+        service
+            .get(first.definition_id(), first.definition_version())
+            .unwrap(),
+        first
+    );
+    assert_eq!(
+        service
+            .history(first.definition_id())
+            .unwrap()
+            .into_iter()
+            .map(|definition| definition.definition_version())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(service.list().unwrap().len(), 2);
+    let diff = service.diff(first.definition_id(), 1, 2).unwrap();
+    assert_eq!(diff.from_version, 1);
+    assert_eq!(diff.to_version, 2);
+    assert!(diff.changed_steps.is_empty());
+
+    service
+        .activate(first.definition_id(), None, first.definition_version())
+        .unwrap();
+    let retired = service
+        .retire(first.definition_id(), Some(first.definition_version()))
+        .unwrap();
+    assert_eq!(retired.active_version, None);
+    assert_eq!(
+        service.history(first.definition_id()).unwrap(),
+        vec![first, second],
+        "retirement must preserve immutable definition history"
     );
 }
 
