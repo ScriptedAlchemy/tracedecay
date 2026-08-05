@@ -235,7 +235,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         if mounted.contains_key(&project_id) {
             return Err(session_registry_error(
                 "reset project configuration",
-                "configuration store is already attached",
+                "configuration store is already attached".to_owned(),
             ));
         }
         let shard_id = StoreShardIdV1::project_sessions(
@@ -296,7 +296,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         {
             return Err(session_registry_error(
                 "validate configuration reset confirmation",
-                "confirmation does not bind the exact project, profile, and store publication",
+                "confirmation does not bind the exact project, profile, and store publication"
+                    .to_owned(),
             ));
         }
         let database = RegisteredGlobalDb::reset_configuration_and_attach(

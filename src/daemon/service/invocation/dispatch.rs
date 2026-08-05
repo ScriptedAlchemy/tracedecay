@@ -503,7 +503,6 @@ impl DaemonInvocationService {
                 };
                 Box::pin(execute_workflow_application(
                     registered,
-                    project_root,
                     request_id,
                     request,
                     observed_at,

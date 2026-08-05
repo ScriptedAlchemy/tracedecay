@@ -163,8 +163,7 @@ pub(crate) use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
     HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, WorkApplicationInvocationV1,
-    WorkApplicationOutcomeV1, WorkAttemptInvocationV1, WorkflowApplicationInvocation,
-    WorkflowApplicationOutcome,
+    WorkApplicationOutcomeV1, WorkflowApplicationInvocation, WorkflowApplicationOutcome,
 };
 // Wire-shape fixtures build application commands the dispatch path no longer
 // names directly now that request construction lives with the contract.

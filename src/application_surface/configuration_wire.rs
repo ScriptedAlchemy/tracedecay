@@ -39,14 +39,14 @@ pub(super) fn is_configuration_operation(operation: ApplicationSurfaceOperation)
     )
 }
 
-fn add_schema<Request, Result>(
+fn add_schema<Request, Response>(
     catalog: &CatalogSnapshotV1,
     operation: ApplicationWireOperation,
     schemas: &mut Vec<ApplicationWireSchemaV1>,
 ) -> Result<(), ApplicationSurfaceAdapterError>
 where
     Request: JsonSchema,
-    Result: JsonSchema,
+    Response: JsonSchema,
 {
     let application_operation = configuration_surface_operation(operation.as_str())?
         .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
@@ -54,7 +54,7 @@ where
         .capability(application_operation.capability_id())
         .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
     let request = SchemaBodyAuthorityV1::for_type::<Request>(manifest.request_schema().clone())?;
-    let result = SchemaBodyAuthorityV1::for_type::<Result>(manifest.result_schema().clone())?;
+    let result = SchemaBodyAuthorityV1::for_type::<Response>(manifest.result_schema().clone())?;
     for binding_id in manifest.binding_ids() {
         let binding = catalog
             .binding(binding_id)
