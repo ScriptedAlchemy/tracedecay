@@ -221,7 +221,9 @@ pub(crate) async fn execute_canonical_workflow(
 
         for running in active {
             let attempt = if fail_fast {
-                cancel_child(runtime, &running).await?
+                let attempt = cancel_child(runtime, &running).await?;
+                attach_terminal_evidence(database, context, &request, &running.child, &attempt)?;
+                attempt
             } else {
                 settle_child(database, runtime, context, &request, running).await?
             };
