@@ -2,8 +2,9 @@
 //!
 //! These values define typed settings, deterministic resolution inputs,
 //! protected-change plans, and opaque credential references. They deliberately
-//! contain no file paths, secret values, database handles, authorization
-//! decisions, or transport-specific payloads.
+//! contain no secret values, database handles, authorization decisions, or
+//! ambient executable lookup rules. Canonical executable paths are permitted
+//! only as digest-pinned provider bindings.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -18,8 +19,10 @@ use crate::research::{
 };
 
 pub mod topology;
+mod work_executable_bindings;
 
 pub use topology::*;
+pub use work_executable_bindings::*;
 
 const CONFIGURATION_SNAPSHOT_ID_DOMAIN: &str = "tracedecay.configuration.snapshot.v1";
 const PROTECTED_CHANGE_DIGEST_DOMAIN: &str = "tracedecay.configuration.protected-change.v1";
@@ -30,6 +33,7 @@ pub const ACCESS_RULES_SETTING_KEY: &str = "scope.access_rules.v1";
 pub const DEFAULT_COLLECTION_SETTING_KEY: &str = "query.default_collection.v1";
 pub const ANALYZER_SETTINGS_SETTING_KEY: &str = "analyzer.settings.v1";
 pub const WORK_TOPOLOGY_POLICY_SETTING_KEY: &str = "work.topology_policy.v1";
+pub const WORK_EXECUTABLE_BINDINGS_SETTING_KEY: &str = "work.executable_bindings.v1";
 pub const CONTEXT_SCOUT_SETTINGS_SETTING_KEY: &str = "context_scout.settings.v1";
 
 /// Canonical project-scoped runtime settings.
@@ -68,6 +72,7 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     DEFAULT_COLLECTION_SETTING_KEY,
     ANALYZER_SETTINGS_SETTING_KEY,
     WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     crate::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1,
     INDEX_EXCLUDE_SETTING_KEY,
@@ -452,6 +457,7 @@ pub enum ConfigurationValueKindV1 {
     DefaultCollection,
     AnalyzerSettings,
     WorkTopologyPolicy,
+    WorkExecutableBindings,
     ContextScoutSettings,
     CredentialReference,
 }
@@ -821,6 +827,7 @@ pub enum ConfigurationValueV1 {
     DefaultCollection(Option<CollectionSelectorV1>),
     AnalyzerSettings(AnalyzerSettingsV1),
     WorkTopologyPolicy(Box<WorkTopologyPolicyV1>),
+    WorkExecutableBindings(Vec<WorkExecutableBindingV1>),
     ContextScoutSettings(ContextScoutSettingsV1),
     CredentialReference(CredentialReferenceMetadataV1),
 }
@@ -837,6 +844,7 @@ impl ConfigurationValueV1 {
             Self::DefaultCollection(_) => ConfigurationValueKindV1::DefaultCollection,
             Self::AnalyzerSettings(_) => ConfigurationValueKindV1::AnalyzerSettings,
             Self::WorkTopologyPolicy(_) => ConfigurationValueKindV1::WorkTopologyPolicy,
+            Self::WorkExecutableBindings(_) => ConfigurationValueKindV1::WorkExecutableBindings,
             Self::ContextScoutSettings(_) => ConfigurationValueKindV1::ContextScoutSettings,
             Self::CredentialReference(_) => ConfigurationValueKindV1::CredentialReference,
         }
@@ -874,6 +882,7 @@ impl ConfigurationValueV1 {
                 .map_or(Ok(()), CollectionSelectorV1::validate),
             Self::AnalyzerSettings(settings) => settings.validate(),
             Self::WorkTopologyPolicy(policy) => policy.validate(),
+            Self::WorkExecutableBindings(bindings) => validate_work_executable_bindings(bindings),
             Self::ContextScoutSettings(settings) => settings.validate(),
             Self::CredentialReference(metadata) => metadata.validate(),
         }
