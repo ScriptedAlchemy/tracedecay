@@ -37,9 +37,17 @@ pub(super) async fn snapshot_database(
         return Ok((None, budget));
     };
 
+    let snapshot_control = tracedecay_runtime_core::sqlite_read_snapshot::SnapshotReadControl::new(
+        budget.deadline(),
+        {
+            let cancellation = budget.cancellation();
+            move || cancellation.is_cancelled()
+        },
+    );
     let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_foreign_in(
         &database_path,
         &scratch_root,
+        snapshot_control,
     )
     .await
     .map_err(|error| scan_error("freeze OpenCode database snapshot", &database_path, error))?;

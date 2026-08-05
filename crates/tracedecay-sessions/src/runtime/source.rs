@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 
 /// The identity primitive lives in the domain crate so the capture kernels,
@@ -47,7 +48,7 @@ use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 /// it from.
 pub use tracedecay_domain::canonical_text::canonical_framed_sha256;
 
-use crate::admission::{WireReadOutcome, read_bounded_to_string};
+use crate::admission::{HostAdmission, WireReadOutcome, read_bounded_to_string};
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
 pub use crate::runtime::shared::{
@@ -59,6 +60,44 @@ use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::{SessionMessageRecord, SessionRecord};
 
 pub type TranscriptIngestResult<T> = Result<T, TranscriptIngestError>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HostProviderCoverage {
+    Complete = 1,
+    Partial = 2,
+    Unavailable = 3,
+}
+
+pub(super) async fn persist_host_provider_coverage(
+    admission: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+    provider: &'static str,
+    coverage: HostProviderCoverage,
+    deferred_units: u64,
+) -> TranscriptIngestResult<()> {
+    let key = format!("host-coverage://{provider}/v1");
+    let current = admission
+        .get_parse_offset(scope, &key)
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error(provider, outcome)
+        })?
+        .unwrap_or_default();
+    admission
+        .advance_parse_offset(
+            scope,
+            &key,
+            ParseOffset {
+                byte_offset: deferred_units,
+                mtime: current.mtime.saturating_add(1).max(1),
+                file_id: coverage as u64,
+            },
+        )
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error(provider, outcome)
+        })
+}
 
 #[derive(Debug, Error)]
 #[non_exhaustive]

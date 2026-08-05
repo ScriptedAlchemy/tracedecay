@@ -277,38 +277,55 @@ fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Val
     const THRESHOLD: u64 = crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
     let warming = ingest.max_transcript_pending_bytes > THRESHOLD;
     let observed = &ingest.observed_providers;
-    let source_unavailable = observed.is_empty();
     let expected = crate::sessions::SessionProvider::ALL.map(|provider| provider.id());
     let unobserved = expected
         .iter()
         .copied()
         .filter(|provider| !observed.iter().any(|observed| observed == provider))
         .collect::<Vec<_>>();
+    let all_providers_complete = expected.iter().all(|provider| {
+        ingest.provider_coverage.iter().any(|coverage| {
+            coverage.provider == *provider
+                && coverage.state == crate::global_db::SessionProviderCoverageState::Complete
+        })
+    });
+    let any_provider_available = ingest.provider_coverage.iter().any(|coverage| {
+        coverage.state != crate::global_db::SessionProviderCoverageState::Unavailable
+    });
+    let source_unavailable = observed.is_empty() && !any_provider_available;
+    let coverage_incomplete = !all_providers_complete;
     Some(json!({
         "status": if source_unavailable {
             "unavailable"
-        } else if warming {
+        } else if warming || coverage_incomplete {
             "warming"
         } else {
             "current"
         },
-        "coverage": if source_unavailable || warming { "partial" } else { "complete" },
+        "coverage": if source_unavailable || warming || coverage_incomplete {
+            "partial"
+        } else {
+            "complete"
+        },
         "authority": "daemon",
         "reason": if source_unavailable {
             "historical_sources_unobserved"
         } else if warming {
             "historical_transcript_backlog"
+        } else if coverage_incomplete {
+            "historical_provider_coverage_incomplete"
         } else {
             "historical_catch_up_current"
         },
         "providers": observed,
+        "provider_coverage": ingest.provider_coverage,
         "unobserved_providers": unobserved,
         "max_transcript_pending_bytes": ingest.max_transcript_pending_bytes,
         "pending_bytes": ingest.pending_bytes,
         "pending_transcripts": ingest.pending_transcripts,
         "message": if source_unavailable {
             "No durable historical source rows or provider frontiers are currently observable."
-        } else if warming {
+        } else if warming || coverage_incomplete {
             "Historical session recall is partially available while the daemon continues bounded background catch-up."
         } else {
             "Historical session recall catch-up is current."
@@ -362,7 +379,9 @@ fn render_status_md(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::global_db::SessionIngestHealth;
+    use crate::global_db::{
+        SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
+    };
 
     use super::historical_session_catch_up_state;
 
@@ -390,13 +409,60 @@ mod tests {
             observed_providers: vec!["kimi".into(), "opencode".into()],
             ..SessionIngestHealth::default()
         })
-        .expect("complete historical coverage remains visible");
+        .expect("incomplete historical coverage remains visible");
         let providers = state["providers"].as_array().unwrap();
 
         assert!(providers.iter().any(|provider| provider == "kimi"));
         assert!(providers.iter().any(|provider| provider == "opencode"));
+        assert_eq!(state["status"], "warming");
+        assert_eq!(state["coverage"], "partial");
+        assert_eq!(state["reason"], "historical_provider_coverage_incomplete");
+    }
+
+    #[test]
+    fn historical_status_is_current_only_after_every_provider_sweep_completes() {
+        let provider_coverage = crate::sessions::SessionProvider::ALL
+            .iter()
+            .map(|provider| SessionProviderCoverage {
+                provider: provider.id().to_owned(),
+                state: SessionProviderCoverageState::Complete,
+                deferred_units: 0,
+            })
+            .collect();
+        let state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["kimi".into()],
+            provider_coverage,
+            ..SessionIngestHealth::default()
+        })
+        .expect("complete provider coverage remains visible");
+
         assert_eq!(state["status"], "current");
         assert_eq!(state["coverage"], "complete");
+    }
+
+    #[test]
+    fn explicit_partial_provider_sweep_never_reports_current() {
+        let provider_coverage = crate::sessions::SessionProvider::ALL
+            .iter()
+            .map(|provider| SessionProviderCoverage {
+                provider: provider.id().to_owned(),
+                state: if provider.id() == "opencode" {
+                    SessionProviderCoverageState::Partial
+                } else {
+                    SessionProviderCoverageState::Complete
+                },
+                deferred_units: u64::from(provider.id() == "opencode"),
+            })
+            .collect();
+        let state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["opencode".into()],
+            provider_coverage,
+            ..SessionIngestHealth::default()
+        })
+        .expect("partial provider coverage remains visible");
+
+        assert_eq!(state["status"], "warming");
+        assert_eq!(state["coverage"], "partial");
     }
 
     #[test]

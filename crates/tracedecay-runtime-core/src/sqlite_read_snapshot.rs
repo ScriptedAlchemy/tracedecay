@@ -14,8 +14,13 @@ use sha2::{Digest, Sha256};
 
 #[path = "sqlite_snapshot_connection.rs"]
 mod connection;
+#[path = "sqlite_snapshot_control.rs"]
+mod control;
+#[path = "sqlite_snapshot_materialize.rs"]
+mod materialize;
 
 pub use connection::SnapshotConnection;
+pub use control::SnapshotReadControl;
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 
@@ -202,21 +207,34 @@ impl SnapshotSet {
     }
 
     pub async fn capture_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
-        Self::capture_with_policy(paths, root, SnapshotSourcePolicy::Owned).await
+        Self::capture_with_policy(
+            paths,
+            root,
+            SnapshotSourcePolicy::Owned,
+            SnapshotReadControl::unlimited(),
+        )
+        .await
     }
 
-    async fn capture_foreign_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
-        Self::capture_with_policy(paths, root, SnapshotSourcePolicy::Foreign).await
+    async fn capture_foreign_in(
+        paths: &[PathBuf],
+        root: &Path,
+        control: SnapshotReadControl,
+    ) -> io::Result<Self> {
+        Self::capture_with_policy(paths, root, SnapshotSourcePolicy::Foreign, control).await
     }
 
     async fn capture_with_policy(
         paths: &[PathBuf],
         root: &Path,
         policy: SnapshotSourcePolicy,
+        control: SnapshotReadControl,
     ) -> io::Result<Self> {
         let owned_paths = paths.to_vec();
         let owned_root = root.to_path_buf();
+        let preparation_control = control.clone();
         let (scratch, prepared, copied_bytes) = tokio::task::spawn_blocking(move || {
+            preparation_control.checkpoint()?;
             let scratch = Arc::new(create_scratch_directory(
                 &owned_root,
                 expected_owner(&owned_paths)?,
@@ -227,11 +245,13 @@ impl SnapshotSet {
             let mut prepared = Vec::new();
             let mut copied_bytes = 0_u64;
             for (index, path) in unique.into_iter().enumerate() {
+                preparation_control.checkpoint()?;
                 let snapshot = prepare_one(&path, &scratch, index, policy)?;
                 copied_bytes = copied_bytes.saturating_add(snapshot.copy_bytes);
                 prepared.push(snapshot);
             }
             let available = fs2::available_space(&scratch.path)?;
+            preparation_control.checkpoint()?;
             if copied_bytes > available {
                 return Err(io::Error::other(format!(
                     "insufficient scratch space for SQLite read snapshots: required {copied_bytes} bytes, available {available} bytes at '{}'",
@@ -245,7 +265,7 @@ impl SnapshotSet {
         let mut databases = BTreeMap::new();
         for snapshot in prepared {
             let source = snapshot.source.clone();
-            let database = finish_one(snapshot, Arc::clone(&scratch)).await?;
+            let database = finish_one(snapshot, Arc::clone(&scratch), control.clone()).await?;
             databases.insert(source, database);
         }
         Ok(Self {
@@ -364,8 +384,13 @@ pub async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
 /// returned snapshot: it first reflinks or copies the database family into
 /// private scratch, verifies the source generation, and materializes any WAL
 /// frames into the private standalone database.
-pub async fn open_foreign_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
-    let mut snapshots = SnapshotSet::capture_foreign_in(&[path.to_path_buf()], root).await?;
+pub async fn open_foreign_in(
+    path: &Path,
+    root: &Path,
+    control: SnapshotReadControl,
+) -> io::Result<SnapshotDatabase> {
+    let mut snapshots =
+        SnapshotSet::capture_foreign_in(&[path.to_path_buf()], root, control).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -637,14 +662,17 @@ fn checkpointed_snapshot_mode() -> SnapshotMode {
 async fn finish_one(
     prepared: PreparedSnapshot,
     scratch: Arc<ScratchDirectory>,
+    control: SnapshotReadControl,
 ) -> io::Result<SnapshotDatabase> {
+    let copy_control = control.clone();
     let (prepared, scratch) =
-        tokio::task::spawn_blocking(move || copy_snapshot_family(prepared, scratch))
+        tokio::task::spawn_blocking(move || copy_snapshot_family(prepared, scratch, &copy_control))
             .await
             .map_err(|error| io::Error::other(format!("snapshot copy task failed: {error}")))??;
     if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
-        materialize_standalone_snapshot(&prepared.target).await?;
+        materialize::materialize(&prepared.target, control.clone()).await?;
     }
+    control.checkpoint()?;
     // `identity_path` is the real file on disk; `attach_path` is the URI used
     // to ATTACH it. They are never interchangeable — the URI is percent-encoded
     // and carries query parameters, so passing it to the filesystem fails.
@@ -673,6 +701,7 @@ async fn finish_one(
         .execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;")
         .await
         .map_err(io::Error::other)?;
+    control.checkpoint()?;
     let snapshot = SnapshotDatabase {
         connection,
         source: prepared.source,
@@ -691,9 +720,11 @@ async fn finish_one(
 fn copy_snapshot_family(
     prepared: PreparedSnapshot,
     scratch: Arc<ScratchDirectory>,
+    control: &SnapshotReadControl,
 ) -> io::Result<(PreparedSnapshot, Arc<ScratchDirectory>)> {
+    control.checkpoint()?;
     if matches!(prepared.mode, SnapshotMode::Copy) {
-        fs::copy(&prepared.source, &prepared.target)?;
+        control.copy_file(&prepared.source, &prepared.target)?;
     }
     if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
         for suffix in ["-wal", "-shm"] {
@@ -705,51 +736,14 @@ fn copy_snapshot_family(
             else {
                 continue;
             };
-            fs::copy(&source_member, with_suffix(&prepared.target, suffix))?;
+            control.copy_file(&source_member, &with_suffix(&prepared.target, suffix))?;
         }
     }
+    control.checkpoint()?;
     if family_state(&prepared.source)? != prepared.source_state {
         return Err(changed_during_snapshot(&prepared.source));
     }
     Ok((prepared, scratch))
-}
-
-async fn materialize_standalone_snapshot(path: &Path) -> io::Result<()> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let standalone = with_suffix(&path, ".standalone");
-        match fs::remove_file(&standalone) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let source = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(io::Error::other)?;
-        let mut destination = Connection::open_with_flags(
-            &standalone,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        )
-        .map_err(io::Error::other)?;
-        {
-            let backup = rusqlite::backup::Backup::new(&source, &mut destination)
-                .map_err(io::Error::other)?;
-            backup
-                .run_to_completion(128, Duration::from_millis(1), None)
-                .map_err(io::Error::other)?;
-        }
-        drop(destination);
-        drop(source);
-        for member in family_paths(&path) {
-            match fs::remove_file(member) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        fs::rename(standalone, path)
-    })
-    .await
-    .map_err(|error| io::Error::other(format!("snapshot materialization task failed: {error}")))?
 }
 
 fn changed_during_snapshot(source: &Path) -> io::Error {
@@ -1037,7 +1031,7 @@ fn durable_family_state(path: &Path, states: &[FileState]) -> Vec<FileState> {
         .collect()
 }
 
-fn family_paths(path: &Path) -> [PathBuf; 3] {
+pub(super) fn family_paths(path: &Path) -> [PathBuf; 3] {
     [
         path.to_path_buf(),
         with_suffix(path, "-wal"),
@@ -1045,7 +1039,7 @@ fn family_paths(path: &Path) -> [PathBuf; 3] {
     ]
 }
 
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+pub(super) fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
@@ -1073,6 +1067,10 @@ fn read_only_uri(path: &Path) -> io::Result<String> {
     }
     Ok(format!("file:{encoded}?mode=ro"))
 }
+
+#[cfg(test)]
+#[path = "sqlite_read_snapshot_cancellation_tests.rs"]
+mod cancellation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1158,9 +1156,13 @@ mod tests {
             .unwrap();
         let before = family_state(&path).unwrap();
 
-        let snapshot = open_foreign_in(&path, &temp.path().join("scratch"))
-            .await
-            .unwrap();
+        let snapshot = open_foreign_in(
+            &path,
+            &temp.path().join("scratch"),
+            SnapshotReadControl::unlimited(),
+        )
+        .await
+        .unwrap();
         let identity_path = snapshot
             .attach_token()
             .unwrap()
