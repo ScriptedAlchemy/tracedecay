@@ -203,9 +203,15 @@ mod work;
 use configuration::*;
 use feedback::*;
 use git::*;
+use lsp::PublishedCodeIndexWorkspaceDocuments;
 #[cfg(test)]
 use lsp::*;
-use plan26::*;
+pub(crate) use plan26::now_millis;
+use plan26::{
+    current_micros, emit_plan26_invocation_event, observe_plan26_invocation_response,
+    plan26_feedback_operation, plan26_invocation_problem_rejected_argument,
+    plan26_invocation_subject, plan26_observable_operation, plan26_rejected_argument,
+};
 use primitive::*;
 use registrars::*;
 use types::*;
