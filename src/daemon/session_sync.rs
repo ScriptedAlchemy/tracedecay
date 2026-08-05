@@ -17,7 +17,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 
-use crate::global_db::{AnalyticsEventQuery, RegisteredGlobalDb};
+use crate::global_db::RegisteredGlobalDb;
 use crate::store::{GlobalDbGitCorrelationStore, GlobalDbSessionIngestAuthority};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
@@ -25,7 +25,6 @@ const SESSION_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SESSION_SYNC_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 const SESSION_SYNC_SHUTDOWN_ABORT_GRACE: Duration = Duration::from_secs(1);
 const SESSION_SYNC_STARTUP_DEADLINE_MICROS: i64 = 60_000_000;
-const GIT_SYNC_ANALYTICS_LIMIT: usize = 500_000;
 const GIT_SYNC_COMMAND_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
@@ -56,7 +55,6 @@ pub(crate) struct DaemonSessionSyncConfig {
     pub project_sessions: Arc<RegisteredGlobalDb>,
     pub user_sessions: Arc<RegisteredGlobalDb>,
     pub registry: Arc<RegisteredGlobalDb>,
-    pub analytics: Option<Arc<RegisteredGlobalDb>>,
     pub startup_import: bool,
     pub project_refresh:
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
@@ -74,7 +72,6 @@ struct SessionSyncProjectContext {
     project_sessions: Arc<RegisteredGlobalDb>,
     user_sessions: Arc<RegisteredGlobalDb>,
     registry: Arc<RegisteredGlobalDb>,
-    analytics: Option<Arc<RegisteredGlobalDb>>,
     project_refresh: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     user_refresh: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
 }
@@ -123,7 +120,6 @@ impl DaemonSessionSyncService {
             project_sessions: config.project_sessions,
             user_sessions: config.user_sessions,
             registry: config.registry,
-            analytics: config.analytics,
             project_refresh: config.project_refresh,
             user_refresh: config.user_refresh,
         });
@@ -179,94 +175,6 @@ impl DaemonSessionSyncService {
         Ok(())
     }
 
-    async fn recover_project(
-        &self,
-        context: &Arc<SessionSyncProjectContext>,
-    ) -> crate::errors::Result<bool> {
-        let scope = SessionSyncScopeV1::new(context.project_id.clone(), context.profile_id.clone());
-        let prefix = journal_prefix(&scope);
-        let journals = context
-            .registry
-            .list_session_sync_journals(&prefix)
-            .await
-            .map_err(store_error)?;
-        let mut recovered_import = false;
-        for (key, encoded) in journals {
-            let mut journal: SessionSyncJournalV1 =
-                serde_json::from_str(&encoded).map_err(journal_decode_error)?;
-            if journal.scope != scope || journal.status == SessionSyncJournalStatusV1::Complete {
-                continue;
-            }
-            journal = self.refresh_source_frontiers(context, &key).await?;
-            if journal.cancel_requested_at.is_some() {
-                self.persist_terminal(
-                    context,
-                    &key,
-                    OperationTermination::Cancelled,
-                    journal.stats,
-                    journal.coverage,
-                    journal.source_frontiers,
-                    Vec::new(),
-                )
-                .await?;
-                continue;
-            }
-            if journal.deadline.is_elapsed_at(now_micros()) {
-                self.persist_terminal(
-                    context,
-                    &key,
-                    OperationTermination::TimedOut,
-                    journal.stats,
-                    journal.coverage,
-                    journal.source_frontiers,
-                    Vec::new(),
-                )
-                .await?;
-                continue;
-            }
-            let active_import =
-                matches!(journal.source, SessionSyncCommandV1::ImportTranscripts(_))
-                    .then(|| {
-                        self.active_imports
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .get(&import_scope_key(&journal.scope))
-                            .cloned()
-                    })
-                    .flatten();
-            if let Some(active_import) = active_import {
-                recovered_import = true;
-                self.coalesce_recovered_import(
-                    Arc::clone(context),
-                    key,
-                    journal,
-                    active_import.journal_key,
-                );
-                continue;
-            }
-            let cancellation = CancellationSignal::active(format!(
-                "session-sync.recovered.{}",
-                journal.admission.operation_id.as_str()
-            ))
-            .map_err(contract_error)?;
-            let admission = journal.admission.clone();
-            let request = SessionSyncRequestV1::new(
-                journal.admission.operation_id,
-                journal.admission.idempotency_key,
-                journal.scope,
-                journal.deadline,
-                cancellation,
-                journal.source,
-            );
-            recovered_import |= matches!(
-                request.command(),
-                SessionSyncCommandV1::ImportTranscripts(_)
-            );
-            let _ = self.enqueue(Arc::clone(context), key, request, admission);
-        }
-        Ok(recovered_import)
-    }
-
     async fn execute_request(&self, request: SessionSyncRequestV1) -> SessionSyncOutcomeV1 {
         let _admission = self.admission_gate.lock().await;
         self.execute_request_locked(request).await
@@ -274,30 +182,9 @@ impl DaemonSessionSyncService {
 
     async fn execute_request_locked(&self, request: SessionSyncRequestV1) -> SessionSyncOutcomeV1 {
         let observed_at = now_micros();
-        match request.admit_at(observed_at) {
-            Ok(()) => {}
-            Err(SessionSyncAdmissionErrorV1::Cancelled) => {
-                return SessionSyncOutcomeV1::Cancelled;
-            }
-            Err(SessionSyncAdmissionErrorV1::DeadlineExceeded) => {
-                return SessionSyncOutcomeV1::DeadlineExceeded;
-            }
-        }
         let Some(context) = self.context_for(request.scope()) else {
             return SessionSyncOutcomeV1::WrongScope;
         };
-        if matches!(
-            request.command(),
-            SessionSyncCommandV1::ImportTranscripts(_)
-        ) && let Some(receipt) = self
-            .active_imports
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&import_scope_key(request.scope()))
-            .map(|active| active.admission.clone())
-        {
-            return SessionSyncOutcomeV1::Joined(receipt);
-        }
         let key = journal_key(request.scope(), request.idempotency_key());
         match context.registry.read_session_sync_journal(&key).await {
             Ok(Some(encoded)) => {
@@ -305,6 +192,34 @@ impl DaemonSessionSyncService {
                     Ok(journal) => {
                         let admission = journal.admission.clone();
                         if journal.status != SessionSyncJournalStatusV1::Complete
+                            && journal.deadline.is_elapsed_at(observed_at)
+                        {
+                            return match self
+                                .persist_interruption(
+                                    &context,
+                                    &key,
+                                    OperationTermination::TimedOut,
+                                )
+                                .await
+                            {
+                                Ok(journal) => journal.outcome(),
+                                Err(_) => SessionSyncOutcomeV1::Unavailable {
+                                    reason_code: "session_sync_journal_write_failed",
+                                },
+                            };
+                        } else if journal.status != SessionSyncJournalStatusV1::Complete
+                            && let Some(primary) = journal.coalesced_primary.clone()
+                        {
+                            if !self.active_contains(&key) {
+                                self.coalesce_import(
+                                    Arc::clone(&context),
+                                    key,
+                                    journal.clone(),
+                                    journal_key(request.scope(), &primary),
+                                    request.cancellation().clone(),
+                                );
+                            }
+                        } else if journal.status != SessionSyncJournalStatusV1::Complete
                             && !self.enqueue(context, key, request, admission)
                         {
                             return SessionSyncOutcomeV1::Unavailable {
@@ -323,6 +238,78 @@ impl DaemonSessionSyncService {
                     reason_code: "session_sync_journal_read_failed",
                 };
             }
+        }
+        match request.admit_at(observed_at) {
+            Ok(()) => {}
+            Err(SessionSyncAdmissionErrorV1::Cancelled) => {
+                return SessionSyncOutcomeV1::Cancelled;
+            }
+            Err(SessionSyncAdmissionErrorV1::DeadlineExceeded) => {
+                return SessionSyncOutcomeV1::DeadlineExceeded;
+            }
+        }
+        let active_import = matches!(
+            request.command(),
+            SessionSyncCommandV1::ImportTranscripts(_)
+        )
+        .then(|| {
+            self.active_imports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&import_scope_key(request.scope()))
+                .cloned()
+        })
+        .flatten();
+        if let Some(primary) = active_import {
+            if self.active_count() >= MAX_SESSION_SYNC_OPERATIONS {
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_capacity_reached",
+                };
+            }
+            let journal = SessionSyncJournalV1::coalesced(
+                &request,
+                observed_at,
+                primary.admission.idempotency_key.clone(),
+            );
+            let encoded = match serde_json::to_string(&journal) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    tracing::warn!(%error, "session sync alias journal encoding failed");
+                    return SessionSyncOutcomeV1::Unavailable {
+                        reason_code: "session_sync_journal_encode_failed",
+                    };
+                }
+            };
+            match context
+                .registry
+                .insert_session_sync_journal(&key, &encoded)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    return self
+                        .status_request(SessionSyncControlV1::new(
+                            request.scope().clone(),
+                            request.idempotency_key().clone(),
+                        ))
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "session sync alias journal admission failed");
+                    return SessionSyncOutcomeV1::Unavailable {
+                        reason_code: "session_sync_journal_write_failed",
+                    };
+                }
+            }
+            let admission = journal.admission.clone();
+            self.coalesce_import(
+                context,
+                key,
+                journal,
+                primary.journal_key,
+                request.cancellation().clone(),
+            );
+            return SessionSyncOutcomeV1::Accepted(admission);
         }
         if self
             .active
@@ -373,6 +360,20 @@ impl DaemonSessionSyncService {
             };
         }
         SessionSyncOutcomeV1::Accepted(admission)
+    }
+
+    fn active_contains(&self, key: &str) -> bool {
+        self.active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(key)
+    }
+
+    fn active_count(&self) -> usize {
+        self.active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     fn enqueue(
@@ -622,6 +623,7 @@ impl DaemonSessionSyncService {
             journal.source_frontiers.clone_from(&source_frontiers);
             journal.completion = Some(SessionSyncCompletionReceiptV1 {
                 admission: journal.admission.clone(),
+                coalesced_primary: journal.coalesced_primary.clone(),
                 completed_at,
                 termination,
                 stats: stats.clone(),

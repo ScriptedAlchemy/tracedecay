@@ -231,6 +231,7 @@ pub struct SessionSyncSourceFrontierV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSyncCompletionReceiptV1 {
     pub admission: SessionSyncAdmissionReceiptV1,
+    pub coalesced_primary: Option<IdempotencyKey>,
     pub completed_at: UtcMicros,
     pub termination: OperationTermination,
     pub stats: SessionSyncStatsV1,
@@ -289,6 +290,7 @@ pub struct SessionSyncJournalV1 {
     pub source: SessionSyncCommandV1,
     pub deadline: Deadline,
     pub status: SessionSyncJournalStatusV1,
+    pub coalesced_primary: Option<IdempotencyKey>,
     pub stats: SessionSyncStatsV1,
     pub coverage: Vec<SessionSyncSourceCoverageV1>,
     pub source_frontiers: Vec<SessionSyncSourceFrontierV1>,
@@ -309,6 +311,7 @@ impl SessionSyncJournalV1 {
             source: request.command(),
             deadline: request.deadline().clone(),
             status: SessionSyncJournalStatusV1::Queued,
+            coalesced_primary: None,
             stats: SessionSyncStatsV1::default(),
             coverage: Vec::new(),
             source_frontiers: Vec::new(),
@@ -316,6 +319,16 @@ impl SessionSyncJournalV1 {
             completion: None,
             updated_at: accepted_at,
         }
+    }
+
+    pub fn coalesced(
+        request: &SessionSyncRequestV1,
+        accepted_at: UtcMicros,
+        primary: IdempotencyKey,
+    ) -> Self {
+        let mut journal = Self::queued(request, accepted_at);
+        journal.coalesced_primary = Some(primary);
+        journal
     }
 
     pub fn outcome(&self) -> SessionSyncOutcomeV1 {
@@ -348,11 +361,12 @@ pub trait SessionSyncServicePort: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionSyncCommandV1, SessionSyncCoverageV1, SessionSyncJournalStatusV1,
-        SessionSyncJournalV1, SessionSyncOutcomeV1, SessionSyncRequestV1, SessionSyncScopeV1,
-        SessionSyncSourceCoverageV1, SessionSyncSourceFrontierV1, SessionTranscriptImportV1,
+        SessionSyncCommandV1, SessionSyncCompletionReceiptV1, SessionSyncCoverageV1,
+        SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1,
+        SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncSourceCoverageV1,
+        SessionSyncSourceFrontierV1, SessionTranscriptImportV1,
     };
-    use crate::{CancellationSignal, Deadline, IdempotencyKey, RequestId};
+    use crate::{CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId};
     use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
 
     #[test]
@@ -407,6 +421,7 @@ mod tests {
         );
         let mut journal = SessionSyncJournalV1::queued(&request, UtcMicros(10));
         journal.status = SessionSyncJournalStatusV1::Running;
+        journal.coalesced_primary = Some(IdempotencyKey::new("session-sync.primary").unwrap());
         journal.stats.sessions_imported = 3;
         journal.stats.messages_imported = 8;
         journal.coverage = vec![SessionSyncSourceCoverageV1 {
@@ -434,11 +449,59 @@ mod tests {
             restored.source_frontiers[0].committed_cursor_json,
             r#"{"byte_offset":72}"#
         );
+        assert_eq!(
+            restored
+                .coalesced_primary
+                .as_ref()
+                .map(IdempotencyKey::as_str),
+            Some("session-sync.primary")
+        );
         assert_eq!(restored.status, SessionSyncJournalStatusV1::Running);
         assert_eq!(restored.cancel_requested_at, Some(UtcMicros(50)));
         assert!(matches!(
             restored.outcome(),
             SessionSyncOutcomeV1::Joined(_)
+        ));
+    }
+
+    #[test]
+    fn completed_coalesced_journal_replays_its_own_admission_and_primary_binding() {
+        let request = SessionSyncRequestV1::new(
+            RequestId::new("session-sync.alias").unwrap(),
+            IdempotencyKey::new("session-sync.alias").unwrap(),
+            SessionSyncScopeV1::new(
+                ProjectId::new("project.fixture").unwrap(),
+                UserProfileId::new("profile.fixture").unwrap(),
+            ),
+            Deadline::new(UtcMicros(200)).unwrap(),
+            CancellationSignal::active("session-sync.alias").unwrap(),
+            SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
+        );
+        let primary = IdempotencyKey::new("session-sync.primary").unwrap();
+        let mut journal = SessionSyncJournalV1::coalesced(&request, UtcMicros(10), primary.clone());
+        journal.status = SessionSyncJournalStatusV1::Complete;
+        journal.completion = Some(SessionSyncCompletionReceiptV1 {
+            admission: journal.admission.clone(),
+            coalesced_primary: Some(primary.clone()),
+            completed_at: UtcMicros(20),
+            termination: OperationTermination::Completed,
+            stats: Default::default(),
+            coverage: vec![SessionSyncSourceCoverageV1 {
+                store_scope: "profile".to_owned(),
+                coverage: SessionSyncCoverageV1::Complete,
+            }],
+            source_frontiers: Vec::new(),
+            failure_codes: Vec::new(),
+        });
+        let restored: SessionSyncJournalV1 =
+            serde_json::from_str(&serde_json::to_string(&journal).unwrap()).unwrap();
+
+        assert_eq!(restored.coalesced_primary, Some(primary.clone()));
+        assert!(matches!(
+            restored.outcome(),
+            SessionSyncOutcomeV1::Complete(receipt)
+                if receipt.admission.idempotency_key.as_str() == "session-sync.alias"
+                    && receipt.coalesced_primary == Some(primary)
         ));
     }
 }
