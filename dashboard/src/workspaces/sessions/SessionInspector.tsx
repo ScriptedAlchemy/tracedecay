@@ -17,8 +17,8 @@
  *                      a boundary rather than silently absent from the
  *                      transcript.
  *   the page           the daemon's opaque temporal cursor selects each page;
- *                      `offset` is only the browser's page-position label. A
- *                      truncated read is never presented as the whole session.
+ *                      the browser derives its range from the turns actually
+ *                      returned. A truncated read is never presented as whole.
  *
  * A message whose `content` is null is not an empty message: the store holds
  * the turn but not its body (offloaded or dropped by retention). That is said
@@ -26,12 +26,14 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { z } from "zod";
 import {
-  LcmSessionPayloadV1Schema,
   type LcmMessageV1,
-  type LcmSummaryNodeV1,
 } from "../../contracts/generated.ts";
+import {
+  CanonicalLcmSessionPayloadV1Schema,
+  type CanonicalLcmSessionPayloadV1,
+  type CanonicalLcmSummaryNodeV1,
+} from "../../data/query/lcmCanonical.ts";
 import { useEnvelope } from "../../data/query/useEnvelope.ts";
 import { InspectorPanel } from "../../ui/archetypes/ExplorerSplit.tsx";
 import { ReadSection, envelopeReadState } from "../../ui/ReadSection.tsx";
@@ -43,12 +45,6 @@ import { formatStamp, splitCount } from "../../ui/format.ts";
  * 1000 and this stays well inside it so an inspector open never pulls a whole
  * corpus into the browser. */
 const PAGE_SIZE = 100;
-const LcmSessionCursorPayloadV1Schema = LcmSessionPayloadV1Schema.extend({
-  next_cursor: z.string().nullable(),
-});
-type LcmSessionCursorPayloadV1 = z.infer<
-  typeof LcmSessionCursorPayloadV1Schema
->;
 
 /** The pager's visible bezel. It stays 24px tall — it annotates a message
  * range rather than heading the panel — and `.td-hit` on the button around it
@@ -63,10 +59,16 @@ export function SessionInspector({
   sessionId: string;
   onClose: () => void;
 }) {
-  const [offset, setOffset] = useState(0);
   const [cursor, setCursor] = useState<string | null>(null);
-  const cursors = useRef(new Map<number, string | null>([[0, null]]));
-  const [order, setOrder] = useState<"asc" | "desc">("asc");
+  const [messageStart, setMessageStart] = useState(0);
+  const history = useRef<
+    Array<{ cursor: string | null; messageStart: number }>
+  >([]);
+  useEffect(() => {
+    setCursor(null);
+    setMessageStart(0);
+    history.current = [];
+  }, [sessionId]);
   /**
    * The page a reader asked for, held until it arrives on screen.
    *
@@ -80,9 +82,9 @@ export function SessionInspector({
    */
   const [pagedTo, setPagedTo] = useState<number | null>(null);
   const session = useEnvelope(
-    ["lcm", "session", sessionId, offset, cursor, order],
-    `/api/plugins/hermes-lcm/session/${encodeURIComponent(sessionId)}?limit=${PAGE_SIZE}&offset=${offset}&order=${order}${cursor == null ? "" : `&cursor=${encodeURIComponent(cursor)}`}`,
-    LcmSessionCursorPayloadV1Schema,
+    ["lcm", "session", sessionId, cursor],
+    `/api/plugins/hermes-lcm/session/${encodeURIComponent(sessionId)}?limit=${PAGE_SIZE}${cursor == null ? "" : `&cursor=${encodeURIComponent(cursor)}`}`,
+    CanonicalLcmSessionPayloadV1Schema,
   );
 
   return (
@@ -109,21 +111,22 @@ export function SessionInspector({
             ) : (
               <SessionBody
                 payload={payload}
-                order={order}
-                onOrderChange={(next) => {
-                  setOrder(next);
-                  setOffset(0);
-                  setCursor(null);
-                  cursors.current = new Map([[0, null]]);
-                  setPagedTo(0);
+                messageStart={messageStart}
+                canGoPrevious={history.current.length > 0}
+                onPrevious={() => {
+                  const previous = history.current.pop();
+                  if (previous == null) return;
+                  setCursor(previous.cursor);
+                  setMessageStart(previous.messageStart);
+                  setPagedTo(previous.messageStart);
                 }}
-                onPageChange={(next, nextCursor) => {
-                  cursors.current.set(next, nextCursor);
-                  setOffset(next);
+                onNext={(nextCursor, returnedMessages) => {
+                  history.current.push({ cursor, messageStart });
+                  const nextStart = messageStart + returnedMessages;
                   setCursor(nextCursor);
-                  setPagedTo(next);
+                  setMessageStart(nextStart);
+                  setPagedTo(nextStart);
                 }}
-                cursorForOffset={(next) => cursors.current.get(next) ?? null}
                 pagedTo={pagedTo}
                 onArrived={() => setPagedTo(null)}
               />
@@ -137,18 +140,18 @@ export function SessionInspector({
 
 function SessionBody({
   payload,
-  order,
-  onOrderChange,
-  onPageChange,
-  cursorForOffset,
+  messageStart,
+  canGoPrevious,
+  onPrevious,
+  onNext,
   pagedTo,
   onArrived,
 }: {
-  payload: LcmSessionCursorPayloadV1;
-  order: "asc" | "desc";
-  onOrderChange: (order: "asc" | "desc") => void;
-  onPageChange: (offset: number, cursor: string | null) => void;
-  cursorForOffset: (offset: number) => string | null;
+  payload: CanonicalLcmSessionPayloadV1;
+  messageStart: number;
+  canGoPrevious: boolean;
+  onPrevious: () => void;
+  onNext: (cursor: string, returnedMessages: number) => void;
   pagedTo: number | null;
   onArrived: () => void;
 }) {
@@ -158,10 +161,10 @@ function SessionBody({
       <CompactionBoundaries payload={payload} />
       <RawMessages
         payload={payload}
-        order={order}
-        onOrderChange={onOrderChange}
-        onPageChange={onPageChange}
-        cursorForOffset={cursorForOffset}
+        messageStart={messageStart}
+        canGoPrevious={canGoPrevious}
+        onPrevious={onPrevious}
+        onNext={onNext}
         pagedTo={pagedTo}
         onArrived={onArrived}
       />
@@ -185,10 +188,12 @@ function SessionBody({
  * the source-token count is zero, because a ratio against a zero denominator is
  * not a small number, it is not a number.
  */
-function SessionCounts({ payload }: { payload: LcmSessionCursorPayloadV1 }) {
+function SessionCounts({ payload }: { payload: CanonicalLcmSessionPayloadV1 }) {
   const { counts } = payload;
   const compaction =
-    counts.source_token_count > 0
+    counts.source_token_count != null &&
+    counts.source_token_count > 0 &&
+    counts.summary_token_count != null
       ? counts.summary_token_count / counts.source_token_count
       : null;
   return (
@@ -201,7 +206,11 @@ function SessionCounts({ payload }: { payload: LcmSessionCursorPayloadV1 }) {
             size="sm"
             value={splitCount(counts.message_count).value}
             unit={splitCount(counts.message_count).unit}
-            note={`~${counts.token_estimate_total.toLocaleString()} est. tokens`}
+            note={
+              counts.token_estimate_total == null
+                ? "token estimate unavailable"
+                : `~${counts.token_estimate_total.toLocaleString()} est. tokens`
+            }
           />
         </div>
         <div className="td-raised border border-edge-subtle px-2.5 py-2">
@@ -210,7 +219,12 @@ function SessionCounts({ payload }: { payload: LcmSessionCursorPayloadV1 }) {
             size="sm"
             value={splitCount(counts.summary_node_count).value}
             unit={splitCount(counts.summary_node_count).unit}
-            note={`${counts.summary_token_count.toLocaleString()} of ${counts.source_token_count.toLocaleString()} source tokens`}
+            note={
+              counts.summary_token_count == null ||
+              counts.source_token_count == null
+                ? "summary token totals unavailable"
+                : `${counts.summary_token_count.toLocaleString()} of ${counts.source_token_count.toLocaleString()} source tokens`
+            }
           />
         </div>
       </div>
@@ -231,11 +245,7 @@ function SessionCounts({ payload }: { payload: LcmSessionCursorPayloadV1 }) {
 
 /** The compactor's cuts. Each node states the depth it sits at, the category
  * and source type it was built from, and the exact token exchange it made. */
-function CompactionBoundaries({
-  payload,
-}: {
-  payload: LcmSessionCursorPayloadV1;
-}) {
+function CompactionBoundaries({ payload }: { payload: CanonicalLcmSessionPayloadV1 }) {
   const nodes = payload.summary_nodes;
   return (
     <div className="flex flex-col gap-1.5">
@@ -287,9 +297,11 @@ function CompactionBoundaries({
   );
 }
 
-function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
+function SummaryNodeRow({ node }: { node: CanonicalLcmSummaryNodeV1 }) {
   const retained =
-    node.source_token_count > 0
+    node.source_token_count != null &&
+    node.source_token_count > 0 &&
+    node.token_count != null
       ? node.token_count / node.source_token_count
       : null;
   return (
@@ -305,13 +317,19 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
         <span className="min-w-0 truncate text-3xs text-text-primary">
           {node.category}
         </span>
-        <span
-          className="td-value ml-auto shrink-0 text-3xs text-text-muted"
-          data-cell="numeric"
-        >
-          {node.token_count.toLocaleString()} ←{" "}
-          {node.source_token_count.toLocaleString()}
-        </span>
+        {node.token_count != null && node.source_token_count != null ? (
+          <span
+            className="td-value ml-auto shrink-0 text-3xs text-text-muted"
+            data-cell="numeric"
+          >
+            {node.token_count.toLocaleString()} ←{" "}
+            {node.source_token_count.toLocaleString()}
+          </span>
+        ) : (
+          <span className="ml-auto shrink-0 text-3xs text-text-muted">
+            token exchange unavailable
+          </span>
+        )}
       </span>
       {retained != null ? (
         <Meter fraction={retained} height="row" className="w-full" />
@@ -327,9 +345,11 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
       </span>
       {/* The producer's own instruction for recovering what this node replaced.
        * Rendered verbatim: the browser does not construct an expansion. */}
-      <span className="td-value break-all text-3xs text-text-muted">
-        {node.expand_hint}
-      </span>
+      {node.expand_hint ? (
+        <span className="td-value break-all text-3xs text-text-muted">
+          {node.expand_hint}
+        </span>
+      ) : null}
     </li>
   );
 }
@@ -337,24 +357,24 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
 /** The raw turns, one server page at a time. */
 function RawMessages({
   payload,
-  order,
-  onOrderChange,
-  onPageChange,
-  cursorForOffset,
+  messageStart,
+  canGoPrevious,
+  onPrevious,
+  onNext,
   pagedTo,
   onArrived,
 }: {
-  payload: LcmSessionCursorPayloadV1;
-  order: "asc" | "desc";
-  onOrderChange: (order: "asc" | "desc") => void;
-  onPageChange: (offset: number, cursor: string | null) => void;
-  cursorForOffset: (offset: number) => string | null;
+  payload: CanonicalLcmSessionPayloadV1;
+  messageStart: number;
+  canGoPrevious: boolean;
+  onPrevious: () => void;
+  onNext: (cursor: string, returnedMessages: number) => void;
   pagedTo: number | null;
   onArrived: () => void;
 }) {
-  const { messages, offset, limit } = payload;
-  const first = messages.length === 0 ? 0 : offset + 1;
-  const last = offset + messages.length;
+  const { messages, limit } = payload;
+  const first = messages.length === 0 ? 0 : messageStart + 1;
+  const last = messageStart + messages.length;
   const range = useRef<HTMLParagraphElement>(null);
 
   /**
@@ -369,32 +389,14 @@ function RawMessages({
    * and is now looking somewhere else keeps what they had.
    */
   useEffect(() => {
-    if (pagedTo === null || pagedTo !== offset) return;
+    if (pagedTo === null || pagedTo !== messageStart) return;
     onArrived();
     if (document.activeElement === document.body) range.current?.focus();
-  }, [pagedTo, offset, onArrived]);
+  }, [pagedTo, messageStart, onArrived]);
 
   return (
     <div className="flex flex-col gap-1.5">
-      <Legend
-        trailing={
-          <button
-            type="button"
-            className="td-hit group shrink-0"
-            onClick={() => onOrderChange(order === "asc" ? "desc" : "asc")}
-            // The order itself leads, because it is this control's visible
-            // label: an accessible name that omits the visible text leaves a
-            // speech-control user with nothing they can say (WCAG 2.5.3).
-            aria-label={`Order ${payload.order} — switch to ${order === "asc" ? "newest first" : "oldest first"}`}
-          >
-            <span className="border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs text-text-secondary group-hover:text-text-primary">
-              {payload.order}
-            </span>
-          </button>
-        }
-      >
-        raw messages
-      </Legend>
+      <Legend>raw messages</Legend>
 
       {/* Loaded range, whole-session total, ordering, and whether another page
        * exists — all four, because any one of them alone lets a page read as
@@ -410,7 +412,7 @@ function RawMessages({
         className="text-3xs text-text-muted tabular"
       >
         {first}–{last} of {payload.counts.message_count.toLocaleString()} ·{" "}
-        {payload.order} order · page size {limit}
+        canonical cursor order · page size {limit}
         {payload.has_more_messages ? " · more pages follow" : " · last page"}
       </p>
 
@@ -424,7 +426,7 @@ function RawMessages({
           detail={
             payload.counts.message_count === 0
               ? "the store holds no turns for this session"
-              : "this offset is past the end of the transcript"
+              : "the canonical cursor returned no visible turns"
           }
         />
       ) : (
@@ -445,11 +447,8 @@ function RawMessages({
         <button
           type="button"
           className="td-hit group disabled:opacity-40"
-          disabled={offset === 0}
-          onClick={() => {
-            const previous = Math.max(0, offset - PAGE_SIZE);
-            onPageChange(previous, cursorForOffset(previous));
-          }}
+          disabled={!canGoPrevious}
+          onClick={onPrevious}
         >
           <span className={PAGER_BEZEL}>
             <ChevronLeft aria-hidden size={11} />
@@ -460,7 +459,11 @@ function RawMessages({
           type="button"
           className="td-hit group disabled:opacity-40"
           disabled={!payload.has_more_messages || payload.next_cursor == null}
-          onClick={() => onPageChange(offset + PAGE_SIZE, payload.next_cursor)}
+          onClick={() => {
+            if (payload.next_cursor != null) {
+              onNext(payload.next_cursor, messages.length);
+            }
+          }}
         >
           <span className={PAGER_BEZEL}>
             Next page

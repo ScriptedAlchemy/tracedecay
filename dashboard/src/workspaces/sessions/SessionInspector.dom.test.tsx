@@ -68,8 +68,6 @@ function sessionPayload(nextCursor: string | null) {
     exists: true,
     session_id: "claude:035c8f3c",
     limit: 100,
-    offset: nextCursor == null ? 100 : 0,
-    order: "asc",
     counts: {
       message_count: 101,
       summary_node_count: 0,

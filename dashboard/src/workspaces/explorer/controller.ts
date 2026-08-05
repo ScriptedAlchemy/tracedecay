@@ -11,14 +11,16 @@ import { useMemo, useState } from 'react';
 import { z } from 'zod';
 import {
   ExplorerQueryRunV1Schema,
-  ExplorerReadContextV1Schema,
-  ExplorerSessionSizeV1Schema,
   GraphOverviewPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   type ExplorerQueryRunV1,
-  type ExplorerReadContextV1,
-  type ExplorerSessionSizeV1,
 } from '../../contracts/generated.ts';
+import {
+  CanonicalExplorerReadContextV1Schema,
+  CanonicalExplorerSessionSizeV1Schema,
+  type CanonicalExplorerReadContextV1,
+  type CanonicalExplorerSessionSizeV1,
+} from '../../data/query/lcmCanonical.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
@@ -76,17 +78,21 @@ function cancelPlannerQuery(runId: string): Promise<EnvelopeResult<ExplorerQuery
   );
 }
 
-function readSessionSize(sessionId: string): Promise<EnvelopeResult<ExplorerSessionSizeV1>> {
+function readSessionSize(
+  sessionId: string,
+): Promise<EnvelopeResult<CanonicalExplorerSessionSizeV1>> {
   return fetchEnvelope(
     `/api/explorer/sessions/${encodeURIComponent(sessionId)}/size`,
-    ExplorerSessionSizeV1Schema,
+    CanonicalExplorerSessionSizeV1Schema,
   );
 }
 
-function readSessionContext(sessionId: string): Promise<EnvelopeResult<ExplorerReadContextV1>> {
+function readSessionContext(
+  sessionId: string,
+): Promise<EnvelopeResult<CanonicalExplorerReadContextV1>> {
   return fetchEnvelope(
     `/api/explorer/sessions/${encodeURIComponent(sessionId)}/read-context?limit=25&offset=0&order=asc`,
-    ExplorerReadContextV1Schema,
+    CanonicalExplorerReadContextV1Schema,
   );
 }
 
@@ -297,8 +303,8 @@ export function useExplorerController(): ExplorerController {
 /* ------------------------------------------------------- session inspector */
 
 export interface ExplorerSessionContext {
-  readonly size: EnvelopeResult<ExplorerSessionSizeV1> | undefined;
-  readonly readContext: EnvelopeResult<ExplorerReadContextV1> | undefined;
+  readonly size: EnvelopeResult<CanonicalExplorerSessionSizeV1> | undefined;
+  readonly readContext: EnvelopeResult<CanonicalExplorerReadContextV1> | undefined;
   readonly pending: boolean;
 }
 

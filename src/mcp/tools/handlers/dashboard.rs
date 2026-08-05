@@ -289,12 +289,10 @@ pub(super) async fn handle_dashboard(
                 })
                 .transpose()?;
             let lcm_read_authority = lcm_retrieval
-                .zip(registered_project_session_db.clone())
                 .zip(retained_cg.store_layout().identity.project_id.clone())
-                .map(|((retrieval, database), project_id)| {
-                    Arc::new(DashboardLcmReadAdapter::new(
-                        retrieval, database, project_id,
-                    )) as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
+                .map(|(retrieval, project_id)| {
+                    Arc::new(DashboardLcmReadAdapter::new(retrieval, project_id))
+                        as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
                 });
             crate::hooks::install_dashboard_hook_readiness_projection()?;
             let state = build_state_with_automation_reconciler(

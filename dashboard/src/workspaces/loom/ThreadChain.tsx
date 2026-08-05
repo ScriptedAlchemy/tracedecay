@@ -7,12 +7,12 @@ import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
 import { summarizeChain, type PlacedThread } from './weave.ts';
 import {
-  LcmSessionPayloadV1Schema,
   type LoomBranchSpanV1,
   type LoomCommitV1,
   type LoomEditedFileV1,
   type LoomSourceStatusV1,
 } from '../../contracts/generated.ts';
+import { CanonicalLcmSessionPayloadV1Schema } from '../../data/query/lcmCanonical.ts';
 
 /**
  * The selected thread's chain: prompt → turns → tools.
@@ -44,7 +44,7 @@ export function ThreadChain({
   const chain = useEnvelope(
     ['loom', 'chain', thread?.id ?? 'none'],
     `/api/plugins/hermes-lcm/session/${encodeURIComponent(thread?.sessionId ?? '')}?limit=200`,
-    LcmSessionPayloadV1Schema,
+    CanonicalLcmSessionPayloadV1Schema,
     { enabled: thread != null },
   );
 

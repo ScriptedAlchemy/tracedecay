@@ -2,16 +2,22 @@
  * selected row, plus the two session reads a transcript row can be expanded
  * into. Nothing here is computed about the row — it reports the field each
  * value was read from so a reader can check it. */
-import { InspectorPanel, RawFields } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { StateChip } from '../../ui/StateChip';
-import { Highlight, MetaLabel } from '../../ui/search/Highlight.tsx';
-import { cn } from '../../ui/cn';
-import { Meter } from '../../ui/instrument.tsx';
-import type { ExplorerReadContextV1, ExplorerSessionSizeV1 } from '../../contracts/generated.ts';
-import type { EnvelopeResult } from '../../data/query/envelope.ts';
-import { useExplorerSessionContext } from './controller.ts';
-import { LANE_BY_ID, LANE_ICON } from './laneChrome.ts';
-import { relativeTime, type Hit } from './model.ts';
+import {
+  InspectorPanel,
+  RawFields,
+} from "../../ui/archetypes/ExplorerSplit.tsx";
+import { StateChip } from "../../ui/StateChip";
+import { Highlight, MetaLabel } from "../../ui/search/Highlight.tsx";
+import { cn } from "../../ui/cn";
+import { Meter } from "../../ui/instrument.tsx";
+import type { EnvelopeResult } from "../../data/query/envelope.ts";
+import type {
+  CanonicalExplorerReadContextV1,
+  CanonicalExplorerSessionSizeV1,
+} from "../../data/query/lcmCanonical.ts";
+import { useExplorerSessionContext } from "./controller.ts";
+import { LANE_BY_ID, LANE_ICON } from "./laneChrome.ts";
+import { relativeTime, type Hit } from "./model.ts";
 
 export function HitInspector({
   hit,
@@ -44,21 +50,23 @@ export function HitInspector({
           <p className="text-2xs leading-relaxed text-text-secondary">
             {terms.length === 0 ? (
               <>
-                Browsing {spec.browseLabel}; position {hit.rank} is the order the daemon
-                returned, not a score.
+                Browsing {spec.browseLabel}; position {hit.rank} is the order
+                the daemon returned, not a score.
               </>
             ) : hit.matchedIn.length > 0 ? (
               <>
-                Position {hit.rank} in {hit.orderLabel}. The query text occurs in{' '}
+                Position {hit.rank} in {hit.orderLabel}. The query text occurs
+                in{" "}
                 <span className="font-mono text-text-primary">
-                  {hit.matchedIn.join(', ')}
+                  {hit.matchedIn.join(", ")}
                 </span>
                 .
               </>
             ) : (
               <>
-                Position {hit.rank} in {hit.orderLabel}. The daemon matched on its
-                own index; the literal terms do not appear in the fields it returned.
+                Position {hit.rank} in {hit.orderLabel}. The daemon matched on
+                its own index; the literal terms do not appear in the fields it
+                returned.
               </>
             )}
           </p>
@@ -78,7 +86,9 @@ export function HitInspector({
             <MetaLabel>Measured</MetaLabel>
             <span className="flex items-center gap-2">
               <Meter
-                fraction={hit.signal.max > 0 ? hit.signal.value / hit.signal.max : null}
+                fraction={
+                  hit.signal.max > 0 ? hit.signal.value / hit.signal.max : null
+                }
                 className="w-10 rounded-full"
                 tone="bg-accent/80"
                 ariaLabel={`${hit.signal.field} ${hit.signal.value}`}
@@ -94,13 +104,13 @@ export function HitInspector({
         ) : null}
         {hit.body ? (
           <section className="flex flex-col gap-1">
-            <MetaLabel>{hit.lane === 'code' ? 'Signature' : 'Body'}</MetaLabel>
+            <MetaLabel>{hit.lane === "code" ? "Signature" : "Body"}</MetaLabel>
             <Highlight
               text={hit.body}
               terms={terms}
               className={cn(
-                'whitespace-pre-wrap break-words text-xs leading-relaxed text-text-secondary',
-                hit.lane === 'code' && 'font-mono',
+                "whitespace-pre-wrap break-words text-xs leading-relaxed text-text-secondary",
+                hit.lane === "code" && "font-mono",
               )}
             />
           </section>
@@ -111,11 +121,13 @@ export function HitInspector({
             text={hit.title}
             terms={terms}
             className={cn(
-              'whitespace-pre-wrap break-words text-xs leading-[1.6] text-text-primary',
-              hit.lane === 'code' && 'font-mono',
+              "whitespace-pre-wrap break-words text-xs leading-[1.6] text-text-primary",
+              hit.lane === "code" && "font-mono",
             )}
           />
-          {age ? <span className="text-2xs text-text-muted">{age} ago</span> : null}
+          {age ? (
+            <span className="text-2xs text-text-muted">{age} ago</span>
+          ) : null}
         </section>
         {sessionId ? (
           <SessionContextDetails
@@ -135,11 +147,11 @@ export function HitInspector({
  * without a usable `session_id` opens no session read at all rather than one
  * against an empty identifier. */
 function sessionIdOf(hit: Hit): string | undefined {
-  if (hit.lane !== 'sessions') return undefined;
-  const raw = hit.raw['session_id'];
-  if (typeof raw !== 'string') return undefined;
+  if (hit.lane !== "sessions") return undefined;
+  const raw = hit.raw["session_id"];
+  if (typeof raw !== "string") return undefined;
   const trimmed = raw.trim();
-  return trimmed === '' ? undefined : trimmed;
+  return trimmed === "" ? undefined : trimmed;
 }
 
 function SessionContextDetails({
@@ -149,13 +161,16 @@ function SessionContextDetails({
   pending,
 }: {
   sessionId: string;
-  size: EnvelopeResult<ExplorerSessionSizeV1> | undefined;
-  readContext: EnvelopeResult<ExplorerReadContextV1> | undefined;
+  size: EnvelopeResult<CanonicalExplorerSessionSizeV1> | undefined;
+  readContext: EnvelopeResult<CanonicalExplorerReadContextV1> | undefined;
   pending: boolean;
 }) {
-  const sizePayload = size?.outcome === 'envelope' ? size.envelope.payload : undefined;
+  const sizePayload =
+    size?.outcome === "envelope" ? size.envelope.payload : undefined;
   const contextPayload =
-    readContext?.outcome === 'envelope' ? readContext.envelope.payload : undefined;
+    readContext?.outcome === "envelope"
+      ? readContext.envelope.payload
+      : undefined;
   if (pending && !sizePayload && !contextPayload) {
     return (
       <section className="flex flex-col gap-1.5">
@@ -166,15 +181,18 @@ function SessionContextDetails({
   }
   if (!sizePayload && !contextPayload) {
     const blocked =
-      size?.outcome === 'transport'
+      size?.outcome === "transport"
         ? size
-        : readContext?.outcome === 'transport'
+        : readContext?.outcome === "transport"
           ? readContext
           : undefined;
     return (
       <section className="flex flex-col gap-1.5">
         <MetaLabel>Session context</MetaLabel>
-        <StateChip kind={blocked?.state ?? 'error'} detail={blocked?.detail ?? sessionId} />
+        <StateChip
+          kind={blocked?.state ?? "error"}
+          detail={blocked?.detail ?? sessionId}
+        />
       </section>
     );
   }
@@ -193,7 +211,8 @@ function SessionContextDetails({
           </dd>
           <dt className="text-text-muted">Raw token estimate</dt>
           <dd className="tabular text-text-secondary">
-            {sizePayload.counts.token_estimate_total.toLocaleString()}
+            {sizePayload.counts.token_estimate_total?.toLocaleString() ??
+              "unavailable"}
           </dd>
           <dt className="text-text-muted">Store</dt>
           <dd className="text-text-secondary">{sizePayload.storage_scope}</dd>
@@ -202,10 +221,13 @@ function SessionContextDetails({
       {contextPayload ? (
         <>
           <p className="text-2xs leading-relaxed text-text-muted">
-            Loaded {contextPayload.messages.length.toLocaleString()} raw messages and{' '}
-            {contextPayload.summary_nodes.length.toLocaleString()} summary nodes in{' '}
-            {contextPayload.order} order
-            {contextPayload.has_more ? '; more rows remain' : '; this read is complete'}.
+            Loaded {contextPayload.messages.length.toLocaleString()} raw
+            messages and {contextPayload.summary_nodes.length.toLocaleString()}{" "}
+            summary nodes in {contextPayload.order} order
+            {contextPayload.has_more
+              ? "; more rows remain"
+              : "; this read is complete"}
+            .
           </p>
           <RawFields
             value={contextPayload}
