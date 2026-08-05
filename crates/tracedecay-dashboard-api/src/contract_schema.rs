@@ -12,7 +12,10 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
 
-use super::analytics_api::AnalyticsOverviewPayloadV1;
+use super::analytics_api::{
+    AnalyticsDiagnosticsPayloadV1, AnalyticsHintsPayloadV1, AnalyticsOverviewPayloadV1,
+    AnalyticsUnderusedPayloadV1, AnalyticsUsageSummaryV1,
+};
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
 use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
 use super::delivery_api::DeliveryOverviewV1;
@@ -30,8 +33,7 @@ use super::graph_structure_api::{
     StrataMeasurementV1, StructureReadV1, TestMapMeasurementV1, registered_route_contracts,
 };
 use super::lcm_api::{
-    LcmMessagesPayloadV1, LcmOverviewPayloadV1, LcmSearchPayloadV1, LcmSessionPayloadV1,
-    LcmTimelinePayloadV1,
+    LcmOverviewPayloadV1, LcmSearchPayloadV1, LcmSessionPayloadV1, LcmTimelinePayloadV1,
 };
 use super::loom_api::LoomTemporalPayloadV1;
 use super::memory_api::{
@@ -57,8 +59,8 @@ struct DashboardContractCatalogV1 {
     doctor_remediation_apply_request: DoctorRemediationApplyRequestV1,
     doctor_remediation: DoctorRemediationPayloadV1,
     explorer_query_run: ExplorerQueryRunV1,
-    explorer_session_size: ExplorerSessionSizeV1,
-    explorer_read_context: ExplorerReadContextV1,
+    explorer_session_size: DashboardEnvelopeV1<Option<ExplorerSessionSizeV1>>,
+    explorer_read_context: DashboardEnvelopeV1<Option<ExplorerReadContextV1>>,
     projects: DashboardEnvelopeV1<ProjectsPayloadV1>,
     project_context: DashboardEnvelopeV1<ProjectContextPayloadV1>,
     graph_overview: DashboardEnvelopeV1<Option<GraphOverviewPayloadV1>>,
@@ -71,13 +73,16 @@ struct DashboardContractCatalogV1 {
     memory_status: DashboardEnvelopeV1<Option<MemoryStatusPayloadV1>>,
     memory_fact_detail: DashboardEnvelopeV1<Option<MemoryFactDetailPayloadV1>>,
     analytics_overview: DashboardEnvelopeV1<Option<AnalyticsOverviewPayloadV1>>,
+    analytics_usage: DashboardEnvelopeV1<Option<AnalyticsUsageSummaryV1>>,
+    analytics_hints: DashboardEnvelopeV1<Option<AnalyticsHintsPayloadV1>>,
+    analytics_underused: DashboardEnvelopeV1<Option<AnalyticsUnderusedPayloadV1>>,
+    analytics_diagnostics: DashboardEnvelopeV1<Option<AnalyticsDiagnosticsPayloadV1>>,
     savings_overview: DashboardEnvelopeV1<Option<SavingsOverviewPayloadV1>>,
     savings_sessions: SavingsSessionsPayloadV1,
     lcm_session: DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>,
     lcm_timeline: DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>,
     lcm_overview: DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>,
     lcm_search: DashboardEnvelopeV1<Option<LcmSearchPayloadV1>>,
-    lcm_messages: DashboardEnvelopeV1<Option<LcmMessagesPayloadV1>>,
     loom_temporal: LoomTemporalPayloadV1,
     delivery_overview: DeliveryOverviewV1,
     feedback_status: DashboardEnvelopeV1<FeedbackObservationReadModelV1>,
