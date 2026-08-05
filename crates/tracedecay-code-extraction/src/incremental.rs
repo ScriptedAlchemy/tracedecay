@@ -507,6 +507,9 @@ impl RetainedParseDocument {
         let new_source = new_source.into();
         let new_parsed_source = new_parsed_source.into();
         if self.source == new_source {
+            if self.parsed_source != new_parsed_source {
+                return self.replace_prepared(next_identity, new_source, new_parsed_source);
+            }
             return self.apply_edits_prepared(next_identity, &[], new_source, new_parsed_source);
         }
         let edit = minimal_edit(&self.source, &new_source);
