@@ -70,9 +70,9 @@ impl ContextScoutRedactionReceiptV1 {
             Self::Sanitized { receipts, .. } => {
                 if receipts.is_empty()
                     || receipts.len() > MAX_SCOUT_EVIDENCE
-                    || receipts.iter().enumerate().any(|(index, receipt)| {
-                        receipts[index.saturating_add(1)..].contains(receipt)
-                    })
+                    || receipts
+                        .windows(2)
+                        .any(|pair| pair[0].as_str() >= pair[1].as_str())
                 {
                     return Err(ContextScoutErrorV1::InvalidEvidence);
                 }
@@ -86,6 +86,10 @@ impl ContextScoutRedactionReceiptV1 {
             Self::Redacted { omissions, .. } => {
                 if omissions.is_empty()
                     || omissions.len() > MAX_SCOUT_EVIDENCE
+                    || omissions.iter().any(|omission| omission.count == 0)
+                    || omissions.windows(2).any(|pair| {
+                        (pair[0].domain, pair[0].reason) >= (pair[1].domain, pair[1].reason)
+                    })
                     || !omissions
                         .iter()
                         .any(|omission| omission.reason == OmissionReason::Redacted)
@@ -207,10 +211,19 @@ impl ContextScoutEvidenceEnvelopeV1 {
         content: FeedbackContentIdentityV1,
         code_generation_id: CodeGenerationId,
         authority: AuthorityReceipt,
-        redaction: ContextScoutRedactionReceiptV1,
+        mut redaction: ContextScoutRedactionReceiptV1,
         mut sources: Vec<ContextScoutEvidenceSourceReceiptV1>,
         claimed_at: UtcMicros,
     ) -> Result<Self, ContextScoutErrorV1> {
+        match &mut redaction {
+            ContextScoutRedactionReceiptV1::MetadataOnly { .. } => {}
+            ContextScoutRedactionReceiptV1::Sanitized { receipts, .. } => {
+                receipts.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            }
+            ContextScoutRedactionReceiptV1::Redacted { omissions, .. } => {
+                omissions.sort_by_key(|omission| (omission.domain, omission.reason));
+            }
+        }
         for source in &mut sources {
             source
                 .anchors
@@ -287,7 +300,11 @@ impl ContextScoutEvidenceEnvelopeV1 {
         self.redaction.validate(&self.authority)?;
         for source in &self.sources {
             source.validate()?;
-            if source.temporal.source_generation.as_ref() != Some(&self.code_generation_id) {
+            if source.temporal.requested_mode != tracedecay_domain::TemporalModeV1::Current
+                || source.temporal.source_generation.as_ref() != Some(&self.code_generation_id)
+                || source.temporal.watermark_digest.is_none()
+                || source.temporal.resolved_at > self.claimed_at
+            {
                 return Err(ContextScoutErrorV1::InvalidEvidence);
             }
         }
@@ -331,19 +348,17 @@ fn fold_availability(
     for source in sources {
         source.validate()?;
     }
-    let completed = sources
+    if sources
         .iter()
-        .filter(|source| source.contribution_state == RetrieverContributionState::Completed)
-        .count();
-    if completed == sources.len() {
+        .all(|source| source.contribution_state == RetrieverContributionState::Completed)
+    {
         return Ok(ContextScoutEvidenceAvailabilityV1::Complete);
     }
-    if completed > 0
-        || sources
-            .iter()
-            .any(|source| source.contribution_state == RetrieverContributionState::Partial)
+    if sources
+        .iter()
+        .any(|source| source.contribution_state == RetrieverContributionState::Cancelled)
     {
-        return Ok(ContextScoutEvidenceAvailabilityV1::Partial);
+        return Ok(ContextScoutEvidenceAvailabilityV1::Cancelled);
     }
     if sources
         .iter()
@@ -351,11 +366,13 @@ fn fold_availability(
     {
         return Ok(ContextScoutEvidenceAvailabilityV1::Stale);
     }
-    if sources
-        .iter()
-        .any(|source| source.contribution_state == RetrieverContributionState::Cancelled)
-    {
-        return Ok(ContextScoutEvidenceAvailabilityV1::Cancelled);
+    if sources.iter().any(|source| {
+        matches!(
+            source.contribution_state,
+            RetrieverContributionState::Completed | RetrieverContributionState::Partial
+        )
+    }) {
+        return Ok(ContextScoutEvidenceAvailabilityV1::Partial);
     }
     Ok(ContextScoutEvidenceAvailabilityV1::Unavailable)
 }
