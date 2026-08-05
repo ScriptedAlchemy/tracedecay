@@ -135,13 +135,30 @@ fn composite_source_masking_preserves_incremental_astro_canonical_rows() {
     let before = "---\nconst title = 'old';\n---\n<h1>{title}</h1>\n";
     let after = "---\nconst title = 'new';\n---\n<h1>{title}</h1>\n";
 
-    pool.parse_and_extract(
+    pool.parse(
         identity_at("worktree.astro", "commit-a", "tree-a", "src/page.astro"),
         "astro",
         before,
-        &extractor,
     )
-    .expect("initial Astro extraction");
+    .expect("initial unprepared Astro parse");
+    let (prepared_report, prepared) = pool
+        .parse_and_extract(
+            identity_at("worktree.astro", "commit-a", "tree-a", "src/page.astro"),
+            "astro",
+            before,
+            &extractor,
+        )
+        .expect("prepared Astro extraction resets the raw tree");
+    assert!(matches!(
+        prepared_report.reuse,
+        ParseReuse::Reset {
+            reason: tracedecay_code_extraction::incremental::ParseResetReason::FullReplacement
+        }
+    ));
+    assert!(matches!(
+        prepared.disposition,
+        ParsedExtractionDisposition::Reset { .. }
+    ));
     let (report, incremental) = pool
         .parse_and_extract(
             identity_at("worktree.astro", "commit-b", "tree-b", "src/page.astro"),
