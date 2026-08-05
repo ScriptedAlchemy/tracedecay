@@ -668,7 +668,7 @@ impl DaemonInvocationState {
             let roots = match resolve_multi_root_projects(
                 store_administration,
                 &self.service,
-                &scope_set_request.project_ids,
+                &scope_set_request.roots,
             )
             .await
             {

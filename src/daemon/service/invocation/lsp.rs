@@ -23,7 +23,14 @@ pub(super) fn admit_lsp_control(
     Ok(())
 }
 
-pub(super) fn canonicalize_lsp_roots(roots: &mut [(PathBuf, String, ResolvedScope)]) -> bool {
+pub(super) fn canonicalize_lsp_roots(
+    roots: &mut [(
+        PathBuf,
+        String,
+        ResolvedScope,
+        tracedecay_application::RegisteredRootLocatorV1,
+    )],
+) -> bool {
     roots.sort_by(|left, right| left.2.scope_digest.cmp(&right.2.scope_digest));
     !roots
         .windows(2)
@@ -119,7 +126,12 @@ impl DaemonInvocationService {
 
     pub(crate) async fn authorize_lsp_workspace(
         &self,
-        mut roots: Vec<(PathBuf, String, ResolvedScope)>,
+        mut roots: Vec<(
+            PathBuf,
+            String,
+            ResolvedScope,
+            tracedecay_application::RegisteredRootLocatorV1,
+        )>,
         observed_at: UtcMicros,
     ) -> Option<AuthorizedLspWorkspace> {
         if roots.is_empty() || roots.len() > MAX_LSP_WORKSPACE_ROOTS {
@@ -128,7 +140,7 @@ impl DaemonInvocationService {
         if !canonicalize_lsp_roots(&mut roots) {
             return None;
         }
-        if let [(project_root, uri, scope)] = roots.as_slice() {
+        if let [(project_root, uri, scope, _locator)] = roots.as_slice() {
             let owner = self.lsp_owner(Some(project_root)).await?;
             let grant = owner.scope_grant?;
             if grant.scope != *scope {
@@ -145,14 +157,19 @@ impl DaemonInvocationService {
 
     async fn authorize_federated_lsp_workspace(
         &self,
-        roots: &[(PathBuf, String, ResolvedScope)],
+        roots: &[(
+            PathBuf,
+            String,
+            ResolvedScope,
+            tracedecay_application::RegisteredRootLocatorV1,
+        )],
         observed_at: UtcMicros,
     ) -> Option<AuthorizedLspWorkspace> {
         let selector_digest = canonical_sha256(&(
             "tracedecay.daemon.lsp-workspace-selector.v1",
             roots
                 .iter()
-                .map(|(_, _, scope)| &scope.scope_digest)
+                .map(|(_, _, scope, _)| &scope.scope_digest)
                 .collect::<Vec<_>>(),
         ))
         .ok()?;
@@ -167,29 +184,30 @@ impl DaemonInvocationService {
         let use_case =
             UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
                 .ok()?;
-        let mut contexts = Vec::with_capacity(roots.len());
+        let mut admissions = Vec::with_capacity(roots.len());
         let mut factories = Vec::with_capacity(roots.len());
         let mut admitted = Vec::with_capacity(roots.len());
         let mut storages = Vec::with_capacity(roots.len());
-        for (ordinal, (project_root, uri, scope)) in roots.iter().enumerate() {
+        for (ordinal, (project_root, uri, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
             let grant = owner.scope_grant?;
             if grant.scope != *scope {
                 return None;
             }
             let storage = owner.scope_set_storage?;
-            contexts.push(
-                RequestContext::new(
-                    grant.issuer.clone(),
-                    scope.clone(),
-                    grant,
-                    RequestId::new(format!("request.lsp-workspace.admit.{ordinal}")).ok()?,
-                    Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000)))
-                        .ok()?,
-                    CancellationContext::active(format!("cancel.lsp-workspace.admit.{ordinal}"))
-                        .ok()?,
-                )
-                .ok()?,
+            let context = RequestContext::new(
+                grant.issuer.clone(),
+                scope.clone(),
+                grant,
+                RequestId::new(format!("request.lsp-workspace.admit.{ordinal}")).ok()?,
+                Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000))).ok()?,
+                CancellationContext::active(format!("cancel.lsp-workspace.admit.{ordinal}"))
+                    .ok()?,
+            )
+            .ok()?;
+            admissions.push(
+                tracedecay_application::AuthorizedRootAdmission::new(context, locator.clone())
+                    .ok()?,
             );
             let root = AdmittedRoot::authorized(uri.clone(), scope.scope_digest.clone());
             factories.push((root.clone(), owner.factory.clone()));
@@ -205,10 +223,10 @@ impl DaemonInvocationService {
             Some(current) => ScopeSetRevision::new(current.get().checked_add(1)?).ok()?,
             None => ScopeSetRevision::new(1).ok()?,
         };
-        let scope_set = AuthorizedScopeSetAuthority::authorize(
+        let scope_set = AuthorizedScopeSetAuthority::authorize_registered(
             scope_set_id,
             next_revision,
-            contexts,
+            admissions,
             &capability,
             &use_case,
             observed_at,
@@ -244,7 +262,11 @@ impl DaemonInvocationService {
         &self,
         active_project_root: &Path,
         request: MultiRootScopeSetCasRequestV1,
-        mut roots: Vec<(PathBuf, ResolvedScope)>,
+        mut roots: Vec<(
+            PathBuf,
+            ResolvedScope,
+            tracedecay_application::RegisteredRootLocatorV1,
+        )>,
         observed_at: UtcMicros,
     ) -> Option<(ResolvedScope, MultiRootScopeSetCasResultV1)> {
         request.validate().ok()?;
@@ -281,9 +303,9 @@ impl DaemonInvocationService {
         let use_case =
             UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
                 .ok()?;
-        let mut contexts = Vec::with_capacity(roots.len());
+        let mut admissions = Vec::with_capacity(roots.len());
         let mut storages = vec![active_storage.clone()];
-        for (ordinal, (project_root, scope)) in roots.iter().enumerate() {
+        for (ordinal, (project_root, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
             let grant = owner.scope_grant?;
             if grant.scope != *scope {
@@ -292,23 +314,24 @@ impl DaemonInvocationService {
             if let Some(storage) = owner.scope_set_storage {
                 storages.push(storage);
             }
-            contexts.push(
-                RequestContext::new(
-                    grant.issuer.clone(),
-                    scope.clone(),
-                    grant,
-                    RequestId::new(format!("request.multi-root.cas.{ordinal}")).ok()?,
-                    Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000)))
-                        .ok()?,
-                    CancellationContext::active(format!("cancel.multi-root.cas.{ordinal}")).ok()?,
-                )
-                .ok()?,
+            let context = RequestContext::new(
+                grant.issuer.clone(),
+                scope.clone(),
+                grant,
+                RequestId::new(format!("request.multi-root.cas.{ordinal}")).ok()?,
+                Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000))).ok()?,
+                CancellationContext::active(format!("cancel.multi-root.cas.{ordinal}")).ok()?,
+            )
+            .ok()?;
+            admissions.push(
+                tracedecay_application::AuthorizedRootAdmission::new(context, locator.clone())
+                    .ok()?,
             );
         }
-        let next = AuthorizedScopeSetAuthority::authorize(
+        let next = AuthorizedScopeSetAuthority::authorize_registered(
             request.scope_set_id,
             next_revision,
-            contexts,
+            admissions,
             &capability,
             &use_case,
             observed_at,
