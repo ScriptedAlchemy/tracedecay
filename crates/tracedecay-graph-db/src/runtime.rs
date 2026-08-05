@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::ErrorCode;
 use grafeo_engine::GrafeoDB;
+use grafeo_storage::file::GrafeoFileManager;
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLock, RwLock as ParkingRwLock};
 
@@ -33,6 +34,11 @@ pub struct GraphDb {
 
 pub struct GraphDbOwner {
     database: Arc<GraphDb>,
+}
+
+pub(crate) enum GraphDbFileState {
+    Existing,
+    Created,
 }
 
 pub(crate) struct Inner {
@@ -97,6 +103,14 @@ impl GraphDbOwner {
         GraphDb::open(options).map(|database| Self { database })
     }
 
+    pub(crate) fn open_with_file(
+        options: GraphDbOpenOptions,
+        file: std::fs::File,
+        state: GraphDbFileState,
+    ) -> Result<Self, GraphDbError> {
+        GraphDb::open_with_file(options, file, state).map(|database| Self { database })
+    }
+
     #[must_use]
     pub fn handle(&self) -> Arc<GraphDb> {
         Arc::clone(&self.database)
@@ -122,9 +136,38 @@ impl GraphDbOwner {
 
 impl GraphDb {
     fn open(options: GraphDbOpenOptions) -> Result<Arc<Self>, GraphDbError> {
-        let validated = options.validate()?;
-        let database = GrafeoDB::with_config(validated.config.clone())
+        Self::open_inner(options, None)
+    }
+
+    fn open_with_file(
+        options: GraphDbOpenOptions,
+        file: std::fs::File,
+        state: GraphDbFileState,
+    ) -> Result<Arc<Self>, GraphDbError> {
+        Self::open_inner(options, Some((file, state)))
+    }
+
+    fn open_inner(
+        options: GraphDbOpenOptions,
+        supplied_file: Option<(std::fs::File, GraphDbFileState)>,
+    ) -> Result<Arc<Self>, GraphDbError> {
+        let mut validated = options.validate()?;
+        let database = if let Some((file, state)) = supplied_file {
+            validated.preexisting_file = matches!(state, GraphDbFileState::Existing);
+            let path = validated.config.path.as_ref().ok_or_else(|| {
+                GraphDbError::invalid("an authoritative graph file requires persistent storage")
+            })?;
+            let file_manager = match state {
+                GraphDbFileState::Existing => GrafeoFileManager::open_with_file(path, file),
+                GraphDbFileState::Created => GrafeoFileManager::create_with_file(path, file),
+            }
             .map_err(|error| map_open_error(error, validated.preexisting_file))?;
+            GrafeoDB::with_config_and_file_manager(validated.config.clone(), file_manager)
+                .map_err(|error| map_open_error(error, validated.preexisting_file))?
+        } else {
+            GrafeoDB::with_config(validated.config.clone())
+                .map_err(|error| map_open_error(error, validated.preexisting_file))?
+        };
         validate_or_initialize_format(&database, &validated)?;
         let state = FormatState::load(&database)?;
         Ok(Arc::new(Self {

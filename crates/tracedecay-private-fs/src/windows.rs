@@ -202,7 +202,7 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
         path,
         PathKind::File,
         OPEN_EXISTING,
-        SECURITY_ACCESS | FILE_GENERIC_READ,
+        SECURITY_ACCESS | FILE_GENERIC_READ | FILE_GENERIC_WRITE,
         SHARE_READ_WRITE_DELETE,
     )
 }
@@ -242,13 +242,9 @@ pub fn create_private_file(path: &Path) -> io::Result<File> {
         PathKind::File,
         CREATE_NEW,
         SECURITY_ACCESS | FILE_GENERIC_READ | FILE_GENERIC_WRITE,
-        FILE_SHARE_READ,
+        SHARE_READ_WRITE_DELETE,
     )?;
-    if let Err(error) = validate_private_handle(&file, path, PathKind::File) {
-        drop(file);
-        let _ = std::fs::remove_file(path);
-        return Err(error);
-    }
+    validate_private_handle(&file, path, PathKind::File)?;
     Ok(file)
 }
 

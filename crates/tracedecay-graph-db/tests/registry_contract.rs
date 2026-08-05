@@ -465,7 +465,7 @@ fn symlinked_graph_file_is_rejected_before_open() {
 }
 
 #[test]
-fn close_and_reopen_preserve_cross_domain_traversal() {
+fn wal_disabled_exact_handle_reopens_cross_platform_without_sidecar() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
@@ -499,6 +499,12 @@ fn close_and_reopen_preserve_cross_domain_traversal() {
     drop(database);
 
     assert!(registry.close(&request).unwrap());
+    assert!(
+        !graph_path(temp.path())
+            .with_extension("grafeo.wal")
+            .exists(),
+        "WAL-disabled single-file storage must not create a pathname-owned sidecar"
+    );
     let reopened = registry.reopen(request).unwrap();
     let result = reopened
         .traverse(TraversalRequest {
@@ -633,27 +639,30 @@ fn cancelled_open_does_not_create_or_register_a_store() {
 }
 
 #[test]
-fn lifecycle_cancellation_after_file_initialization_rolls_back_the_file() {
+fn lifecycle_cancellation_after_file_creation_converges_ready() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
     let mut request = registration(store_identity.clone(), temp.path());
-    request.lifecycle_cancellation = Arc::new(CancelOnPoll {
+    let cancellation = Arc::new(CancelOnPoll {
         polls: AtomicUsize::new(0),
-        cancel_on: 2,
+        cancel_on: 3,
     });
+    request.lifecycle_cancellation = cancellation.clone();
 
-    assert_eq!(
-        registry.resolve(request).unwrap_err(),
-        GraphDbError::Cancelled
-    );
+    let database = registry.resolve(request).unwrap();
+    assert!(cancellation.is_cancelled());
     assert_eq!(
         registry
             .status(&registration(store_identity, temp.path()))
             .unwrap(),
-        None
+        Some(GraphDbRegistryStatus::Ready)
     );
-    assert!(!graph_path(temp.path()).exists());
+    assert!(
+        database.snapshot().is_ok(),
+        "creation is the non-cancellable registration linearization point"
+    );
+    assert!(graph_path(temp.path()).is_file());
 }
 
 #[cfg(unix)]

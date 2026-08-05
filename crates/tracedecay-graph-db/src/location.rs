@@ -110,10 +110,12 @@ impl GraphDbOpenOptions {
                         ));
                     }
                 };
+                let mut config = Config::persistent(path)
+                    .with_storage_format(StorageFormat::SingleFile)
+                    .with_wal_durability(durability);
+                config.wal_enabled = false;
                 Ok(ValidatedOpen {
-                    config: Config::persistent(path)
-                        .with_storage_format(StorageFormat::SingleFile)
-                        .with_wal_durability(durability),
+                    config,
                     durability: self.durability,
                     expected_format,
                     preexisting_file,
