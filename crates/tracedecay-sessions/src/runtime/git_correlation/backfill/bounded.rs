@@ -141,8 +141,9 @@ async fn backfill_one_bounded<S: GitCorrelationSessionStore>(
         return Err(BoundedSessionError::Skip(BackfillSkipReason::NotAWorktree));
     }
     let worktree_path = std::path::Path::new(row.project_path.trim());
-    let worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(worktree_path)
-        .ok_or(BoundedSessionError::Skip(BackfillSkipReason::NotAWorktree))?;
+    let worktree_root =
+        tracedecay_runtime_core::worktree::discover_git_worktree_root(worktree_path)
+            .ok_or(BoundedSessionError::Skip(BackfillSkipReason::NotAWorktree))?;
     let worktree = normalize_worktree(&worktree_root.to_string_lossy());
 
     let reflog = bounded_git_output(

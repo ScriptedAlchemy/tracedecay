@@ -43,14 +43,24 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
     // gix discovery walks up the same way `git rev-parse` does but without
     // a subprocess spawn. A discovered bare repo (no workdir) matches
     // `--show-toplevel` failing.
-    if let Ok(repo) = gix::discover(dir) {
-        return realpath(repo.workdir()?);
+    if let Some(worktree_root) = discover_git_worktree_root(dir) {
+        return Some(worktree_root);
     }
     if !git_may_resolve_repo(dir) {
         return None;
     }
     let trimmed = crate::git::git_capture(dir, &["rev-parse", "--show-toplevel"])?;
     realpath(Path::new(&trimmed))
+}
+
+/// Discovers a worktree root without invoking Git.
+///
+/// Bounded and cancellable callers use this authority so discovery cannot
+/// escape their subprocess deadline through [`git_worktree_root`]'s
+/// command-line fallback.
+pub fn discover_git_worktree_root(dir: &Path) -> Option<PathBuf> {
+    let repo = gix::discover(dir).ok()?;
+    realpath(repo.workdir()?)
 }
 
 /// Absolute, symlink-resolved path to the repository's git common directory.
