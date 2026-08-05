@@ -1,7 +1,7 @@
 use tracedecay_application::{
     ApplicationOperation, CancellationObservation, CancellationStage, EffectTermination,
     ReconciliationState, SourceEditAuthorizationPort, SourceEditEffectRequestV1, SourceEditRequest,
-    SourceEditVerificationStateV1, SourceEditVerificationV1, now_micros, source_edit_operation,
+    SourceEditVerificationV1, now_micros, source_edit_operation,
 };
 use tracedecay_domain::ManifestDigest;
 
