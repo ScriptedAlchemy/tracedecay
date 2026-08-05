@@ -238,6 +238,16 @@ pub enum RetrieverKind {
 }
 
 impl RetrieverKind {
+    pub const ALL_LANES: [Self; 7] = [
+        Self::ExactLiteral,
+        Self::Lexical,
+        Self::Semantic,
+        Self::Graph,
+        Self::Temporal,
+        Self::TaskSession,
+        Self::Diagnostic,
+    ];
+
     /// The lanes admitted to the query fallback subpayload.
     pub const QUERY_FALLBACK_LANES: [Self; 3] = [Self::ExactLiteral, Self::Lexical, Self::Graph];
 
@@ -1469,6 +1479,18 @@ mod tests {
 
     #[test]
     fn retriever_contract_names_every_runtime_lane() {
+        assert_eq!(
+            RetrieverKind::ALL_LANES,
+            [
+                RetrieverKind::ExactLiteral,
+                RetrieverKind::Lexical,
+                RetrieverKind::Semantic,
+                RetrieverKind::Graph,
+                RetrieverKind::Temporal,
+                RetrieverKind::TaskSession,
+                RetrieverKind::Diagnostic,
+            ],
+        );
         for (wire, expected) in [
             ("exact_literal", RetrieverKind::ExactLiteral),
             ("lexical", RetrieverKind::Lexical),

@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    ComponentRevision, EphemeralSanitizedQueryViewV1, PrincipalId, QueryMac,
-    QueryNormalizationRevision, RepositoryId, RetrievalCursorKeyId, RetrieverKind,
-    RetrieverOutcome, SanitizerRevision, TemporalModeV1,
+    CalibrationProfileId, ComponentRevision, EphemeralSanitizedQueryViewV1, PrincipalId,
+    PublicRetrieverStatus, QueryMac, QueryNormalizationRevision, RepositoryId,
+    RetrievalCursorKeyId, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, TemporalModeV1,
 };
 
 use super::{batch, composition_lanes, id, no_caps, profile, request};
@@ -58,6 +59,119 @@ fn empty_foreground_lanes() -> Vec<crate::retrieval::fusion::CompositionLaneInpu
             RetrieverOutcome::Complete(batch(Vec::new(), "graph")),
         ),
     ])
+}
+
+fn federated_authority() -> QueryAuthorityV1 {
+    let mut profile = profile();
+    profile.calibrations = RetrieverKind::ALL_LANES
+        .into_iter()
+        .map(|lane| {
+            (
+                lane,
+                id::<CalibrationProfileId>(&format!("calibration.{}.v1", lane.as_str())),
+            )
+        })
+        .collect();
+    profile.score_domain_calibrations = RetrieverKind::ALL_LANES
+        .into_iter()
+        .map(|lane| {
+            let score_domain = id::<ScoreDomainId>(&format!("score.{}.v1", lane.as_str()));
+            (
+                score_domain.clone(),
+                ScoreDomainCalibrationV1 {
+                    calibration_profile_id: id(&format!("calibration.{}.v1", lane.as_str())),
+                    score_domain,
+                    raw_min_micros: 0,
+                    raw_max_micros: 1_000_000,
+                },
+            )
+        })
+        .collect();
+    profile.weights_micros = RetrieverKind::ALL_LANES
+        .into_iter()
+        .map(|lane| (lane, 100_000))
+        .collect();
+    let request = request();
+    QueryAuthorityV1::new_federated(
+        profile,
+        no_caps(),
+        id::<ComponentRevision>("ranking.authority.v1"),
+        RetrievalCursorKeyringV1::new(
+            request.scope.privacy_domain,
+            id::<RetrievalCursorKeyId>("retrieval-key.authority.v1"),
+            1,
+            vec![7_u8; 32],
+            1_000_000,
+        )
+        .expect("keyring"),
+    )
+    .expect("federated authority")
+}
+
+fn empty_federated_lanes() -> Vec<crate::retrieval::fusion::CompositionLaneInput> {
+    composition_lanes(
+        RetrieverKind::ALL_LANES
+            .into_iter()
+            .map(|lane| {
+                (
+                    lane,
+                    RetrieverOutcome::Complete(batch(Vec::new(), lane.as_str())),
+                )
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn federated_authority_composes_every_lane_without_fallback_projection() {
+    let authority = federated_authority();
+    let request = request();
+    let authorized = authority
+        .compose_federated(&request, &query_view(), empty_federated_lanes(), 8, None)
+        .expect("federated composition");
+
+    assert_eq!(
+        authorized
+            .composition
+            .public_lane_statuses
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        RetrieverKind::ALL_LANES
+    );
+    assert!(
+        authorized
+            .composition
+            .public_lane_statuses
+            .values()
+            .all(|status| *status == PublicRetrieverStatus::Complete)
+    );
+    assert!(authorized.page.ranked_candidates.is_empty());
+    assert!(authorized.page.cursor.is_none());
+    assert_eq!(
+        authority.compose(&request, &query_view(), empty_foreground_lanes(), 8, None,),
+        Err(QueryAuthorityErrorV1::AuthorityModeMismatch)
+    );
+}
+
+#[test]
+fn federated_authority_rejects_missing_or_duplicate_lanes() {
+    let authority = federated_authority();
+    let request = request();
+    let query = query_view();
+    let mut missing = empty_federated_lanes();
+    missing.retain(|lane| lane.lane != RetrieverKind::Diagnostic);
+    assert_eq!(
+        authority.compose_federated(&request, &query, missing, 8, None),
+        Err(QueryAuthorityErrorV1::LaneSetMismatch)
+    );
+
+    let mut duplicate = empty_federated_lanes();
+    duplicate.push(duplicate[0].clone());
+    assert_eq!(
+        authority.compose_federated(&request, &query, duplicate, 8, None),
+        Err(QueryAuthorityErrorV1::LaneSetMismatch)
+    );
 }
 
 #[test]
