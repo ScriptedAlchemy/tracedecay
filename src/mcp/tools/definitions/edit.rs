@@ -493,83 +493,12 @@ pub(super) fn def_insert_at_symbol() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_api_migration_plan() -> ToolDefinition {
-    def(
-        "tracedecay_api_migration_plan",
-        "Plan API Migration",
-        "Build an immutable graph- and AST-backed API migration family. Operations are \
-         dependency ordered and typed: primary promotion, whole-definition replacement, \
-         bound-symbol rename, deliberate compatibility insertion, selected terminology, \
-         and protected stable-value assertions. The result reports every exact caller/site \
-         as changed, unchanged, skipped, or blocked and includes the digest consumed by apply.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "family_id": {
-                    "type": "string",
-                    "minLength": 1
-                },
-                "operations": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 256,
-                    "items": {
-                        "type": "object"
-                    }
-                }
-            },
-            "required": ["family_id", "operations"]
-        }),
-    )
-}
-
-pub(super) fn def_api_migration_apply() -> ToolDefinition {
-    def_rw(
-        "tracedecay_api_migration_apply",
-        "Apply API Migration",
-        "Dry-run or atomically apply the exact immutable API migration plan returned by \
-         tracedecay_api_migration_plan. Apply revalidates the plan digest, HEAD, graph-backed \
-         identities, every file preimage, and protected values before writes. Cancellation, \
-         publication failure, graph-refresh failure, or requested diagnostic failure restores \
-         every changed file. Temporary compatibility aliases remain for PR19.",
-        {
-            let mut schema = source_edit_schema(json!({
-                "type": "object",
-                "properties": {
-                    "plan": {
-                        "type": "object",
-                        "description": "Exact immutable plan returned by tracedecay_api_migration_plan."
-                    },
-                    "plan_digest": {
-                        "type": "string",
-                        "pattern": "^sha256:[0-9a-f]{64}$"
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "description": "Revalidate and preview with zero writes (default: true)."
-                    },
-                    "verify": {
-                        "type": "boolean",
-                        "description": "Run diagnostics for every changed file and roll back unless clean (default: true)."
-                    }
-                },
-                "required": ["plan", "plan_digest"]
-            }));
-            schema["properties"]["dry_run"]["default"] = json!(true);
-            schema["properties"]["verify"]["default"] = json!(true);
-            schema["allOf"][0]["if"]["required"] = json!(["dry_run"]);
-            schema
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tracedecay_application::SourceEditKind;
 
-    fn source_edit_definitions() -> [(ToolDefinition, SourceEditKind); 8] {
+    fn source_edit_definitions() -> [(ToolDefinition, SourceEditKind); 7] {
         [
             (def_str_replace(), SourceEditKind::StrReplace),
             (def_multi_str_replace(), SourceEditKind::MultiStrReplace),
@@ -578,7 +507,6 @@ mod tests {
             (def_replace_symbol(), SourceEditKind::ReplaceSymbol),
             (def_insert_at_symbol(), SourceEditKind::InsertAtSymbol),
             (def_move_symbol(), SourceEditKind::MoveSymbol),
-            (def_api_migration_apply(), SourceEditKind::ApiMigrationApply),
         ]
     }
 
@@ -599,10 +527,7 @@ mod tests {
             );
             assert_eq!(
                 schema["properties"]["dry_run"]["default"],
-                json!(matches!(
-                    kind,
-                    SourceEditKind::MoveSymbol | SourceEditKind::ApiMigrationApply
-                ))
+                json!(matches!(kind, SourceEditKind::MoveSymbol))
             );
         }
     }

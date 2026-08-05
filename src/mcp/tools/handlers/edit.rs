@@ -3,9 +3,8 @@
 
 use serde_json::{Value, json};
 use tracedecay_application::{
-    ApiMigrationPlanRequestV1, ApiMigrationPlanV1, CancellationSignal, Deadline, EffectId,
-    IdempotencyKey, RequestId, SourceEditKind, SourceEditReconciliationDispositionV1,
-    SourceEditRequest,
+    CancellationSignal, Deadline, EffectId, IdempotencyKey, RequestId, SourceEditKind,
+    SourceEditReconciliationDispositionV1, SourceEditRequest,
 };
 use tracedecay_domain::ManifestDigest;
 
@@ -490,60 +489,6 @@ pub(super) async fn handle_ast_grep_rewrite(
     .await
 }
 
-pub(super) async fn handle_api_migration_plan(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let request = serde_json::from_value::<ApiMigrationPlanRequestV1>(json!({
-        "family_id": required_str(&args, "family_id")?,
-        "operations": required_array(&args, "operations")?,
-    }))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("invalid API migration plan request: {error}"),
-    })?;
-    let plan = crate::application::api_migration::plan_api_migration(cg, request).await?;
-    let value = serde_json::to_value(&plan).map_err(|error| TraceDecayError::Config {
-        message: format!("cannot render API migration plan: {error}"),
-    })?;
-    let touched_files = plan
-        .files
-        .iter()
-        .map(|file| file.path.clone())
-        .collect::<Vec<_>>();
-    Ok(
-        generic_tool_result(Some(cg.project_root()), &args, &value, touched_files)
-            .with_semantic_error(plan.blocked),
-    )
-}
-
-pub(super) async fn handle_api_migration_apply(
-    cg: &TraceDecay,
-    args: Value,
-    invocation: SourceEditInvocationContext,
-) -> Result<ToolResult> {
-    let plan = serde_json::from_value::<ApiMigrationPlanV1>(
-        args.get("plan")
-            .cloned()
-            .ok_or_else(|| missing_required_param("plan"))?,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("invalid API migration plan: {error}"),
-    })?;
-    let plan_digest = ManifestDigest::new(required_str(&args, "plan_digest")?)
-        .map_err(source_edit_identity_error)?;
-    let dry_run = args.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
-    let verify = args.get("verify").and_then(Value::as_bool).unwrap_or(true);
-    source_edit_tool_result(
-        cg,
-        &args,
-        SourceEditRequest::ApiMigrationApply {
-            plan,
-            plan_digest,
-            dry_run,
-            verify,
-        },
-        invocation,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -580,19 +525,6 @@ mod tests {
 
     fn digest(value: &str) -> ManifestDigest {
         ManifestDigest::new(value).unwrap()
-    }
-
-    fn api_migration_plan() -> ApiMigrationPlanV1 {
-        ApiMigrationPlanV1 {
-            family_id: "family.mcp-route".to_owned(),
-            repository_revision: "HEAD".to_owned(),
-            graph_revision: digest(EXPECTED_STATE),
-            operations: Vec::new(),
-            sites: Vec::new(),
-            files: Vec::new(),
-            blocked: false,
-            plan_digest: digest(PREDICTED_STATE),
-        }
     }
 
     async fn fixture_graph(project_root: &Path) -> (TraceDecay, crate::db::DaemonDatabaseScope) {
@@ -740,7 +672,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eight_source_edit_handlers_forward_exact_variants_defaults_and_controls() {
+    async fn seven_source_edit_handlers_forward_exact_variants_defaults_and_controls() {
         let project = tempdir().unwrap();
         let (graph, _database_scope) = fixture_graph(project.path()).await;
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -791,17 +723,6 @@ mod tests {
         handle_move_symbol(
             &graph,
             json!({"symbol":"old","dest_file":"src/new.rs"}),
-            invocation_context(Some(Arc::clone(&executor))),
-        )
-        .await
-        .unwrap();
-        let plan = api_migration_plan();
-        handle_api_migration_apply(
-            &graph,
-            json!({
-                "plan": plan,
-                "plan_digest": PREDICTED_STATE
-            }),
             invocation_context(Some(executor)),
         )
         .await
@@ -820,7 +741,6 @@ mod tests {
                 SourceEditKind::ReplaceSymbol,
                 SourceEditKind::InsertAtSymbol,
                 SourceEditKind::MoveSymbol,
-                SourceEditKind::ApiMigrationApply,
             ]
         );
         assert!(seen.iter().all(|invocation| invocation.edit.dry_run()));
@@ -846,16 +766,6 @@ mod tests {
                 update_references: false,
                 ..
             }
-        ));
-        assert!(matches!(
-            &seen[7].edit,
-            SourceEditRequest::ApiMigrationApply {
-                plan,
-                plan_digest,
-                dry_run: true,
-                verify: true,
-            } if plan.family_id == "family.mcp-route"
-                && &plan.plan_digest == plan_digest
         ));
         for invocation in seen.iter() {
             assert_eq!(

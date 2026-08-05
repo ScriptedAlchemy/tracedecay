@@ -530,7 +530,6 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
         def_hotspots(),
         def_similar(),
         def_rename_preview(),
-        def_api_migration_plan(),
         def_unused_imports(),
         def_rank(),
         def_largest(),
@@ -609,7 +608,6 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
         def_replace_symbol(),
         def_insert_at_symbol(),
         def_move_symbol(),
-        def_api_migration_apply(),
         def_source_edit_reconcile(),
         def_find_exact_symbol(),
     ];
@@ -868,8 +866,6 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_replace_symbol",
     "tracedecay_move_symbol",
     "tracedecay_ast_grep_rewrite",
-    "tracedecay_api_migration_plan",
-    "tracedecay_api_migration_apply",
     "tracedecay_source_edit_reconcile",
     // git & info
     "tracedecay_branch_list",

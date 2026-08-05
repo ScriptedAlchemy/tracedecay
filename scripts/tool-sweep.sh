@@ -308,8 +308,6 @@ source_lines|read|{"file":"@FILE","span":{"start_byte":0,"end_byte":512},"meta":
 source_outline|read|{"file":"@FILE"}
 test_results|read|{}
 # edit
-api_migration_apply|mutate|{"plan":{},"plan_digest":"0"}
-api_migration_plan|preview|{"family_id":"sweep","operations":[]}
 ast_grep_rewrite|mutate|{"path":"@FILE","pattern":"$A + $B","rewrite":"$B + $A","dry_run":true}
 insert_at|mutate|{"path":"@FILE","anchor":"@SYMBOL","content":"","dry_run":true}
 insert_at_symbol|mutate|{"symbol":"@SYMBOL","content":"","dry_run":true}
