@@ -64,11 +64,8 @@ pub(super) async fn execute_workflow_application(
     };
     let services = match registered.database.workflow_application_services() {
         Ok(services) => services,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
+        Err(error) => {
+            return DaemonInvocationResponse::problem(request_id, workflow_storage_problem(&error));
         }
     };
 
@@ -496,6 +493,17 @@ fn workflow_effect_operation(operation_key: &str) -> Option<WorkflowEffectOperat
     }
 }
 
+fn workflow_storage_problem(error: &crate::errors::TraceDecayError) -> DaemonInvocationProblem {
+    match error {
+        crate::errors::TraceDecayError::ResetRequired { authority, .. }
+            if authority == "workflow" =>
+        {
+            DaemonInvocationProblem::ResetRequired
+        }
+        _ => DaemonInvocationProblem::Unavailable,
+    }
+}
+
 fn workflow_effect_problem(problem: DaemonInvocationProblem) -> WorkflowEffectProblemV1 {
     match problem {
         DaemonInvocationProblem::NotFoundOrNotAuthorized => {
@@ -797,6 +805,16 @@ mod workflow_effect_receipt_tests {
         assert_eq!(
             workflow_effect_terminal_observation(EffectTermination::Completed, observed_at),
             None
+        );
+    }
+
+    #[test]
+    fn workflow_reset_refusal_remains_a_daemon_reset_problem() {
+        let error =
+            crate::errors::TraceDecayError::reset_required("workflow", "partial workflow schema");
+        assert_eq!(
+            workflow_storage_problem(&error),
+            DaemonInvocationProblem::ResetRequired
         );
     }
 }
