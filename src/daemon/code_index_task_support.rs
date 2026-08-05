@@ -41,7 +41,47 @@ pub(super) fn code_index_search_hydration_budget(
     accepted_semantic_budget.copied().unwrap_or(*query_budget)
 }
 
-pub(super) async fn settle_owned_blocking_task<T, O>(
+pub(super) async fn generation_for_hydration(
+    schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    scope: &tracedecay_application::ResolvedScope,
+    generation_id: &tracedecay_domain::CodeGenerationId,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<
+    code_index_scheduler::LatestCompleteCodeIndexV1,
+    tracedecay_query::code_search::CodeIndexSearchOutcomeV1,
+> {
+    let generation = schedulers
+        .generation_for_controlled(
+            scope,
+            generation_id,
+            Some(
+                code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
+                    deadline,
+                    cancellation,
+                },
+            ),
+        )
+        .await;
+    match generation {
+        Ok(Some(generation)) => Ok(generation),
+        Ok(None) => Err(code_index_search_unavailable_for_generation(
+            Some(generation_id.as_str().to_owned()),
+            tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+            "generation_changed_before_hydration",
+        )),
+        Err(reason) => {
+            let semantic_reason = reason.as_str();
+            Err(code_index_search_unavailable_for_generation(
+                Some(generation_id.as_str().to_owned()),
+                reason,
+                semantic_reason,
+            ))
+        }
+    }
+}
+
+pub(crate) async fn settle_owned_blocking_task<T, O>(
     mut task: tokio::task::JoinHandle<T>,
     poll_interval: std::time::Duration,
     mut termination: impl FnMut() -> Option<O>,

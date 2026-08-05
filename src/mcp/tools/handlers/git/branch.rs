@@ -35,7 +35,13 @@ where
     let permit = Arc::clone(&BRANCH_REF_READ_ADMISSION)
         .try_acquire_owned()
         .map_err(|_| BranchRouteReadErrorV1::Capacity)?;
-    tokio::task::spawn_blocking(move || {
+    let terminal_control = crate::branch::LocalBranchReadControlV1 {
+        max_refs,
+        after: after.clone(),
+        deadline: deadline.clone(),
+        cancellation: cancellation.clone(),
+    };
+    let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         operation(
             &project_root,
@@ -47,9 +53,22 @@ where
             },
         )
         .map_err(BranchRouteReadErrorV1::Ref)
-    })
+    });
+    match crate::daemon::code_index_task_support::settle_owned_blocking_task(
+        task,
+        std::time::Duration::from_millis(10),
+        || {
+            terminal_control
+                .termination()
+                .map(BranchRouteReadErrorV1::Ref)
+        },
+    )
     .await
-    .map_err(|_| BranchRouteReadErrorV1::Task)?
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(BranchRouteReadErrorV1::Task),
+        Err(reason) => Err(reason),
+    }
 }
 
 fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
@@ -706,5 +725,42 @@ mod tests {
 
         assert!(matches!(result, Err(BranchRouteReadErrorV1::Capacity)));
         drop((first, second));
+    }
+
+    #[tokio::test]
+    async fn cancelled_branch_ref_read_owns_worker_until_settlement() {
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("branch-ref-owned-settlement")
+                .expect("cancellation");
+        let worker_cancellation = cancellation.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut read = tokio::spawn(run_branch_ref_read(
+            std::path::PathBuf::from("/fixture"),
+            1,
+            None,
+            None,
+            Some(worker_cancellation),
+            move |_root, _control| {
+                started_tx.send(()).expect("worker started");
+                release_rx.recv().expect("release worker");
+                Ok(())
+            },
+        ));
+        started_rx.await.expect("blocking worker started");
+        cancellation.cancel(tracedecay_application::clock::now_micros());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut read)
+                .await
+                .is_err(),
+            "cancellation observation must not detach the blocking ref worker"
+        );
+        release_tx.send(()).expect("release blocking worker");
+        assert!(matches!(
+            read.await.expect("branch read task"),
+            Err(BranchRouteReadErrorV1::Ref(
+                crate::branch::LocalBranchSnapshotErrorV1::Cancelled
+            ))
+        ));
     }
 }

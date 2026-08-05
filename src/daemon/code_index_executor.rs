@@ -1,8 +1,4 @@
 //! Code-index MCP search executor with its hydration and display helpers.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic,
-//! signatures, or behavior changed. `use super::*` re-exposes every name the
-//! parent `daemon` module had in scope so the moved code resolves unchanged.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +11,7 @@ use super::{
 use code_index_task_support::{
     code_index_scope_unavailable, code_index_search_hydration_budget,
     code_index_search_unavailable, code_index_search_unavailable_for_generation,
+    generation_for_hydration,
 };
 
 const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize = 1;
@@ -720,15 +717,17 @@ pub(super) fn code_index_search_executor(
                     None,
                 ),
             };
-            let Some(latest) = schedulers
-                .generation_for(&terminal_scope, &executed.query.generation)
-                .await
-            else {
-                return code_index_search_unavailable_for_generation(
-                    Some(executed.query.generation.as_str().to_owned()),
-                    code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-                    "generation_changed_before_hydration",
-                );
+            let latest = match generation_for_hydration(
+                &schedulers,
+                &terminal_scope,
+                &executed.query.generation,
+                control.deadline.clone(),
+                control.cancellation.clone(),
+            )
+            .await
+            {
+                Ok(latest) => latest,
+                Err(outcome) => return outcome,
             };
             let mut hydration_request = executed.query.sanitized.request().clone();
             let hydration_budget = code_index_search_hydration_budget(

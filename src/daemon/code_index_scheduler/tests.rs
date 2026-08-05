@@ -226,13 +226,23 @@ fn retention_generations(
 }
 
 fn remove_historical_pointer_entries(store_root: &Path) {
+    use crate::retention::code_index_generations::durable_generation_index_digest;
+
     let pointer_path = store_root.join("active-code-generation-v1.json");
     let mut pointer: crate::retention::code_index_generations::DurablePublicationPointerV1 =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read publication pointer"))
             .expect("decode publication pointer");
-    pointer.generation_index.clear();
-    pointer.generation_index_truncated = false;
-    pointer.generation_index_digest = None;
+    pointer
+        .generation_index
+        .retain(|entry| entry.generation_id == pointer.generation_id);
+    pointer.generation_index_truncated = true;
+    pointer.generation_index_digest = Some(
+        durable_generation_index_digest(
+            &pointer.generation_index,
+            pointer.generation_index_truncated,
+        )
+        .expect("digest active-only publication index"),
+    );
     std::fs::write(
         pointer_path,
         serde_json::to_vec(&pointer).expect("encode legacy publication pointer"),
@@ -280,6 +290,90 @@ fn code_generation_retention_preserves_every_pointer_addressable_generation() {
 }
 
 #[test]
+fn bounded_pointer_history_collects_evicted_clean_and_dirty_generations() {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        DurablePublicationPointerV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
+        MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, run_code_generation_retention,
+    };
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let generations = retention_generations(
+        &fixture,
+        store.path(),
+        MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 + 3,
+    );
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(store.path().join("active-code-generation-v1.json"))
+            .expect("read bounded publication pointer"),
+    )
+    .expect("decode bounded publication pointer");
+
+    assert!(pointer.generation_index_truncated);
+    assert_eq!(
+        pointer.generation_index.len(),
+        MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1
+    );
+    assert!(
+        pointer
+            .generation_index
+            .iter()
+            .map(|entry| entry.size_bytes)
+            .sum::<u64>()
+            <= MAX_DURABLE_GENERATION_INDEX_BYTES_V1
+    );
+    assert!(
+        pointer
+            .generation_index
+            .iter()
+            .any(|entry| entry.source_reference.is_none()),
+        "dirty snapshots must consume the same retained-history budget"
+    );
+
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(50),
+    )
+    .expect("collect generations evicted from bounded history");
+    assert_eq!(
+        report.deleted_generations.len(),
+        generations.len() - pointer.generation_index.len()
+    );
+
+    let reopened = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let retained = pointer
+        .generation_index
+        .iter()
+        .map(|entry| entry.generation_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for generation in &generations {
+        assert_eq!(
+            reopened
+                .publication
+                .load_generation(generation)
+                .expect("read bounded generation")
+                .is_some(),
+            retained.contains(generation.as_str()),
+            "only pointer-addressable generations may survive collection"
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(store.path().join("code-generations-v1"))
+            .expect("list retained generations")
+            .count(),
+        pointer.generation_index.len()
+    );
+}
+
+#[test]
 fn code_generation_retention_dry_run_reports_without_deleting() {
     use crate::retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
@@ -301,10 +395,15 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
     .expect("plan retention");
 
     assert_eq!(report.plan.superseded_generations.len(), 4);
-    assert_eq!(report.plan.collectable_generations.len(), 1);
+    assert_eq!(report.plan.collectable_generations.len(), 4);
     assert_eq!(
-        report.plan.collectable_generations[0].generation_id,
-        generations[0]
+        report
+            .plan
+            .collectable_generations
+            .iter()
+            .map(|generation| generation.generation_id.clone())
+            .collect::<BTreeSet<_>>(),
+        generations[..4].iter().cloned().collect()
     );
     println!(
         "dry_run superseded_count={} superseded_bytes={} collectable_count={} collectable_bytes={} deleted_count={}",
@@ -367,8 +466,18 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
             .iter()
             .all(|generation| generation.generation_id != generations[0])
     );
-    assert_eq!(report.deleted_generations.len(), 1);
-    assert_eq!(report.deleted_generations[0].generation_id, generations[1]);
+    assert_eq!(report.deleted_generations.len(), 4);
+    assert_eq!(
+        report
+            .deleted_generations
+            .iter()
+            .map(|generation| generation.generation_id.clone())
+            .collect::<BTreeSet<_>>(),
+        generations[1..generations.len() - 1]
+            .iter()
+            .cloned()
+            .collect()
+    );
 }
 
 #[test]
@@ -393,10 +502,14 @@ fn code_generation_retention_emits_durable_reclaim_receipt() {
     .expect("apply retention");
 
     let receipt = report.receipt.expect("applied reclaim receipt");
-    assert_eq!(receipt.deleted_generations.len(), 1);
+    assert_eq!(receipt.deleted_generations.len(), 4);
     assert_eq!(
         receipt.reclaimed_bytes,
-        receipt.deleted_generations[0].size_bytes
+        receipt
+            .deleted_generations
+            .iter()
+            .map(|generation| generation.size_bytes)
+            .sum::<u64>()
     );
     assert!(
         store
@@ -407,8 +520,8 @@ fn code_generation_retention_emits_durable_reclaim_receipt() {
     );
     let observed =
         observe_code_generation_retention(store.path()).expect("observe retained generations");
-    assert_eq!(observed.superseded_generation_count, 3);
-    assert!(observed.superseded_generation_bytes > 0);
+    assert_eq!(observed.superseded_generation_count, 0);
+    assert_eq!(observed.superseded_generation_bytes, 0);
 }
 
 // --- Code-index scope-root reconciliation ----------------------------------
@@ -679,6 +792,7 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
     let store = TempDir::new().expect("store root");
     retention_generations(&fixture, store.path(), 4);
+    remove_historical_pointer_entries(store.path());
     // Sparse growth: the manifest prefix each generation is read through is
     // untouched, only the on-disk size a byte budget would have measured.
     for entry in std::fs::read_dir(store.path().join("code-generations-v1"))
@@ -691,6 +805,23 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
             .expect("open sealed generation");
         file.set_len(ONE_GIB).expect("grow sealed generation");
     }
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let mut pointer: crate::retention::code_index_generations::DurablePublicationPointerV1 =
+        serde_json::from_slice(&std::fs::read(&pointer_path).expect("read publication pointer"))
+            .expect("decode publication pointer");
+    pointer.generation_index[0].size_bytes = ONE_GIB;
+    pointer.generation_index_digest = Some(
+        crate::retention::code_index_generations::durable_generation_index_digest(
+            &pointer.generation_index,
+            pointer.generation_index_truncated,
+        )
+        .expect("digest sparse publication index"),
+    );
+    std::fs::write(
+        pointer_path,
+        serde_json::to_vec(&pointer).expect("encode sparse publication pointer"),
+    )
+    .expect("write sparse publication pointer");
 
     let plan = plan_code_generation_retention_with_verification(
         store.path(),

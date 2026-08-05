@@ -40,7 +40,7 @@ pub(in crate::daemon) struct BranchGenerationPairV1 {
 }
 
 impl DaemonCodeIndexPublicationStoreV1 {
-    fn exact_read_error(
+    pub(super) fn exact_read_error(
         error: crate::code_index::production::CodeIndexPublicationStoreErrorV1,
     ) -> CodeIndexSearchUnavailableReasonV1 {
         match error {
@@ -182,8 +182,9 @@ impl CodeIndexSchedulerRegistryV1 {
         let head_revision = head_revision.clone();
         let head_tree = head_tree.clone();
         let scope = scope.clone();
-        crate::daemon::park_admission(tokio::task::spawn_blocking(move || {
-            let scheduler = match scheduler.try_lock() {
+        let terminal_control = control.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let mut scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
                 Err(TryLockError::WouldBlock) => {
                     return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
@@ -192,7 +193,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     return Err(CodeIndexSearchUnavailableReasonV1::Internal);
                 }
             };
-            let (base, head) = scheduler.publication.revisions(
+            let revisions = scheduler.publication.revisions(
                 &base_reference,
                 &base_revision,
                 &base_tree,
@@ -200,18 +201,75 @@ impl CodeIndexSchedulerRegistryV1 {
                 &head_revision,
                 &head_tree,
                 &control,
-            )?;
+            );
+            let (base, head) = match revisions {
+                Ok(generations) => generations,
+                Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable) => {
+                    scheduler.publish_exact_git_tree_generation(
+                        &super::git_tree_capture::ExactGitTreeSourceV1 {
+                            reference: base_reference.clone(),
+                            revision: tracedecay_domain::CommitId::new(
+                                base_revision.as_str().to_owned(),
+                            )
+                            .map_err(|_| CodeIndexSearchUnavailableReasonV1::InvalidRequest)?,
+                            tree: tracedecay_domain::TreeId::new(base_tree.as_str().to_owned())
+                                .map_err(|_| CodeIndexSearchUnavailableReasonV1::InvalidRequest)?,
+                        },
+                        &control,
+                    )?;
+                    if base_reference != head_reference
+                        || base_revision != head_revision
+                        || base_tree != head_tree
+                    {
+                        scheduler.publish_exact_git_tree_generation(
+                            &super::git_tree_capture::ExactGitTreeSourceV1 {
+                                reference: head_reference.clone(),
+                                revision: tracedecay_domain::CommitId::new(
+                                    head_revision.as_str().to_owned(),
+                                )
+                                .map_err(|_| CodeIndexSearchUnavailableReasonV1::InvalidRequest)?,
+                                tree: tracedecay_domain::TreeId::new(head_tree.as_str().to_owned())
+                                    .map_err(|_| {
+                                        CodeIndexSearchUnavailableReasonV1::InvalidRequest
+                                    })?,
+                            },
+                            &control,
+                        )?;
+                    }
+                    scheduler.publication.revisions(
+                        &base_reference,
+                        &base_revision,
+                        &base_tree,
+                        &head_reference,
+                        &head_revision,
+                        &head_tree,
+                        &control,
+                    )?
+                }
+                Err(reason) => return Err(reason),
+            };
             let base = scheduler.bind_latest_complete(base);
             let head = scheduler.bind_latest_complete(head);
-            if !Self::latest_matches_scope(&base, &scope)
-                || !Self::latest_matches_scope(&head, &scope)
+            if !Self::latest_matches_scope_identity(&base, &scope)
+                || !Self::latest_matches_scope_identity(&head, &scope)
             {
                 return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
             }
             Ok(BranchGenerationPairV1 { base, head })
-        }))
+        });
+        match crate::daemon::park_admission(
+            crate::daemon::code_index_task_support::settle_owned_blocking_task(
+                task,
+                std::time::Duration::from_millis(10),
+                || terminal_control.termination(),
+            ),
+        )
         .await
-        .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(CodeIndexSearchUnavailableReasonV1::Internal),
+            Err(reason) => Err(reason),
+        }
     }
 }
 
@@ -411,6 +469,7 @@ mod tests {
         .await
         .expect("bounded exact-generation read")
         .expect("both clean commit generations");
+        let base_generation_id = pair.base.generation().manifest().generation_id.clone();
         assert!(matches!(
             registry
                 .generations_for_revisions(
@@ -557,6 +616,137 @@ mod tests {
                 .await,
             Err(CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired)
         ));
+        assert!(matches!(
+            registry.generation_for(&scope, &base_generation_id).await,
+            Err(CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn non_checked_out_refs_are_indexed_from_immutable_git_trees() {
+        let project = TempDir::new().expect("project");
+        let store = TempDir::new().expect("store");
+        git(project.path(), &["init", "-q", "-b", "main"]);
+        git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+        git(
+            project.path(),
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn main_tree_value() -> usize { 1 }\n",
+        )
+        .expect("main source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "main"]);
+        let main_revision =
+            GitOidV1::new(git(project.path(), &["rev-parse", "HEAD"])).expect("main revision");
+        let main_tree =
+            GitOidV1::new(git(project.path(), &["rev-parse", "HEAD^{tree}"])).expect("main tree");
+
+        git(project.path(), &["checkout", "-qb", "feature"]);
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn feature_tree_value() -> usize { 2 }\n",
+        )
+        .expect("feature source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "feature"]);
+        let feature_revision =
+            GitOidV1::new(git(project.path(), &["rev-parse", "HEAD"])).expect("feature revision");
+        let feature_tree = GitOidV1::new(git(project.path(), &["rev-parse", "HEAD^{tree}"]))
+            .expect("feature tree");
+        git(project.path(), &["checkout", "-q", "main"]);
+
+        let project_id = ProjectId::new("project.non-checked-out-refs").expect("project id");
+        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
+        let scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id.clone(),
+            &canonical_project,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open scheduler");
+        drop(scheduler);
+
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn dirty_worktree_value() -> usize { 3 }\n",
+        )
+        .expect("dirty worktree source");
+
+        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        registry
+            .mount_worktree(
+                project_id.clone(),
+                &canonical_project,
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("mount sealed store");
+        let identity = super::super::identity::IndexingIdentityV1::resolve(&canonical_project)
+            .expect("indexing identity");
+        let main_reference =
+            tracedecay_domain::RefId::new("refs/heads/main").expect("main reference");
+        let feature_reference =
+            tracedecay_domain::RefId::new("refs/heads/feature").expect("feature reference");
+        let scope = ResolvedScope::new(
+            project_id,
+            identity.repository_id().clone(),
+            identity.worktree_id().clone(),
+            Some(main_reference.clone()),
+        )
+        .expect("resolved scope");
+        let control = BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        };
+
+        let pair = registry
+            .generations_for_revisions(
+                &scope,
+                &main_reference,
+                &main_revision,
+                &main_tree,
+                &feature_reference,
+                &feature_revision,
+                &feature_tree,
+                control.clone(),
+            )
+            .await
+            .expect("exact generations for both refs");
+        assert_eq!(
+            pair.base.generation().snapshot().reference.as_ref(),
+            Some(&main_reference)
+        );
+        assert_eq!(
+            pair.head.generation().snapshot().reference.as_ref(),
+            Some(&feature_reference)
+        );
+        let main_symbols =
+            generation_symbols(pair.base.generation(), None, None, &control).expect("main symbols");
+        let feature_symbols = generation_symbols(pair.head.generation(), None, None, &control)
+            .expect("feature symbols");
+        assert!(
+            main_symbols
+                .iter()
+                .any(|symbol| symbol.name == "main_tree_value")
+        );
+        assert!(
+            feature_symbols
+                .iter()
+                .any(|symbol| symbol.name == "feature_tree_value")
+        );
+        assert!(
+            main_symbols
+                .iter()
+                .chain(feature_symbols.iter())
+                .all(|symbol| symbol.name != "dirty_worktree_value"),
+            "exact generations must read immutable commit-tree blobs, not dirty worktree bytes"
+        );
     }
 
     #[tokio::test]

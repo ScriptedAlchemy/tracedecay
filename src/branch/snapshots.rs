@@ -13,7 +13,7 @@ pub struct LocalBranchReadControlV1 {
 }
 
 impl LocalBranchReadControlV1 {
-    fn termination(&self) -> Option<LocalBranchSnapshotErrorV1> {
+    pub(crate) fn termination(&self) -> Option<LocalBranchSnapshotErrorV1> {
         if self
             .cancellation
             .as_ref()
