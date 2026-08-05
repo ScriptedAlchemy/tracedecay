@@ -108,8 +108,7 @@ impl<'a> ProjectProviderRun<'a> {
                     remaining = remaining.saturating_sub(progress.bytes_consumed);
                 }
                 Err(error) => {
-                    if let Some(cancelled) =
-                        cancelled_provider_outcome(Some(&error), self.cancellation)
+                    if let Some(cancelled) = cancelled_provider_outcome(&error)
                     {
                         return cancelled;
                     }
@@ -156,8 +155,7 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
             ),
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 ProviderRunOutcome::failed(
@@ -199,8 +197,7 @@ impl<'a> ProjectProviderRun<'a> {
                 run
             }
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 let mut run = ProviderRunOutcome::failed(
@@ -263,8 +260,7 @@ impl<'a> ProjectProviderRun<'a> {
                 run
             }
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 let mut run = ProviderRunOutcome::failed(
@@ -323,8 +319,7 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
             ),
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 let failure =
@@ -360,8 +355,7 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.deferred || outcome.bytes_consumed > self.max_new_bytes,
             ),
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 ProviderRunOutcome::failed(
@@ -401,9 +395,7 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome
             }
             Err(error) => {
-                if let Some(cancelled) =
-                    cancelled_claude_provider_outcome(&error, self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
                     return cancelled;
                 }
                 let failure = claude_catch_up_failure("observation", &error);
@@ -466,8 +458,7 @@ impl<'a> ProjectProviderRun<'a> {
                 ));
             }
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 outcome.add_failure(warn_transcript_catch_up_failure(
