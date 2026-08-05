@@ -88,6 +88,26 @@ fn repository_mutation_capacity_fails_closed_before_waiting() {
 }
 
 #[test]
+fn completed_repository_mutation_gates_are_reclaimed() {
+    let queue = RepositoryMutationQueue::default();
+    for index in 0..256 {
+        let repository =
+            RepositoryId::new(format!("repository.reclaimed.{index}")).expect("repository id");
+        queue
+            .with_repository(&repository, || ())
+            .expect("repository mutation");
+    }
+
+    assert_eq!(
+        queue
+            .retained_gate_count_for_test()
+            .expect("repository gate count"),
+        0,
+        "completed repository identities must not grow daemon memory without bound"
+    );
+}
+
+#[test]
 fn queued_repository_mutation_observes_live_cancellation() {
     let queue = Arc::new(RepositoryMutationQueue::default());
     let repository = RepositoryId::new("repository.cancellation").expect("repository id");
