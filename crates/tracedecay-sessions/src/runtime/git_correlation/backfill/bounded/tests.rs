@@ -366,6 +366,119 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
 }
 
 #[tokio::test]
+async fn publish_verification_restart_rejects_same_path_repository_replacement() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let control =
+        BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10));
+    let row = SessionActivityRow {
+        provider: "codex".to_string(),
+        session_id: "session-1".to_string(),
+        project_path: repository.path().to_str().unwrap().to_string(),
+        started_at: Some(0),
+        ended_at: Some(i64::MAX),
+        message_min_ts: None,
+        message_max_ts: None,
+    };
+    let cursor = native::initialize_reflog_cursor(repository.path(), i64::MAX, &control).unwrap();
+    let key = GitHistoryProgressKey { source_rowid: 1 };
+    let mut progress = progress_from_cursor(key, i64::MAX, &row, 0, i64::MAX, cursor).unwrap();
+    progress.scan_mode = GitHistoryScanMode::Graph;
+    progress.capture_target_offset = Some(progress.reflog_byte_offset);
+    progress.verify_byte_offset = progress.reflog_byte_offset;
+    progress.verify_digest.clone_from(&progress.reflog_digest);
+    progress.segment_cursor = 1;
+    history_progress::insert_progress(&store.connection, &progress)
+        .await
+        .unwrap();
+    history_progress::upsert_segment(
+        &store.connection,
+        &GitHistorySegmentRow {
+            key,
+            ordinal: 0,
+            branch: Some("main".to_string()),
+            start_ts: 0,
+            end_ts: i64::MAX,
+            tip_oid: progress.segment_tip_oid.clone(),
+            applied: true,
+            completed: true,
+        },
+    )
+    .await
+    .unwrap();
+    for (boundary, timestamp) in [(0, 0), (1, i64::MAX)] {
+        history_progress::upsert_staged_span(
+            &store.connection,
+            &history_progress::GitHistoryStagedSpanRow {
+                key,
+                segment_ordinal: 0,
+                boundary,
+                branch: Some("main".to_string()),
+                timestamp,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let worktree = canonical_worktree_path(&progress).unwrap();
+    let mut committed = false;
+    let transitioned = advance_graph(
+        &store,
+        &worktree,
+        &progress,
+        &options(false),
+        &mut GraphPageBudget::default(),
+        &control,
+        &mut committed,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(transitioned, StreamGitEvidenceOutcome::Progressed));
+    assert!(committed);
+    let snapshot = store.read_snapshot().await.unwrap();
+    let pending_verification = history_progress::read_progress(&snapshot, key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pending_verification.scan_mode,
+        GitHistoryScanMode::PublishVerify
+    );
+    drop(snapshot);
+
+    std::fs::rename(
+        repository.path().join(".git"),
+        repository.path().join(".git-original"),
+    )
+    .unwrap();
+    initialize_repository(repository.path());
+    let restarted = run_bounded_history_index_page(
+        &store,
+        &options(false),
+        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(restarted.interruption, None);
+    assert_eq!(restarted.frontier.activity_timestamp, -1);
+    for table in [
+        "git_history_index_progress",
+        "git_history_index_staged_spans",
+        "session_git_spans",
+        "commit_sessions",
+    ] {
+        assert_eq!(
+            scalar(&store, &format!("SELECT COUNT(*) FROM {table}")).await,
+            0,
+            "{table}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn out_of_window_deep_history_is_bounded_and_resumes_from_durable_graph_state() {
     let repository = repository_fixture();
     append_linear_history(repository.path(), MAX_GRAPH_PAGE_EXAMINED_NODES + 1);

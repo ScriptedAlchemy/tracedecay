@@ -41,7 +41,9 @@ pub(in super::super) async fn install_final_schema(
             common_dir_identity BLOB NOT NULL,
             generation INTEGER NOT NULL CHECK(generation >= 0),
             scan_mode TEXT NOT NULL
-                CHECK(scan_mode IN ('reflog_capture', 'reflog_verify', 'graph', 'publish')),
+                CHECK(scan_mode IN (
+                    'reflog_capture', 'reflog_verify', 'graph', 'publish_verify', 'publish'
+                )),
             reflog_path BLOB NOT NULL,
             reflog_byte_offset INTEGER NOT NULL CHECK(reflog_byte_offset >= 0),
             reflog_byte_length INTEGER NOT NULL CHECK(reflog_byte_length >= 0),
@@ -86,7 +88,7 @@ pub(in super::super) async fn install_final_schema(
                 )
                 OR
                 (
-                    scan_mode IN ('graph', 'publish')
+                    scan_mode IN ('graph', 'publish_verify', 'publish')
                     AND capture_target_offset IS NOT NULL
                     AND reflog_byte_offset = capture_target_offset
                     AND verify_byte_offset = capture_target_offset
@@ -153,6 +155,7 @@ pub(super) enum GitHistoryScanMode {
     ReflogCapture,
     ReflogVerify,
     Graph,
+    PublishVerify,
     Publish,
 }
 
@@ -162,6 +165,7 @@ impl GitHistoryScanMode {
             Self::ReflogCapture => "reflog_capture",
             Self::ReflogVerify => "reflog_verify",
             Self::Graph => "graph",
+            Self::PublishVerify => "publish_verify",
             Self::Publish => "publish",
         }
     }
@@ -171,6 +175,7 @@ impl GitHistoryScanMode {
             "reflog_capture" => Ok(Self::ReflogCapture),
             "reflog_verify" => Ok(Self::ReflogVerify),
             "graph" => Ok(Self::Graph),
+            "publish_verify" => Ok(Self::PublishVerify),
             "publish" => Ok(Self::Publish),
             other => Err(invalid_stored_value("scan_mode", other)),
         }
@@ -425,7 +430,7 @@ pub(super) async fn compare_and_swap_progress(
                         AND emitted_count = ?14)
                     OR
                     (scan_mode = 'graph'
-                        AND ?2 IN ('graph', 'publish')
+                        AND ?2 IN ('graph', 'publish_verify')
                         AND capture_target_offset IS ?5
                         AND reflog_digest = ?4
                         AND consulted_ref_seal_json = ?15
@@ -436,6 +441,19 @@ pub(super) async fn compare_and_swap_progress(
                         AND segment_tip_oid = ?12
                         AND ?13 >= segment_cursor
                         AND ?14 >= emitted_count)
+                    OR
+                    (scan_mode = 'publish_verify'
+                        AND ?2 IN ('publish_verify', 'publish')
+                        AND capture_target_offset IS ?5
+                        AND reflog_digest = ?4
+                        AND consulted_ref_seal_json = ?15
+                        AND cursor_head_state = ?8
+                        AND cursor_head_branch IS ?9
+                        AND cursor_oid = ?10
+                        AND segment_end = ?11
+                        AND segment_tip_oid = ?12
+                        AND segment_cursor = ?13
+                        AND emitted_count = ?14)
                     OR
                     (scan_mode = 'publish'
                         AND ?2 = 'publish'
@@ -801,7 +819,12 @@ fn validate_progress(progress: &GitHistoryProgressRow) -> Result<(), GitCorrelat
                 && (target..=progress.reflog_byte_length).contains(&progress.verify_byte_offset)
                 && progress.emitted_count == 0
         }
-        (GitHistoryScanMode::Graph | GitHistoryScanMode::Publish, Some(target)) => {
+        (
+            GitHistoryScanMode::Graph
+            | GitHistoryScanMode::PublishVerify
+            | GitHistoryScanMode::Publish,
+            Some(target),
+        ) => {
             progress.reflog_byte_offset == target
                 && progress.verify_byte_offset == target
                 && progress.verify_digest == progress.reflog_digest

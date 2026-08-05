@@ -22,8 +22,8 @@ use progress::{
     session_row_from_progress,
 };
 use state::{
-    advance_graph, advance_publish, advance_reflog_capture, advance_reflog_verification,
-    reset_exact_progress,
+    advance_graph, advance_publish, advance_publish_verification, advance_reflog_capture,
+    advance_reflog_verification, reset_exact_progress,
 };
 #[derive(Clone)]
 pub struct BoundedGitControl {
@@ -559,6 +559,16 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
                     &progress,
                     opts,
                     &mut graph_budget,
+                    control,
+                    committed,
+                )
+                .await
+            }
+            GitHistoryScanMode::PublishVerify => {
+                advance_publish_verification(
+                    session_store,
+                    &project_path,
+                    &progress,
                     control,
                     committed,
                 )
