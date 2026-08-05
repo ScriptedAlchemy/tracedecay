@@ -46,6 +46,8 @@ pub enum WorkRuntimeContractError {
     ExecutionNotAdmitted,
     #[error("Work execution envelope is invalid")]
     InvalidExecutionEnvelope,
+    #[error("Work execution configuration snapshot is invalid")]
+    InvalidExecutionSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -448,7 +450,7 @@ impl WorkExecutionEnvelopeV1 {
 }
 
 impl WorkProviderBackendV1 {
-    fn provider_id(self) -> &'static ProviderId {
+    pub(crate) fn provider_id(self) -> &'static ProviderId {
         static CLAUDE: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
         static CODEX_APP_SERVER: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
         static CODEX_CLI: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
@@ -465,6 +467,14 @@ impl WorkProviderBackendV1 {
                 ProviderId::new("provider.work.codex-cli")
                     .expect("static Codex CLI Work provider ID")
             }),
+        }
+    }
+
+    pub(crate) const fn protocol(self) -> crate::WorkProviderProtocol {
+        match self {
+            Self::ClaudeCodeCli => crate::WorkProviderProtocol::ClaudeStreamJson,
+            Self::CodexAppServer => crate::WorkProviderProtocol::CodexAppServerJsonRpc,
+            Self::CodexCli => crate::WorkProviderProtocol::CodexExecJson,
         }
     }
 }
