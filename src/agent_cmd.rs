@@ -188,6 +188,7 @@ fn require_adoption_confirmation(
         options,
         home,
         lifecycle_root,
+        None,
     )?;
     let adopted =
         adopted_relative_paths(&preview, lifecycle_root, component_set.component_set.host);
@@ -491,6 +492,7 @@ fn dry_run_canonical_component_set(
         options,
         home,
         lifecycle_root,
+        None,
     )?;
     eprintln!(
         "{} {:?}: plan={}, registration_base={}, registration_current={}, artifacts={}, confirmation={}",
@@ -613,16 +615,29 @@ fn preview_canonical_component_set(
     options: &crate::cli::HostBundleCliOptions,
     home: &Path,
     lifecycle_root: &Path,
+    install_context: Option<&tracedecay::agents::InstallContext>,
 ) -> tracedecay::errors::Result<
     tracedecay::agents::host_bundle_v2::HostComponentSetLifecyclePreviewV1,
 > {
     let request = component_set_request(component_set, operation, options.yes)?;
-    let mut registration = CatalogHostComponentRegistrationAuthority::new(
-        agent_id,
-        home,
-        lifecycle_root,
-        request.lifecycle.operation,
-    )?;
+    let mut registration = match install_context {
+        Some(install) => {
+            CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin_and_dashboard(
+                agent_id,
+                home,
+                lifecycle_root,
+                request.lifecycle.operation,
+                install.tracedecay_bin.clone(),
+                install.dashboard,
+            )?
+        }
+        None => CatalogHostComponentRegistrationAuthority::new(
+            agent_id,
+            home,
+            lifecycle_root,
+            request.lifecycle.operation,
+        )?,
+    };
     tracedecay::agents::host_bundle_v2::dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
         home,
         lifecycle_root,
@@ -3282,7 +3297,13 @@ pub(crate) fn handle_reinstall_preflight_command() -> tracedecay::errors::Result
             }
         }
 
-        match preflight_agent_integration(id, integration.as_ref(), &home, &health_context) {
+        match preflight_agent_integration(
+            id,
+            integration.as_ref(),
+            &home,
+            &health_context,
+            &install_context,
+        ) {
             Ok(summary) => eprintln!("  \x1b[32m✔\x1b[0m {id}: {summary}"),
             Err(error) => {
                 eprintln!("  \x1b[31m✘\x1b[0m {id}: {error}");
@@ -3308,6 +3329,7 @@ fn preflight_agent_integration(
     integration: &dyn tracedecay::agents::AgentIntegration,
     home: &Path,
     health_context: &tracedecay::agents::HealthcheckContext,
+    install_context: &tracedecay::agents::InstallContext,
 ) -> tracedecay::errors::Result<String> {
     use tracedecay::agents::host_bundle_v2::{
         HostBundleComponentV1, HostBundleRegistrationStateV1,
@@ -3327,8 +3349,11 @@ fn preflight_agent_integration(
 
     let mut registration_states = Vec::new();
     for component in &component_set.component_set.components {
-        let state =
-            integration.host_component_registration(component.manifest.component, health_context);
+        let state = integration.host_component_registration_for_lifecycle(
+            component.manifest.component,
+            health_context,
+            install_context,
+        );
         if state == HostBundleRegistrationStateV1::Corrupt {
             return Err(tracedecay::errors::TraceDecayError::Config {
                 message: format!(
@@ -3359,6 +3384,7 @@ fn preflight_agent_integration(
         },
         home,
         &lifecycle_root,
+        Some(install_context),
     )?;
     Ok(format!(
         "signed repair plan valid; registration {}",

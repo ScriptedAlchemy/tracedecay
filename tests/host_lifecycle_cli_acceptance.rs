@@ -667,6 +667,12 @@ fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
         cli.run(&["install", "--agent", case.id, "--no-dashboard"]),
     );
     assert_dashboard_absent();
+    assert_success(
+        case.id,
+        "reinstall preflight",
+        cli.run(&["reinstall", "--dry-run"]),
+    );
+    assert_dashboard_absent();
     assert_success(case.id, "update", cli.run(&["update-plugin"]));
     assert_dashboard_absent();
     assert_success(case.id, "reinstall", cli.run(&["reinstall"]));

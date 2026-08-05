@@ -1611,6 +1611,76 @@ pub(crate) fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
     })
 }
 
+/// Remove explicitly retired sibling plugin trees.
+///
+/// Both the retired suffix and ownership manifest are allow-listed: a name
+/// prefix alone is never ownership evidence. A sibling is removed only when it
+/// is a real directory, its suffix is known to have been created by
+/// `TraceDecay`, and one host-specific manifest parses with `name = "tracedecay"`.
+pub(crate) fn sweep_superseded_plugin_siblings(
+    current_dir: &Path,
+    ownership_manifests: &[&str],
+) -> Result<()> {
+    const RETIRED_SUFFIXES: &[&str] = &["pre-v2-adopt"];
+
+    let Some(parent) = current_dir.parent() else {
+        return Ok(());
+    };
+    let Some(current_name) = current_dir.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let prefix = format!("{current_name}.");
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect plugin siblings in {}: {error}",
+                    parent.display()
+                ),
+            });
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to inspect a plugin sibling in {}: {error}",
+                parent.display()
+            ),
+        })?;
+        let file_type = entry.file_type().map_err(|error| TraceDecayError::Config {
+            message: format!("failed to inspect {}: {error}", entry.path().display()),
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let retired = name
+            .strip_prefix(&prefix)
+            .is_some_and(|suffix| RETIRED_SUFFIXES.contains(&suffix));
+        if !file_type.is_dir() || !retired {
+            continue;
+        }
+        let sibling = entry.path();
+        let owned = ownership_manifests.iter().any(|relative| {
+            load_json_file(&sibling.join(relative))
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                == Some("tracedecay")
+        });
+        if !owned {
+            continue;
+        }
+        std::fs::remove_dir_all(&sibling).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to remove superseded tracedecay plugin {}: {error}",
+                sibling.display()
+            ),
+        })?;
+    }
+    Ok(())
+}
+
 /// Recursively collect every regular file under `root` (following the same
 /// hand-rolled walk both the Cursor and Codex installers rely on).
 pub(crate) fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
