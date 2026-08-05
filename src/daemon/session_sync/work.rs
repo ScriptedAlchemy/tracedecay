@@ -834,6 +834,11 @@ const fn git_history_interruption_reason(
         BoundedBackfillInterruption::Cancelled => "git_sync_cancelled",
         BoundedBackfillInterruption::CommandTimedOut => "git_command_timed_out",
         BoundedBackfillInterruption::HistoryLimitReached => "git_history_limit_reached",
+        BoundedBackfillInterruption::DryRunFrontierLimitReached => {
+            "git_dry_run_frontier_limit_reached"
+        }
+        BoundedBackfillInterruption::UnsupportedSourceFraming => "git_unsupported_source_framing",
+        BoundedBackfillInterruption::SourceChanged => "git_source_changed",
         BoundedBackfillInterruption::SourceUnavailable => "git_source_unavailable",
     }
 }
