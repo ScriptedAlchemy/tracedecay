@@ -60,7 +60,7 @@ fn definition_with_operation_and_catalog(
         }],
         digest('a'),
         digest('b'),
-        digest('c'),
+        catalog_digest,
     )
     .unwrap()
 }

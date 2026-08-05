@@ -11,9 +11,9 @@ use tracedecay_api::WorkflowOperation;
 use tracedecay_application::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationResult, CancellationSignal, Deadline, LegalAction, ResultContractRef,
-    RetryDirective, SafeDiagnostic, TaskHandoffIssueRequestV1, TaskHandoffRedeemRequestV1,
-    WorkflowDefinitionActivateRequestV1, WorkflowDefinitionRegisterRequestV1,
-    WorkflowFanOutRequestV1, workflow_executable_binding_registry,
+    RetryDirective, SafeDiagnostic, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
+    WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest, WorkflowFanOutRequest,
+    workflow_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
@@ -24,7 +24,7 @@ use crate::daemon_client::{
 };
 use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
-    WorkflowApplicationInvocationV1, WorkflowApplicationOutcomeV1,
+    WorkflowApplicationInvocation, WorkflowApplicationOutcome,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -81,40 +81,40 @@ impl WorkflowCliOperation {
         ))
     }
 
-    fn decode(self, body: Value) -> Result<WorkflowApplicationInvocationV1> {
+    fn decode(self, body: Value) -> Result<WorkflowApplicationInvocation> {
         match self {
-            Self::RegisterDefinition => decode::<WorkflowDefinitionRegisterRequestV1>(body)
-                .map(WorkflowApplicationInvocationV1::RegisterDefinition),
-            Self::ActivateDefinition => decode::<WorkflowDefinitionActivateRequestV1>(body)
-                .map(WorkflowApplicationInvocationV1::ActivateDefinition),
-            Self::ExecuteFanOut => decode::<WorkflowFanOutRequestV1>(body)
+            Self::RegisterDefinition => decode::<WorkflowDefinitionRegisterRequest>(body)
+                .map(WorkflowApplicationInvocation::RegisterDefinition),
+            Self::ActivateDefinition => decode::<WorkflowDefinitionActivateRequest>(body)
+                .map(WorkflowApplicationInvocation::ActivateDefinition),
+            Self::ExecuteFanOut => decode::<WorkflowFanOutRequest>(body)
                 .map(Box::new)
-                .map(WorkflowApplicationInvocationV1::ExecuteFanOut),
-            Self::HandoffIssue => decode::<TaskHandoffIssueRequestV1>(body)
-                .map(WorkflowApplicationInvocationV1::HandoffIssue),
-            Self::HandoffRedeem => decode::<TaskHandoffRedeemRequestV1>(body)
-                .map(WorkflowApplicationInvocationV1::HandoffRedeem),
+                .map(WorkflowApplicationInvocation::ExecuteFanOut),
+            Self::HandoffIssue => decode::<TaskHandoffIssueRequest>(body)
+                .map(WorkflowApplicationInvocation::HandoffIssue),
+            Self::HandoffRedeem => decode::<TaskHandoffRedeemRequest>(body)
+                .map(WorkflowApplicationInvocation::HandoffRedeem),
         }
     }
 
-    fn matches(self, outcome: &WorkflowApplicationOutcomeV1) -> bool {
+    fn matches(self, outcome: &WorkflowApplicationOutcome) -> bool {
         matches!(
             (self, outcome),
             (
                 Self::RegisterDefinition,
-                WorkflowApplicationOutcomeV1::RegisterDefinition(_)
+                WorkflowApplicationOutcome::RegisterDefinition(_)
             ) | (
                 Self::ActivateDefinition,
-                WorkflowApplicationOutcomeV1::ActivateDefinition(_)
+                WorkflowApplicationOutcome::ActivateDefinition(_)
             ) | (
                 Self::ExecuteFanOut,
-                WorkflowApplicationOutcomeV1::ExecuteFanOut(_)
+                WorkflowApplicationOutcome::ExecuteFanOut(_)
             ) | (
                 Self::HandoffIssue,
-                WorkflowApplicationOutcomeV1::HandoffIssue(_)
+                WorkflowApplicationOutcome::HandoffIssue(_)
             ) | (
                 Self::HandoffRedeem,
-                WorkflowApplicationOutcomeV1::HandoffRedeem(_)
+                WorkflowApplicationOutcome::HandoffRedeem(_)
             )
         )
     }
@@ -205,14 +205,14 @@ pub async fn invoke_workflow_cli(
 }
 
 fn erase_workflow_outcome(
-    outcome: WorkflowApplicationOutcomeV1,
+    outcome: WorkflowApplicationOutcome,
 ) -> Result<ApplicationOutcome<Value>> {
     let outcome = match outcome {
-        WorkflowApplicationOutcomeV1::RegisterDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcomeV1::ActivateDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcomeV1::ExecuteFanOut(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcomeV1::HandoffIssue(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcomeV1::HandoffRedeem(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::RegisterDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::ActivateDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::ExecuteFanOut(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::HandoffIssue(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::HandoffRedeem(outcome) => serde_json::to_value(outcome),
     }?;
     serde_json::from_value(outcome).map_err(Into::into)
 }
