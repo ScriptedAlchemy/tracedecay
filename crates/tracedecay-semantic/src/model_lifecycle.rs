@@ -36,6 +36,8 @@ const ARTIFACT_GC_LEASE_SECONDS: u64 = 5 * 60;
 const HF_HUB_CACHE_DIRECTORY_V1: &str = "hf-hub-cache";
 const RERANKER_ACTIVE_LEASE_ID_V1: &str = "reranker:active:v1";
 const RERANKER_ROLLBACK_LEASE_ID_V1: &str = "reranker:rollback:v1";
+const EMBEDDING_ACTIVE_LEASE_ID_V1: &str = "embedding:active:v1";
+const EMBEDDING_ROLLBACK_LEASE_ID_V1: &str = "embedding:rollback:v1";
 static SHARED_LIFECYCLE_OWNER: std::sync::OnceLock<Option<Arc<SemanticModelLifecycleOwnerV1>>> =
     std::sync::OnceLock::new();
 
@@ -480,6 +482,7 @@ fn fetch_hf_hub_member(
 }
 
 include!("model_lifecycle/owner.rs");
+include!("model_lifecycle/reconciliation.rs");
 include!("model_lifecycle/acquisition.rs");
 include!("model_lifecycle/persistence.rs");
 include!("model_lifecycle/local_evaluation.rs");

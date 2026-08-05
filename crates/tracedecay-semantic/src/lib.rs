@@ -48,7 +48,6 @@ mod runtime_query;
 mod runtime_service;
 mod semantic_evaluation;
 pub mod session_pool;
-
 // Test-support constructors. Dependent crates opt in through `test-helpers`
 // exactly like the query kernel's `*_for_test` surface.
 #[cfg(any(test, feature = "test-helpers"))]
@@ -70,8 +69,9 @@ pub use runtime_service::{
     SemanticRuntimeShutdownReceiptV1, SemanticRuntimeWorkV1,
 };
 pub use semantic_evaluation::{
-    PreparedSemanticEvaluationProjectionV1, SemanticEvaluationQueryEmbedderV1,
-    SemanticEvaluationQueryFactoryV1, prepare_semantic_evaluation_projection,
+    PreparedSemanticEvaluationProjectionV1, SemanticEvaluationProjectionCancellationV1,
+    SemanticEvaluationQueryEmbedderV1, SemanticEvaluationQueryFactoryV1,
+    measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
 };
 
 /// Default `FastEmbed` catalog model selected on install (offline-safe).

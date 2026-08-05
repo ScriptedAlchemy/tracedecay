@@ -160,19 +160,6 @@ fn install_path_of(state: &SemanticModelLifecycleStateV1) -> Option<&Path> {
     }
 }
 
-fn state_revision(state: &SemanticModelLifecycleStateV1) -> &str {
-    match state {
-        SemanticModelLifecycleStateV1::SelectedNotDownloaded { revision, .. }
-        | SemanticModelLifecycleStateV1::Downloading { revision, .. }
-        | SemanticModelLifecycleStateV1::Verifying { revision, .. }
-        | SemanticModelLifecycleStateV1::Installed { revision, .. }
-        | SemanticModelLifecycleStateV1::Loading { revision, .. }
-        | SemanticModelLifecycleStateV1::Indexing { revision, .. }
-        | SemanticModelLifecycleStateV1::Ready { revision, .. }
-        | SemanticModelLifecycleStateV1::Failed { revision, .. } => revision,
-    }
-}
-
 fn verify_member_file(path: &Path, length: u64, sha256: &str) -> bool {
     let Ok(meta) = fs::metadata(path) else {
         return false;
