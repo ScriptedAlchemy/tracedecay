@@ -373,7 +373,7 @@ pub fn configuration_surface_catalog_contribution()
     for spec in &CONFIGURATION_SPECS {
         let capability_id = CapabilityId::new(capability_id(spec.name))?;
         let (spec_bindings, binding_ids) =
-            current_bindings(&capability_id, spec.name, spec.surfaces)?;
+            current_bindings(&capability_id, spec.name, spec.surfaces.iter().copied())?;
         bindings.extend(spec_bindings);
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
