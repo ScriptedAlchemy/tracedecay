@@ -5,6 +5,7 @@ use std::sync::Arc;
 use super::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
 
 pub mod harness;
+#[cfg(test)]
 mod session_sync;
 
 #[doc(hidden)]
