@@ -132,8 +132,6 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_replace_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_insert_at_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_move_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_api_migration_plan", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_api_migration_apply", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_source_edit_reconcile", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_test_map", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_gini", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -333,6 +331,13 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_fact_store"
             | "tracedecay_session_start"
             | "tracedecay_session_end"
+            | "tracedecay_str_replace"
+            | "tracedecay_multi_str_replace"
+            | "tracedecay_insert_at"
+            | "tracedecay_ast_grep_rewrite"
+            | "tracedecay_replace_symbol"
+            | "tracedecay_insert_at_symbol"
+            | "tracedecay_move_symbol"
     )
 }
 
@@ -592,6 +597,18 @@ mod tests {
             contract.inverse(),
             McpInverseContract::NotApplicable
         ));
+    }
+
+    #[test]
+    fn source_edit_reconcile_is_unavailable_without_an_authentic_journey() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        assert!(
+            !catalog
+                .contract("tracedecay_source_edit_reconcile")
+                .unwrap()
+                .availability()
+                .is_available()
+        );
     }
 
     #[test]
