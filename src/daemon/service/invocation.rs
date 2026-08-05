@@ -127,7 +127,8 @@ use crate::application::feedback::{
     open_pr12_feedback_cycle_runtime,
 };
 use crate::application::lsp_runtime::{
-    DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
+    DaemonLspSessionFactory, FederatedLspProviderAuthority, LspCodeIndexProjectionIdentityPort,
+    PreparedFederatedLspProviderRoutes, lsp_session_factory,
 };
 use crate::application::operation_stream::{
     OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,

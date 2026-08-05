@@ -174,8 +174,19 @@ where
         }
     }
 
-    pub fn take_workspace_folder_mutation(&mut self) -> Option<WorkspaceFolderMutation> {
-        self.pending_workspace_mutation.take()
+    pub fn pending_workspace_folder_mutation(&self) -> Option<WorkspaceFolderMutation> {
+        self.pending_workspace_mutation.clone()
+    }
+
+    pub fn reject_workspace_folder_mutation(
+        &mut self,
+        mutation: &WorkspaceFolderMutation,
+    ) -> Result<(), WorkspaceFolderMutationApplyError> {
+        if self.pending_workspace_mutation.as_ref() != Some(mutation) {
+            return Err(WorkspaceFolderMutationApplyError::StaleWorkspace);
+        }
+        self.pending_workspace_mutation = None;
+        Ok(())
     }
 
     pub fn apply_workspace_folder_mutation(
@@ -183,12 +194,29 @@ where
         mutation: &WorkspaceFolderMutation,
         workspace: AuthorizedLspWorkspace,
     ) -> Result<(), WorkspaceFolderMutationApplyError> {
-        if self.lifecycle.gateway.workspace().scope_set_digest()
-            != mutation.observed_scope_digest.as_ref()
+        if self.pending_workspace_mutation.as_ref() != Some(mutation)
+            || self.lifecycle.gateway.workspace().scope_set_digest()
+                != mutation.observed_scope_digest.as_ref()
         {
             return Err(WorkspaceFolderMutationApplyError::StaleWorkspace);
         }
+        let removed_roots = self
+            .lifecycle
+            .gateway
+            .workspace()
+            .roots()
+            .iter()
+            .filter(|root| {
+                mutation
+                    .removed
+                    .iter()
+                    .any(|uri| root.matches_root_uri(uri))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        self.clear_removed_workspace_root_state(&removed_roots);
         self.lifecycle.gateway.replace_workspace(workspace);
+        self.pending_workspace_mutation = None;
         Ok(())
     }
 

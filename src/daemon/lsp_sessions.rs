@@ -60,55 +60,31 @@ pub(super) fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<
         .map(|uri| AdmittedRoot::new(uri.to_string()))
 }
 
-pub(super) async fn admitted_lsp_workspace_for_request(
+pub(super) async fn registered_lsp_root_selectors_for_uris(
     store_administration: &StoreAdministration,
-    service: &service::invocation::DaemonInvocationService,
-    project_path: &Path,
-    request: &DaemonInvocationRequest,
-) -> Option<AuthorizedLspWorkspace> {
-    let requested_uris = match request.lsp_workspace_folders()? {
-        [] => vec![url::Url::from_file_path(project_path).ok()?.to_string()],
-        folders => folders.to_vec(),
-    };
-    if requested_uris.len() > tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS {
+    requested_uris: &[String],
+) -> Option<(
+    Vec<tracedecay_application::RegisteredRootSelectorV1>,
+    BTreeMap<PathBuf, String>,
+)> {
+    if requested_uris.is_empty() || requested_uris.len() > tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS {
         return None;
     }
-    // A single folder is only ever the active project: a lone sibling hint
-    // must not silently reroute the session. A multi-folder workspace may span
-    // registered roots, but the active project must be one of them so the
-    // session stays anchored to the admitted route.
-    let single_root = requested_uris.len() == 1;
-    let active_project_path = project_path.canonicalize().ok()?;
     let graphs = store_administration.mounted_project_graphs().await;
     let mut selectors = Vec::with_capacity(requested_uris.len());
     let mut canonical_uris = BTreeMap::new();
-    let mut admits_active_project = false;
     for requested_uri in requested_uris {
-        let uri = url::Url::parse(&requested_uri).ok()?;
+        let uri = url::Url::parse(requested_uri).ok()?;
         if uri.scheme() != "file" || uri.query().is_some() || uri.fragment().is_some() {
             return None;
         }
         let requested_path = uri.to_file_path().ok()?.canonicalize().ok()?;
-        if single_root && requested_path != active_project_path {
-            return None;
-        }
-        if requested_path == active_project_path {
-            admits_active_project = true;
-        }
-        let mut candidates = Vec::new();
-        for graph in &graphs {
-            if graph.project_root() != requested_path {
-                continue;
-            }
-            let Some(raw_project_id) = graph.store_layout().identity.project_id.as_deref() else {
-                continue;
-            };
-            let Ok(project_id) = tracedecay_domain::ProjectId::new(raw_project_id.to_owned())
-            else {
-                continue;
-            };
-            candidates.push(project_id);
-        }
+        let mut candidates = graphs
+            .iter()
+            .filter(|graph| graph.project_root() == requested_path)
+            .filter_map(|graph| graph.store_layout().identity.project_id.as_deref())
+            .filter_map(|project_id| tracedecay_domain::ProjectId::new(project_id.to_owned()).ok())
+            .collect::<Vec<_>>();
         candidates.sort();
         candidates.dedup();
         let [project_id] = candidates.as_slice() else {
@@ -121,12 +97,35 @@ pub(super) async fn admitted_lsp_workspace_for_request(
             )
             .ok()?,
         );
-        let canonical_uri = url::Url::from_file_path(&requested_path).ok()?.to_string();
-        canonical_uris.insert(requested_path, canonical_uri);
+        canonical_uris.insert(
+            requested_path.clone(),
+            url::Url::from_file_path(requested_path).ok()?.to_string(),
+        );
     }
-    if !admits_active_project {
+    Some((selectors, canonical_uris))
+}
+
+pub(super) async fn admitted_lsp_workspace_for_request(
+    store_administration: &StoreAdministration,
+    service: &service::invocation::DaemonInvocationService,
+    project_path: &Path,
+    request: &DaemonInvocationRequest,
+) -> Option<AuthorizedLspWorkspace> {
+    let requested_uris = match request.lsp_workspace_folders()? {
+        [] => vec![url::Url::from_file_path(project_path).ok()?.to_string()],
+        folders => folders.to_vec(),
+    };
+    // A single folder is only ever the active project: a lone sibling hint
+    // must not silently reroute the session. A multi-folder workspace may span
+    // registered roots, but the active project must be one of them so the
+    // session stays anchored to the admitted route.
+    let active_project_path = project_path.canonicalize().ok()?;
+    let (selectors, canonical_uris) =
+        registered_lsp_root_selectors_for_uris(store_administration, &requested_uris).await?;
+    if !canonical_uris.contains_key(&active_project_path) {
         return None;
     }
+    let anchor_root_uri = canonical_uris.get(&active_project_path)?.clone();
     let resolved = super::invocation_dispatch::resolve_multi_root_projects(
         store_administration,
         service,
@@ -142,6 +141,10 @@ pub(super) async fn admitted_lsp_workspace_for_request(
         })
         .collect::<Option<Vec<_>>>()?;
     service
-        .authorize_lsp_workspace(resolved_roots, tracedecay_application::clock::now_micros())
+        .authorize_lsp_workspace(
+            resolved_roots,
+            anchor_root_uri,
+            tracedecay_application::clock::now_micros(),
+        )
         .await
 }

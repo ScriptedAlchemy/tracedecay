@@ -440,12 +440,22 @@ fn workspace_folder_notification_emits_one_fenced_mutation_without_local_apply()
         1,
     );
     session.handle_payload(
-        br#"{"jsonrpc":"2.0","method":"workspace/didChangeWorkspaceFolders","params":{"event":{"added":[{"uri":"file:///third","name":"third"}],"removed":[{"uri":"file:///right","name":"right"}]}}}"#,
+        br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///right/src/lib.rs","languageId":"rust","version":1,"text":"fn removed() {}"}}}"#,
         2,
+    );
+    assert!(
+        session
+            .overlays()
+            .snapshot("file:///right/src/lib.rs")
+            .is_some()
+    );
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","method":"workspace/didChangeWorkspaceFolders","params":{"event":{"added":[{"uri":"file:///third","name":"third"}],"removed":[{"uri":"file:///right","name":"right"}]}}}"#,
+        3,
     );
 
     let mutation = session
-        .take_workspace_folder_mutation()
+        .pending_workspace_folder_mutation()
         .expect("one fenced workspace mutation");
     assert_eq!(
         mutation,
@@ -476,6 +486,12 @@ fn workspace_folder_notification_emits_one_fenced_mutation_without_local_apply()
     session
         .apply_workspace_folder_mutation(&mutation, next_workspace)
         .expect("matching daemon acknowledgement");
+    assert!(
+        session
+            .overlays()
+            .snapshot("file:///right/src/lib.rs")
+            .is_none()
+    );
     assert_eq!(
         session
             .document_root("file:///third/src/lib.rs")

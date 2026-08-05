@@ -121,6 +121,7 @@ pub struct LspSessionOpenRequest {
 pub struct AuthorizedLspWorkspace {
     scope_set_digest: Option<ManifestDigest>,
     roots: Vec<AdmittedRoot>,
+    anchor_root: AdmittedRoot,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,14 +134,29 @@ impl AuthorizedLspWorkspace {
     pub fn single(root: AdmittedRoot) -> Self {
         Self {
             scope_set_digest: None,
-            roots: vec![root],
+            roots: vec![root.clone()],
+            anchor_root: root,
         }
     }
 
     pub fn new(
         scope_set_digest: Option<ManifestDigest>,
-        mut roots: Vec<AdmittedRoot>,
+        roots: Vec<AdmittedRoot>,
     ) -> Result<Self, LspEndpointError> {
+        let anchor_root_uri = roots
+            .first()
+            .ok_or(LspEndpointError::AdmissionRejected)?
+            .uri()
+            .to_owned();
+        Self::anchored(scope_set_digest, roots, anchor_root_uri)
+    }
+
+    pub fn anchored(
+        scope_set_digest: Option<ManifestDigest>,
+        mut roots: Vec<AdmittedRoot>,
+        anchor_root_uri: impl Into<String>,
+    ) -> Result<Self, LspEndpointError> {
+        let anchor_root_uri = anchor_root_uri.into();
         if roots.is_empty() || roots.len() > MAX_LSP_WORKSPACE_ROOTS {
             return Err(LspEndpointError::AdmissionRejected);
         }
@@ -167,9 +183,18 @@ impl AuthorizedLspWorkspace {
                 return Err(LspEndpointError::AdmissionRejected);
             }
         }
+        let anchor_root = roots
+            .iter()
+            .filter(|root| root.matches_root_uri(&anchor_root_uri))
+            .cloned()
+            .collect::<Vec<_>>();
+        let [anchor_root] = anchor_root.as_slice() else {
+            return Err(LspEndpointError::AdmissionRejected);
+        };
         Ok(Self {
             scope_set_digest,
             roots,
+            anchor_root: anchor_root.clone(),
         })
     }
 
@@ -179,6 +204,10 @@ impl AuthorizedLspWorkspace {
 
     pub fn scope_set_digest(&self) -> Option<&ManifestDigest> {
         self.scope_set_digest.as_ref()
+    }
+
+    pub fn anchor_root_uri(&self) -> &str {
+        self.anchor_root.uri()
     }
 
     pub fn root_ordinal(&self, root: &AdmittedRoot) -> Option<usize> {
@@ -236,7 +265,7 @@ impl AuthorizedLspWorkspace {
     }
 
     pub(crate) fn primary(&self) -> &AdmittedRoot {
-        &self.roots[0]
+        &self.anchor_root
     }
 
     fn matches_multi_root_hints(&self, requested: &[String]) -> bool {
@@ -629,6 +658,28 @@ mod tests {
             !workspace
                 .admits_exact_root_hints(&["file:///repo".to_owned(), "file:///repo".to_owned(),])
         );
+    }
+
+    #[test]
+    fn authorized_workspace_retains_anchor_independent_of_scope_sort_order() {
+        let workspace = AuthorizedLspWorkspace::anchored(
+            Some(ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap()),
+            vec![
+                AdmittedRoot::authorized(
+                    "file:///first-by-scope",
+                    ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+                ),
+                AdmittedRoot::authorized(
+                    "file:///active",
+                    ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).unwrap(),
+                ),
+            ],
+            "file:///active/",
+        )
+        .unwrap();
+
+        assert_eq!(workspace.anchor_root_uri(), "file:///active");
+        assert_eq!(workspace.primary().uri(), "file:///active");
     }
 
     #[cfg(unix)]

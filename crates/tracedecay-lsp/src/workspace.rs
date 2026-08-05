@@ -49,6 +49,32 @@ impl WorkspaceFolderMutation {
                 "workspace folder URIs must be unique and cannot be both added and removed",
             ));
         }
+        if added.iter().any(|uri| {
+            workspace
+                .roots()
+                .iter()
+                .any(|root| root.matches_root_uri(uri))
+        }) || removed.iter().any(|uri| {
+            workspace
+                .roots()
+                .iter()
+                .filter(|root| root.matches_root_uri(uri))
+                .count()
+                != 1
+        }) {
+            return Err(RpcFailure::invalid_params(
+                "workspace folder changes must add new roots and remove exact admitted roots",
+            ));
+        }
+        let active_root_uri = workspace.primary().uri().to_owned();
+        if removed
+            .iter()
+            .any(|uri| workspace.primary().matches_root_uri(uri))
+        {
+            return Err(RpcFailure::invalid_params(
+                "the active workspace root cannot be removed",
+            ));
+        }
 
         let mut next_root_uris = workspace
             .roots()
@@ -70,7 +96,7 @@ impl WorkspaceFolderMutation {
         }
         Ok(Some(Self {
             observed_scope_digest: workspace.scope_set_digest().cloned(),
-            active_root_uri: workspace.primary().uri().to_owned(),
+            active_root_uri,
             added,
             removed,
             next_root_uris,

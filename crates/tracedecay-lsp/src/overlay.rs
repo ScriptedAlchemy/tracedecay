@@ -22,14 +22,14 @@ use tracedecay_code_extraction::incremental::{ParseReport, ParseReuse};
 use tracedecay_domain::{ContentDigest, ManifestDigest, canonical_sha256};
 
 mod retained_parse;
+mod retention;
 
 use retained_parse::RetainedOverlayParse;
 pub use retained_parse::{OverlayParseState, OverlayParseUnavailable};
 
 /// A single unsaved document cannot consume more than two MiB of the daemon.
 pub const MAX_OVERLAY_BYTES: usize = 2 * 1024 * 1024;
-/// A session cannot accumulate an unbounded number of individually bounded
-/// documents.
+/// A session cannot accumulate an unbounded number of bounded documents.
 pub const MAX_OPEN_DOCUMENTS: usize = 128;
 /// Debounced work is bounded independently because closing documents frees
 /// overlay slots before their terminal clear is emitted.

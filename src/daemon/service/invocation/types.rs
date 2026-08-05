@@ -327,6 +327,7 @@ pub(in crate::daemon::service) struct RegisteredConfigurationRuntime {
 pub(super) struct RuntimeLspSession {
     pub(super) expires_at_ms: u64,
     pub(super) actor: RuntimeLspActor,
+    pub(super) providers: FederatedLspProviderAuthority,
 }
 
 impl Drop for RuntimeLspSession {

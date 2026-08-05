@@ -262,6 +262,79 @@ where
         self.pending_workspace_mutation = None;
     }
 
+    pub(super) fn clear_removed_workspace_root_state(&mut self, removed: &[AdmittedRoot]) {
+        let belongs_to_removed_root =
+            |uri: &str| removed.iter().any(|root| root.contains_document(uri));
+        let request_ids = self
+            .semantic
+            .pending
+            .iter()
+            .filter_map(|(request_id, pending)| {
+                pending
+                    .request
+                    .document_uri()
+                    .is_some_and(belongs_to_removed_root)
+                    .then(|| request_id.clone())
+            })
+            .chain(
+                self.context
+                    .pending_requests
+                    .iter()
+                    .filter_map(|(request_id, pending)| {
+                        pending
+                            .request
+                            .document_uri
+                            .as_deref()
+                            .is_some_and(belongs_to_removed_root)
+                            .then(|| request_id.clone())
+                    }),
+            )
+            .collect::<BTreeSet<_>>();
+        for request_id in request_ids {
+            let _ = self.cancel_request_and_upstream(&request_id);
+        }
+        self.lifecycle
+            .overlays
+            .retain_documents(|uri| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .debounce
+            .retain_documents(|uri| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .published
+            .retain(|uri, _| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .native_upstream
+            .retain(|uri, _| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .active_refreshes
+            .retain(|uri, _| !belongs_to_removed_root(uri));
+        self.context.currentness.retain(|(_, uri), _| {
+            uri.as_deref()
+                .is_none_or(|uri| !belongs_to_removed_root(uri))
+        });
+        let in_flight = self.outbound.in_flight;
+        let queued = std::mem::take(&mut self.outbound.queue);
+        for (index, frame) in queued.into_iter().enumerate() {
+            let removed_publication = frame
+                .publication
+                .as_ref()
+                .is_some_and(|publication| belongs_to_removed_root(&publication.uri));
+            if removed_publication {
+                if let Some(publication) = &frame.publication {
+                    self.lifecycle.control.remove_publication(&publication.uri);
+                }
+                if !(in_flight && index == 0) {
+                    self.outbound.queued_bytes = self
+                        .outbound
+                        .queued_bytes
+                        .saturating_sub(frame.payload.len());
+                    continue;
+                }
+            }
+            self.outbound.queue.push_back(frame);
+        }
+    }
+
     pub(super) fn cancel_pending_operations(&mut self) {
         let semantic = std::mem::take(&mut self.semantic.pending);
         for (request_id, pending) in semantic {

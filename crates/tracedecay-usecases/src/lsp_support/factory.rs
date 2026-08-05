@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use tokio::runtime::Handle;
 use tracedecay_lsp::{
     AdmittedRoot, AnalyzerCancellationAdapter, AnalyzerCancellationPort, AuthorizedLspWorkspace,
@@ -95,7 +96,36 @@ impl DaemonLspSessionFactory {
     pub fn open_federated_workspace_session(
         workspace: AuthorizedLspWorkspace,
         factories: Vec<(AdmittedRoot, Arc<Self>)>,
-    ) -> Option<DaemonLspRuntimeSession> {
+    ) -> Option<(DaemonLspRuntimeSession, FederatedLspProviderAuthority)> {
+        let (routes, gateway_capabilities, upstream_capabilities) =
+            FederatedLspProviderRoutes::build(&workspace, factories)?;
+        let authority = FederatedLspProviderAuthority::new(routes);
+        let bundle = DaemonLspProviderBundle::from_shared(
+            Arc::new(authority.clone()),
+            Arc::new(authority.clone()),
+            Arc::new(authority.clone()),
+            Arc::new(authority.clone()),
+            Arc::new(authority.clone()),
+            gateway_capabilities,
+            upstream_capabilities,
+        );
+        Some((bundle.into_workspace_session(workspace), authority))
+    }
+}
+
+struct FederatedLspProviderRoutes {
+    feedback: BTreeMap<String, Arc<dyn FeedbackCyclePort + Send + Sync>>,
+    semantics: BTreeMap<String, Arc<dyn SemanticProviderPort + Send + Sync>>,
+    diagnostics: BTreeMap<String, Arc<dyn DiagnosticSnapshotPort + Send + Sync>>,
+    cancellation: BTreeMap<String, Arc<dyn AnalyzerCancellationPort + Send + Sync>>,
+    context: BTreeMap<String, Arc<dyn ContextProjectionPort + Send + Sync>>,
+}
+
+impl FederatedLspProviderRoutes {
+    fn build(
+        workspace: &AuthorizedLspWorkspace,
+        factories: Vec<(AdmittedRoot, Arc<DaemonLspSessionFactory>)>,
+    ) -> Option<(Self, GatewayCapabilities, UpstreamCapabilities)> {
         if factories.len() != workspace.roots().len() {
             return None;
         }
@@ -139,48 +169,76 @@ impl DaemonLspSessionFactory {
             gateway_capabilities.get_or_insert_with(|| factory.gateway_capabilities.clone());
             upstream_capabilities.get_or_insert_with(|| factory.upstream_capabilities.clone());
         }
-        let bundle = DaemonLspProviderBundle::from_shared(
-            Arc::new(FederatedFeedback { roots: feedback }),
-            Arc::new(FederatedSemantics { roots: semantics }),
-            Arc::new(FederatedDiagnostics { roots: diagnostics }),
-            Arc::new(FederatedCancellation {
-                roots: cancellation,
-            }),
-            Arc::new(FederatedContext { roots: context }),
+        Some((
+            Self {
+                feedback,
+                semantics,
+                diagnostics,
+                cancellation,
+                context,
+            },
             gateway_capabilities?,
             upstream_capabilities?,
-        );
-        Some(bundle.into_workspace_session(workspace))
+        ))
     }
 }
 
-struct FederatedFeedback {
-    roots: BTreeMap<String, Arc<dyn FeedbackCyclePort + Send + Sync>>,
+/// One atomically replaceable provider set shared by every routed port in an
+/// admitted LSP session.
+#[derive(Clone)]
+pub struct FederatedLspProviderAuthority {
+    routes: Arc<ArcSwap<FederatedLspProviderRoutes>>,
 }
 
-impl FeedbackCyclePort for FederatedFeedback {
+impl FederatedLspProviderAuthority {
+    fn new(routes: FederatedLspProviderRoutes) -> Self {
+        Self {
+            routes: Arc::new(ArcSwap::from_pointee(routes)),
+        }
+    }
+
+    pub fn prepare_replacement(
+        workspace: &AuthorizedLspWorkspace,
+        factories: Vec<(AdmittedRoot, Arc<DaemonLspSessionFactory>)>,
+    ) -> Option<PreparedFederatedLspProviderRoutes> {
+        let (routes, _, _) = FederatedLspProviderRoutes::build(workspace, factories)?;
+        Some(PreparedFederatedLspProviderRoutes { routes })
+    }
+
+    pub fn replace(&self, replacement: PreparedFederatedLspProviderRoutes) {
+        self.routes.store(Arc::new(replacement.routes));
+    }
+}
+
+pub struct PreparedFederatedLspProviderRoutes {
+    routes: FederatedLspProviderRoutes,
+}
+
+impl FeedbackCyclePort for FederatedLspProviderAuthority {
     fn request_feedback_cycle(&self, request: FeedbackCycleRequest) -> FeedbackCycleResponse {
-        self.roots.get(&request.root_uri).map_or_else(
-            || FeedbackCycleResponse::Rejected {
-                reason: "root-not-authorized".to_owned(),
-            },
-            |port| port.request_feedback_cycle(request),
-        )
+        self.routes
+            .load()
+            .feedback
+            .get(&request.root_uri)
+            .map_or_else(
+                || FeedbackCycleResponse::Rejected {
+                    reason: "root-not-authorized".to_owned(),
+                },
+                |port| port.request_feedback_cycle(request),
+            )
     }
 }
 
-struct FederatedSemantics {
-    roots: BTreeMap<String, Arc<dyn SemanticProviderPort + Send + Sync>>,
-}
-
-impl SemanticProviderPort for FederatedSemantics {
+impl SemanticProviderPort for FederatedLspProviderAuthority {
     fn request(
         &self,
         root: &AdmittedRoot,
         request_id: &LspRequestId,
         request: &SemanticRequest,
     ) -> SemanticProviderOutcome<SemanticResponse> {
-        self.roots
+        self.routes
+            .load()
+            .semantics
             .get(root.uri())
             .map_or(SemanticProviderOutcome::Unavailable, |port| {
                 port.request(root, request_id, request)
@@ -188,18 +246,14 @@ impl SemanticProviderPort for FederatedSemantics {
     }
 }
 
-struct FederatedDiagnostics {
-    roots: BTreeMap<String, Arc<dyn DiagnosticSnapshotPort + Send + Sync>>,
-}
-
-impl DiagnosticSnapshotPort for FederatedDiagnostics {
+impl DiagnosticSnapshotPort for FederatedLspProviderAuthority {
     fn document_diagnostics(
         &self,
         root: &AdmittedRoot,
         document_uri: &str,
         overlay: Option<&OverlaySnapshot>,
     ) -> DiagnosticSnapshotOutcome {
-        self.roots.get(root.uri()).map_or(
+        self.routes.load().diagnostics.get(root.uri()).map_or(
             DiagnosticSnapshotOutcome::Failed {
                 source_generation: None,
                 failure_class: "root-not-authorized".to_owned(),
@@ -215,7 +269,7 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
         overlay: Option<&OverlaySnapshot>,
         source_generation: Option<u64>,
     ) -> DiagnosticRefreshAdmission {
-        self.roots.get(root.uri()).map_or(
+        self.routes.load().diagnostics.get(root.uri()).map_or(
             DiagnosticRefreshAdmission::Rejected {
                 failure_class: "root-not-authorized".to_owned(),
             },
@@ -224,26 +278,21 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
     }
 }
 
-struct FederatedCancellation {
-    roots: BTreeMap<String, Arc<dyn AnalyzerCancellationPort + Send + Sync>>,
-}
-
-impl AnalyzerCancellationPort for FederatedCancellation {
+impl AnalyzerCancellationPort for FederatedLspProviderAuthority {
     fn cancel_upstream(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
-        self.roots
+        self.routes
+            .load()
+            .cancellation
             .get(root.uri())
             .is_some_and(|port| port.cancel_upstream(root, request_id))
     }
 }
 
-struct FederatedContext {
-    roots: BTreeMap<String, Arc<dyn ContextProjectionPort + Send + Sync>>,
-}
-
-impl ContextProjectionPort for FederatedContext {
+impl ContextProjectionPort for FederatedLspProviderAuthority {
     fn registrations(&self) -> Vec<ContextProjectionRegistration> {
-        let mut registrations = self
-            .roots
+        let routes = self.routes.load();
+        let mut registrations = routes
+            .context
             .values()
             .map(|port| port.registrations().into_iter().collect::<BTreeSet<_>>());
         let Some(mut common) = registrations.next() else {
@@ -261,7 +310,9 @@ impl ContextProjectionPort for FederatedContext {
         request_id: &LspRequestId,
         request: &ContextProjectionRequest,
     ) -> ContextProjectionOutcome {
-        self.roots
+        self.routes
+            .load()
+            .context
             .get(root.uri())
             .map_or(ContextProjectionOutcome::Denied, |port| {
                 port.snapshot(root, request_id, request)
@@ -273,7 +324,9 @@ impl ContextProjectionPort for FederatedContext {
         root: &AdmittedRoot,
         request_id: &LspRequestId,
     ) -> Option<ContextProjectionOutcome> {
-        self.roots
+        self.routes
+            .load()
+            .context
             .get(root.uri())
             .and_then(|port| port.poll_snapshot(root, request_id))
     }
@@ -284,7 +337,9 @@ impl ContextProjectionPort for FederatedContext {
         request_id: &LspRequestId,
         request: &ContextExpansionRequest,
     ) -> ContextExpansionOutcome {
-        self.roots
+        self.routes
+            .load()
+            .context
             .get(root.uri())
             .map_or(ContextExpansionOutcome::Denied, |port| {
                 port.expand(root, request_id, request)
@@ -296,13 +351,17 @@ impl ContextProjectionPort for FederatedContext {
         root: &AdmittedRoot,
         request_id: &LspRequestId,
     ) -> Option<ContextExpansionOutcome> {
-        self.roots
+        self.routes
+            .load()
+            .context
             .get(root.uri())
             .and_then(|port| port.poll_expansion(root, request_id))
     }
 
     fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
-        self.roots
+        self.routes
+            .load()
+            .context
             .get(root.uri())
             .is_some_and(|port| port.cancel_request(root, request_id))
     }
@@ -312,7 +371,9 @@ impl ContextProjectionPort for FederatedContext {
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) -> Vec<ContextProjectionChange> {
-        self.roots
+        self.routes
+            .load()
+            .context
             .get(root.uri())
             .map_or_else(Vec::new, |port| port.poll_changes(root, subscriptions))
     }
@@ -322,7 +383,7 @@ impl ContextProjectionPort for FederatedContext {
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) {
-        if let Some(port) = self.roots.get(root.uri()) {
+        if let Some(port) = self.routes.load().context.get(root.uri()) {
             port.update_subscriptions(root, subscriptions);
         }
     }
@@ -356,22 +417,20 @@ mod tests {
     fn federated_semantics_routes_secondary_root_to_its_exact_provider() {
         let primary = AdmittedRoot::new("file:///primary");
         let secondary = AdmittedRoot::new("file:///secondary");
-        let provider = FederatedSemantics {
-            roots: BTreeMap::from([
-                (
-                    primary.uri().to_owned(),
-                    Arc::new(RootSemantic {
-                        root_uri: "file:///primary",
-                    }) as Arc<dyn SemanticProviderPort + Send + Sync>,
-                ),
-                (
-                    secondary.uri().to_owned(),
-                    Arc::new(RootSemantic {
-                        root_uri: "file:///secondary",
-                    }) as Arc<dyn SemanticProviderPort + Send + Sync>,
-                ),
-            ]),
+        let routes = |root: &AdmittedRoot, root_uri: &'static str| FederatedLspProviderRoutes {
+            feedback: BTreeMap::new(),
+            semantics: BTreeMap::from([(
+                root.uri().to_owned(),
+                Arc::new(RootSemantic { root_uri }) as Arc<dyn SemanticProviderPort + Send + Sync>,
+            )]),
+            diagnostics: BTreeMap::new(),
+            cancellation: BTreeMap::new(),
+            context: BTreeMap::new(),
         };
+        let provider = FederatedLspProviderAuthority::new(routes(&primary, "file:///primary"));
+        provider.replace(PreparedFederatedLspProviderRoutes {
+            routes: routes(&secondary, "file:///secondary"),
+        });
         let request = SemanticRequest::Hover {
             document_uri: "file:///secondary/lib.rs".to_owned(),
             position: LspPosition {
@@ -387,6 +446,20 @@ mod tests {
                 &request,
             ),
             SemanticProviderOutcome::Complete(SemanticResponse::Hover(None))
+        ));
+        assert!(matches!(
+            provider.request(
+                &primary,
+                &LspRequestId::String("request.removed".to_owned()),
+                &SemanticRequest::Hover {
+                    document_uri: "file:///primary/lib.rs".to_owned(),
+                    position: LspPosition {
+                        line: 0,
+                        character: 0,
+                    },
+                },
+            ),
+            SemanticProviderOutcome::Unavailable
         ));
     }
 }

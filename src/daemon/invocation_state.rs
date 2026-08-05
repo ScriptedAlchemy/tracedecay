@@ -591,6 +591,90 @@ impl DaemonInvocationState {
         self.service.expire_all().await;
     }
 
+    async fn apply_pending_lsp_workspace_mutation(
+        &self,
+        store_administration: &StoreAdministration,
+        session: service::invocation::DaemonLspSessionAccess,
+        mutation: tracedecay_lsp::WorkspaceFolderMutation,
+        deadline: &tracedecay_application::Deadline,
+        cancellation: &tracedecay_application::CancellationContext,
+        now_ms: u64,
+    ) -> Result<(), service::invocation::DaemonInvocationProblem> {
+        let apply = async {
+            if cancellation.is_cancelled()
+                || deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+            {
+                return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+            }
+            let (selectors, canonical_uris) = registered_lsp_root_selectors_for_uris(
+                store_administration,
+                &mutation.next_root_uris,
+            )
+            .await
+            .ok_or(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
+            let active_root = url::Url::parse(&mutation.active_root_uri)
+                .ok()
+                .and_then(|uri| uri.to_file_path().ok())
+                .and_then(|path| path.canonicalize().ok())
+                .ok_or(service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+            if !canonical_uris.contains_key(&active_root) {
+                return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
+            }
+            let resolved =
+                resolve_multi_root_projects(store_administration, &self.service, &selectors)
+                    .await?;
+            if cancellation.is_cancelled()
+                || deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+            {
+                return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+            }
+            let roots = resolved
+                .into_iter()
+                .map(|(root, scope, locator)| {
+                    let uri = canonical_uris.get(&root)?.clone();
+                    Some((root, uri, scope, locator))
+                })
+                .collect::<Option<Vec<_>>>()
+                .ok_or(service::invocation::DaemonInvocationProblem::Unavailable)?;
+            let workspace = self
+                .service
+                .authorize_lsp_workspace(
+                    roots,
+                    mutation.active_root_uri.clone(),
+                    tracedecay_application::clock::now_micros(),
+                )
+                .await
+                .ok_or(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
+            let providers = self
+                .service
+                .prepare_lsp_workspace_providers(&workspace)
+                .await
+                .ok_or(service::invocation::DaemonInvocationProblem::Unavailable)?;
+            self.service
+                .apply_lsp_workspace_mutation(
+                    &self.lsp_session_registry,
+                    session.clone(),
+                    &mutation,
+                    workspace,
+                    providers,
+                    now_ms,
+                )
+                .await
+        }
+        .await;
+        if apply.is_err() {
+            self.service
+                .reject_lsp_workspace_mutation(
+                    &self.lsp_session_registry,
+                    session,
+                    &mutation,
+                    now_ms,
+                )
+                .await?;
+        }
+        apply
+    }
+
     pub(super) async fn invoke_for_project(
         &self,
         store_administration: &StoreAdministration,
@@ -753,6 +837,15 @@ impl DaemonInvocationState {
                 )
                 .await;
         }
+        let lsp_frame_control = match &request.payload {
+            service::invocation::DaemonInvocationPayload::LspFrame {
+                session,
+                deadline,
+                cancellation,
+                ..
+            } => Some((session.clone(), deadline.clone(), cancellation.clone())),
+            _ => None,
+        };
         let lsp_workspace =
             if request.operation() == service::invocation::DaemonInvocationOperation::LspOpen {
                 match request_project_path {
@@ -775,7 +868,8 @@ impl DaemonInvocationState {
         } else {
             None
         };
-        self.service
+        let response = self
+            .service
             .invoke(
                 &self.lsp_session_registry,
                 request_project_path,
@@ -783,6 +877,45 @@ impl DaemonInvocationState {
                 git_service,
                 request,
             )
-            .await
+            .await;
+        if matches!(
+            &response.outcome,
+            service::invocation::DaemonInvocationOutcome::LspFrameAccepted { .. }
+        ) && let Some((session, deadline, cancellation)) = lsp_frame_control
+        {
+            match self
+                .service
+                .pending_lsp_workspace_mutation(
+                    &self.lsp_session_registry,
+                    session.clone(),
+                    service::invocation::now_millis(),
+                )
+                .await
+            {
+                Ok(Some(mutation)) => {
+                    if let Err(problem) = self
+                        .apply_pending_lsp_workspace_mutation(
+                            store_administration,
+                            session,
+                            mutation,
+                            &deadline,
+                            &cancellation,
+                            service::invocation::now_millis(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(?problem, "rejected fenced LSP workspace-folder mutation");
+                    }
+                }
+                Ok(None) => {}
+                Err(problem) => {
+                    tracing::warn!(
+                        ?problem,
+                        "could not inspect accepted LSP workspace-folder mutation"
+                    );
+                }
+            }
+        }
+        response
     }
 }

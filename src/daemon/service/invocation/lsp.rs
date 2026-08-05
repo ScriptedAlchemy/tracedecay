@@ -3,6 +3,8 @@
 use super::*;
 use tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS;
 
+mod workspace_mutation;
+
 pub(super) fn admit_lsp_control(
     request_id: String,
     deadline: &Deadline,
@@ -40,7 +42,7 @@ pub(super) fn canonicalize_lsp_roots(
 pub(super) fn runtime_lsp_actor(
     workspace: AuthorizedLspWorkspace,
     factories: Vec<(AdmittedRoot, Arc<DaemonLspSessionFactory>)>,
-) -> Option<RuntimeLspActor> {
+) -> Option<(RuntimeLspActor, FederatedLspProviderAuthority)> {
     DaemonLspSessionFactory::open_federated_workspace_session(workspace, factories)
 }
 
@@ -132,6 +134,7 @@ impl DaemonInvocationService {
             ResolvedScope,
             tracedecay_application::RegisteredRootLocatorV1,
         )>,
+        anchor_root_uri: String,
         observed_at: UtcMicros,
     ) -> Option<AuthorizedLspWorkspace> {
         if roots.is_empty() || roots.len() > MAX_LSP_WORKSPACE_ROOTS {
@@ -146,12 +149,17 @@ impl DaemonInvocationService {
             if grant.scope != *scope {
                 return None;
             }
-            return Some(AuthorizedLspWorkspace::single(AdmittedRoot::authorized(
-                uri.clone(),
-                scope.scope_digest.clone(),
-            )));
+            return AuthorizedLspWorkspace::anchored(
+                None,
+                vec![AdmittedRoot::authorized(
+                    uri.clone(),
+                    scope.scope_digest.clone(),
+                )],
+                anchor_root_uri,
+            )
+            .ok();
         }
-        self.authorize_federated_lsp_workspace(&roots, observed_at)
+        self.authorize_federated_lsp_workspace(&roots, anchor_root_uri, observed_at)
             .await
     }
 
@@ -163,6 +171,7 @@ impl DaemonInvocationService {
             ResolvedScope,
             tracedecay_application::RegisteredRootLocatorV1,
         )],
+        anchor_root_uri: String,
         observed_at: UtcMicros,
     ) -> Option<AuthorizedLspWorkspace> {
         let selector_digest = canonical_sha256(&(
@@ -247,7 +256,9 @@ impl DaemonInvocationService {
             }
         }
         let digest = scope_set.digest().clone();
-        let workspace = AuthorizedLspWorkspace::new(Some(digest.clone()), admitted).ok()?;
+        let workspace =
+            AuthorizedLspWorkspace::anchored(Some(digest.clone()), admitted, anchor_root_uri)
+                .ok()?;
         self.authorized_lsp_workspaces.lock().await.insert(
             digest,
             AuthorizedDaemonLspWorkspace {
@@ -548,9 +559,10 @@ impl DaemonInvocationService {
         };
         let expires_at_ms = now_ms.saturating_add(LSP_SESSION_TTL_MS);
         let session_id = access.session_id().clone();
-        let (actor, scope_set_id, scope_set_digest) = match authorized {
+        let (actor, providers, scope_set_id, scope_set_digest) = match authorized {
             Some(authorized) => {
-                let Some(actor) = runtime_lsp_actor(workspace, authorized.factories) else {
+                let Some((actor, providers)) = runtime_lsp_actor(workspace, authorized.factories)
+                else {
                     return DaemonInvocationResponse::problem(
                         request_id,
                         DaemonInvocationProblem::Unavailable,
@@ -558,21 +570,36 @@ impl DaemonInvocationService {
                 };
                 (
                     actor,
+                    providers,
                     Some(authorized.scope_set.scope_set_id().clone()),
                     Some(authorized.scope_set.digest().clone()),
                 )
             }
-            None => (
-                lsp_owner.factory.open_workspace_session(workspace),
-                None,
-                None,
-            ),
+            None => {
+                let Ok(primary) = workspace.resolve_root_uri(workspace.anchor_root_uri()) else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                let primary = primary.clone();
+                let Some((actor, providers)) =
+                    runtime_lsp_actor(workspace, vec![(primary, lsp_owner.factory)])
+                else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                (actor, providers, None, None)
+            }
         };
         self.lsp_sessions.lock().await.insert(
             session_id,
             RuntimeLspSession {
                 expires_at_ms,
                 actor,
+                providers,
             },
         );
         DaemonInvocationResponse::lsp_opened(

@@ -312,7 +312,7 @@ pub(super) fn observe_plan26_invocation_response(
     }
 }
 
-pub(super) fn now_millis() -> u64 {
+pub(crate) fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
