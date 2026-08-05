@@ -236,10 +236,10 @@ pub async fn hook_claude_subagent_start() -> i32 {
 
 /// Claude Code `PostCompact` hook handler.
 ///
-/// `compact_summary` is emitted by Claude after native compaction. The daemon
-/// authenticates that exact event, catches the transcript up through the
-/// canonical observation/redaction path, and publishes the summary and its
-/// frozen source relations in one LCM transaction.
+/// Claude does not currently expose machine-verifiable provenance for the
+/// compacted source frontier. The daemon therefore treats this event as a
+/// read-only capability probe and returns typed unavailable without publishing
+/// transcript or summary state.
 pub async fn hook_claude_post_compact() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);

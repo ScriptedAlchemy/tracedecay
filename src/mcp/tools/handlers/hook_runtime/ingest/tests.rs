@@ -82,6 +82,26 @@ async fn supported_transcript_admission_requires_its_authority_without_echoing_p
     assert!(!data.to_string().contains(secret));
 }
 
+#[tokio::test]
+async fn claude_postcompact_without_machine_provenance_is_read_only_unavailable() {
+    let outcome = claude_compact(
+        &json!({
+            "event_json": r#"{"compact_summary":"self-asserted","digest":"self-asserted"}"#,
+        }),
+        SessionAuthorities::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome["status"], "unavailable");
+    assert_eq!(
+        outcome["reason"],
+        "claude_postcompact_provenance_unavailable"
+    );
+    assert_eq!(outcome["summary_nodes_created"], 0);
+    assert_eq!(outcome["summary_node_ids"], json!([]));
+}
+
 #[test]
 fn capture_registry_owns_every_supported_transcript_route() {
     for route in [

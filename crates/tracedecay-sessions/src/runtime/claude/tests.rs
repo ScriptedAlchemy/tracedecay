@@ -3,24 +3,6 @@ use serde_json::json;
 use tracedecay_capture::claude as canonical;
 
 #[test]
-fn exact_transcript_ownership_requires_canonical_jsonl_path() {
-    let home = tempfile::tempdir().unwrap();
-    let projects = home.path().join(".claude/projects/project-a");
-    std::fs::create_dir_all(&projects).unwrap();
-    let owned = projects.join("session.jsonl");
-    let wrong_extension = projects.join("session.txt");
-    let outside = home.path().join("outside.jsonl");
-    std::fs::write(&owned, b"{}\n").unwrap();
-    std::fs::write(&wrong_extension, b"{}\n").unwrap();
-    std::fs::write(&outside, b"{}\n").unwrap();
-    let source = ClaudeSource::with_home(home.path());
-
-    assert!(source.owns_transcript_path(&owned));
-    assert!(!source.owns_transcript_path(&wrong_extension));
-    assert!(!source.owns_transcript_path(&outside));
-}
-
-#[test]
 fn live_session_discovery_excludes_large_unrelated_history() {
     let home = tempfile::tempdir().unwrap();
     let projects = home.path().join(".claude/projects");

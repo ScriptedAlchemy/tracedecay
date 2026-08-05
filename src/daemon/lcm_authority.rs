@@ -10,10 +10,9 @@ use std::sync::Arc;
 use tracedecay_application::{
     CancellationStage, OperationTermination, RequestAdmission, RequestContext,
 };
-use tracedecay_domain::{ManifestDigest, RetrievalAnchorId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_sessions::runtime::lcm::{
-    LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmGcConfig, LcmPreflightRequest,
-    LcmPreflightResponse, LcmStatus, LcmSummarizerMode,
+    LcmError, LcmGcConfig, LcmPreflightRequest, LcmPreflightResponse, LcmStatus,
 };
 use tracedecay_usecases::context::{
     CancellationToken, RequestInterruption, application_observed_at,
@@ -22,14 +21,12 @@ use tracedecay_usecases::context::{
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityFuture, LcmAuthorityInvocation, LcmAuthorityOperation, LcmAuthorityOutcome,
     LcmAuthorityPayload, LcmAuthorityPort, LcmAuthorityRequest, LcmAuthorityResponse,
-    LcmAuthorityTarget, LcmAuthorityUnavailableReason, LcmCompactionCommand,
-    LcmCompressionEvidence, LcmDoctorQuery, LcmHostProtocol, LcmStatusQuery,
-    LcmTranscriptIngestCommand, lcm_authority_operation_identity,
+    LcmAuthorityTarget, LcmAuthorityUnavailableReason, LcmCompactionCommand, LcmDoctorQuery,
+    LcmStatusQuery, LcmTranscriptIngestCommand, lcm_authority_operation_identity,
 };
 
 use crate::global_db::RegisteredGlobalDb;
 
-mod canonical_source;
 mod mount;
 mod receipt;
 pub(crate) use mount::{MountedLcmAuthorityPort, mount_registered_lcm_authority};
@@ -39,7 +36,6 @@ type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, LcmError>> + Sen
 
 trait LcmDaemonStore: Send + Sync {
     fn ingest(&self, request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse>;
-    fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse>;
     fn status(&self, query: LcmStatusQuery) -> StoreFuture<'_, LcmStatus>;
     fn doctor(&self, query: LcmDoctorQuery) -> StoreFuture<'_, serde_json::Value>;
 }
@@ -57,10 +53,6 @@ impl RegisteredLcmDaemonStore {
 impl LcmDaemonStore for RegisteredLcmDaemonStore {
     fn ingest(&self, request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse> {
         Box::pin(self.database.lcm_preflight(request))
-    }
-
-    fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
-        Box::pin(self.database.lcm_compress_required_summary(request))
     }
 
     fn status(&self, query: LcmStatusQuery) -> StoreFuture<'_, LcmStatus> {
@@ -89,62 +81,6 @@ impl LcmDaemonStore for RegisteredLcmDaemonStore {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CanonicalCompactionSource {
-    messages: Vec<serde_json::Value>,
-    anchors: Vec<RetrievalAnchorId>,
-    snapshot_state: ManifestDigest,
-}
-
-enum CanonicalCompactionSourceOutcome {
-    Ready(CanonicalCompactionSource),
-    Unavailable,
-}
-
-type CanonicalSourceFuture<'a> =
-    Pin<Box<dyn Future<Output = CanonicalCompactionSourceOutcome> + Send + 'a>>;
-
-trait LcmCanonicalCompactionSourcePort: Send + Sync {
-    fn hydrate<'a>(&'a self, provider: &'a str, session_id: &'a str) -> CanonicalSourceFuture<'a>;
-}
-
-fn compression_request(
-    preflight: LcmPreflightRequest,
-    messages: Vec<serde_json::Value>,
-    summary_text: String,
-) -> LcmCompressionRequest {
-    LcmCompressionRequest {
-        provider: preflight.provider,
-        session_id: preflight.session_id,
-        messages,
-        // PostCompact proves the host already crossed its native compaction
-        // boundary. Force the storage plan to publish the supplied summary
-        // instead of re-evaluating a budget signal that the event does not
-        // carry.
-        current_tokens: Some(preflight.current_tokens.unwrap_or(2).max(2)),
-        focus_topic: None,
-        ignore_session_patterns: preflight.ignore_session_patterns,
-        stateless_session_patterns: preflight.stateless_session_patterns,
-        ignore_message_patterns: preflight.ignore_message_patterns,
-        expected_current_frontier_store_id: None,
-        threshold_tokens: Some(preflight.threshold_tokens.unwrap_or(1).max(1)),
-        max_assembly_tokens: preflight.max_assembly_tokens,
-        leaf_chunk_tokens: preflight.leaf_chunk_tokens,
-        max_source_messages: preflight.max_source_messages,
-        summary_fan_in: preflight.summary_fan_in,
-        incremental_max_depth: preflight.incremental_max_depth,
-        fresh_tail_count: Some(0),
-        dynamic_leaf_chunk_enabled: preflight.dynamic_leaf_chunk_enabled,
-        dynamic_leaf_chunk_max: preflight.dynamic_leaf_chunk_max,
-        context_length: preflight.context_length,
-        reserve_tokens_floor: preflight.reserve_tokens_floor,
-        summarizer: LcmSummarizerMode::Provided {
-            summary_text,
-            route: Some("claude_native_postcompact".to_owned()),
-        },
-    }
-}
-
 /// One daemon-owned LCM authority bound to one registered session shard.
 ///
 /// No database accessor is exposed. Reconstructing this value after daemon
@@ -152,38 +88,22 @@ fn compression_request(
 /// committed LCM frontier/status from storage.
 pub(crate) struct DaemonLcmAuthority {
     store: Option<Arc<dyn LcmDaemonStore>>,
-    canonical_source: Option<Arc<dyn LcmCanonicalCompactionSourcePort>>,
 }
 
 impl DaemonLcmAuthority {
     pub(crate) fn registered(database: Arc<RegisteredGlobalDb>) -> Self {
         Self {
             store: Some(Arc::new(RegisteredLcmDaemonStore::new(database))),
-            canonical_source: None,
         }
     }
 
     pub(crate) fn unavailable() -> Self {
-        Self {
-            store: None,
-            canonical_source: None,
-        }
-    }
-
-    fn with_canonical_source(
-        mut self,
-        canonical_source: Arc<dyn LcmCanonicalCompactionSourcePort>,
-    ) -> Self {
-        self.canonical_source = Some(canonical_source);
-        self
+        Self { store: None }
     }
 
     #[cfg(test)]
     fn with_store(store: Arc<dyn LcmDaemonStore>) -> Self {
-        Self {
-            store: Some(store),
-            canonical_source: None,
-        }
+        Self { store: Some(store) }
     }
 
     async fn execute_inner(&self, invocation: LcmAuthorityInvocation) -> LcmAuthorityResponse {
@@ -430,11 +350,11 @@ impl DaemonLcmAuthority {
     async fn execute_compaction(
         &self,
         context: &RequestContext,
-        cancellation: &CancellationToken,
+        _cancellation: &CancellationToken,
         started_at: UtcMicros,
         command: LcmCompactionCommand,
     ) -> LcmAuthorityResponse {
-        let Some(store) = self.store.as_ref() else {
+        if self.store.is_none() {
             return unavailable(
                 context,
                 LcmAuthorityOperation::Compact,
@@ -450,134 +370,12 @@ impl DaemonLcmAuthority {
                 LcmAuthorityUnavailableReason::HostProtocolUnavailable,
             );
         }
-        match command.evidence {
-            LcmCompressionEvidence::PressureOnly { .. } => unavailable(
-                context,
-                LcmAuthorityOperation::Compact,
-                started_at,
-                LcmAuthorityUnavailableReason::HostPayloadUnavailable,
-            ),
-            LcmCompressionEvidence::ClaudeNativeSummary {
-                protocol,
-                summary_text,
-            } => {
-                let LcmHostProtocol::ClaudeCodePostCompact {
-                    protocol_revision,
-                    event_digest,
-                } = protocol
-                else {
-                    return unavailable(
-                        context,
-                        LcmAuthorityOperation::Compact,
-                        started_at,
-                        LcmAuthorityUnavailableReason::HostProtocolUnavailable,
-                    );
-                };
-                if protocol_revision != "claude.postcompact.v1"
-                    || summary_text.trim().is_empty()
-                    || !command.preflight.messages.is_empty()
-                {
-                    return unavailable(
-                        context,
-                        LcmAuthorityOperation::Compact,
-                        started_at,
-                        LcmAuthorityUnavailableReason::HostProtocolUnavailable,
-                    );
-                }
-                let Some(canonical_source) = self.canonical_source.as_ref() else {
-                    return unavailable(
-                        context,
-                        LcmAuthorityOperation::Compact,
-                        started_at,
-                        LcmAuthorityUnavailableReason::HostPayloadUnavailable,
-                    );
-                };
-                let hydrated = run_application_request_interruptible(
-                    context,
-                    cancellation,
-                    canonical_source
-                        .hydrate(&command.preflight.provider, &command.preflight.session_id),
-                    || {},
-                )
-                .await;
-                let source = match hydrated {
-                    Ok(CanonicalCompactionSourceOutcome::Ready(source))
-                        if !source.messages.is_empty() && !source.anchors.is_empty() =>
-                    {
-                        source
-                    }
-                    Ok(_) => {
-                        return unavailable(
-                            context,
-                            LcmAuthorityOperation::Compact,
-                            started_at,
-                            LcmAuthorityUnavailableReason::HostPayloadUnavailable,
-                        );
-                    }
-                    Err(interruption) => {
-                        return terminal_interruption(
-                            context,
-                            LcmAuthorityOperation::Compact,
-                            started_at,
-                            interruption,
-                            CancellationStage::DuringRead,
-                            None,
-                        );
-                    }
-                };
-                let source_state = source.snapshot_state.clone();
-                let source_anchors = source.anchors.clone();
-                let request = compression_request(command.preflight, source.messages, summary_text);
-                let compacted = run_application_request_interruptible(
-                    context,
-                    cancellation,
-                    store.compact(request),
-                    || {},
-                )
-                .await;
-                match compacted {
-                    Ok(Ok(response)) => {
-                        let Ok(state) = canonical_sha256(&(
-                            event_digest,
-                            source_state,
-                            source_anchors,
-                            &response,
-                        )) else {
-                            return terminal_failure(
-                                context,
-                                LcmAuthorityOperation::Compact,
-                                started_at,
-                                "LCM atomic compaction receipt could not be encoded",
-                            );
-                        };
-                        terminal(
-                            context,
-                            LcmAuthorityOperation::Compact,
-                            started_at,
-                            LcmAuthorityOutcome::Ready,
-                            OperationTermination::Completed,
-                            Some(state),
-                            Some(LcmAuthorityPayload::Compaction(response)),
-                            None,
-                        )
-                    }
-                    Ok(Err(_)) => terminal_failure(
-                        context,
-                        LcmAuthorityOperation::Compact,
-                        started_at,
-                        "LCM atomic compaction failed",
-                    ),
-                    Err(interruption) => terminal_interruption(
-                        context,
-                        LcmAuthorityOperation::Compact,
-                        started_at,
-                        interruption,
-                        CancellationStage::EffectInFlight,
-                        None,
-                    ),
-                }
-            }
-        }
+        unavailable(
+            context,
+            LcmAuthorityOperation::Compact,
+            started_at,
+            LcmAuthorityUnavailableReason::HostPayloadUnavailable,
+        )
     }
 
     async fn execute_status(
