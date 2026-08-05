@@ -118,7 +118,7 @@ fn effect_context(actor: &str, grant_revision: u64, grant_digest: char) -> Reque
         None,
     )
     .unwrap();
-    let actor = id(actor);
+    let actor: ActorId = id(actor);
     let grant = CapabilityGrantSnapshot::new(
         id::<CapabilityGrantId>("grant.workflow.runtime-store"),
         grant_revision,
@@ -528,9 +528,9 @@ fn lost_redeem_response_replays_success_instead_of_token_replay() {
     )
     .unwrap();
     let restarted = store.restart("workflow-effect-redeem-replay");
-    let authority = authority(&restarted);
+    let restarted_authority = authority(&restarted);
     let retry = WorkflowEffectAuthorityPortV1::execute_effect(
-        &authority,
+        &restarted_authority,
         &identity,
         &prepared,
         UtcMicros(40),
@@ -618,9 +618,9 @@ fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
             .unwrap();
     });
     let restarted = store.restart("workflow-effect-in-flight");
-    let authority = authority(&restarted);
+    let restarted_authority = authority(&restarted);
     let reconciled = WorkflowEffectAuthorityPortV1::execute_effect(
-        &authority,
+        &restarted_authority,
         &identity,
         &prepared,
         UtcMicros(20),
@@ -760,7 +760,7 @@ fn restart_uses_the_reserved_preparation_and_timestamps() {
             .unwrap();
     });
     let store = store.restart("workflow-effect-reserved-preparation");
-    let authority = authority(&store);
+    let restarted_authority = authority(&store);
     let retry_identity = effect_identity_at(
         WorkflowEffectOperationV1::HandoffIssue,
         "actor.workflow.source",
@@ -780,7 +780,7 @@ fn restart_uses_the_reserved_preparation_and_timestamps() {
     );
 
     let record = WorkflowEffectAuthorityPortV1::execute_effect(
-        &authority,
+        &restarted_authority,
         &retry_identity,
         &recomputed,
         UtcMicros(50),
