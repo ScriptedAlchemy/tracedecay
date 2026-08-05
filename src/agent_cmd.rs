@@ -14,9 +14,11 @@ use tracedecay::user_config::UserConfig;
 
 mod automation;
 pub(crate) use automation::CodexAutomationInstall;
+#[cfg(test)]
+use automation::broker_codex_daemon_automation_project;
 use automation::{
-    broker_codex_daemon_automation_project, install_codex_daemon_automation,
-    validate_codex_automation_flags, validate_codex_automation_project_path,
+    install_codex_daemon_automation, validate_codex_automation_flags,
+    validate_codex_automation_project_path,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
