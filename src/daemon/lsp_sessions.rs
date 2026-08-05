@@ -9,21 +9,13 @@
 
 use super::*;
 
-#[derive(Clone)]
-pub(super) enum ConnectionLspSessionTransition {
-    Reconnect,
-    Detach(service::invocation::DaemonLspSessionAccess),
-}
-
 pub(super) fn invocation_lsp_session_transition(
     request: &DaemonInvocationRequest,
-) -> Option<ConnectionLspSessionTransition> {
+) -> Option<service::invocation::DaemonLspSessionAccess> {
     match &request.payload {
-        service::invocation::DaemonInvocationPayload::LspReconnect { .. } => {
-            Some(ConnectionLspSessionTransition::Reconnect)
-        }
-        service::invocation::DaemonInvocationPayload::LspDetach { session, .. } => {
-            Some(ConnectionLspSessionTransition::Detach(session.clone()))
+        service::invocation::DaemonInvocationPayload::LspReconnect { session, .. }
+        | service::invocation::DaemonInvocationPayload::LspDetach { session, .. } => {
+            Some(session.clone())
         }
         _ => None,
     }
@@ -31,7 +23,7 @@ pub(super) fn invocation_lsp_session_transition(
 
 pub(super) fn update_connection_lsp_sessions(
     sessions: &mut HashMap<String, service::invocation::DaemonLspSessionAccess>,
-    transitioned: Option<&ConnectionLspSessionTransition>,
+    transitioned: Option<&service::invocation::DaemonLspSessionAccess>,
     response: &DaemonInvocationResponse,
 ) {
     match &response.outcome {
@@ -42,14 +34,7 @@ pub(super) fn update_connection_lsp_sessions(
             sessions.insert(session.session_id.clone(), session.clone());
         }
         service::invocation::DaemonInvocationOutcome::LspDetached => {
-            if let Some(ConnectionLspSessionTransition::Detach(detached)) = transitioned {
-                sessions.remove(&detached.session_id);
-            }
-        }
-        service::invocation::DaemonInvocationOutcome::Problem {
-            problem: service::invocation::DaemonInvocationProblem::Unavailable,
-        } => {
-            if let Some(ConnectionLspSessionTransition::Detach(detached)) = transitioned {
+            if let Some(detached) = transitioned {
                 sessions.remove(&detached.session_id);
             }
         }
@@ -60,64 +45,12 @@ pub(super) fn update_connection_lsp_sessions(
 pub(super) async fn cleanup_connection_lsp_sessions(
     invocation: &DaemonInvocationState,
     sessions: HashMap<String, service::invocation::DaemonLspSessionAccess>,
-) -> std::result::Result<(), service::invocation::DaemonInvocationProblem> {
-    let mut outcome = Ok(());
+) {
     for session in sessions.into_values() {
-        if let Err(problem) = invocation
+        invocation
             .service
             .disconnect_lsp_session(&invocation.lsp_session_registry, session)
-            .await
-        {
-            outcome = Err(problem);
-        }
-    }
-    outcome
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tracedecay_lsp::{LspSessionAccess, LspSessionCredential, LspSessionId};
-
-    fn session_access() -> service::invocation::DaemonLspSessionAccess {
-        let access = LspSessionAccess::new(
-            LspSessionId::new("connection-owned-session").expect("session id"),
-            LspSessionCredential::new(vec![7; 16]).expect("credential"),
-        );
-        service::invocation::DaemonLspSessionAccess::from_access(&access)
-    }
-
-    #[test]
-    fn terminal_detach_failure_releases_connection_ownership() {
-        let access = session_access();
-        let mut sessions = HashMap::from([(access.session_id.clone(), access.clone())]);
-        let transition = ConnectionLspSessionTransition::Detach(access);
-        let response = DaemonInvocationResponse::problem(
-            "request.detach",
-            service::invocation::DaemonInvocationProblem::Unavailable,
-        );
-
-        update_connection_lsp_sessions(&mut sessions, Some(&transition), &response);
-
-        assert!(
-            sessions.is_empty(),
-            "a detach failure after terminal cleanup must not trigger a second disconnect"
-        );
-    }
-
-    #[test]
-    fn reconnect_failure_retains_connection_ownership() {
-        let access = session_access();
-        let mut sessions = HashMap::from([(access.session_id.clone(), access.clone())]);
-        let transition = ConnectionLspSessionTransition::Reconnect;
-        let response = DaemonInvocationResponse::problem(
-            "request.reconnect",
-            service::invocation::DaemonInvocationProblem::Unavailable,
-        );
-
-        update_connection_lsp_sessions(&mut sessions, Some(&transition), &response);
-
-        assert_eq!(sessions.len(), 1);
+            .await;
     }
 }
 

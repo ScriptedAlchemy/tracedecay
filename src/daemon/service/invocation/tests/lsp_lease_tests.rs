@@ -53,159 +53,14 @@ async fn detach_runtime_actor(service: &DaemonInvocationService, session: &Daemo
         .expect("detach runtime actor");
 }
 
-#[tokio::test]
-async fn shutdown_and_exit_can_complete_the_explicit_transport_detach() {
-    let service = DaemonInvocationService::default();
-    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
-    let session = open_session(&service, &registry, "request.shutdown-exit").await;
-    for (request_id, frame) in [
-        (
-            "request.initialize",
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///authoritative","capabilities":{"general":{"positionEncodings":["utf-16"]}}}}"#,
-        ),
-        (
-            "request.initialized",
-            r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
-        ),
-        (
-            "request.protocol-shutdown",
-            r#"{"jsonrpc":"2.0","id":2,"method":"shutdown","params":{}}"#,
-        ),
-        (
-            "request.exit",
-            r#"{"jsonrpc":"2.0","method":"exit","params":{}}"#,
-        ),
-    ] {
-        let response = service
-            .send_lsp_frame(
-                &registry,
-                request_id.to_owned(),
-                session.clone(),
-                frame.to_owned(),
-                1,
-            )
-            .await;
-        assert!(
-            matches!(
-                response.outcome,
-                DaemonInvocationOutcome::LspFrameAccepted { .. }
-            ),
-            "protocol frame must be accepted: {:?}",
-            response.outcome
-        );
-    }
-    let access = session.clone().into_access().expect("session access");
-    assert_eq!(
-        service
-            .lsp_sessions
-            .lock()
-            .await
-            .get(access.session_id())
-            .expect("runtime session")
-            .actor
-            .lifecycle(),
-        SessionLifecycle::Exited
-    );
-
-    let response = service
-        .detach_lsp_session(&registry, "request.transport-detach".to_owned(), session, 2)
-        .await;
-
-    assert!(matches!(
-        response.outcome,
-        DaemonInvocationOutcome::LspDetached
-    ));
-    assert_eq!(registry.lock().await.active_sessions(), 0);
-    assert!(service.lsp_sessions.lock().await.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reconnect_success_is_fenced_from_late_disconnect_cleanup() {
-    for attempt in 0..64 {
-        let service = Arc::new(DaemonInvocationService::default());
-        let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
-        let session = open_session(
-            &service,
-            &registry,
-            &format!("request.reconnect-race.{attempt}"),
-        )
-        .await;
-        let barrier = Arc::new(tokio::sync::Barrier::new(3));
-
-        let disconnect = {
-            let service = Arc::clone(&service);
-            let registry = Arc::clone(&registry);
-            let session = session.clone();
-            let barrier = Arc::clone(&barrier);
-            tokio::spawn(async move {
-                barrier.wait().await;
-                service.disconnect_lsp_session(&registry, session).await
-            })
-        };
-        let reconnect = {
-            let service = Arc::clone(&service);
-            let registry = Arc::clone(&registry);
-            let barrier = Arc::clone(&barrier);
-            tokio::spawn(async move {
-                barrier.wait().await;
-                service
-                    .reconnect_lsp_session(
-                        &registry,
-                        format!("request.reconnect-race-response.{attempt}"),
-                        session,
-                        now_millis(),
-                    )
-                    .await
-            })
-        };
-        barrier.wait().await;
-        let _ = disconnect.await.expect("disconnect task");
-        let response = reconnect.await.expect("reconnect task");
-
-        let DaemonInvocationOutcome::LspReconnected { session } = response.outcome else {
-            panic!("concurrent reconnect failed on attempt {attempt}");
-        };
-        let access = session.into_access().expect("reconnected access");
-        registry
-            .lock()
-            .await
-            .authenticate(&access, now_millis())
-            .expect("successful reconnect remains authenticated");
-        assert_ne!(
-            service
-                .lsp_sessions
-                .lock()
-                .await
-                .get(access.session_id())
-                .expect("successful reconnect retains runtime")
-                .actor
-                .lifecycle(),
-            SessionLifecycle::Detached,
-            "late cleanup detached reconnected actor on attempt {attempt}"
-        );
-        assert_eq!(
-            service.lsp_lease_tasks.active_tasks(),
-            0,
-            "late cleanup retained the prior lease on attempt {attempt}"
-        );
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn immediate_lease_completion_is_not_retained_during_admission() {
     let registry = Arc::new(LspLeaseTaskRegistry::default());
     let session_id = LspSessionId::new("lsp-immediate-expiry").expect("session id");
-    let previous = registry
-        .begin_start(
-            session_id.clone(),
-            crate::application::context::CancellationToken::new(),
-            std::future::ready(()),
-        )
-        .expect("begin immediate lease task");
     registry
-        .finish_start(&session_id, previous)
+        .start(session_id, std::future::ready(()))
         .await
-        .expect("finish immediate lease task");
+        .expect("start immediate lease task");
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while registry.active_tasks() != 0 {
             tokio::task::yield_now().await;
@@ -222,16 +77,40 @@ async fn immediate_lease_completion_is_not_retained_during_admission() {
 }
 
 #[tokio::test]
+async fn cancellation_before_lease_activation_retires_reserved_task_ownership() {
+    let registry = Arc::new(LspLeaseTaskRegistry::default());
+    let session_id = LspSessionId::new("lsp-pending-disconnect").expect("session id");
+    let (activate, activated) = tokio::sync::oneshot::channel::<()>();
+    registry
+        .start(session_id.clone(), async move {
+            if activated.await.is_ok() {
+                std::future::pending::<()>().await;
+            }
+        })
+        .await
+        .expect("reserve pending lease task");
+    assert_eq!(registry.active_tasks(), 1);
+
+    registry
+        .cancel(&session_id)
+        .await
+        .expect("cancel pending lease task");
+
+    assert!(
+        activate.send(()).is_err(),
+        "a detached endpoint must not activate lease work after explicit cancellation"
+    );
+    assert_eq!(registry.active_tasks(), 0);
+}
+
+#[tokio::test]
 async fn disconnect_reclamation_does_not_outlive_daemon_service() {
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
     let session = open_session(&service, &registry, "request.owner-drop").await;
     let retained_runtime_state = Arc::downgrade(&service.lsp_sessions);
 
-    service
-        .disconnect_lsp_session(&registry, session)
-        .await
-        .expect("disconnect session");
+    service.disconnect_lsp_session(&registry, session).await;
     drop(service);
     tokio::task::yield_now().await;
 
@@ -247,10 +126,7 @@ async fn abrupt_disconnect_reclaims_session_at_its_bounded_lease() {
     let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
     let session = open_session(&service, &registry, "request.abrupt-drop").await;
 
-    service
-        .disconnect_lsp_session(&registry, session)
-        .await
-        .expect("disconnect session");
+    service.disconnect_lsp_session(&registry, session).await;
     tokio::task::yield_now().await;
     tokio::time::advance(std::time::Duration::from_millis(LSP_SESSION_TTL_MS)).await;
     tokio::task::yield_now().await;
@@ -261,82 +137,6 @@ async fn abrupt_disconnect_reclaims_session_at_its_bounded_lease() {
         service.lsp_lease_tasks.active_tasks(),
         0,
         "bounded reclamation must retire its owned task"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn reconnect_renews_session_and_survives_the_disconnected_lease_deadline() {
-    let service = DaemonInvocationService::default();
-    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
-    let session = open_session(&service, &registry, "request.reconnect-renewal").await;
-    let access = session.clone().into_access().expect("session access");
-    let original_expires_at_ms = service
-        .lsp_sessions
-        .lock()
-        .await
-        .get(access.session_id())
-        .expect("runtime session")
-        .expires_at_ms;
-    let reconnect_now_ms = original_expires_at_ms
-        .saturating_sub(LSP_SESSION_TTL_MS)
-        .saturating_add(1_000);
-
-    service
-        .disconnect_lsp_session(&registry, session.clone())
-        .await
-        .expect("disconnect session");
-    let response = service
-        .reconnect_lsp_session(
-            &registry,
-            "request.reconnect-renewal".to_owned(),
-            session,
-            reconnect_now_ms,
-        )
-        .await;
-    let DaemonInvocationOutcome::LspReconnected { session } = response.outcome else {
-        panic!("expected reconnected session");
-    };
-    let renewed_access = session.clone().into_access().expect("renewed access");
-    let renewed_expires_at_ms = reconnect_now_ms.saturating_add(LSP_SESSION_TTL_MS);
-
-    {
-        let runtime_sessions = service.lsp_sessions.lock().await;
-        let runtime = runtime_sessions
-            .get(renewed_access.session_id())
-            .expect("renewed runtime session");
-        assert_eq!(runtime.expires_at_ms, renewed_expires_at_ms);
-        assert_eq!(
-            runtime.actor.lifecycle(),
-            SessionLifecycle::AwaitingInitialize
-        );
-    }
-    assert_eq!(
-        registry
-            .lock()
-            .await
-            .authenticate(&renewed_access, original_expires_at_ms)
-            .expect("registry expiry must be renewed")
-            .lifecycle(),
-        SessionLifecycle::AwaitingInitialize
-    );
-    assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
-
-    tokio::time::advance(std::time::Duration::from_millis(LSP_SESSION_TTL_MS)).await;
-    tokio::task::yield_now().await;
-
-    assert_eq!(registry.lock().await.active_sessions(), 1);
-    assert!(
-        service
-            .lsp_sessions
-            .lock()
-            .await
-            .contains_key(renewed_access.session_id())
-    );
-    assert!(
-        service
-            .authenticate(&registry, session, original_expires_at_ms)
-            .await
-            .is_ok()
     );
 }
 
@@ -374,20 +174,376 @@ async fn explicit_detach_reports_actor_failure_after_closing_session_state() {
 }
 
 #[tokio::test]
+async fn explicit_detach_accepts_an_actor_that_already_exited_gracefully() {
+    let service = DaemonInvocationService::default();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+    let session = open_session(&service, &registry, "request.detach-exited").await;
+    let access = session.clone().into_access().expect("session access");
+    {
+        let mut sessions = service.lsp_sessions.lock().await;
+        let actor = &mut sessions
+            .get_mut(access.session_id())
+            .expect("runtime session")
+            .actor;
+        for frame in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///authoritative","capabilities":{"general":{"positionEncodings":["utf-16"]}}}}"#,
+            r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"shutdown","params":{}}"#,
+            r#"{"jsonrpc":"2.0","method":"exit","params":{}}"#,
+        ] {
+            actor.handle_payload(frame.as_bytes(), now_millis());
+        }
+        assert_eq!(actor.lifecycle(), SessionLifecycle::Exited);
+    }
+
+    let response = service
+        .invoke(
+            &registry,
+            None,
+            None,
+            None,
+            DaemonInvocationRequest::lsp_detach(
+                "request.detach-exited",
+                session,
+                lsp_deadline(),
+                CancellationContext::active("cancel.detach-exited").unwrap(),
+            ),
+        )
+        .await;
+
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::LspDetached
+    ));
+    assert_eq!(registry.lock().await.active_sessions(), 0);
+    assert!(service.lsp_sessions.lock().await.is_empty());
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
+}
+
+#[tokio::test]
 async fn disconnect_actor_failure_closes_state_without_scheduling_a_lease() {
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
     let session = open_session(&service, &registry, "request.disconnect-failure").await;
     detach_runtime_actor(&service, &session).await;
 
-    let problem = service
-        .disconnect_lsp_session(&registry, session)
-        .await
-        .expect_err("actor detach failure must be reported");
+    service.disconnect_lsp_session(&registry, session).await;
 
-    assert_eq!(problem, DaemonInvocationProblem::Unavailable);
     assert_eq!(registry.lock().await.active_sessions(), 0);
     assert!(service.lsp_sessions.lock().await.is_empty());
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_detach_racing_disconnect_leaves_no_unowned_lease_task() {
+    for attempt in 0..32 {
+        let service = Arc::new(DaemonInvocationService::default());
+        let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+        let session = open_session(
+            &service,
+            &registry,
+            &format!("request.detach-race.{attempt}"),
+        )
+        .await;
+        let disconnect_service = Arc::clone(&service);
+        let disconnect_registry = Arc::clone(&registry);
+        let disconnect_session = session.clone();
+        let disconnect = tokio::spawn(async move {
+            disconnect_service
+                .disconnect_lsp_session(&disconnect_registry, disconnect_session)
+                .await;
+        });
+        let response = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_detach(
+                    format!("request.detach-race.{attempt}"),
+                    session,
+                    lsp_deadline(),
+                    CancellationContext::active(format!("cancel.detach-race.{attempt}")).unwrap(),
+                ),
+            )
+            .await;
+        disconnect.await.expect("disconnect race task");
+
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::LspDetached
+                | DaemonInvocationOutcome::Problem {
+                    problem: DaemonInvocationProblem::Unavailable
+                        | DaemonInvocationProblem::NotFoundOrNotAuthorized
+                }
+        ));
+        assert_eq!(registry.lock().await.active_sessions(), 0);
+        assert!(service.lsp_sessions.lock().await.is_empty());
+        assert_eq!(
+            service.lsp_lease_tasks.active_tasks(),
+            0,
+            "attempt {attempt} retained a lease task after explicit detach"
+        );
+    }
+}
+
+#[tokio::test]
+async fn repeated_disconnect_preserves_the_existing_bounded_lease() {
+    let service = DaemonInvocationService::default();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+    let session = open_session(&service, &registry, "request.double-disconnect").await;
+
+    service
+        .disconnect_lsp_session(&registry, session.clone())
+        .await;
+    assert_eq!(registry.lock().await.active_sessions(), 1);
+    assert_eq!(service.active_lsp_runtime_count().await, 1);
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 1);
+
+    service.disconnect_lsp_session(&registry, session).await;
+
+    assert_eq!(registry.lock().await.active_sessions(), 1);
+    assert_eq!(service.active_lsp_runtime_count().await, 1);
+    assert_eq!(
+        service.lsp_lease_tasks.active_tasks(),
+        1,
+        "an idempotent second disconnect must not cancel the first bounded lease"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn reconnect_at_lease_expiry_joins_reclamation_before_rotating_credentials() {
+    let service = Arc::new(DaemonInvocationService::default());
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+    let session = open_session(&service, &registry, "request.reconnect-at-expiry").await;
+    service
+        .disconnect_lsp_session(&registry, session.clone())
+        .await;
+    tokio::task::yield_now().await;
+
+    let endpoint_guard = registry.lock().await;
+    let reconnect_service = Arc::clone(&service);
+    let reconnect_registry = Arc::clone(&registry);
+    let reconnect = tokio::spawn(async move {
+        reconnect_service
+            .reconnect_lsp_session(
+                &reconnect_registry,
+                "request.reconnect-at-expiry".to_owned(),
+                session,
+                now_millis(),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(LSP_SESSION_TTL_MS)).await;
+    tokio::task::yield_now().await;
+    drop(endpoint_guard);
+
+    let response = reconnect.await.expect("near-expiry reconnect");
+    let DaemonInvocationOutcome::LspReconnected {
+        session: reconnected,
+    } = response.outcome
+    else {
+        panic!("near-expiry reconnect must win after authenticating");
+    };
+    tokio::task::yield_now().await;
+
+    assert_eq!(registry.lock().await.active_sessions(), 1);
+    assert_eq!(service.active_lsp_runtime_count().await, 1);
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
+    let detached = service
+        .detach_lsp_session(
+            &registry,
+            "request.reconnect-at-expiry.detach".to_owned(),
+            reconnected,
+            now_millis(),
+        )
+        .await;
+    assert!(matches!(
+        detached.outcome,
+        DaemonInvocationOutcome::LspDetached
+    ));
+}
+
+#[tokio::test]
+async fn abnormal_reconnect_cancels_and_joins_the_registered_lease() {
+    let service = DaemonInvocationService::default();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+    let session = open_session(&service, &registry, "request.reconnect-divergent").await;
+    let access = session.clone().into_access().expect("session access");
+
+    service
+        .disconnect_lsp_session(&registry, session.clone())
+        .await;
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 1);
+    service
+        .lsp_sessions
+        .lock()
+        .await
+        .remove(access.session_id());
+
+    let response = service
+        .invoke(
+            &registry,
+            None,
+            None,
+            None,
+            DaemonInvocationRequest::lsp_reconnect(
+                "request.reconnect-divergent",
+                session,
+                lsp_deadline(),
+                CancellationContext::active("cancel.reconnect-divergent").unwrap(),
+            ),
+        )
+        .await;
+
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+    ));
+    assert_eq!(registry.lock().await.active_sessions(), 0);
+    assert!(service.lsp_sessions.lock().await.is_empty());
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
+}
+
+#[tokio::test]
+async fn shutdown_fences_racing_lsp_open_before_it_can_publish_state() {
+    let service = Arc::new(DaemonInvocationService::default());
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+    let shutdown_service = Arc::clone(&service);
+    let shutdown = tokio::spawn(async move {
+        shutdown_service.begin_shutdown().await;
+    });
+    tokio::task::yield_now().await;
+
+    let response = service
+        .open_lsp_session(
+            &registry,
+            Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
+                "file:///authoritative",
+            ))),
+            "request.open-during-shutdown".to_owned(),
+            env!("CARGO_PKG_VERSION").to_owned(),
+            None,
+            Vec::new(),
+            now_millis(),
+            Some(DaemonLspInvocationOwner::new(
+                unavailable_lsp_session_factory(),
+            )),
+        )
+        .await;
+    shutdown.await.expect("shutdown admission fence");
+
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::Unavailable
+        }
+    ));
+    assert_eq!(registry.lock().await.active_sessions(), 0);
+    assert!(service.lsp_sessions.lock().await.is_empty());
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn state_shutdown_fences_a_queued_open_before_the_endpoint_expiry_sweep() {
+    let state = Arc::new(crate::daemon::invocation_state::DaemonInvocationState::default());
+    let endpoint_guard = state.lsp_session_registry.lock().await;
+    let shutdown_state = Arc::clone(&state);
+    let shutdown = tokio::spawn(async move {
+        shutdown_state.shutdown().await;
+    });
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    let open_state = Arc::clone(&state);
+    let (open_started, started) = tokio::sync::oneshot::channel();
+    let open = tokio::spawn(async move {
+        open_started.send(()).expect("open-start observer");
+        open_state
+            .service
+            .open_lsp_session(
+                &open_state.lsp_session_registry,
+                Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
+                    "file:///authoritative",
+                ))),
+                "request.state-shutdown-race".to_owned(),
+                env!("CARGO_PKG_VERSION").to_owned(),
+                None,
+                Vec::new(),
+                now_millis(),
+                Some(DaemonLspInvocationOwner::new(
+                    unavailable_lsp_session_factory(),
+                )),
+            )
+            .await
+    });
+    started.await.expect("racing open started");
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if open.is_finished() || state.service.lsp_admission_open.try_lock().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown or open must acquire the LSP admission gate");
+    drop(endpoint_guard);
+
+    let response = open.await.expect("racing LSP open");
+    shutdown.await.expect("daemon invocation state shutdown");
+
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::Unavailable
+        }
+    ));
+    assert_eq!(state.lsp_session_registry.lock().await.active_sessions(), 0);
+    assert_eq!(state.service.active_lsp_runtime_count().await, 0);
+    assert_eq!(state.service.lsp_lease_tasks.active_tasks(), 0);
+}
+
+#[tokio::test]
+async fn shutdown_fences_reconnect_before_lease_and_endpoint_expiry() {
+    let service = DaemonInvocationService::default();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+    let session = open_session(&service, &registry, "request.reconnect-shutdown").await;
+    service
+        .disconnect_lsp_session(&registry, session.clone())
+        .await;
+    assert_eq!(registry.lock().await.active_sessions(), 1);
+    assert_eq!(service.active_lsp_runtime_count().await, 1);
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 1);
+
+    service.begin_shutdown().await;
+    let response = service
+        .reconnect_lsp_session(
+            &registry,
+            "request.reconnect-shutdown".to_owned(),
+            session,
+            now_millis(),
+        )
+        .await;
+
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::Unavailable
+        }
+    ));
+    assert_eq!(registry.lock().await.active_sessions(), 1);
+    assert_eq!(service.active_lsp_runtime_count().await, 1);
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 1);
+
+    service.expire_all().await;
+    registry.lock().await.expire_at(u64::MAX);
+    assert_eq!(registry.lock().await.active_sessions(), 0);
+    assert_eq!(service.active_lsp_runtime_count().await, 0);
     assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
 }
 
@@ -398,20 +554,17 @@ async fn shutdown_joins_pending_lease_reclamation() {
     let session = open_session(&service, &registry, "request.shutdown").await;
     let retained_runtime_state = Arc::downgrade(&service.lsp_sessions);
 
-    service
-        .disconnect_lsp_session(&registry, session)
-        .await
-        .expect("disconnect session");
+    service.disconnect_lsp_session(&registry, session).await;
     service.expire_all().await;
-    assert!(
-        matches!(
-            service.lsp_lease_tasks.begin_start(
+    assert_eq!(
+        service
+            .lsp_lease_tasks
+            .start(
                 LspSessionId::new("lsp-after-shutdown").expect("session id"),
-                crate::application::context::CancellationToken::new(),
                 std::future::ready(()),
-            ),
-            Err(DaemonInvocationProblem::Unavailable)
-        ),
+            )
+            .await,
+        Err(DaemonInvocationProblem::Unavailable),
         "shutdown must close lease-task admission before draining"
     );
     drop(service);

@@ -324,24 +324,16 @@ jobs:
           npm --prefix plugin/cursor-native-extension test
           npm --prefix plugin/cursor-native-extension run package
 
-      # These three gates filter by test name, and libtest exits 0 when a filter
-      # matches nothing (unlike the nextest used elsewhere, which has
-      # --no-tests=fail). require-exact-test.sh asserts the count libtest
-      # reports, so a rename, a moved #[cfg], or a feature change fails here
-      # instead of turning the gate into a silent no-op that reports success.
       - name: Lite feature compile check
-        # The ONLY --no-default-features build lane; the exact-test it once
-        # ran was deleted, but lite-profile compile coverage stays.
+        # The ONLY --no-default-features build lane.
         run: cargo check --locked --no-default-features --features lite
 
       - name: Host-bundle default-feature platform lifecycle
-        run: |
-          set -euo pipefail
-          # The ONLY default-feature (not --all-features) lifecycle run.
-          scripts/require-exact-test.sh \
-            cargo test --locked --test pr13_host_bundle_acceptance \
-            receipt_backed_doctor_checks_deployed_digests_registration_and_repair \
-            -- --exact
+        # The ONLY default-feature (not --all-features) lifecycle run.
+        run: >-
+          cargo nextest run --locked
+          --test pr13_host_bundle_acceptance
+          --no-tests=fail
 
       - name: FastEmbed fixture pin check
         if: matrix.name == 'Linux'
@@ -357,11 +349,9 @@ jobs:
       - name: Run in-flight observation crash harness
         if: matrix.name == 'Linux'
         run: >-
-          scripts/require-exact-test.sh
-          cargo test --locked --all-features --features test-transport
+          cargo nextest run --locked --all-features --features test-transport
           --test daemon_fault_harness_test
-          killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
-          -- --exact
+          --no-tests=fail
 
   windows-build:
     name: Build Windows tests
@@ -675,15 +665,16 @@ jobs:
           shared-key: ci-pr12-pr13-lite-windows-msvc
           cache-on-failure: true
 
-      # Same libtest no-op hazard as the Linux/macOS `test` job: `cargo test
-      # <name> -- --exact` exits 0 when the filter matches nothing.
       - name: Lite feature compile check
         shell: bash
         run: cargo check --locked --no-default-features --features lite
 
       - name: Host-bundle default-feature platform lifecycle
         shell: bash
-        run: cargo test --locked --test pr13_host_bundle_acceptance
+        run: >-
+          cargo nextest run --locked
+          --test pr13_host_bundle_acceptance
+          --no-tests=fail
 
       - name: Merge Windows junit
         shell: bash

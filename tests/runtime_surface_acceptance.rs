@@ -2,6 +2,7 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
@@ -194,7 +195,7 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     }
     std::fs::write(
         project.join("src/main.rs"),
-        "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// PR12 transport parity\n",
+        "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// Runtime surface parity\n",
     )
     .expect("write staged Git change");
     git(&project, &["add", "src/main.rs"]);
@@ -308,68 +309,52 @@ async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
         "params": {},
     });
     let (deadline, cancellation) = lsp_control();
-    let shutdown_closed = match session
+    match session
         .try_send_client_frame(&shutdown_request.to_string(), deadline, cancellation)
         .await
         .expect("send daemon LSP shutdown frame")
     {
-        FrameSend::Closed => true,
-        FrameSend::Sent => false,
+        FrameSend::Closed => return,
+        FrameSend::Sent => {}
         FrameSend::Backpressured => panic!("daemon LSP shutdown frame was backpressured"),
-    };
-    if !shutdown_closed {
-        let shutdown = poll_lsp_response(session, request_id).await;
-        assert_eq!(shutdown["result"], Value::Null);
-        let exit_notification = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "exit",
-            "params": {},
-        });
+    }
+    let shutdown = poll_lsp_response(session, request_id).await;
+    assert_eq!(shutdown["result"], Value::Null);
+    let exit_notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "exit",
+        "params": {},
+    });
+    let (deadline, cancellation) = lsp_control();
+    match session
+        .try_send_client_frame(&exit_notification.to_string(), deadline, cancellation)
+        .await
+        .expect("send daemon LSP exit frame")
+    {
+        FrameSend::Closed => return,
+        FrameSend::Sent => {}
+        FrameSend::Backpressured => panic!("daemon LSP exit frame was backpressured"),
+    }
+    for _ in 0..100 {
         let (deadline, cancellation) = lsp_control();
-        let exit_closed = match session
-            .try_send_client_frame(&exit_notification.to_string(), deadline, cancellation)
+        match session
+            .poll_daemon_frame(deadline, cancellation)
             .await
-            .expect("send daemon LSP exit frame")
+            .expect("poll closed daemon LSP session")
         {
-            FrameSend::Closed => true,
-            FrameSend::Sent => false,
-            FrameSend::Backpressured => panic!("daemon LSP exit frame was backpressured"),
-        };
-        if !exit_closed {
-            let mut closed = false;
-            for _ in 0..100 {
-                let (deadline, cancellation) = lsp_control();
-                match session
-                    .poll_daemon_frame(deadline, cancellation)
-                    .await
-                    .expect("poll closed daemon LSP session")
-                {
-                    FramePoll::Closed => {
-                        closed = true;
-                        break;
-                    }
-                    FramePoll::Pending => {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    FramePoll::Frame(frame) => {
-                        panic!(
-                            "daemon LSP session emitted a frame after exit: {}",
-                            String::from_utf8_lossy(&frame)
-                        );
-                    }
-                }
+            FramePoll::Closed => return,
+            FramePoll::Pending => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            assert!(
-                closed,
-                "daemon LSP session did not close after shutdown and exit"
-            );
+            FramePoll::Frame(frame) => {
+                panic!(
+                    "daemon LSP session emitted a frame after exit: {}",
+                    String::from_utf8_lossy(&frame)
+                );
+            }
         }
     }
-    let (deadline, cancellation) = lsp_control();
-    session
-        .detach(deadline, cancellation)
-        .await
-        .expect("detach daemon LSP session after shutdown and exit");
+    panic!("daemon LSP session did not close after shutdown and exit")
 }
 
 async fn poll_lsp_context(
@@ -1620,6 +1605,115 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         git_stdout(&fixture.project, &["write-tree"]),
         cancellation_tree,
         "CLI/MCP cancellation must leave native Git state unchanged"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_json_preserves_a_typed_application_problem_envelope() {
+    let environment = TempDir::new().expect("workflow CLI environment");
+    let request_path = environment.path().join("invalid-handoff.json");
+    std::fs::write(&request_path, r#"{"unexpected":true}"#)
+        .expect("write invalid typed Workflow request");
+    let output = common::tracedecay_command_with_home(environment.path())
+        .args([
+            "workflow",
+            "handoff-redeem",
+            "--request-file",
+            request_path.to_str().expect("UTF-8 request path"),
+            "--project",
+            environment.path().to_str().expect("UTF-8 project path"),
+            "--json",
+        ])
+        .output()
+        .expect("invoke Workflow CLI");
+
+    assert!(
+        output.status.success(),
+        "typed application problems are successful CLI transport responses: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("Workflow JSON stdout");
+    assert_eq!(stdout.lines().count(), 1);
+    let problem: Value = serde_json::from_str(stdout.trim_end()).expect("typed Workflow problem");
+    assert_eq!(
+        problem["contract"]["schema_id"],
+        "schema.workflow.handoff_redeem.result"
+    );
+    assert_eq!(problem["contract"]["schema_revision"], 1);
+    assert_eq!(problem["problem"]["kind"], "invalid_request");
+    assert_eq!(
+        problem["problem"]["code"], "invalid_workflow_request",
+        "Workflow --json must not flatten typed problems into Config stderr"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stdio_bridge_exits_successfully_after_client_shutdown_and_exit() {
+    let fixture = lsp_runtime_fixture().await;
+    let root_uri = url::Url::from_directory_path(&fixture.project)
+        .expect("project root URI")
+        .to_string();
+    let frames = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "rootUri": root_uri,
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] }
+                }
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "shutdown",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+            "params": {}
+        }),
+    ];
+    let mut command = common::tracedecay_command_with_home(fixture.home());
+    command
+        .current_dir(&fixture.project)
+        .args([
+            "lsp",
+            "bridge",
+            "--stdio",
+            "--project",
+            fixture.project.to_str().expect("UTF-8 project path"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut bridge =
+        common::TestChildProcess::new(command.spawn().expect("spawn stdio LSP bridge"));
+    {
+        let stdin = bridge.stdin_mut().expect("bridge stdin");
+        for frame in frames {
+            let payload = frame.to_string();
+            write!(stdin, "Content-Length: {}\r\n\r\n{payload}", payload.len())
+                .expect("write LSP frame");
+        }
+        stdin.flush().expect("flush LSP frames");
+    }
+    let output = bridge
+        .wait_with_output(std::time::Duration::from_secs(20))
+        .expect("stdio LSP bridge exit");
+
+    assert!(
+        output.status.success(),
+        "graceful LSP exit must not fail explicit bridge detach: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
