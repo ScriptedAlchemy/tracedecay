@@ -583,6 +583,7 @@ impl DaemonInvocationState {
     }
 
     pub(super) async fn shutdown(&self) {
+        self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();
         self.code_index_schedulers.shutdown().await;
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
