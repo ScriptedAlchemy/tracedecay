@@ -15,6 +15,8 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::*;
 
+mod multi_root;
+
 /// Daemon-generation-local state for the closed invocation protocol.
 ///
 /// The Unix and portable brokers share this state so an authenticated LSP
@@ -30,83 +32,6 @@ pub(super) struct DaemonInvocationState {
     query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
     semantic_projection_scheduler:
         crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
-}
-
-enum AuthorizedMultiRootResolution {
-    Denied,
-    Unavailable(tracedecay_domain::ScopeUnavailableReasonV1),
-}
-
-async fn resolve_authorized_multi_root_root(
-    store_administration: &StoreAdministration,
-    database: &crate::global_db::RegisteredGlobalDb,
-    root: &tracedecay_application::AuthorizedRoot,
-) -> std::result::Result<PathBuf, AuthorizedMultiRootResolution> {
-    let scope = root.scope();
-    let locator = root
-        .locator()
-        .ok_or(AuthorizedMultiRootResolution::Unavailable(
-            tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
-        ))?;
-    let profile_identity = store_administration.profile_identity().map_err(|_| {
-        AuthorizedMultiRootResolution::Unavailable(
-            tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
-        )
-    })?;
-    if profile_identity.profile_id() != &locator.profile.profile_id {
-        return Err(AuthorizedMultiRootResolution::Unavailable(
-            tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
-        ));
-    }
-    let registry_context = database
-        .project_registry_context_by_id(locator.project_id.as_str())
-        .await
-        .map_err(|_| {
-            AuthorizedMultiRootResolution::Unavailable(
-                tracedecay_domain::ScopeUnavailableReasonV1::StoreUnavailable,
-            )
-        })?
-        .ok_or(AuthorizedMultiRootResolution::Denied)?;
-    if registry_context.project.project_id != locator.project_id.as_str()
-        || !registry_context.stores.iter().any(|store| {
-            store.store.project_id == locator.project_id.as_str()
-                && store.store.store_id == locator.profile.store_id
-        })
-    {
-        return Err(AuthorizedMultiRootResolution::Denied);
-    }
-    let registered_root = PathBuf::from(registry_context.project.canonical_root);
-    if !registered_root.is_absolute()
-        || registered_root.canonicalize().ok().as_ref() != Some(&registered_root)
-    {
-        return Err(AuthorizedMultiRootResolution::Unavailable(
-            tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
-        ));
-    }
-    let exact_root = locator.canonical_root.clone();
-    if exact_root.canonicalize().ok().as_ref() != Some(&exact_root) {
-        return Err(AuthorizedMultiRootResolution::Unavailable(
-            tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
-        ));
-    }
-    tracedecay_usecases::context::RegisteredScopeResolver::resolve(
-        &registered_root,
-        &exact_root,
-        &locator.project_id,
-    )
-    .map_err(|_| AuthorizedMultiRootResolution::Denied)?;
-    let exact_scope =
-        project_open_owners::resolved_scope_for_project(&exact_root, &locator.project_id).map_err(
-            |_| {
-                AuthorizedMultiRootResolution::Unavailable(
-                    tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
-                )
-            },
-        )?;
-    if &exact_scope != scope {
-        return Err(AuthorizedMultiRootResolution::Denied);
-    }
-    Ok(exact_root)
 }
 
 impl Default for DaemonInvocationState {
@@ -312,6 +237,24 @@ impl DaemonInvocationState {
         deadline: tracedecay_application::Deadline,
         cancellation: tracedecay_application::CancellationContext,
     ) -> DaemonInvocationResponse {
+        if cancellation.is_cancelled() {
+            return DaemonInvocationResponse::with_outcome(
+                request_id,
+                service::invocation::DaemonInvocationOutcome::ApplicationProblem {
+                    problem: tracedecay_application::ApplicationProblem::cancelled_before_admission(
+                    ),
+                },
+            );
+        }
+        if deadline.is_elapsed_at(observed_at) {
+            return DaemonInvocationResponse::with_outcome(
+                request_id,
+                service::invocation::DaemonInvocationOutcome::ApplicationProblem {
+                    problem: tracedecay_application::ApplicationProblem::timed_out_before_admission(
+                    ),
+                },
+            );
+        }
         let Some(scope_set) = self
             .service
             .persisted_scope_set(active_project_root, &request.scope_set_id)
@@ -370,12 +313,30 @@ impl DaemonInvocationState {
                 );
             }
         };
+        let cursor_key = match database.ensure_active_session_cursor_key_result().await {
+            Ok(key) => key,
+            Err(_) => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::Unavailable,
+                );
+            }
+        };
+        let cursor_authenticator = match database.load_session_cursor_key_provider_result().await {
+            Ok(authenticator) => authenticator,
+            Err(_) => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::Unavailable,
+                );
+            }
+        };
         let mut contexts = Vec::new();
         let mut generations = Vec::with_capacity(scope_set.roots().len());
-        let mut outcomes = BTreeMap::new();
+        let mut resolved_roots = Vec::with_capacity(scope_set.roots().len());
         for (ordinal, root) in scope_set.roots().iter().enumerate() {
             let scope = root.scope();
-            let root = match resolve_authorized_multi_root_root(
+            let root = match multi_root::resolve_authorized_root(
                 store_administration,
                 database.as_ref(),
                 root,
@@ -383,7 +344,7 @@ impl DaemonInvocationState {
             .await
             {
                 Ok(root) => root,
-                Err(AuthorizedMultiRootResolution::Denied) => {
+                Err(multi_root::AuthorizedRootResolution::Denied) => {
                     let Ok(generation) = denied_root_generation(scope) else {
                         return DaemonInvocationResponse::problem(
                             request_id,
@@ -391,9 +352,10 @@ impl DaemonInvocationState {
                         );
                     };
                     generations.push(generation);
+                    resolved_roots.push(None);
                     continue;
                 }
-                Err(AuthorizedMultiRootResolution::Unavailable(reason)) => {
+                Err(multi_root::AuthorizedRootResolution::Unavailable(reason)) => {
                     let Ok(generation) = unavailable_root_generation(scope, reason) else {
                         return DaemonInvocationResponse::problem(
                             request_id,
@@ -401,6 +363,7 @@ impl DaemonInvocationState {
                         );
                     };
                     generations.push(generation);
+                    resolved_roots.push(None);
                     continue;
                 }
             };
@@ -416,6 +379,7 @@ impl DaemonInvocationState {
                     );
                 };
                 generations.push(generation);
+                resolved_roots.push(None);
                 continue;
             };
             let source_revision = if matches!(
@@ -435,6 +399,7 @@ impl DaemonInvocationState {
                             );
                         };
                         generations.push(generation);
+                        resolved_roots.push(None);
                         continue;
                     }
                 }
@@ -452,27 +417,6 @@ impl DaemonInvocationState {
                     service::invocation::DaemonInvocationProblem::InvalidRequest,
                 );
             };
-            let value = self
-                .execute_one_multi_root_operation(
-                    store_administration,
-                    &root,
-                    scope,
-                    ordinal,
-                    &request.operation,
-                    observed_at,
-                    deadline.clone(),
-                    cancellation.clone(),
-                )
-                .await;
-            let outcome = match value {
-                Ok(value) => tracedecay_domain::ScopeOutcome::Exact(vec![value]),
-                Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
-                    tracedecay_domain::ScopeOutcome::Denied
-                }
-                Err(_) => tracedecay_domain::ScopeOutcome::Unavailable {
-                    reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
-                },
-            };
             contexts.push(context);
             let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
                 scope.scope_digest.clone(),
@@ -484,6 +428,126 @@ impl DaemonInvocationState {
                 );
             };
             generations.push(generation);
+            resolved_roots.push(Some(root));
+        }
+        let authorization =
+            match tracedecay_application::MultiRootAuthorizationBindingV1::from_contexts(&contexts)
+            {
+                Ok(authorization) => authorization,
+                Err(_) => {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    );
+                }
+            };
+        let continuation = match &request.continuation {
+            Some(continuation) => {
+                match multi_root_continuation::open(
+                    continuation,
+                    &cursor_authenticator,
+                    observed_at,
+                ) {
+                    Ok(state) => Some(state),
+                    Err(_) => {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                        );
+                    }
+                }
+            }
+            None if request.page == 0 => None,
+            None => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            }
+        };
+        if let Some(state) = &continuation {
+            let binding_matches = state.scope_set_id == request.scope_set_id
+                && state.scope_set_revision == request.scope_set_revision
+                && state.scope_set_digest == request.scope_set_digest
+                && state.root_generations == generations
+                && state.query_digest == query_digest
+                && state.order_digest == order_digest
+                && state.authorization == authorization
+                && state.next_page == request.page;
+            if !binding_matches {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            }
+        }
+        let mut outcomes = BTreeMap::new();
+        let mut last_order_key = None;
+        let mut fused_rank = request.page.saturating_mul(100);
+        for (ordinal, ((authorized_root, generation), root)) in scope_set
+            .roots()
+            .iter()
+            .zip(generations.iter())
+            .zip(resolved_roots.iter())
+            .enumerate()
+        {
+            let scope = authorized_root.scope();
+            let Some(root) = root else {
+                continue;
+            };
+            if !matches!(
+                generation.outcome,
+                tracedecay_domain::ScopeOutcome::Exact(_)
+                    | tracedecay_domain::ScopeOutcome::Partial { .. }
+            ) {
+                continue;
+            }
+            let value = self
+                .execute_one_multi_root_operation(
+                    store_administration,
+                    root,
+                    scope,
+                    ordinal,
+                    &request.operation,
+                    observed_at,
+                    deadline.clone(),
+                    cancellation.clone(),
+                )
+                .await;
+            let outcome = match value {
+                Ok(value) => {
+                    let Ok(evidence_digest) = tracedecay_domain::canonical_sha256(&(
+                        "tracedecay.multi-root.total-order-key.v1",
+                        fused_rank,
+                        ordinal,
+                        &value,
+                    )) else {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            service::invocation::DaemonInvocationProblem::InvalidRequest,
+                        );
+                    };
+                    let Ok(root_ordinal) = u32::try_from(ordinal) else {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            service::invocation::DaemonInvocationProblem::InvalidRequest,
+                        );
+                    };
+                    last_order_key = Some(tracedecay_application::MultiRootTotalOrderKeyV1 {
+                        fused_rank,
+                        root_ordinal,
+                        evidence_digest,
+                    });
+                    fused_rank = fused_rank.saturating_add(1);
+                    tracedecay_domain::ScopeOutcome::Exact(vec![value])
+                }
+                Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
+                    tracedecay_domain::ScopeOutcome::Denied
+                }
+                Err(_) => tracedecay_domain::ScopeOutcome::Unavailable {
+                    reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+                },
+            };
             outcomes.insert(scope.scope_digest.clone(), outcome);
         }
         let Ok(capability_id) = tracedecay_tool_catalog::CapabilityId::new(
@@ -502,6 +566,50 @@ impl DaemonInvocationState {
                 service::invocation::DaemonInvocationProblem::Unavailable,
             );
         };
+        let Some(next_page) = request.page.checked_add(1) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::InvalidRequest,
+            );
+        };
+        const MULTI_ROOT_CONTINUATION_TTL_MICROS_V1: i64 = 60 * 1_000_000;
+        let expires_at = tracedecay_domain::UtcMicros(
+            observed_at
+                .0
+                .saturating_add(MULTI_ROOT_CONTINUATION_TTL_MICROS_V1)
+                .min(authorization.expires_at.0),
+        );
+        let next_state = match tracedecay_application::MultiRootContinuationStateV1::new(
+            scope_set.scope_set_id().clone(),
+            scope_set.revision(),
+            scope_set.digest().clone(),
+            generations.clone(),
+            query_digest.clone(),
+            order_digest.clone(),
+            authorization,
+            observed_at,
+            expires_at,
+            next_page,
+            last_order_key,
+        ) {
+            Ok(state) => state,
+            Err(_) => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            }
+        };
+        let next_continuation =
+            match multi_root_continuation::seal(&next_state, &cursor_key, &cursor_authenticator) {
+                Ok(continuation) => continuation,
+                Err(_) => {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        service::invocation::DaemonInvocationProblem::Unavailable,
+                    );
+                }
+            };
         let query = tracedecay_application::MultiRootQueryRequestV1 {
             scope_set,
             contexts,
@@ -513,7 +621,8 @@ impl DaemonInvocationState {
             query_digest,
             order_digest,
             page: request.page,
-            continuation: request.continuation,
+            continuation,
+            next_continuation,
         };
         let page = match self
             .service

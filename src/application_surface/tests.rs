@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -27,13 +27,15 @@ use super::{
     ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
     HttpDisconnectCancellation, HttpOperationEventState, PrimitiveCodeSurfaceRequest,
     application_negotiated_features, application_surface_dispatch_input_with_controls,
-    current_micros, execute_application_surface, http_operation_event_router,
-    normalize_application_tool_args, parse_application_surface_request, plan26_sse_stream_event,
+    current_micros, execute_application_surface, http_application_router_with_executor,
+    http_operation_event_router, normalize_application_tool_args,
+    parse_application_surface_request, plan26_sse_stream_event,
     resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
     surface_rejection_metadata,
 };
 use crate::application::feedback::observations::{
-    Plan26ArgumentRejectionClassV1, Plan26FeedbackOutcomeV1, Plan26RejectedArgumentV1,
+    Plan26ArgumentRejectionClassV1, Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
+    Plan26RejectedArgumentV1,
 };
 use crate::application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
@@ -1520,6 +1522,125 @@ fn surface_rejection_metadata_distinguishes_invalid_input_from_authorization() {
     assert_eq!(
         surface_rejection_metadata(&ApplicationSurfaceAdapterError::DaemonUnavailable),
         None
+    );
+}
+
+#[derive(Default)]
+struct RecordingMultiRootExecutor {
+    operations: Mutex<Vec<crate::daemon_contract::DaemonInvocationOperation>>,
+}
+
+impl tracedecay_application::ApplicationInvocationExecutor for RecordingMultiRootExecutor {
+    fn invoke(
+        &self,
+        _invocation: tracedecay_application::ApplicationInvocation,
+    ) -> tracedecay_application::ApplicationInvocationFuture<
+        '_,
+        std::result::Result<
+            tracedecay_application::ApplicationResponse,
+            tracedecay_application::InvocationError,
+        >,
+    > {
+        Box::pin(async { panic!("multi-root HTTP fixture uses controlled daemon invocation") })
+    }
+}
+
+impl crate::daemon_client::DaemonInvocationExecutor for RecordingMultiRootExecutor {
+    fn invoke_controlled(
+        &self,
+        request: crate::daemon_contract::DaemonInvocationRequest,
+        _deadline: Deadline,
+        _cancellation: CancellationSignal,
+        _policy: crate::daemon_client::InvocationCancellationPolicy,
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        '_,
+        std::result::Result<
+            crate::daemon_contract::DaemonInvocationResponse,
+            crate::daemon_client::DaemonInvocationError,
+        >,
+    > {
+        self.operations
+            .lock()
+            .expect("recorded operations")
+            .push(request.operation());
+        Box::pin(async { Err(crate::daemon_client::DaemonInvocationError::Unavailable) })
+    }
+
+    fn observe_plan26_feedback(
+        &self,
+        _subject_digest: ManifestDigest,
+        _observed_at: UtcMicros,
+        _event: Plan26FeedbackSourceEventV1,
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn production_http_router_mounts_all_multi_root_operations() {
+    let executor = Arc::new(RecordingMultiRootExecutor::default());
+    let application_executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor> =
+        executor.clone();
+    let router = http_application_router_with_executor(
+        application_executor,
+        OperationEventAuthority::default(),
+        ProjectId::new("project.http-multi-root").expect("project"),
+    )
+    .expect("HTTP application router");
+    let requests = [
+        (
+            "/multi-root/scope-set/read",
+            json!({"scope_set_id": "scope-set.http-multi-root"}),
+        ),
+        (
+            "/multi-root/scope-set/compare-and-swap",
+            json!({
+                "scope_set_id": "scope-set.http-multi-root",
+                "expected_revision": null,
+                "roots": [
+                    {"project_id": "project.http-one", "root": "/project/http-one"},
+                    {"project_id": "project.http-two", "root": "/project/http-two"}
+                ]
+            }),
+        ),
+        (
+            "/multi-root/execute",
+            json!({
+                "scope_set_id": "scope-set.http-multi-root",
+                "scope_set_revision": 1,
+                "scope_set_digest": format!("sha256:{}", "a".repeat(64)),
+                "operation": {"kind": "query", "request": {}},
+                "page": 0,
+                "continuation": null
+            }),
+        ),
+    ];
+
+    for (path, body) in requests {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("HTTP request"),
+            )
+            .await
+            .expect("HTTP response");
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{path} must be mounted and forward to the daemon owner"
+        );
+    }
+
+    assert_eq!(
+        *executor.operations.lock().expect("recorded operations"),
+        vec![
+            crate::daemon_contract::DaemonInvocationOperation::MultiRootScopeSetRead,
+            crate::daemon_contract::DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap,
+            crate::daemon_contract::DaemonInvocationOperation::MultiRootExecute,
+        ]
     );
 }
 

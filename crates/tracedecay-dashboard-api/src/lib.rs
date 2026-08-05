@@ -1677,10 +1677,12 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     // stores. Report the transport the UI would actually have to use rather
     // than a fixed string: without an admitted application executor there is
     // no way to reach a scope set at all.
-    let multi_root = if state.application_invocation_executor.is_some() {
-        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
-            "no multi-root scope set is mounted for this project",
-        )
+    let multi_root_available = state.application_invocation_executor.is_some();
+    let multi_root = if multi_root_available {
+        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(format!(
+            "no authorized scope set is selected; use /api/application{}",
+            tracedecay_application::MultiRootApplicationOperation::Execute.route_path(),
+        ))
     } else {
         tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
             "the daemon application transport is not admitted for this dashboard",
@@ -1722,7 +1724,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             // Settings tab: aggregated project/user config editing plus
             // read-only environment and storage-path display.
             "settings": true,
-            "multi_root": false,
+            "multi_root": multi_root_available,
         },
         "automation": {
             "enabled": automation.enabled,
@@ -1739,6 +1741,31 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod authority_tests {
     use super::*;
+
+    struct AdmittedApplicationRuntime;
+
+    impl DashboardApplicationRuntime for AdmittedApplicationRuntime {
+        fn routers(
+            &self,
+            _active_project_id: ProjectId,
+        ) -> std::result::Result<DashboardApplicationRouters, String> {
+            Ok(DashboardApplicationRouters {
+                http: Router::new(),
+                configuration: Router::new(),
+                feedback: Router::new(),
+                work: Router::new(),
+            })
+        }
+
+        fn apply_configuration_batch<'a>(
+            &'a self,
+            _request_id: tracedecay_application::RequestId,
+            _mutations: Vec<tracedecay_usecases::configuration::DirectConfigurationMutation>,
+            _expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId,
+        ) -> DashboardConfigurationApplyFuture<'a> {
+            Box::pin(async { unreachable!("capability discovery does not apply configuration") })
+        }
+    }
 
     struct DashboardStateFixture {
         state: DashboardState,
@@ -1902,6 +1929,21 @@ mod authority_tests {
             state.code_diagnostics_authority.is_none(),
             "direct dashboard must not construct an analyzer authority"
         );
+    }
+
+    #[tokio::test]
+    async fn admitted_application_runtime_advertises_the_multi_root_route() {
+        let mut fixture = DashboardStateFixture::open("project.dashboard-multi-root").await;
+        fixture.state.application_invocation_executor = Some(Arc::new(AdmittedApplicationRuntime));
+
+        let Json(capabilities) = capabilities(State(fixture.state)).await;
+
+        assert_eq!(capabilities["multi_root"]["status"], "unavailable");
+        assert_eq!(
+            capabilities["multi_root"]["reason"],
+            "no authorized scope set is selected; use /api/application/multi-root/execute"
+        );
+        assert_eq!(capabilities["features"]["multi_root"], true);
     }
 
     #[tokio::test]

@@ -14,8 +14,13 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::{RequestAdmission, RequestContext};
 
+mod continuation;
 mod locator;
 
+pub use continuation::{
+    MultiRootAuthorizationBindingV1, MultiRootContinuationStateV1, MultiRootContinuationV1,
+    MultiRootTotalOrderKeyV1,
+};
 pub use locator::{
     AuthorizedRoot, AuthorizedRootAdmission, RegisteredRootLocatorV1, RegisteredRootSelectorV1,
     SharedProfileStoreLocatorV1,
@@ -23,8 +28,6 @@ pub use locator::{
 
 const AUTHORIZED_SCOPE_SET_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.authorized-scope-set.v1";
-const MULTI_ROOT_CONTINUATION_DIGEST_DOMAIN_V1: &str =
-    "tracedecay.application.multi-root-continuation.v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -155,7 +158,7 @@ impl MultiRootExecuteRequestV1 {
             .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
         if let Some(cursor) = &continuation {
             cursor.validate()?;
-            if page != cursor.next_page() {
+            if page == 0 {
                 return Err(MultiRootQueryError::CursorMismatch { field: "page" });
             }
         } else if page != 0 {
@@ -489,141 +492,6 @@ pub enum MultiRootQueryError {
     Invalid(String),
 }
 
-/// Frozen continuation identity shared by all participating roots.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct MultiRootContinuationV1 {
-    scope_set_digest: ManifestDigest,
-    root_generations: Vec<RootScopeOutcomeV1<RootGenerationV1>>,
-    query_digest: ManifestDigest,
-    order_digest: ManifestDigest,
-    #[schemars(range(min = 1))]
-    next_page: u64,
-    digest: ManifestDigest,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MultiRootContinuationWireV1 {
-    scope_set_digest: ManifestDigest,
-    root_generations: Vec<RootScopeOutcomeV1<RootGenerationV1>>,
-    query_digest: ManifestDigest,
-    order_digest: ManifestDigest,
-    next_page: u64,
-    digest: ManifestDigest,
-}
-
-impl<'de> Deserialize<'de> for MultiRootContinuationV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = MultiRootContinuationWireV1::deserialize(deserializer)?;
-        let continuation = Self::new(
-            wire.scope_set_digest,
-            wire.root_generations,
-            wire.query_digest,
-            wire.order_digest,
-            wire.next_page,
-        )
-        .map_err(serde::de::Error::custom)?;
-        if continuation.digest != wire.digest {
-            return Err(serde::de::Error::custom(
-                "multi-root continuation digest does not match its frozen identity",
-            ));
-        }
-        Ok(continuation)
-    }
-}
-
-impl MultiRootContinuationV1 {
-    pub fn new(
-        scope_set_digest: ManifestDigest,
-        mut root_generations: Vec<RootScopeOutcomeV1<RootGenerationV1>>,
-        query_digest: ManifestDigest,
-        order_digest: ManifestDigest,
-        next_page: u64,
-    ) -> Result<Self, MultiRootQueryError> {
-        scope_set_digest
-            .validate()
-            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
-        query_digest
-            .validate()
-            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
-        order_digest
-            .validate()
-            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
-        if root_generations.is_empty() {
-            return Err(MultiRootQueryError::RootSetMismatch);
-        }
-        if next_page == 0 {
-            return Err(MultiRootQueryError::Invalid(
-                "continuation page must be nonzero".to_owned(),
-            ));
-        }
-        for root in &root_generations {
-            root.validate_generation()
-                .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
-        }
-        root_generations.sort_by(|left, right| left.scope_digest.cmp(&right.scope_digest));
-        if root_generations
-            .windows(2)
-            .any(|pair| pair[0].scope_digest == pair[1].scope_digest)
-        {
-            return Err(MultiRootQueryError::RootSetMismatch);
-        }
-        let digest = canonical_sha256(&(
-            MULTI_ROOT_CONTINUATION_DIGEST_DOMAIN_V1,
-            &scope_set_digest,
-            &root_generations,
-            &query_digest,
-            &order_digest,
-            next_page,
-        ))
-        .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
-        Ok(Self {
-            scope_set_digest,
-            root_generations,
-            query_digest,
-            order_digest,
-            next_page,
-            digest,
-        })
-    }
-
-    pub fn scope_set_digest(&self) -> &ManifestDigest {
-        &self.scope_set_digest
-    }
-
-    pub fn root_generations(&self) -> &[RootScopeOutcomeV1<RootGenerationV1>] {
-        &self.root_generations
-    }
-
-    pub const fn next_page(&self) -> u64 {
-        self.next_page
-    }
-
-    pub fn digest(&self) -> &ManifestDigest {
-        &self.digest
-    }
-
-    pub fn validate(&self) -> Result<(), MultiRootQueryError> {
-        let canonical = Self::new(
-            self.scope_set_digest.clone(),
-            self.root_generations.clone(),
-            self.query_digest.clone(),
-            self.order_digest.clone(),
-            self.next_page,
-        )?;
-        if canonical != *self {
-            return Err(MultiRootQueryError::CursorMismatch {
-                field: "continuation digest",
-            });
-        }
-        Ok(())
-    }
-}
-
 /// Internal application request after transport admission.
 pub struct MultiRootQueryRequestV1<Q> {
     pub scope_set: AuthorizedScopeSet,
@@ -636,7 +504,8 @@ pub struct MultiRootQueryRequestV1<Q> {
     pub query_digest: ManifestDigest,
     pub order_digest: ManifestDigest,
     pub page: u64,
-    pub continuation: Option<MultiRootContinuationV1>,
+    pub continuation: Option<MultiRootContinuationStateV1>,
+    pub next_continuation: MultiRootContinuationV1,
 }
 
 /// One root-local query adapter. It receives only the exact admitted context
@@ -736,24 +605,17 @@ impl<P> AuthorizedMultiRootQueryService<P> {
         }
 
         let aggregate = aggregate_outcomes(&roots);
-        let next_page = request
+        request
             .page
             .checked_add(1)
             .ok_or_else(|| MultiRootQueryError::Invalid("page overflow".to_owned()))?;
-        let continuation = MultiRootContinuationV1::new(
-            request.scope_set.digest().clone(),
-            request.root_generations,
-            request.query_digest,
-            request.order_digest,
-            next_page,
-        )?;
         Ok(MultiRootQueryPageV1 {
             scope_set_id: request.scope_set.scope_set_id().clone(),
             scope_set_revision: request.scope_set.revision(),
             scope_set_digest: request.scope_set.digest().clone(),
             roots,
             aggregate,
-            continuation,
+            continuation: request.next_continuation,
         })
     }
 }
@@ -849,14 +711,27 @@ fn validate_continuation<Q>(
         };
     };
     continuation.validate()?;
+    if continuation.expires_at <= request.observed_at {
+        return Err(MultiRootQueryError::CursorMismatch {
+            field: "continuation expiry",
+        });
+    }
+    if continuation.scope_set_id != *request.scope_set.scope_set_id() {
+        return Err(MultiRootQueryError::CursorMismatch {
+            field: "scope set id",
+        });
+    }
+    if continuation.scope_set_revision != request.scope_set.revision() {
+        return Err(MultiRootQueryError::CursorMismatch {
+            field: "scope set revision",
+        });
+    }
     if continuation.scope_set_digest != *request.scope_set.digest() {
         return Err(MultiRootQueryError::CursorMismatch {
             field: "scope set digest",
         });
     }
-    let mut generations = request.root_generations.clone();
-    generations.sort_by(|left, right| left.scope_digest.cmp(&right.scope_digest));
-    if continuation.root_generations != generations {
+    if continuation.root_generations != request.root_generations {
         return Err(MultiRootQueryError::CursorMismatch {
             field: "root generations",
         });
@@ -873,6 +748,13 @@ fn validate_continuation<Q>(
     }
     if continuation.next_page != request.page {
         return Err(MultiRootQueryError::CursorMismatch { field: "page" });
+    }
+    if continuation.authorization
+        != MultiRootAuthorizationBindingV1::from_contexts(&request.contexts)?
+    {
+        return Err(MultiRootQueryError::CursorMismatch {
+            field: "authorization epoch",
+        });
     }
     Ok(())
 }

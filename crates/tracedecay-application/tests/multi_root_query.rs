@@ -4,8 +4,10 @@ use std::fmt;
 use schemars::schema_for;
 use tracedecay_application::{
     AuthorizedMultiRootQueryService, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
-    CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass, MultiRootQueryError,
-    MultiRootQueryPort, MultiRootQueryRequestV1, RequestContext, RequestId, ResolvedScope,
+    CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    MultiRootAuthorizationBindingV1, MultiRootContinuationStateV1, MultiRootContinuationV1,
+    MultiRootQueryError, MultiRootQueryPort, MultiRootQueryRequestV1, RequestContext, RequestId,
+    ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, CollectionRevision, ManifestDigest, ProjectId, RefId, RepositoryId, RootGenerationV1,
@@ -30,6 +32,15 @@ fn digest(byte: char) -> ManifestDigest {
 }
 
 fn context(worktree: &str, suffix: &str) -> RequestContext {
+    context_at_revision(worktree, suffix, 1, 'a')
+}
+
+fn context_at_revision(
+    worktree: &str,
+    suffix: &str,
+    revision: u64,
+    digest_byte: char,
+) -> RequestContext {
     let scope = ResolvedScope::new(
         id::<ProjectId>("project.fixture"),
         id::<RepositoryId>("repository.fixture"),
@@ -39,8 +50,8 @@ fn context(worktree: &str, suffix: &str) -> RequestContext {
     .unwrap();
     let grant = CapabilityGrantSnapshot::new(
         id(&format!("grant.{suffix}")),
-        1,
-        digest('a'),
+        revision,
+        digest(digest_byte),
         id::<ActorId>("actor.issuer"),
         UtcMicros(1),
         UtcMicros(1_000),
@@ -129,7 +140,7 @@ fn request(
     contexts: Vec<RequestContext>,
     query_digest: ManifestDigest,
     page: u64,
-    continuation: Option<tracedecay_application::MultiRootContinuationV1>,
+    continuation: Option<MultiRootContinuationStateV1>,
 ) -> MultiRootQueryRequestV1<String> {
     let generations = scope_set
         .roots()
@@ -149,7 +160,37 @@ fn request(
         order_digest: digest('e'),
         page,
         continuation,
+        next_continuation: MultiRootContinuationV1::from_opaque(format!("mr1.test.{page}"))
+            .unwrap(),
     }
+}
+
+fn continuation_state(
+    scope_set: &AuthorizedScopeSet,
+    contexts: &[RequestContext],
+    query_digest: ManifestDigest,
+    next_page: u64,
+) -> MultiRootContinuationStateV1 {
+    let generations = scope_set
+        .roots()
+        .iter()
+        .enumerate()
+        .map(|(index, root)| generation(root.scope(), if index == 0 { 'b' } else { 'c' }))
+        .collect();
+    MultiRootContinuationStateV1::new(
+        scope_set.scope_set_id().clone(),
+        scope_set.revision(),
+        scope_set.digest().clone(),
+        generations,
+        query_digest,
+        digest('e'),
+        MultiRootAuthorizationBindingV1::from_contexts(contexts).unwrap(),
+        UtcMicros(10),
+        UtcMicros(1_000),
+        next_page,
+        None,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -168,17 +209,11 @@ fn two_root_query_returns_partial_truth_and_frozen_continuation() {
         }
     ));
     assert!(matches!(page.roots[1].outcome, ScopeOutcome::Exact(_)));
-    assert_eq!(page.continuation.root_generations().len(), 2);
-    assert_eq!(page.continuation.next_page(), 1);
+    assert!(page.continuation.as_str().starts_with("mr1."));
 
+    let continuation = continuation_state(&set, &contexts, digest('d'), 1);
     let next = AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Unavailable))
-        .execute(request(
-            set,
-            contexts,
-            digest('d'),
-            1,
-            Some(page.continuation),
-        ))
+        .execute(request(set, contexts, digest('d'), 1, Some(continuation)))
         .unwrap();
     let ScopeOutcome::Partial { value, .. } = next.aggregate else {
         panic!("one available root must keep the continuation partial");
@@ -195,19 +230,41 @@ fn cursor_mismatch_and_denied_root_never_become_empty_success() {
     assert!(matches!(first.aggregate, ScopeOutcome::Partial { .. }));
     assert!(matches!(first.roots[0].outcome, ScopeOutcome::Denied));
 
+    let continuation = continuation_state(&set, &contexts, digest('d'), 1);
     let mismatch = AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Denied))
-        .execute(request(
-            set,
-            contexts,
-            digest('f'),
-            1,
-            Some(first.continuation),
-        ))
+        .execute(request(set, contexts, digest('f'), 1, Some(continuation)))
         .unwrap_err();
     assert_eq!(
         mismatch,
         MultiRootQueryError::CursorMismatch {
             field: "query digest"
+        }
+    );
+}
+
+#[test]
+fn continuation_reauthorizes_the_current_grant_epoch() {
+    let (set, contexts) = setup();
+    let continuation = continuation_state(&set, &contexts, digest('d'), 1);
+    let changed_contexts = vec![
+        context_at_revision("worktree.main", "main", 2, '7'),
+        context("worktree.linked", "linked"),
+    ];
+
+    let mismatch = AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Unavailable))
+        .execute(request(
+            set,
+            changed_contexts,
+            digest('d'),
+            1,
+            Some(continuation),
+        ))
+        .unwrap_err();
+
+    assert_eq!(
+        mismatch,
+        MultiRootQueryError::CursorMismatch {
+            field: "authorization epoch"
         }
     );
 }
@@ -241,37 +298,21 @@ fn denied_generation_does_not_require_a_current_root_context() {
 }
 
 #[test]
-fn continuation_schema_and_runtime_reject_page_zero() {
+fn continuation_schema_is_opaque_and_runtime_rejects_noncanonical_tokens() {
     let schema =
         serde_json::to_value(schema_for!(tracedecay_application::MultiRootContinuationV1)).unwrap();
-    assert_eq!(schema["properties"]["next_page"]["minimum"], 1);
+    assert_eq!(schema["type"], "string");
+    assert!(schema.get("properties").is_none());
 
-    let generations = vec![generation(
-        &context("worktree.main", "schema").scope().clone(),
-        'b',
-    )];
+    let continuation = MultiRootContinuationV1::from_opaque("mr1.signed.payload").unwrap();
+    assert_eq!(
+        serde_json::to_value(continuation).unwrap(),
+        serde_json::json!("mr1.signed.payload")
+    );
     assert!(
-        tracedecay_application::MultiRootContinuationV1::new(
-            digest('a'),
-            generations.clone(),
-            digest('c'),
-            digest('d'),
-            0,
+        serde_json::from_value::<tracedecay_application::MultiRootContinuationV1>(
+            serde_json::json!("unsigned")
         )
         .is_err()
-    );
-
-    let continuation = tracedecay_application::MultiRootContinuationV1::new(
-        digest('a'),
-        generations,
-        digest('c'),
-        digest('d'),
-        1,
-    )
-    .unwrap();
-    let mut wire = serde_json::to_value(continuation).unwrap();
-    wire["next_page"] = serde_json::json!(0);
-    assert!(
-        serde_json::from_value::<tracedecay_application::MultiRootContinuationV1>(wire).is_err()
     );
 }

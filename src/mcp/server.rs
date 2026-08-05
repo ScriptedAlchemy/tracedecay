@@ -802,8 +802,6 @@ impl McpServer {
             Arc::new(DaemonProjectRegistryReadService::new(Arc::clone(registry)))
                 as Arc<dyn ProjectRegistryReadPort>
         });
-        let project_session_retrieval_calls = Arc::new(AtomicU64::new(0));
-        let user_session_retrieval_calls = Arc::new(AtomicU64::new(0));
         let project_session_retrieval_service =
             build_project_session_retrieval_service(ProjectSessionRetrievalServiceInputs {
                 database: session_db.as_ref(),
@@ -813,7 +811,6 @@ impl McpServer {
                 registry: registry_db.as_ref(),
                 resolver: retained_project_graph_resolver.as_ref(),
                 profile_identity: profile_identity.as_ref(),
-                calls: Arc::clone(&project_session_retrieval_calls),
             });
         let user_session_retrieval_service = user_session_db
             .as_ref()
@@ -824,15 +821,9 @@ impl McpServer {
                         Arc::clone(database),
                         Arc::clone(registered),
                         root,
-                        Arc::clone(&user_session_retrieval_calls),
                         None,
                     ),
-                    None => DaemonSessionRetrievalService::new(
-                        Arc::clone(database),
-                        root,
-                        Arc::clone(&user_session_retrieval_calls),
-                        None,
-                    ),
+                    None => DaemonSessionRetrievalService::new(Arc::clone(database), root, None),
                 },
             )
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);

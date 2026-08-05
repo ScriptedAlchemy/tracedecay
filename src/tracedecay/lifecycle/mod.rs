@@ -116,12 +116,13 @@ impl TraceDecay {
         runtime_registry: &DaemonSessionRuntimeRegistryV1,
         project_root: &Path,
         store_layout: &StoreLayout,
-        db_path: &Path,
+        _db_path: &Path,
         branch_name: Option<&str>,
         operation: &'static str,
         access: DatabaseAccessMode,
     ) -> Result<Database> {
         let project_id = Self::registered_project_id(store_layout)?;
+        let db_path = &store_layout.graph_db_path;
         if let Some(branch_name) = branch_name {
             if matches!(access, DatabaseAccessMode::ReadOnly) {
                 return runtime_registry
