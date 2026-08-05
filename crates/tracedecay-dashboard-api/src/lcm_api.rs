@@ -17,10 +17,6 @@ use super::util::{JsonPath, JsonQuery};
 
 #[derive(Clone, Debug)]
 pub enum DashboardLcmReadRequestV1 {
-    Overview {
-        query: String,
-        limit: i64,
-    },
     Search {
         query: String,
         limit: i64,
@@ -35,20 +31,26 @@ pub enum DashboardLcmReadRequestV1 {
     Session {
         session_id: String,
         limit: i64,
-        offset: i64,
         cursor: Option<String>,
-        order: String,
-    },
-    Timeline {
-        bucket: String,
-        session_id: Option<String>,
-        limit: i64,
     },
 }
 
 pub enum DashboardLcmReadOutcomeV1 {
     Ready(DashboardLcmCanonicalPageV1),
-    Unavailable { reason: String },
+    NotReady {
+        state: DashboardLcmReadStateV1,
+        reason: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DashboardLcmReadStateV1 {
+    Absent,
+    Stale,
+    Locked,
+    Denied,
+    Redacted,
+    Unavailable,
 }
 
 #[derive(Clone, Debug)]
@@ -69,8 +71,8 @@ pub struct DashboardLcmCanonicalSummaryV1 {
     pub node_id: String,
     pub session_id: String,
     pub depth: i64,
-    pub token_count: i64,
-    pub source_token_count: i64,
+    pub token_count: Option<i64>,
+    pub source_token_count: Option<i64>,
     pub latest_at: Option<i64>,
     pub created_at: i64,
     pub expand_hint: String,
@@ -81,8 +83,8 @@ pub struct DashboardLcmCanonicalSummaryV1 {
 pub struct DashboardLcmCanonicalStatsV1 {
     pub message_count: i64,
     pub summary_node_count: i64,
-    pub summary_token_count: i64,
-    pub source_token_count: i64,
+    pub summary_token_count: Option<i64>,
+    pub source_token_count: Option<i64>,
     pub depth_counts: Vec<(i64, i64)>,
 }
 
@@ -110,9 +112,9 @@ pub trait DashboardLcmReadPortV1: Send + Sync {
 struct LcmSessionCountsV1 {
     message_count: i64,
     summary_node_count: i64,
-    token_estimate_total: i64,
-    summary_token_count: i64,
-    source_token_count: i64,
+    token_estimate_total: Option<i64>,
+    summary_token_count: Option<i64>,
+    source_token_count: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -142,8 +144,8 @@ pub(super) struct LcmSummaryNodeV1 {
     pub(super) depth: i64,
     pub(super) category: String,
     pub(super) source_type: String,
-    pub(super) token_count: i64,
-    pub(super) source_token_count: i64,
+    pub(super) token_count: Option<i64>,
+    pub(super) source_token_count: Option<i64>,
     pub(super) latest_at: Option<i64>,
     pub(super) created_at: i64,
     pub(super) expand_hint: String,
@@ -174,9 +176,9 @@ struct LcmDepthCountV1 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct LcmCompressionSummaryV1 {
-    source_token_count: i64,
-    token_count: i64,
-    ratio: f64,
+    source_token_count: Option<i64>,
+    token_count: Option<i64>,
+    ratio: Option<f64>,
     node_count: i64,
 }
 
@@ -264,8 +266,6 @@ pub(super) struct LcmSessionPayloadV1 {
     exists: bool,
     session_id: String,
     limit: i64,
-    offset: i64,
-    order: String,
     counts: LcmSessionCountsV1,
     messages: Vec<LcmMessageV1>,
     summary_nodes: Vec<LcmSummaryNodeV1>,
@@ -331,16 +331,13 @@ pub struct OverviewParams {
 /// authority hydrates it through the owning store's redaction authority.
 pub async fn overview(
     State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<OverviewParams>,
+    JsonQuery(_params): JsonQuery<OverviewParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>> {
-    lcm_read(
-        &state,
-        DashboardLcmReadRequestV1::Overview {
-            query: params.q,
-            limit: params.limit.unwrap_or(50).clamp(1, 500),
-        },
-    )
-    .await
+    Json(DashboardEnvelopeV1::unavailable(
+        scope_from_state(&state),
+        None,
+        "lcm_aggregate_cursor_contract_unavailable",
+    ))
 }
 
 #[derive(Deserialize)]
@@ -389,10 +386,7 @@ pub async fn search(
 #[derive(Deserialize)]
 pub struct SessionParams {
     limit: Option<i64>,
-    offset: Option<i64>,
     cursor: Option<String>,
-    #[serde(default)]
-    order: String,
 }
 
 /// GET /api/plugins/hermes-lcm/session/{session_id}
@@ -406,13 +400,7 @@ pub async fn session(
         DashboardLcmReadRequestV1::Session {
             session_id,
             limit: params.limit.unwrap_or(100).clamp(1, 500),
-            offset: params.offset.unwrap_or(0).max(0),
             cursor: params.cursor,
-            order: if params.order == "desc" {
-                "desc".to_owned()
-            } else {
-                "asc".to_owned()
-            },
         },
     )
     .await
@@ -429,21 +417,13 @@ pub struct TimelineParams {
 /// GET /api/plugins/hermes-lcm/timeline
 pub async fn timeline(
     State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<TimelineParams>,
+    JsonQuery(_params): JsonQuery<TimelineParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>> {
-    lcm_read(
-        &state,
-        DashboardLcmReadRequestV1::Timeline {
-            bucket: if params.bucket.is_empty() {
-                "day".to_owned()
-            } else {
-                params.bucket
-            },
-            session_id: nonempty(params.session_id),
-            limit: params.limit.unwrap_or(90).clamp(1, 500),
-        },
-    )
-    .await
+    Json(DashboardEnvelopeV1::unavailable(
+        scope_from_state(&state),
+        None,
+        "lcm_aggregate_cursor_contract_unavailable",
+    ))
 }
 
 async fn lcm_read<T>(
@@ -478,9 +458,33 @@ where
                 )),
             }
         }
-        DashboardLcmReadOutcomeV1::Unavailable { reason } => Json(
-            DashboardEnvelopeV1::unavailable(scope_from_state(state), None, reason),
-        ),
+        DashboardLcmReadOutcomeV1::NotReady {
+            state: read_state,
+            reason,
+        } => {
+            let scope = scope_from_state(state);
+            let envelope = match read_state {
+                DashboardLcmReadStateV1::Absent => DashboardEnvelopeV1::complete_zero_findings(
+                    scope,
+                    DashboardCoverageV1::complete(0, "session records"),
+                    None,
+                ),
+                DashboardLcmReadStateV1::Stale => {
+                    let mut coverage = DashboardCoverageV1::unknown();
+                    coverage.omission_reasons.push(reason);
+                    DashboardEnvelopeV1::stale(scope, coverage, None)
+                }
+                DashboardLcmReadStateV1::Locked => DashboardEnvelopeV1::locked(scope, None, reason),
+                DashboardLcmReadStateV1::Denied => DashboardEnvelopeV1::denied(scope, None),
+                DashboardLcmReadStateV1::Redacted => {
+                    DashboardEnvelopeV1::redacted(scope, None, reason)
+                }
+                DashboardLcmReadStateV1::Unavailable => {
+                    DashboardEnvelopeV1::unavailable(scope, None, reason)
+                }
+            };
+            Json(envelope)
+        }
     }
 }
 
@@ -489,9 +493,6 @@ fn render_canonical_payload(
     page: DashboardLcmCanonicalPageV1,
 ) -> serde_json::Value {
     match request {
-        DashboardLcmReadRequestV1::Overview { query, limit } => {
-            overview_payload(page, query, limit)
-        }
         DashboardLcmReadRequestV1::Search {
             query,
             limit,
@@ -543,15 +544,13 @@ fn render_canonical_payload(
         DashboardLcmReadRequestV1::Session {
             session_id,
             limit,
-            offset,
             cursor: _,
-            order,
         } => {
-            let mut messages = page.messages.into_iter().collect::<Vec<_>>();
-            if order == "desc" {
-                messages.reverse();
-            }
-            let messages = messages.into_iter().map(message_json).collect::<Vec<_>>();
+            let messages = page
+                .messages
+                .into_iter()
+                .map(message_json)
+                .collect::<Vec<_>>();
             let summary_nodes = page
                 .summary_nodes
                 .into_iter()
@@ -564,8 +563,6 @@ fn render_canonical_payload(
                 "exists": page.stats.message_count > 0 || page.stats.summary_node_count > 0,
                 "session_id": session_id,
                 "limit": limit,
-                "offset": offset,
-                "order": order,
                 "counts": {
                     "message_count": page.stats.message_count,
                     "summary_node_count": page.stats.summary_node_count,
@@ -581,11 +578,6 @@ fn render_canonical_payload(
                 "next_cursor": page.next_cursor
             })
         }
-        DashboardLcmReadRequestV1::Timeline {
-            bucket,
-            session_id,
-            limit,
-        } => timeline_payload(page, bucket, session_id, limit),
     }
 }
 
@@ -629,174 +621,6 @@ fn summary_json(summary: DashboardLcmCanonicalSummaryV1) -> serde_json::Value {
 
 fn token_estimate(content: &str) -> i64 {
     i64::try_from(content.chars().count().div_ceil(4)).unwrap_or(i64::MAX)
-}
-
-fn overview_payload(
-    page: DashboardLcmCanonicalPageV1,
-    query: String,
-    limit: i64,
-) -> serde_json::Value {
-    let DashboardLcmCanonicalPageV1 {
-        messages,
-        summary_nodes,
-        stats,
-        ..
-    } = page;
-    let mut sessions = std::collections::BTreeMap::<String, (i64, Option<i64>)>::new();
-    let mut roles = std::collections::BTreeMap::<String, i64>::new();
-    let mut sources = std::collections::BTreeMap::<String, i64>::new();
-    for message in &messages {
-        let session = sessions
-            .entry(message.session_id.clone())
-            .or_insert((0, None));
-        session.0 = session.0.saturating_add(1);
-        session.1 = session.1.max(message.timestamp);
-        *roles.entry(message.role.clone()).or_default() += 1;
-        *sources.entry(message.provider.clone()).or_default() += 1;
-    }
-    let latest_sessions = sessions
-        .into_iter()
-        .map(|(session_id, (message_count, last_timestamp))| {
-            serde_json::json!({
-                "session_id": session_id,
-                "message_count": message_count,
-                "last_store_id": null,
-                "last_timestamp": last_timestamp
-            })
-        })
-        .collect::<Vec<_>>();
-    let messages = messages.into_iter().map(message_json).collect::<Vec<_>>();
-    let summary_node_sessions_total = summary_nodes
-        .iter()
-        .map(|node| node.session_id.as_str())
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
-    let summary_nodes = summary_nodes
-        .into_iter()
-        .map(summary_json)
-        .collect::<Vec<_>>();
-    let latest_summary_nodes = summary_nodes.clone();
-    let max_summary_depth = stats
-        .depth_counts
-        .iter()
-        .map(|(depth, _)| *depth)
-        .max()
-        .unwrap_or(0);
-    serde_json::json!({
-        "path": "daemon://session-temporal",
-        "storage_scope": "project",
-        "exists": true,
-        "overview": {
-            "messages_total": stats.message_count,
-            "sessions_total": latest_sessions.len(),
-            "summary_nodes_total": stats.summary_node_count,
-            "summary_node_sessions_total": summary_node_sessions_total,
-            "max_summary_depth": max_summary_depth,
-            "role_counts": roles.into_iter().map(|(role, count)| serde_json::json!({"role": role, "count": count})).collect::<Vec<_>>(),
-            "source_counts": sources.into_iter().map(|(source, count)| serde_json::json!({"source": source, "count": count})).collect::<Vec<_>>(),
-            "depth_counts": stats.depth_counts.into_iter().map(|(depth, count)| serde_json::json!({"depth": depth, "count": count})).collect::<Vec<_>>(),
-            "compression": {
-                "source_token_count": stats.source_token_count,
-                "token_count": stats.summary_token_count,
-                "ratio": if stats.summary_token_count > 0 {
-                    stats.source_token_count as f64 / stats.summary_token_count as f64
-                } else {
-                    0.0
-                },
-                "node_count": stats.summary_node_count
-            }
-        },
-        "latest_sessions": latest_sessions,
-        "latest_summary_nodes": latest_summary_nodes,
-        "matches": {"messages": messages, "summary_nodes": summary_nodes},
-        "query": query,
-        "limit": limit
-    })
-}
-
-fn timeline_payload(
-    page: DashboardLcmCanonicalPageV1,
-    bucket: String,
-    session_id: Option<String>,
-    limit: i64,
-) -> serde_json::Value {
-    let DashboardLcmCanonicalPageV1 {
-        messages,
-        summary_nodes,
-        ..
-    } = page;
-    let mut buckets = std::collections::BTreeMap::<String, (i64, i64)>::new();
-    let mut node_buckets = std::collections::BTreeMap::<String, i64>::new();
-    let mut undated = (0i64, 0i64);
-    for message in messages {
-        let tokens = token_estimate(&message.content);
-        if let Some(timestamp) = message.timestamp {
-            let key = timestamp_bucket(timestamp, &bucket);
-            let entry = buckets.entry(key).or_default();
-            entry.0 = entry.0.saturating_add(1);
-            entry.1 = entry.1.saturating_add(tokens);
-        } else {
-            undated.0 = undated.0.saturating_add(1);
-            undated.1 = undated.1.saturating_add(tokens);
-        }
-    }
-    for summary in summary_nodes {
-        if let Some(timestamp) = summary.latest_at {
-            *node_buckets
-                .entry(timestamp_bucket(timestamp, &bucket))
-                .or_default() += 1;
-        }
-    }
-    let total_dated_buckets = i64::try_from(buckets.len()).unwrap_or(i64::MAX);
-    let buckets = buckets
-        .into_iter()
-        .rev()
-        .take(usize::try_from(limit).unwrap_or(usize::MAX))
-        .map(|(bucket, (count, token_estimate))| {
-            serde_json::json!({
-                "bucket": bucket,
-                "count": count,
-                "token_estimate": token_estimate
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::json!({
-        "path": "daemon://session-temporal",
-        "storage_scope": "project",
-        "exists": true,
-        "bucket": bucket,
-        "session_id": session_id,
-        "buckets": buckets,
-        "node_buckets": node_buckets.into_iter().map(|(bucket, count)| serde_json::json!({"bucket": bucket, "count": count})).collect::<Vec<_>>(),
-        "undated": {"count": undated.0, "token_estimate": undated.1},
-        "coverage": {
-            "limit": limit,
-            "returned_buckets": buckets.len(),
-            "total_dated_buckets": total_dated_buckets,
-            "truncated": total_dated_buckets > limit,
-            "ordering": "descending",
-            "next_before_bucket": null
-        }
-    })
-}
-
-fn timestamp_bucket(timestamp: i64, grain: &str) -> String {
-    let seconds = if timestamp.abs() > 10_000_000_000_000 {
-        timestamp / 1_000_000
-    } else if timestamp.abs() > 10_000_000_000 {
-        timestamp / 1_000
-    } else {
-        timestamp
-    };
-    let bucket_seconds = match grain {
-        "hour" => 60 * 60,
-        "month" => 30 * 24 * 60 * 60,
-        _ => 24 * 60 * 60,
-    };
-    seconds
-        .div_euclid(bucket_seconds)
-        .saturating_mul(bucket_seconds)
-        .to_string()
 }
 
 fn nonempty(value: String) -> Option<String> {

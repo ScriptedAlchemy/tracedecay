@@ -469,6 +469,38 @@ impl<T> DashboardEnvelopeV1<T> {
         )
     }
 
+    /// A mounted read that cannot proceed while its canonical authority is
+    /// locked. The reason remains coverage evidence; no payload is fabricated.
+    #[must_use]
+    pub fn locked(scope: DashboardScopeV1, payload: T, reason: impl Into<String>) -> Self {
+        let mut coverage = DashboardCoverageV1::unknown();
+        coverage.omission_reasons.push(reason.into());
+        Self::new(
+            scope,
+            DashboardDomainStateV1::Locked,
+            coverage,
+            DashboardFreshnessV1::unknown(),
+            payload,
+        )
+    }
+
+    /// A read whose canonical authority admitted the caller but redacted the
+    /// requested content. Redaction is both a domain and authorization state.
+    #[must_use]
+    pub fn redacted(scope: DashboardScopeV1, payload: T, reason: impl Into<String>) -> Self {
+        let mut coverage = DashboardCoverageV1::unknown();
+        coverage.omission_reasons.push(reason.into());
+        let mut envelope = Self::new(
+            scope,
+            DashboardDomainStateV1::Redacted,
+            coverage,
+            DashboardFreshnessV1::unknown(),
+            payload,
+        );
+        envelope.authorization = DashboardAuthorizationV1::Redacted;
+        envelope
+    }
+
     /// A partial observation with a known eligible population.
     #[must_use]
     pub fn partial(
@@ -666,6 +698,21 @@ mod tests {
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Stale);
         assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Stale);
         assert_eq!(envelope.payload, Some(7));
+    }
+
+    #[test]
+    fn locked_and_redacted_reads_preserve_their_exact_state() {
+        let locked =
+            DashboardEnvelopeV1::<Option<u64>>::locked(scope(), None, "temporal_store_locked");
+        assert_eq!(locked.domain_state, DashboardDomainStateV1::Locked);
+        assert_eq!(locked.coverage.omission_reasons, ["temporal_store_locked"]);
+        assert_eq!(locked.authorization, DashboardAuthorizationV1::Authorized);
+
+        let redacted =
+            DashboardEnvelopeV1::<Option<u64>>::redacted(scope(), None, "content_redacted");
+        assert_eq!(redacted.domain_state, DashboardDomainStateV1::Redacted);
+        assert_eq!(redacted.authorization, DashboardAuthorizationV1::Redacted);
+        assert_eq!(redacted.coverage.omission_reasons, ["content_redacted"]);
     }
 
     #[test]

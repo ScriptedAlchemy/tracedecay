@@ -19,7 +19,7 @@ use tracedecay_usecases::session::lcm::{
 use super::super::SessionAuthorities;
 
 use super::errors::{map_claude_observation_ingest_error, map_transcript_ingest_error};
-use super::{required_project_db, required_str};
+use super::required_str;
 
 mod kernels;
 
@@ -141,7 +141,7 @@ async fn drain_host_observation_projections(
 }
 
 pub(super) async fn codex_compact(
-    cg: &TraceDecay,
+    _cg: &TraceDecay,
     args: &Value,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
@@ -149,29 +149,6 @@ pub(super) async fn codex_compact(
     let Some(authority) = session_authorities.project_lcm else {
         return Ok(compaction_authority_unavailable("codex_compact"));
     };
-    let mut messages_upserted = 0;
-    if let Some(source) = crate::sessions::codex::CodexSource::new() {
-        let project_id = project_observation_id(cg)?;
-        let scope = ObservationScopeV1::Project {
-            project_id: project_id.clone(),
-        };
-        let admission =
-            host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
-        for path in source.transcript_paths(cg.project_root()) {
-            crate::sessions::codex::try_admit_codex_jsonl_observations_for_project_with_admission(
-                &path,
-                cg.project_root(),
-                project_id.clone(),
-                &admission,
-                None,
-            )
-            .await
-            .map_err(|error| map_transcript_ingest_error(&error))?;
-        }
-        let cancellation = ObservationCancellation::default();
-        messages_upserted =
-            drain_host_observation_projections(&admission, &scope, &cancellation).await?;
-    }
     let session_id = serde_json::from_str::<Value>(event_json)
         .ok()
         .as_ref()
@@ -186,7 +163,7 @@ pub(super) async fn codex_compact(
             "action": "codex_compact",
             "status": "unavailable",
             "reason": "host_session_identity_unavailable",
-            "messages_upserted": messages_upserted,
+            "messages_upserted": 0,
         }));
     };
     let Some(response) = authority
@@ -214,7 +191,7 @@ pub(super) async fn codex_compact(
         "reason": reason,
         "authority_outcome": response.outcome,
         "committed_state": response.receipt.committed_state,
-        "messages_upserted": messages_upserted,
+        "messages_upserted": 0,
     }))
 }
 
@@ -233,7 +210,7 @@ pub(super) async fn claude_compact(
 }
 
 pub(super) async fn cursor_compact(
-    cg: &TraceDecay,
+    _cg: &TraceDecay,
     args: &Value,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
@@ -241,20 +218,12 @@ pub(super) async fn cursor_compact(
     let Some(authority) = session_authorities.project_lcm else {
         return Ok(compaction_authority_unavailable("cursor_compact"));
     };
-    let project_id = project_observation_id(cg)?;
-    let admission =
-        host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
     let parsed: Value = serde_json::from_str(event_json)?;
     let session_id = ["session_id", "conversation_id", "chat_id"]
         .iter()
         .find_map(|key| parsed.get(*key).and_then(Value::as_str))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error("Cursor preCompact event omitted session id"))?;
-    let ingest = crate::sessions::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
-        event_json, project_id, &admission, None,
-    )
-    .await
-    .map_err(|error| map_transcript_ingest_error(&error))?;
     let messages_to_compact = event_usize(&parsed, &["messages_to_compact", "compact_count"]);
     if messages_to_compact == Some(0) {
         return Ok(cursor_compact_skipped("no messages to compact"));
@@ -293,7 +262,7 @@ pub(super) async fn cursor_compact(
         "committed_state": response.receipt.committed_state,
         "summary_nodes_created": 0,
         "summary_node_ids": [],
-        "messages_upserted": ingest.messages_upserted,
+        "messages_upserted": 0,
     }))
 }
 

@@ -91,7 +91,7 @@ mod lcm_api;
 pub use lcm_api::{
     DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
     DashboardLcmCanonicalSummaryV1, DashboardLcmReadFutureV1, DashboardLcmReadOutcomeV1,
-    DashboardLcmReadPortV1, DashboardLcmReadRequestV1,
+    DashboardLcmReadPortV1, DashboardLcmReadRequestV1, DashboardLcmReadStateV1,
 };
 mod loom_api;
 mod memory_analysis;
@@ -2301,10 +2301,8 @@ mod authority_tests {
         let app = router_with_active_application(fixture.state, None, Router::new());
 
         for uri in [
-            "/api/plugins/hermes-lcm/overview",
             "/api/plugins/hermes-lcm/search?q=needle",
             "/api/plugins/hermes-lcm/session/session-missing",
-            "/api/plugins/hermes-lcm/timeline",
         ] {
             let response = app
                 .clone()
@@ -2325,6 +2323,40 @@ mod authority_tests {
             assert_eq!(value["schema_revision"], 1, "{uri}");
             assert_eq!(value["domain_state"], "ready", "{uri}");
             assert!(value["payload"].is_object(), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lcm_aggregate_reads_are_unavailable_without_cursor_complete_authority() {
+        let mut fixture = DashboardStateFixture::open("project.dashboard-lcm-aggregate").await;
+        fixture.state.lcm_read_authority = Some(Arc::new(FakeDashboardLcmRead));
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        for uri in [
+            "/api/plugins/hermes-lcm/overview",
+            "/api/plugins/hermes-lcm/timeline",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("LCM aggregate request"),
+                )
+                .await
+                .expect("LCM aggregate response");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("LCM aggregate body");
+            let value: Value = serde_json::from_slice(&body).expect("LCM aggregate json");
+
+            assert_eq!(value["domain_state"], "unknown", "{uri}");
+            assert_eq!(
+                value["coverage"]["omission_reasons"][0],
+                "lcm_aggregate_cursor_contract_unavailable",
+                "{uri}"
+            );
         }
     }
 

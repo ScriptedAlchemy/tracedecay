@@ -36,7 +36,7 @@
  * read serves them as provider-qualified rows, and the selected-thread rail
  * renders those rows without projecting a made-up continuous coordinate.
  */
-import { packTrack, type LoomSpan } from './tracks.ts';
+import { packTrack, type LoomSpan } from "./tracks.ts";
 
 /**
  * A session as the weave needs to read it.
@@ -77,7 +77,7 @@ export interface WeaveThread {
    * when it served nothing usable. Never inferred. */
   end: number | null;
   /** Which durable field supplied `end`; null means the extent is unknown. */
-  endSource: 'session_end' | 'last_message' | null;
+  endSource: "session_end" | "last_message" | null;
   /** Measured message count; zero is a real reading, not a missing one. */
   messages: number;
   isSubagent: boolean;
@@ -139,7 +139,7 @@ function modelsOf(session: WeaveSession): string[] {
   const out: string[] = [];
   for (const row of session.models ?? []) {
     const model = row.model;
-    if (typeof model === 'string' && model.length > 0 && !out.includes(model)) {
+    if (typeof model === "string" && model.length > 0 && !out.includes(model)) {
       out.push(model);
     }
   }
@@ -169,24 +169,28 @@ export function threadsFrom(sessions: readonly WeaveSession[]): {
     // recorded twice; treating it as a one-second span would draw a mark that
     // claims a measurement nobody made.
     const hasRecordedEnd =
-      typeof recordedEnd === 'number' &&
+      typeof recordedEnd === "number" &&
       Number.isFinite(recordedEnd) &&
       recordedEnd > start;
     const hasLastMessage =
-      typeof lastMessage === 'number' &&
+      typeof lastMessage === "number" &&
       Number.isFinite(lastMessage) &&
       lastMessage > start;
-    const end = hasRecordedEnd ? recordedEnd : hasLastMessage ? lastMessage : null;
-    const endSource = hasRecordedEnd
-      ? 'session_end'
+    const end = hasRecordedEnd
+      ? recordedEnd
       : hasLastMessage
-        ? 'last_message'
+        ? lastMessage
+        : null;
+    const endSource = hasRecordedEnd
+      ? "session_end"
+      : hasLastMessage
+        ? "last_message"
         : null;
     threads.push({
       id: JSON.stringify([session.provider, session.session_id]),
       sessionId: session.session_id,
       label: session.title?.trim() || session.session_id,
-      host: session.provider || 'unknown',
+      host: session.provider || "unknown",
       start,
       end,
       endSource,
@@ -364,7 +368,10 @@ export function summarizeChain(
     tool_name?: string | null | undefined;
     token_estimate?: number | null | undefined;
   }[],
-  counts?: { message_count?: number; token_estimate_total?: number } | undefined,
+  counts?: {
+    message_count?: number;
+    token_estimate_total?: number | null;
+  },
   truncated = false,
 ): ChainSummary {
   const ordered = messages
@@ -372,7 +379,11 @@ export function summarizeChain(
     .sort((a, b) => {
       const left = a.message.ordinal;
       const right = b.message.ordinal;
-      if (typeof left === 'number' && typeof right === 'number' && left !== right) {
+      if (
+        typeof left === "number" &&
+        typeof right === "number" &&
+        left !== right
+      ) {
         return left - right;
       }
       return a.index - b.index;
@@ -384,18 +395,18 @@ export function summarizeChain(
   let timestamped = false;
 
   const steps: ChainStep[] = ordered.map((message) => {
-    const role = (message.role ?? 'unknown').trim() || 'unknown';
+    const role = (message.role ?? "unknown").trim() || "unknown";
     roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
     const tool =
-      typeof message.tool_name === 'string' && message.tool_name.length > 0
+      typeof message.tool_name === "string" && message.tool_name.length > 0
         ? message.tool_name
         : null;
     if (tool) toolCounts.set(tool, (toolCounts.get(tool) ?? 0) + 1);
-    if (typeof message.timestamp === 'number' && message.timestamp > 0) {
+    if (typeof message.timestamp === "number" && message.timestamp > 0) {
       timestamped = true;
     }
     const tokens =
-      typeof message.token_estimate === 'number' && message.token_estimate >= 0
+      typeof message.token_estimate === "number" && message.token_estimate >= 0
         ? message.token_estimate
         : null;
     return {
@@ -424,7 +435,7 @@ export function summarizeChain(
 /** One line of a turn, short enough for a rail and long enough to identify.
  * Whitespace is collapsed so a pasted command does not print as a paragraph. */
 function excerptOf(content: string | null | undefined): string {
-  if (typeof content !== 'string') return '';
-  const line = content.replace(/\s+/g, ' ').trim();
+  if (typeof content !== "string") return "";
+  const line = content.replace(/\s+/g, " ").trim();
   return line.length > 140 ? `${line.slice(0, 139)}…` : line;
 }
