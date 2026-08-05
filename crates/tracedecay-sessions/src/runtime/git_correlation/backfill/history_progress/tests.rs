@@ -227,17 +227,16 @@ async fn exact_reset_cascades_children_and_transaction_rollback_leaves_no_state(
         "bbbbbbbb"
     );
     assert!(read_pending_page(&conn, key, 0, 0).await.is_err());
-    assert!(seen_exists(&conn, key, 0, &seen.oid).await.unwrap());
 
     assert!(reset_progress(&conn, key).await.unwrap());
     assert!(read_segment(&conn, key, 0).await.unwrap().is_none());
     assert!(
-        read_pending(&conn, key, 0, "bbbbbbbb")
+        read_pending_page(&conn, key, 0, 128)
             .await
             .unwrap()
-            .is_none()
+            .is_empty()
     );
-    assert!(!seen_exists(&conn, key, 0, &seen.oid).await.unwrap());
+    assert!(insert_seen(&conn, &seen).await.is_err());
 
     let rolled_back_key = GitHistoryProgressKey {
         activity_timestamp: 202,

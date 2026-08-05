@@ -495,51 +495,6 @@ pub(super) async fn upsert_segment(
     Ok(changed == 1)
 }
 
-pub(super) async fn delete_segment(
-    conn: &(impl Executor + ?Sized),
-    key: GitHistoryProgressKey,
-    ordinal: u64,
-) -> Result<bool, GitCorrelationError> {
-    Ok(conn
-        .execute(
-            "DELETE FROM git_history_index_segments
-              WHERE activity_timestamp = ?1
-                AND source_rowid = ?2
-                AND ordinal = ?3",
-            params![key.activity_timestamp, key.source_rowid, ordinal],
-        )
-        .await?
-        == 1)
-}
-
-pub(super) async fn read_pending(
-    conn: &(impl QueryExecutor + ?Sized),
-    key: GitHistoryProgressKey,
-    segment_ordinal: u64,
-    oid: &str,
-) -> Result<Option<GitHistoryPendingRow>, GitCorrelationError> {
-    let mut rows = conn
-        .query(
-            "SELECT activity_timestamp, source_rowid, segment_ordinal, oid
-               FROM git_history_index_pending
-              WHERE activity_timestamp = ?1
-                AND source_rowid = ?2
-                AND segment_ordinal = ?3
-                AND oid = ?4",
-            params![
-                key.activity_timestamp,
-                key.source_rowid,
-                segment_ordinal,
-                oid,
-            ],
-        )
-        .await?;
-    rows.next()
-        .await?
-        .map(|row| pending_from_row(&row))
-        .transpose()
-}
-
 pub(super) async fn read_pending_page(
     conn: &(impl QueryExecutor + ?Sized),
     key: GitHistoryProgressKey,
@@ -633,31 +588,6 @@ pub(super) async fn delete_pending(
         )
         .await?
         == 1)
-}
-
-pub(super) async fn seen_exists(
-    conn: &(impl QueryExecutor + ?Sized),
-    key: GitHistoryProgressKey,
-    segment_ordinal: u64,
-    oid: &str,
-) -> Result<bool, GitCorrelationError> {
-    let mut rows = conn
-        .query(
-            "SELECT 1
-               FROM git_history_index_seen
-              WHERE activity_timestamp = ?1
-                AND source_rowid = ?2
-                AND segment_ordinal = ?3
-                AND oid = ?4",
-            params![
-                key.activity_timestamp,
-                key.source_rowid,
-                segment_ordinal,
-                oid,
-            ],
-        )
-        .await?;
-    Ok(rows.next().await?.is_some())
 }
 
 pub(super) async fn insert_seen(
