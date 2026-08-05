@@ -471,7 +471,7 @@ async fn resume_uses_sealed_canonical_worktree_after_alias_repoint() {
             "SELECT worktree FROM session_git_spans ORDER BY span_id LIMIT 1"
         )
         .await,
-        canonical.canonicalize().unwrap().to_str().unwrap()
+        normalize_worktree(canonical.canonicalize().unwrap().to_str().unwrap())
     );
 }
 
