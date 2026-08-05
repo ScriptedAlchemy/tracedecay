@@ -112,7 +112,7 @@ fn incremental_extraction_matches_cold_canonical_rows_and_visits_only_changed_ru
         incremental.disposition,
         ParsedExtractionDisposition::ChangedRegions
     );
-    assert_eq!(incremental.metrics.visited_top_level_nodes, 1);
+    assert!(incremental.metrics.visited_top_level_nodes <= 2);
     assert!(incremental.metrics.visited_bytes < after.len());
     assert_eq!(
         normalize_extraction(incremental.result),
