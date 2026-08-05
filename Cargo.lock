@@ -6081,6 +6081,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tracedecay-store",
  "tracedecay-temporal-query",
  "zeroize",
 ]
