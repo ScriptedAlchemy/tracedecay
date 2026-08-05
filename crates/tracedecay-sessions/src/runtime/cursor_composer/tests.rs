@@ -12,66 +12,9 @@ use tracedecay_capture::cursor_composer::normalize_cursor_composer_envelope_obse
 use tracedecay_domain::{CanonicalObservationFactV1, CanonicalWorkflowSemanticKindV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 
-use crate::admission::test_support::PanicHostAdmission;
-use crate::observation::ObservationCancellation;
+use crate::admission::test_support::MemoryHostAdmission;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
-
-#[tokio::test]
-async fn cancelled_composer_sweep_stops_before_scanning_state_database() {
-    let project = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    let state_dir = home
-        .path()
-        .join(".config")
-        .join("Cursor")
-        .join("User")
-        .join("globalStorage");
-    std::fs::create_dir_all(&state_dir).unwrap();
-    let connection = rusqlite::Connection::open(state_dir.join("state.vscdb")).unwrap();
-    connection
-        .execute_batch(
-            "PRAGMA journal_mode=DELETE;
-             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
-            rusqlite::params![
-                "composerData:cancelled",
-                json!({
-                    "composerId": "cancelled",
-                    "workspaceIdentifier": {
-                        "uri": { "fsPath": project.path().to_string_lossy() }
-                    },
-                    "fullConversationHeadersOnly": []
-                })
-                .to_string()
-            ],
-        )
-        .unwrap();
-    drop(connection);
-    let project_id =
-        tracedecay_domain::ProjectId::new("project.cursor-composer-cancelled").unwrap();
-    let cancellation = ObservationCancellation::default();
-    cancellation.cancel();
-
-    let outcome = CursorComposerSource::with_home(home.path())
-        .ingest_capped_with_cancellation(
-            &PanicHostAdmission,
-            project.path(),
-            project_id,
-            DEFAULT_COMPOSER_ENVELOPE_CAP,
-            None,
-            &cancellation,
-        )
-        .await;
-
-    assert_eq!(outcome.sessions_upserted, 0);
-    assert_eq!(outcome.messages_upserted, 0);
-    assert_eq!(outcome.bytes_consumed, 0);
-    assert!(outcome.owned_session_ids.is_empty());
-}
+mod projection;
 
 /// A failed `has_session_message` lookup is store *unavailability*, not proof
 /// the bubble is already durable. The sweep must defer it and ingest it on a
@@ -80,8 +23,6 @@ async fn cancelled_composer_sweep_stops_before_scanning_state_database() {
 /// which is what made the old `unwrap_or(true)` a permanent silent drop.
 #[tokio::test]
 async fn store_error_during_message_lookup_defers_instead_of_dropping_the_bubble() {
-    use crate::admission::test_support::MemoryHostAdmission;
-
     let project = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let state_dir = home
@@ -144,7 +85,8 @@ async fn store_error_during_message_lookup_defers_instead_of_dropping_the_bubble
             DEFAULT_COMPOSER_ENVELOPE_CAP,
             None,
         )
-        .await;
+        .await
+        .expect("composer sweep after a temporary store failure");
 
     assert_eq!(
         deferred.messages_upserted, 0,
@@ -164,7 +106,8 @@ async fn store_error_during_message_lookup_defers_instead_of_dropping_the_bubble
             DEFAULT_COMPOSER_ENVELOPE_CAP,
             None,
         )
-        .await;
+        .await
+        .expect("composer recovery sweep");
     assert!(
         recovered.messages_upserted >= 2,
         "both bubbles must reach the store once it recovers, got {}",

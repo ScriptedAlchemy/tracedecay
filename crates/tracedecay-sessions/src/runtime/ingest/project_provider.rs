@@ -411,7 +411,7 @@ impl<'a> ProjectProviderRun<'a> {
 
     async fn run_cursor(self) -> ProviderRunOutcome {
         let composer = if let Some(source) = cursor_composer::CursorComposerSource::new() {
-            source
+            match source
                 .ingest_capped_with_cancellation(
                     self.facade,
                     self.project_root,
@@ -421,6 +421,23 @@ impl<'a> ProjectProviderRun<'a> {
                     self.cancellation,
                 )
                 .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                        return cancelled;
+                    }
+                    return ProviderRunOutcome::failed(
+                        warn_transcript_catch_up_failure(
+                            "cursor",
+                            "observation",
+                            &error,
+                            "project Cursor composer observation catch-up failed",
+                        ),
+                        0,
+                    );
+                }
+            }
         } else {
             cursor_composer::CursorComposerSweepOutcome::default()
         };

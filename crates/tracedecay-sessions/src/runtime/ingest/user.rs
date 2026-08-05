@@ -142,7 +142,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
                 max_new_bytes,
                 cancellation,
             )
-            .await
+            .await?
     } else {
         cursor_composer::CursorComposerSweepOutcome::default()
     };

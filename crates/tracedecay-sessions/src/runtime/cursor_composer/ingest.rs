@@ -2,7 +2,7 @@
 //! `state.vscdb` envelope/bubble ingestion, `store.db` sweeps, and coverage
 //! advancement.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -11,15 +11,14 @@ use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
     ObservationSourceIdentityV1, ProjectId, ProviderId, SessionId,
 };
-use tracedecay_store::ObservationPersistOutcome;
 use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::TranscriptScopeMatcher;
+use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 
-use super::PROVIDER;
 use super::capture::{
     build_cursor_composer_capture_request_for_project,
     build_cursor_composer_envelope_capture_request_for_project, composer_envelope_todo_checkpoint,
@@ -35,6 +34,7 @@ use super::store::{
     MAX_COMPOSER_STORE_BLOB_VISITS, StoreWalkOutcome, order_store_messages_bounded,
     read_store_meta_bounded,
 };
+use super::{CursorComposerSweepOutcome, PROVIDER};
 /// Default ceiling on how many *new/changed* composer sessions one sweep pass
 /// ingests, so the first backfill of thousands of sessions never blocks
 /// startup; already-watermarked sessions are skipped cheaply and do not count.
@@ -77,16 +77,19 @@ impl ComposerIngestContext<'_, '_> {
     }
 }
 
-async fn drain_composer_projection_queue(context: &ComposerIngestContext<'_, '_>) {
-    if let Err(error) = crate::runtime::cursor::drain_cursor_observation_projections(
+async fn drain_composer_projection_queue(
+    context: &ComposerIngestContext<'_, '_>,
+) -> TranscriptIngestResult<crate::runtime::cursor::CursorTranscriptIngestStats> {
+    crate::runtime::cursor::drain_cursor_observation_projections(
         context.facade,
         &context.scope,
         context.cancellation,
     )
     .await
-    {
-        tracing::debug!(?error, "Cursor composer projection drain deferred");
-    }
+}
+
+fn composer_cancellation_error() -> TranscriptIngestError {
+    TranscriptIngestError::Cancelled { provider: PROVIDER }
 }
 
 fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentityV1, String> {
@@ -138,28 +141,6 @@ async fn advance_composer_coverage(
     .map_err(|error| error.to_string())
 }
 
-/// Outcome of one composer sweep pass.
-#[derive(Debug, Default, Clone)]
-pub struct CursorComposerSweepOutcome {
-    pub sessions_upserted: u64,
-    pub messages_upserted: u64,
-    /// Serialized bytes of new observation payloads processed by this pass.
-    pub bytes_consumed: u64,
-    /// At least one new observation was deferred by the aggregate byte cap.
-    pub deferred_by_byte_cap: bool,
-    /// Bounded set of composer session ids observed during the sweep. The
-    /// JSONL sweep skips these so the two Cursor sources do not double-ingest
-    /// the same session within the bounded discovery window.
-    pub owned_session_ids: HashSet<String>,
-}
-
-impl CursorComposerSweepOutcome {
-    fn add(&mut self, sessions: u64, messages: u64) {
-        self.sessions_upserted = self.sessions_upserted.saturating_add(sessions);
-        self.messages_upserted = self.messages_upserted.saturating_add(messages);
-    }
-}
-
 /// Read-only Cursor composer store source rooted at a home directory.
 pub struct CursorComposerSource {
     state_db_path: PathBuf,
@@ -189,15 +170,15 @@ impl CursorComposerSource {
 
     /// Ingest every composer session (and per-session `store.db` chat) that
     /// belongs to `project_root` into `db`, bounded to `envelope_cap`
-    /// newly-changed sessions this pass. Fail-open: any DB/parse error yields
-    /// the outcome so far rather than propagating.
+    /// newly-changed sessions this pass. SQLite and parse failures leave the
+    /// source fail-open, while projection authority failures stay typed.
     pub async fn ingest(
         &self,
         admission: &dyn HostAdmission,
         project_root: &Path,
         project_id: ProjectId,
         envelope_cap: usize,
-    ) -> CursorComposerSweepOutcome {
+    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
         self.ingest_capped(
             admission,
             project_root,
@@ -217,7 +198,7 @@ impl CursorComposerSource {
         project_id: ProjectId,
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
-    ) -> CursorComposerSweepOutcome {
+    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
         self.ingest_capped_with_cancellation(
             admission,
             project_root,
@@ -237,7 +218,7 @@ impl CursorComposerSource {
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
         cancellation: &ObservationCancellation,
-    ) -> CursorComposerSweepOutcome {
+    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
         let context = ComposerIngestContext {
             facade: admission,
             scope: ObservationScopeV1::Project { project_id },
@@ -254,7 +235,7 @@ impl CursorComposerSource {
         admission: &dyn HostAdmission,
         registered_roots: &[PathBuf],
         envelope_cap: usize,
-    ) -> CursorComposerSweepOutcome {
+    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
         self.ingest_user_capped(
             admission,
             registered_roots,
@@ -272,7 +253,7 @@ impl CursorComposerSource {
         registered_roots: &[PathBuf],
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
-    ) -> CursorComposerSweepOutcome {
+    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
         self.ingest_user_capped_with_cancellation(
             admission,
             registered_roots,
@@ -290,7 +271,7 @@ impl CursorComposerSource {
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
         cancellation: &ObservationCancellation,
-    ) -> CursorComposerSweepOutcome {
+    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
         let context = ComposerIngestContext {
             facade: admission,
             scope: ObservationScopeV1::Profile,
@@ -307,16 +288,21 @@ impl CursorComposerSource {
         context: &ComposerIngestContext<'_, '_>,
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
-    ) -> CursorComposerSweepOutcome {
+    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
         let mut outcome = CursorComposerSweepOutcome::default();
         if context.cancellation.is_cancelled() {
-            return outcome;
+            return Err(composer_cancellation_error());
         }
         let mut byte_budget =
             IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_COMPOSER_SWEEP_BYTES));
-        drain_composer_projection_queue(context).await;
+        let projection_stats = drain_composer_projection_queue(context).await?;
+        outcome.add_projection(
+            projection_stats.sessions_upserted,
+            projection_stats.messages_upserted,
+            projection_stats.source_deferred,
+        );
         if context.cancellation.is_cancelled() {
-            return outcome;
+            return Err(composer_cancellation_error());
         }
         let mut workspace_paths = HashMap::new();
         self.ingest_state_vscdb(
@@ -328,18 +314,25 @@ impl CursorComposerSource {
         )
         .await;
         if context.cancellation.is_cancelled() {
-            outcome.bytes_consumed = byte_budget.consumed();
-            outcome.deferred_by_byte_cap = byte_budget.deferred();
-            return outcome;
+            return Err(composer_cancellation_error());
         }
         self.ingest_chat_store_dbs(context, &workspace_paths, &mut byte_budget, &mut outcome)
             .await;
-        if !context.cancellation.is_cancelled() {
-            drain_composer_projection_queue(context).await;
+        if context.cancellation.is_cancelled() {
+            return Err(composer_cancellation_error());
+        }
+        let projection_stats = drain_composer_projection_queue(context).await?;
+        outcome.add_projection(
+            projection_stats.sessions_upserted,
+            projection_stats.messages_upserted,
+            projection_stats.source_deferred,
+        );
+        if context.cancellation.is_cancelled() {
+            return Err(composer_cancellation_error());
         }
         outcome.bytes_consumed = byte_budget.consumed();
-        outcome.deferred_by_byte_cap = byte_budget.deferred();
-        outcome
+        outcome.deferred_by_byte_cap |= byte_budget.deferred();
+        Ok(outcome)
     }
 
     async fn ingest_state_vscdb(
@@ -498,7 +491,6 @@ impl CursorComposerSource {
                     continue;
                 };
                 let mut session_accepted = false;
-                let mut messages = 0_u64;
                 if composer_todos_have_admittable_items(&envelope)
                     && let Some(todo_checkpoint) = composer_envelope_todo_checkpoint(&envelope)
                     && let Ok(envelope_source) = cursor_composer_envelope_source(&composer_id)
@@ -528,14 +520,9 @@ impl CursorComposerSource {
                                 context.cancellation,
                             )
                         && let Ok(outcome) = context.facade.capture_observation(request).await
-                        && let CaptureObservationOutcome::Persisted {
-                            outcome: persisted, ..
-                        } = outcome
+                        && let CaptureObservationOutcome::Persisted { .. } = outcome
                     {
                         session_accepted = true;
-                        if matches!(*persisted, ObservationPersistOutcome::Committed(_)) {
-                            messages = messages.saturating_add(1);
-                        }
                     }
                 }
                 for (position, header) in headers.iter().enumerate() {
@@ -696,19 +683,9 @@ impl CursorComposerSource {
                                 continue;
                             };
                             match context.facade.capture_observation(request).await {
-                                Ok(CaptureObservationOutcome::Persisted {
-                                    outcome: persisted,
-                                    ..
-                                })
-                                | Ok(CaptureObservationOutcome::AcceptedForReplay {
-                                    outcome: persisted,
-                                    ..
-                                }) => {
+                                Ok(CaptureObservationOutcome::Persisted { .. })
+                                | Ok(CaptureObservationOutcome::AcceptedForReplay { .. }) => {
                                     session_accepted = true;
-                                    if matches!(*persisted, ObservationPersistOutcome::Committed(_))
-                                    {
-                                        messages = messages.saturating_add(1);
-                                    }
                                 }
                                 Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
                                     if advance_composer_coverage(
@@ -757,7 +734,6 @@ impl CursorComposerSource {
                 }
                 if session_accepted {
                     ingested_this_pass += 1;
-                    outcome.add(1, messages);
                 }
             }
             if !page_full {
@@ -880,8 +856,6 @@ impl CursorComposerSource {
         let Ok(source) = cursor_composer_source(&session_id) else {
             return;
         };
-        let mut session_accepted = false;
-        let mut messages = 0_u64;
         for (ordinal, (role, content, source_bytes)) in ordered.into_iter().enumerate() {
             if context.cancellation.is_cancelled() {
                 break;
@@ -953,17 +927,8 @@ impl CursorComposerSource {
                 continue;
             };
             match context.facade.capture_observation(request).await {
-                Ok(CaptureObservationOutcome::Persisted {
-                    outcome: persisted, ..
-                })
-                | Ok(CaptureObservationOutcome::AcceptedForReplay {
-                    outcome: persisted, ..
-                }) => {
-                    session_accepted = true;
-                    if matches!(*persisted, ObservationPersistOutcome::Committed(_)) {
-                        messages = messages.saturating_add(1);
-                    }
-                }
+                Ok(CaptureObservationOutcome::Persisted { .. })
+                | Ok(CaptureObservationOutcome::AcceptedForReplay { .. }) => {}
                 Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
                     if advance_composer_coverage(
                         ComposerCoverageContext {
@@ -1006,9 +971,6 @@ impl CursorComposerSource {
                 }
                 Err(_) => return,
             }
-        }
-        if session_accepted {
-            outcome.add(1, messages);
         }
     }
 }

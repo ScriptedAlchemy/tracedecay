@@ -140,7 +140,6 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
         kv("bubbleId:comp-1:b-asst", &assistant_bubble),
     ];
     write_state_vscdb(&home, &rows).await;
-
     let db = open_project_session_db(&project).await.unwrap();
     let outcome = CursorComposerSource::with_home(&home)
         .ingest(
@@ -149,8 +148,8 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
             db.project_id().clone(),
             CAP,
         )
-        .await;
-
+        .await
+        .expect("composer sweep");
     assert_eq!(
         outcome.sessions_upserted, 1,
         "one composer session ingested"
@@ -270,7 +269,8 @@ async fn composer_owned_session_dedupes_jsonl_sweep() {
             db.project_id().clone(),
             CAP,
         )
-        .await;
+        .await
+        .expect("composer sweep");
     assert!(outcome.owned_session_ids.contains("comp-1"));
 
     // JSONL sweep with the composer-owned skip set does not touch comp-1.
@@ -292,7 +292,8 @@ async fn composer_owned_session_dedupes_jsonl_sweep() {
             db.project_id().clone(),
             CAP,
         )
-        .await;
+        .await
+        .expect("composer sweep");
     let plain_sweep = CursorSweepSource::with_home(&home);
     let plain = try_ingest_source(&db, &plain_sweep, &project, None)
         .await
@@ -321,7 +322,6 @@ async fn composer_watermark_skips_unchanged_and_reingests_growth() {
         ],
     )
     .await;
-
     let db = open_project_session_db(&project).await.unwrap();
     let source = CursorComposerSource::with_home(&home);
     let first = source
@@ -331,7 +331,8 @@ async fn composer_watermark_skips_unchanged_and_reingests_growth() {
             db.project_id().clone(),
             CAP,
         )
-        .await;
+        .await
+        .expect("composer sweep");
     assert_eq!(first.sessions_upserted, 1);
 
     let second = source
@@ -341,7 +342,8 @@ async fn composer_watermark_skips_unchanged_and_reingests_growth() {
             db.project_id().clone(),
             CAP,
         )
-        .await;
+        .await
+        .expect("composer sweep");
     assert_eq!(
         second.sessions_upserted, 0,
         "unchanged session must skip without re-upserting"
@@ -368,7 +370,8 @@ async fn composer_watermark_skips_unchanged_and_reingests_growth() {
             db.project_id().clone(),
             CAP,
         )
-        .await;
+        .await
+        .expect("composer sweep");
     assert_eq!(third.sessions_upserted, 1, "growth re-ingests");
     let reply = db
         .get_session_message("cursor", "comp-1:b2")
@@ -402,7 +405,6 @@ async fn composer_projection_failure_commits_frontier_and_replays_once() {
         ],
     )
     .await;
-
     let db = open_project_session_db(&project).await.unwrap();
     let first =
         ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
@@ -499,7 +501,6 @@ async fn composer_replaced_envelope_converges_without_duplicate_bubbles() {
         ],
     )
     .await;
-
     let db = open_project_session_db(&project).await.unwrap();
     let source = CursorComposerSource::with_home(&home);
     assert_eq!(
@@ -511,6 +512,7 @@ async fn composer_replaced_envelope_converges_without_duplicate_bubbles() {
                 CAP,
             )
             .await
+            .expect("composer sweep")
             .sessions_upserted,
         1
     );
@@ -537,6 +539,7 @@ async fn composer_replaced_envelope_converges_without_duplicate_bubbles() {
                 CAP,
             )
             .await
+            .expect("composer sweep")
             .sessions_upserted,
         1
     );
@@ -555,6 +558,7 @@ async fn composer_replaced_envelope_converges_without_duplicate_bubbles() {
                 CAP,
             )
             .await
+            .expect("composer sweep")
             .sessions_upserted,
         0
     );
@@ -593,8 +597,8 @@ async fn composer_late_header_converges_with_rebuild() {
             incremental_db.project_id().clone(),
             CAP,
         )
-        .await;
-
+        .await
+        .expect("composer sweep");
     write_state_vscdb(
         &incremental_home,
         &[
@@ -615,8 +619,8 @@ async fn composer_late_header_converges_with_rebuild() {
             incremental_db.project_id().clone(),
             CAP,
         )
-        .await;
-
+        .await
+        .expect("composer sweep");
     let mut incremental_messages = Vec::new();
     for bubble_id in ["b1", "b2", "b3"] {
         let message_id = format!("comp-late:{bubble_id}");
@@ -652,8 +656,8 @@ async fn composer_late_header_converges_with_rebuild() {
             rebuild_db.project_id().clone(),
             CAP,
         )
-        .await;
-
+        .await
+        .expect("composer sweep");
     for (bubble_id, role, text, kind) in incremental_messages {
         let message_id = format!("comp-late:{bubble_id}");
         let rebuilt = rebuild_db
@@ -698,8 +702,8 @@ async fn composer_reordered_headers_keep_native_identity() {
             db.project_id().clone(),
             CAP,
         )
-        .await;
-
+        .await
+        .expect("composer sweep");
     write_state_vscdb(
         &home,
         &[
@@ -720,8 +724,8 @@ async fn composer_reordered_headers_keep_native_identity() {
             db.project_id().clone(),
             CAP,
         )
-        .await;
-
+        .await
+        .expect("composer sweep");
     for (bubble_id, text) in [
         ("b1", "First prompt."),
         ("b2", "Second reply."),
@@ -768,7 +772,6 @@ async fn composer_tolerates_malformed_and_reads_store_db() {
         .join("agent-1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_store_db(&agent_dir.join("store.db")).await;
-
     let db = open_project_session_db(&project).await.unwrap();
     let outcome = CursorComposerSource::with_home(&home)
         .ingest(
@@ -777,8 +780,8 @@ async fn composer_tolerates_malformed_and_reads_store_db() {
             db.project_id().clone(),
             CAP,
         )
-        .await;
-
+        .await
+        .expect("composer sweep");
     // Both the composer envelope session and the store.db chat session ingested.
     assert!(outcome.owned_session_ids.contains("comp-1"));
     assert!(outcome.owned_session_ids.contains("cursor-chat:agent-1"));
@@ -859,8 +862,8 @@ async fn composer_sql_oversized_bubble_is_non_durable_without_payload_leak() {
             CAP,
             Some(64 * 1024),
         )
-        .await;
-
+        .await
+        .expect("composer sweep");
     assert!(
         outcome.owned_session_ids.contains("comp-oversize"),
         "valid envelope still owns the session"
@@ -968,7 +971,6 @@ async fn composer_envelope_todos_admit_workflow_lifecycle_facts() {
         ],
     )
     .await;
-
     let db = open_project_session_db(&project).await.unwrap();
     let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
     assert_eq!(
@@ -1045,7 +1047,6 @@ async fn composer_envelope_todos_exact_duplicate_is_idempotent() {
         ],
     )
     .await;
-
     let db = open_project_session_db(&project).await.unwrap();
     let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
     let observations_before = durable_table_count(&db, "observations").await;
@@ -1080,7 +1081,6 @@ async fn composer_envelope_todo_secret_is_sanitized_before_persistence() {
         }
     ]);
     write_state_vscdb(&home, &[kv("composerData:comp-secret", &env)]).await;
-
     let db = open_project_session_db(&project).await.unwrap();
     CursorComposerSource::with_home(&home)
         .ingest(
@@ -1089,8 +1089,8 @@ async fn composer_envelope_todo_secret_is_sanitized_before_persistence() {
             db.project_id().clone(),
             CAP,
         )
-        .await;
-
+        .await
+        .expect("composer sweep");
     let joined = composer_observation_json_blobs(&db).await.join("\n");
     assert!(joined.contains("workflow_lifecycle"));
     assert!(
