@@ -46,6 +46,7 @@ mod crypto;
 mod enrollment;
 mod enrollment_lifecycle;
 mod policy;
+mod recovery_authority;
 mod replay_authority;
 mod replay_recovery;
 mod rows;
@@ -57,6 +58,10 @@ pub use crypto::{RemoteSpoolKeyV1, RemoteSpoolKeyringV1};
 use enrollment::{
     enrollment_one_row, enrollment_row_text, load_authority_state, load_enrollment,
     map_enrollment_error,
+};
+pub use recovery_authority::{
+    RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
+    RemoteRecoveryPhysicalEffectsV1, RemoteRecoverySqliteAuthorityV1,
 };
 pub use replay_recovery::RemoteReplayStartupRecoveryV1;
 use rows::*;

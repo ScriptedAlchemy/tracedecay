@@ -48,6 +48,48 @@ CREATE TABLE remote_query_policies (
     record_json TEXT NOT NULL CHECK (json_valid(record_json))
 ) STRICT;
 
+CREATE TABLE remote_recovery_authorities (
+    authority_key TEXT PRIMARY KEY,
+    authority_json TEXT NOT NULL CHECK (json_valid(authority_json)),
+    frontier_sequence INTEGER NOT NULL CHECK (frontier_sequence >= 0),
+    updated_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE remote_recovery_operations (
+    operation_id TEXT PRIMARY KEY,
+    operation_kind TEXT NOT NULL CHECK (
+        operation_kind IN ('backup', 'restore', 'promotion')
+    ),
+    request_digest TEXT NOT NULL,
+    expected_authority_key TEXT NOT NULL,
+    pre_state_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'executing', 'completed', 'cancelled', 'timed_out',
+            'rolled_back', 'forward_recovery_required'
+        )
+    ),
+    output_json TEXT CHECK (output_json IS NULL OR json_valid(output_json)),
+    receipt_json TEXT CHECK (receipt_json IS NULL OR json_valid(receipt_json)),
+    started_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE remote_recovery_sink_installations (
+    operation_id TEXT NOT NULL REFERENCES remote_recovery_operations(operation_id),
+    sink_id TEXT NOT NULL,
+    installed_epoch INTEGER NOT NULL CHECK (installed_epoch > 0),
+    installed_at INTEGER NOT NULL,
+    PRIMARY KEY (operation_id, sink_id)
+) STRICT;
+
+CREATE TABLE remote_replay_recovery_lease (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    lease_id TEXT NOT NULL,
+    acquired_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK (expires_at > acquired_at)
+) STRICT;
+
 CREATE TABLE remote_spool_frames (
     event_id TEXT PRIMARY KEY,
     enrollment_id TEXT NOT NULL,
@@ -78,7 +120,11 @@ pub(super) const REMOTE_NODE_LOCAL_TABLES: &[&str] = &[
     "remote_enrollment_grants",
     "remote_enrollments",
     "remote_query_policies",
+    "remote_recovery_authorities",
+    "remote_recovery_operations",
+    "remote_recovery_sink_installations",
     "remote_replay_policies",
+    "remote_replay_recovery_lease",
     "remote_spool_frames",
     "remote_store_contract",
 ];
@@ -104,9 +150,31 @@ pub(super) const REMOTE_NODE_LOCAL_COLUMNS: &[(&str, &str)] = &[
     ("remote_query_policies", "scope_digest"),
     ("remote_query_policies", "policy_revision"),
     ("remote_query_policies", "record_json"),
+    ("remote_recovery_authorities", "authority_key"),
+    ("remote_recovery_authorities", "authority_json"),
+    ("remote_recovery_authorities", "frontier_sequence"),
+    ("remote_recovery_authorities", "updated_at"),
+    ("remote_recovery_operations", "operation_id"),
+    ("remote_recovery_operations", "operation_kind"),
+    ("remote_recovery_operations", "request_digest"),
+    ("remote_recovery_operations", "expected_authority_key"),
+    ("remote_recovery_operations", "pre_state_digest"),
+    ("remote_recovery_operations", "state"),
+    ("remote_recovery_operations", "output_json"),
+    ("remote_recovery_operations", "receipt_json"),
+    ("remote_recovery_operations", "started_at"),
+    ("remote_recovery_operations", "updated_at"),
+    ("remote_recovery_sink_installations", "operation_id"),
+    ("remote_recovery_sink_installations", "sink_id"),
+    ("remote_recovery_sink_installations", "installed_epoch"),
+    ("remote_recovery_sink_installations", "installed_at"),
     ("remote_replay_policies", "scope_digest"),
     ("remote_replay_policies", "policy_revision"),
     ("remote_replay_policies", "evidence_json"),
+    ("remote_replay_recovery_lease", "singleton"),
+    ("remote_replay_recovery_lease", "lease_id"),
+    ("remote_replay_recovery_lease", "acquired_at"),
+    ("remote_replay_recovery_lease", "expires_at"),
     ("remote_spool_frames", "event_id"),
     ("remote_spool_frames", "enrollment_id"),
     ("remote_spool_frames", "sequence"),
