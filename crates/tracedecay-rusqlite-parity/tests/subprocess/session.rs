@@ -81,11 +81,8 @@ fn subprocess_reports_closed_session_store_counts_schema_and_keyset_pages() {
         "session_temporal_observation_effects",
         "session_temporal_projection_receipts",
         "session_occurrences",
-        "session_logical_copy_edges",
         "session_assertions",
         "session_summary_nodes",
-        "session_summary_sources",
-        "session_summary_successors",
         "memory_v2_facts",
         "memory_v2_current_facts",
         "memory_v2_assertions",
@@ -102,9 +99,7 @@ fn subprocess_reports_closed_session_store_counts_schema_and_keyset_pages() {
             "source_cursors" => "observation",
             "sessions" | "session_messages" => "transcript",
             "session_schema_migrations" | "lcm_raw_messages" => "lcm",
-            "session_summary_nodes" | "session_summary_sources" | "session_summary_successors" => {
-                "summary"
-            }
+            "session_summary_nodes" => "summary",
             "memory_v2_facts"
             | "memory_v2_current_facts"
             | "memory_v2_assertions"

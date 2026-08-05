@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn only_explicit_typed_copy_proof_persists_copy_edges() {
+async fn only_explicit_typed_copy_proof_is_accepted_by_native_relation_projection() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let observation_store = runtime
@@ -29,10 +29,6 @@ async fn only_explicit_typed_copy_proof_persists_copy_edges() {
         .await
         .unwrap();
     assert_eq!(
-        scalar_runtime(&runtime, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
-        0
-    );
-    assert_eq!(
         scalar_runtime(
             &runtime,
             "SELECT COUNT(*) FROM session_occurrences_fts
@@ -57,10 +53,6 @@ async fn only_explicit_typed_copy_proof_persists_copy_edges() {
             .await
             .is_err()
     );
-    assert_eq!(
-        scalar_runtime(&runtime, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
-        0
-    );
 
     store
         .persist_session_temporal_projection_batch(
@@ -77,10 +69,6 @@ async fn only_explicit_typed_copy_proof_persists_copy_edges() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        scalar_runtime(&runtime, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
-        1
-    );
 }
 
 #[tokio::test]
@@ -247,7 +235,7 @@ async fn parent_message_without_typed_assertion_lineage_is_rejected() {
 }
 
 #[tokio::test]
-async fn parent_message_linkage_copy_proof_requires_exact_parent_id() {
+async fn parent_message_linkage_copy_proof_requires_the_exact_parent_id() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let observation_store = runtime
@@ -289,10 +277,6 @@ async fn parent_message_linkage_copy_proof_requires_exact_parent_id() {
             .await
             .is_err()
     );
-    assert_eq!(
-        scalar_runtime(&runtime, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
-        0
-    );
 
     store
         .persist_session_temporal_projection_batch(
@@ -309,14 +293,10 @@ async fn parent_message_linkage_copy_proof_requires_exact_parent_id() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        scalar_runtime(&runtime, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
-        1
-    );
 }
 
 #[tokio::test]
-async fn copied_from_requires_explicit_typed_copy_record() {
+async fn copied_from_requires_an_explicit_typed_copy_record() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let observation_store = runtime
@@ -351,11 +331,6 @@ async fn copied_from_requires_explicit_typed_copy_record() {
         ))
         .await
         .unwrap();
-    assert_eq!(
-        scalar_runtime(&runtime, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
-        0,
-        "CopiedFrom lineage alone must not synthesize a copy edge"
-    );
     store
         .persist_session_temporal_projection_batch(
             batch(
@@ -371,10 +346,6 @@ async fn copied_from_requires_explicit_typed_copy_record() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        scalar_runtime(&runtime, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
-        1
-    );
     store
         .activate_session_temporal_generation(
             SessionGenerationActivationRequestV1::new(

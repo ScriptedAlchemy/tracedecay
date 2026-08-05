@@ -1855,49 +1855,6 @@ async fn temporal_fts_repair_accepts_exact_blob_index_damage() {
     );
 }
 
-#[tokio::test]
-async fn temporal_health_detects_cross_session_ownership() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let runtime = DoctorTestRuntime::open(
-        &dir.path().join("profile"),
-        "doctor temporal ownership drift test",
-    )
-    .await;
-    let db = runtime.database();
-    db.checkpoint_result().await.unwrap();
-    let writer = db.writer_connection().unwrap();
-    writer
-        .execute_batch(
-            "DROP TRIGGER session_summary_sources_owner_guard_v1;
-             INSERT INTO retrieval_anchors (
-                 anchor_id, anchor_json, owner_json, projection_generation
-             ) VALUES
-                 ('anchor-a', '{}', '{}', 'doctor-fixture'),
-                 ('anchor-b', '{}', '{}', 'doctor-fixture');
-             INSERT INTO session_summary_nodes (
-                 summary_id, session_id, summary_anchor_id, summary_text, index_text,
-                 source_horizon_json, publication_json, created_at
-             ) VALUES
-                 ('summary-a', 'session-a', 'anchor-a', 'a', 'a', '{}', NULL, 1),
-                 ('summary-b', 'session-b', 'anchor-b', 'b', 'b', '{}', NULL, 2);
-             INSERT INTO session_summary_sources (
-                 summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES ('summary-b', 0, 'summary', NULL, 'summary-a');",
-        )
-        .await
-        .unwrap();
-    db.checkpoint_result().await.unwrap();
-
-    let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
-    assert!(
-        report["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|finding| finding["kind"] == "ownership_drift")
-    );
-}
-
 #[test]
 fn temporal_fts_classifier_rejects_whole_database_corruption() {
     assert!(

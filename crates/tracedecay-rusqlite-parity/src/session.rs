@@ -252,15 +252,6 @@ fn decode_row(table: SessionStoreTable, row: &Row<'_>) -> rusqlite::Result<Sessi
             role: row.get(12)?,
             row_digest,
         }),
-        SessionStoreTable::SessionLogicalCopyEdges => {
-            Ok(SessionStoreRow::SessionLogicalCopyEdges {
-                session_id: row.get(0)?,
-                generation: row.get(1)?,
-                occurrence_id: row.get(2)?,
-                copied_from_occurrence_id: row.get(3)?,
-                row_digest,
-            })
-        }
         SessionStoreTable::SessionAssertions => Ok(SessionStoreRow::SessionAssertions {
             session_id: row.get(0)?,
             generation: row.get(1)?,
@@ -274,19 +265,6 @@ fn decode_row(table: SessionStoreTable, row: &Row<'_>) -> rusqlite::Result<Sessi
             summary_anchor_id: row.get(2)?,
             row_digest,
         }),
-        SessionStoreTable::SessionSummarySources => Ok(SessionStoreRow::SessionSummarySources {
-            summary_id: row.get(0)?,
-            source_ordinal: row.get(1)?,
-            source_kind: row.get(2)?,
-            row_digest,
-        }),
-        SessionStoreTable::SessionSummarySuccessors => {
-            Ok(SessionStoreRow::SessionSummarySuccessors {
-                predecessor_summary_id: row.get(0)?,
-                successor_summary_id: row.get(1)?,
-                row_digest,
-            })
-        }
         SessionStoreTable::MemoryV2Facts => Ok(SessionStoreRow::MemoryV2Facts {
             fact_id: row.get(0)?,
             owner_kind: row.get(1)?,
@@ -442,18 +420,6 @@ fn cursor_for_row(row: &SessionStoreRow) -> SessionStoreCursor {
             generation: *generation,
             occurrence_id: occurrence_id.clone(),
         },
-        SessionStoreRow::SessionLogicalCopyEdges {
-            session_id,
-            generation,
-            occurrence_id,
-            copied_from_occurrence_id,
-            ..
-        } => SessionStoreCursor::SessionLogicalCopyEdges {
-            session_id: session_id.clone(),
-            generation: *generation,
-            occurrence_id: occurrence_id.clone(),
-            copied_from_occurrence_id: copied_from_occurrence_id.clone(),
-        },
         SessionStoreRow::SessionAssertions {
             session_id,
             generation,
@@ -469,22 +435,6 @@ fn cursor_for_row(row: &SessionStoreRow) -> SessionStoreCursor {
                 summary_id: summary_id.clone(),
             }
         }
-        SessionStoreRow::SessionSummarySources {
-            summary_id,
-            source_ordinal,
-            ..
-        } => SessionStoreCursor::SessionSummarySources {
-            summary_id: summary_id.clone(),
-            source_ordinal: *source_ordinal,
-        },
-        SessionStoreRow::SessionSummarySuccessors {
-            predecessor_summary_id,
-            successor_summary_id,
-            ..
-        } => SessionStoreCursor::SessionSummarySuccessors {
-            predecessor_summary_id: predecessor_summary_id.clone(),
-            successor_summary_id: successor_summary_id.clone(),
-        },
         SessionStoreRow::MemoryV2Facts {
             fact_id,
             owner_kind,

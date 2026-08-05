@@ -71,7 +71,6 @@ pub(super) struct ProjectionStatements<'connection> {
     pub(super) turn: Statement<'connection>,
     pub(super) agent: Statement<'connection>,
     pub(super) occurrence: Statement<'connection>,
-    pub(super) copy: Statement<'connection>,
     pub(super) assertion: Statement<'connection>,
     pub(super) receipt: Statement<'connection>,
 }

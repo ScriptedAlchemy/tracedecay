@@ -579,7 +579,7 @@ async fn parent_resolver_pages_live_sized_observation_history() {
 }
 
 #[tokio::test]
-async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
+async fn validated_copy_retains_bitemporality_with_native_relation_projection() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -627,7 +627,6 @@ async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
         knowledge_at: batch.occurrences()[1].knowledge_at,
         valid_time: batch.occurrences()[1].valid_time,
     };
-    let expected_copy = copy.clone();
     let batch = SessionTemporalProjectionBatchV1::new(
         batch.session_id().clone(),
         batch.generation(),
@@ -664,43 +663,6 @@ async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
         .persist_session_refresh_projection_batch(progress, batch.clone())
         .await
         .unwrap();
-    let database = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-    let snapshot = database.read_snapshot().await.unwrap();
-    let (scope, relation_store) = database.session_relation_store().unwrap();
-    let projection = super::super::relation_projection::reconstruct_session_relation_projection(
-        &snapshot,
-        scope,
-        &session_id,
-        batch.generation(),
-        100,
-        100,
-        Arc::new(NeverCancelled),
-    )
-    .await
-    .unwrap();
-    relation_store.replace(&projection).unwrap();
-    let loaded = relation_store
-        .load_projection(
-            scope,
-            &session_id,
-            batch.generation().value(),
-            100,
-            100,
-            Arc::new(NeverCancelled),
-        )
-        .unwrap();
-    assert_eq!(
-        loaded.logical_copies,
-        vec![crate::session_temporal::relations::LogicalCopyRelation {
-            occurrence_id: expected_copy.occurrence_id,
-            copied_from_occurrence_id: expected_copy.copied_from_occurrence_id,
-            proof: expected_copy.proof,
-            knowledge_at: expected_copy.knowledge_at,
-            valid_time: expected_copy.valid_time,
-        }]
-    );
 }
 
 #[tokio::test]

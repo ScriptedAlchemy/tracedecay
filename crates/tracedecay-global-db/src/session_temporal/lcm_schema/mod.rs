@@ -527,6 +527,7 @@ async fn temporal_schema_object_catalog(db_path: &Path) -> Vec<(String, String)>
             || table_name.starts_with("session_logical_copy")
             || table_name.starts_with("session_occurrence")
             || table_name.starts_with("session_query_cursor")
+            || table_name.starts_with("session_relation")
             || table_name.starts_with("session_refresh")
             || table_name.starts_with("session_relation")
             || table_name.starts_with("session_summary_")

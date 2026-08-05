@@ -16,7 +16,7 @@ mod projection;
 mod reads;
 
 use projection::{ProjectionStatements, encode_watermarks, insert_occurrence, projection_digest};
-use reads::{read_projection_batch, read_summary};
+use reads::read_projection_batch;
 
 #[derive(Clone, Default)]
 pub struct SessionExecutor;
@@ -27,6 +27,11 @@ impl SessionExecutor {
         savepoint: &Savepoint<'_>,
         batch: &SessionTemporalProjectionBatchV1,
     ) -> rusqlite::Result<()> {
+        if !batch.copies().is_empty() {
+            return Err(invalid(
+                "session logical-copy relations are owned by the native graph store",
+            ));
+        }
         let generation = u64_to_i64(batch.generation().value(), "session generation")?;
         let frozen = encode_watermarks(batch.watermarks())?;
         let stored_generation = savepoint
@@ -94,12 +99,6 @@ impl SessionExecutor {
                     ?15, ?16, '', ''
                  )",
             )?,
-            copy: savepoint.prepare(
-                "INSERT INTO session_logical_copy_edges (
-                    session_id, generation, occurrence_id, copied_from_occurrence_id,
-                    proof_json, knowledge_at, valid_time_json, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            )?,
             assertion: savepoint.prepare(
                 "INSERT INTO session_assertions (
                     session_id, generation, assertion_id, assertion_kind,
@@ -124,18 +123,6 @@ impl SessionExecutor {
         for occurrence in batch.occurrences() {
             insert_occurrence(&mut statements, batch, generation, occurrence)?;
         }
-        for copy in batch.copies() {
-            statements.copy.execute(params![
-                batch.session_id().as_str(),
-                generation,
-                copy.occurrence_id.as_str(),
-                copy.copied_from_occurrence_id.as_str(),
-                encode(&copy.proof)?,
-                copy.knowledge_at.0,
-                encode(&copy.valid_time)?,
-                copy.knowledge_at.0,
-            ])?;
-        }
         for assertion in batch.assertions() {
             statements.assertion.execute(params![
                 batch.session_id().as_str(),
@@ -151,7 +138,7 @@ impl SessionExecutor {
         }
 
         let occurrence_digest = canonical_digest(batch.occurrences())?;
-        let copy_digest = canonical_digest(batch.copies())?;
+        let copy_digest = canonical_digest(&Vec::<String>::new())?;
         let assertion_digest = canonical_digest(batch.assertions())?;
         let empty_digest = canonical_digest(&Vec::<String>::new())?;
         let committed_at = batch
@@ -178,7 +165,7 @@ impl SessionExecutor {
             usize_to_i64(batch.occurrences().len(), "session occurrence count")?,
             occurrence_digest,
             empty_digest,
-            usize_to_i64(batch.copies().len(), "session copy count")?,
+            0,
             copy_digest,
             usize_to_i64(batch.assertions().len(), "session assertion count")?,
             assertion_digest,
@@ -192,56 +179,10 @@ impl SessionExecutor {
         savepoint: &Savepoint<'_>,
         request: &SessionSummaryPublicationRequestV1,
     ) -> rusqlite::Result<()> {
-        let summary = request.summary();
-        if let Some(existing) = read_summary(savepoint, summary.summary_id())? {
-            return if existing == *summary {
-                Ok(())
-            } else {
-                Err(invalid("immutable session summary identity conflict"))
-            };
-        }
-        let mut node = savepoint.prepare(
-            "INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
-                source_horizon_json, publication_json, created_at
-             ) VALUES (?1, ?2, ?3, '', '', ?4, ?5, ?6)",
-        )?;
-        node.execute(params![
-            summary.summary_id().as_str(),
-            summary.session_id().as_str(),
-            summary.summary_anchor_id().as_str(),
-            encode(&summary.source_horizon())?,
-            summary.publication().map(encode).transpose()?,
-            summary.created_at().0,
-        ])?;
-        if !summary.source_anchors().is_empty() {
-            let mut source = savepoint.prepare(
-                "INSERT INTO session_summary_sources (
-                    summary_id, source_ordinal, source_kind,
-                    source_anchor_id, source_summary_id
-                 ) VALUES (?1, ?2, 'anchor', ?3, NULL)",
-            )?;
-            for (ordinal, anchor) in summary.source_anchors().iter().enumerate() {
-                source.execute(params![
-                    summary.summary_id().as_str(),
-                    usize_to_i64(ordinal, "summary source ordinal")?,
-                    anchor.as_str(),
-                ])?;
-            }
-        }
-        if let Some(predecessor) = summary.predecessor_summary_id() {
-            let mut successor = savepoint.prepare(
-                "INSERT INTO session_summary_successors (
-                    predecessor_summary_id, successor_summary_id, created_at
-                 ) VALUES (?1, ?2, ?3)",
-            )?;
-            successor.execute(params![
-                predecessor.as_str(),
-                summary.summary_id().as_str(),
-                summary.created_at().0,
-            ])?;
-        }
-        Ok(())
+        let _ = (savepoint, request);
+        Err(invalid(
+            "session summary relations are owned by the native graph store",
+        ))
     }
 
     pub fn execute_read(
@@ -256,9 +197,9 @@ impl SessionExecutor {
                 batch_ordinal,
             } => read_projection_batch(snapshot, session_id, *generation, *batch_ordinal)
                 .map(SessionReadResultV1::ProjectionBatch),
-            SessionReadOperationV1::Summary(summary_id) => {
-                read_summary(snapshot, summary_id).map(SessionReadResultV1::Summary)
-            }
+            SessionReadOperationV1::Summary(_) => Err(invalid(
+                "session summary relations are owned by the native graph store",
+            )),
         }
     }
 }

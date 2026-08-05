@@ -5,14 +5,13 @@ use rusqlite::Connection;
 use rusqlite::hooks::{AuthAction, Authorization};
 use serde_json::json;
 use tracedecay_domain::{
-    CanonicalObservationIdV1, CopyProofV1, LogicalCopyRecordV1, MessageOccurrenceIdV1,
-    MessageOccurrenceRecordV1, ObservationId, ProjectionOutputOrdinalV1, RetrievalAnchorId,
-    SessionId, SessionProjectionGenerationV1, SessionSummaryIdV1, SessionSummaryRecordV1,
-    SummarySourceHorizonV1, TemporalValidityV1, UtcMicros,
+    CanonicalObservationIdV1, MessageOccurrenceIdV1, MessageOccurrenceRecordV1,
+    ProjectionOutputOrdinalV1, RetrievalAnchorId, SessionId, SessionProjectionGenerationV1,
+    SessionSummaryIdV1, SessionSummaryRecordV1, SummarySourceHorizonV1, UtcMicros,
 };
 use tracedecay_store::{
-    SessionFrozenWatermarksV1, SessionSummaryPublicationRequestV1, SessionTemporalCapabilitiesV1,
-    SessionTemporalCapabilityV1, SessionTemporalSnapshotV1,
+    SessionFrozenWatermarksV1, SessionReadOperationV1, SessionSummaryPublicationRequestV1,
+    SessionTemporalCapabilitiesV1, SessionTemporalCapabilityV1, SessionTemporalSnapshotV1,
 };
 
 use super::*;
@@ -121,17 +120,6 @@ fn projection_schema(connection: &Connection) {
                     index_text TEXT NOT NULL,
                     PRIMARY KEY(session_id, generation, occurrence_id)
                 );
-                CREATE TABLE session_logical_copy_edges (
-                    session_id TEXT NOT NULL,
-                    generation INTEGER NOT NULL,
-                    occurrence_id TEXT NOT NULL,
-                    copied_from_occurrence_id TEXT NOT NULL,
-                    proof_json TEXT NOT NULL,
-                    knowledge_at INTEGER NOT NULL,
-                    valid_time_json TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    PRIMARY KEY(session_id, generation, occurrence_id, copied_from_occurrence_id)
-                );
                 CREATE TABLE session_assertions (
                     session_id TEXT NOT NULL,
                     generation INTEGER NOT NULL,
@@ -162,20 +150,6 @@ fn summary_schema(connection: &Connection) {
                     source_horizon_json TEXT NOT NULL,
                     publication_json TEXT,
                     created_at INTEGER NOT NULL
-                );
-                CREATE TABLE session_summary_sources (
-                    summary_id TEXT NOT NULL,
-                    source_ordinal INTEGER NOT NULL,
-                    source_kind TEXT NOT NULL,
-                    source_anchor_id TEXT,
-                    source_summary_id TEXT,
-                    PRIMARY KEY(summary_id, source_ordinal)
-                );
-                CREATE TABLE session_summary_successors (
-                    predecessor_summary_id TEXT NOT NULL,
-                    successor_summary_id TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    PRIMARY KEY(predecessor_summary_id, successor_summary_id)
                 );
                 ",
         )
@@ -235,21 +209,7 @@ fn projection_batch() -> SessionTemporalProjectionBatchV1 {
         (0..3)
             .map(|ordinal| occurrence(&session_id, ordinal))
             .collect(),
-        (1..3)
-            .map(|ordinal| LogicalCopyRecordV1 {
-                occurrence_id: occurrence_id(ordinal),
-                copied_from_occurrence_id: occurrence_id(0),
-                proof: CopyProofV1::ProviderLinkage {
-                    source_occurrence_id: occurrence_id(0),
-                    provider_record_id: ObservationId::new(format!(
-                        "provider.copy.prepare-cache.{ordinal}"
-                    ))
-                    .unwrap(),
-                },
-                knowledge_at: UtcMicros(50),
-                valid_time: TemporalValidityV1::Unknown,
-            })
-            .collect(),
+        Vec::new(),
         (1..3)
             .map(|ordinal| {
                 serde_json::from_value(json!({
@@ -291,11 +251,7 @@ fn summary_request() -> SessionSummaryPublicationRequestV1 {
         SessionSummaryIdV1::new("summary.prepare-cache").unwrap(),
         session_id,
         RetrievalAnchorId::new("anchor.summary.prepare-cache").unwrap(),
-        (0..3)
-            .map(|ordinal| {
-                RetrievalAnchorId::new(format!("anchor.summary-source.{ordinal}")).unwrap()
-            })
-            .collect(),
+        vec![RetrievalAnchorId::new("anchor.summary.source").unwrap()],
         SummarySourceHorizonV1 {
             knowledge_through: UtcMicros(50),
             valid_through: Some(UtcMicros(40)),
@@ -337,7 +293,6 @@ fn projection_batch_prepares_each_insert_once() {
         "session_turns",
         "session_agents",
         "session_occurrences",
-        "session_logical_copy_edges",
         "session_assertions",
         "session_temporal_projection_receipts",
     ] {
@@ -350,25 +305,51 @@ fn projection_batch_prepares_each_insert_once() {
 }
 
 #[test]
-fn summary_sources_prepare_once_for_the_whole_publication() {
+fn summary_write_rejects_relation_payloads_without_sql() {
     let mut connection = Connection::open_in_memory().unwrap();
     summary_schema(&connection);
     let request = summary_request();
     let prepares = install_insert_prepare_counter(&connection);
 
     let savepoint = connection.savepoint().unwrap();
-    SessionExecutor
+    let error = SessionExecutor
         .execute_summary_write(&savepoint, &request)
-        .unwrap();
-    savepoint.commit().unwrap();
+        .expect_err("native graph owns summary relations");
 
+    assert!(matches!(
+        error,
+        rusqlite::Error::InvalidParameterName(message)
+            if message == "session summary relations are owned by the native graph store"
+    ));
     assert_eq!(
         prepares
             .lock()
             .unwrap()
-            .get("session_summary_sources")
+            .get("session_summary_nodes")
             .copied(),
-        Some(1),
-        "summary source statement must be prepared once for the publication"
+        None,
+        "portable SQLite must not write summary relation payloads"
     );
+}
+
+#[test]
+fn summary_read_rejects_relation_payloads_without_sql() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    summary_schema(&connection);
+    let transaction = connection.transaction().unwrap();
+
+    let error = SessionExecutor
+        .execute_read(
+            &transaction,
+            &SessionReadOperationV1::Summary(
+                SessionSummaryIdV1::new("summary.prepare-cache").unwrap(),
+            ),
+        )
+        .expect_err("native graph owns summary relations");
+
+    assert!(matches!(
+        error,
+        rusqlite::Error::InvalidParameterName(message)
+            if message == "session summary relations are owned by the native graph store"
+    ));
 }

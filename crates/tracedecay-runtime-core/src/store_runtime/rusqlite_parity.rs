@@ -1194,17 +1194,8 @@ fn session_store_row_matches(table: SessionStoreTableV1, row: &SessionStoreRowV1
             SessionStoreTableV1::SessionTemporalProjectionReceipts
         }
         SessionStoreRowV1::SessionOccurrences { .. } => SessionStoreTableV1::SessionOccurrences,
-        SessionStoreRowV1::SessionLogicalCopyEdges { .. } => {
-            SessionStoreTableV1::SessionLogicalCopyEdges
-        }
         SessionStoreRowV1::SessionAssertions { .. } => SessionStoreTableV1::SessionAssertions,
         SessionStoreRowV1::SessionSummaryNodes { .. } => SessionStoreTableV1::SessionSummaryNodes,
-        SessionStoreRowV1::SessionSummarySources { .. } => {
-            SessionStoreTableV1::SessionSummarySources
-        }
-        SessionStoreRowV1::SessionSummarySuccessors { .. } => {
-            SessionStoreTableV1::SessionSummarySuccessors
-        }
         SessionStoreRowV1::MemoryV2Facts { .. } => SessionStoreTableV1::MemoryV2Facts,
         SessionStoreRowV1::MemoryV2CurrentFacts { .. } => SessionStoreTableV1::MemoryV2CurrentFacts,
         SessionStoreRowV1::MemoryV2Assertions { .. } => SessionStoreTableV1::MemoryV2Assertions,
@@ -1245,11 +1236,8 @@ fn session_store_row_digest(row: &SessionStoreRowV1) -> &str {
         | SessionStoreRowV1::SessionTemporalObservationEffects { row_digest, .. }
         | SessionStoreRowV1::SessionTemporalProjectionReceipts { row_digest, .. }
         | SessionStoreRowV1::SessionOccurrences { row_digest, .. }
-        | SessionStoreRowV1::SessionLogicalCopyEdges { row_digest, .. }
         | SessionStoreRowV1::SessionAssertions { row_digest, .. }
         | SessionStoreRowV1::SessionSummaryNodes { row_digest, .. }
-        | SessionStoreRowV1::SessionSummarySources { row_digest, .. }
-        | SessionStoreRowV1::SessionSummarySuccessors { row_digest, .. }
         | SessionStoreRowV1::MemoryV2Facts { row_digest, .. }
         | SessionStoreRowV1::MemoryV2CurrentFacts { row_digest, .. }
         | SessionStoreRowV1::MemoryV2Assertions { row_digest, .. }
@@ -1289,18 +1277,9 @@ fn session_store_cursor_matches(table: SessionStoreTableV1, cursor: &SessionStor
             SessionStoreTableV1::SessionTemporalProjectionReceipts
         }
         SessionStoreCursorV1::SessionOccurrences { .. } => SessionStoreTableV1::SessionOccurrences,
-        SessionStoreCursorV1::SessionLogicalCopyEdges { .. } => {
-            SessionStoreTableV1::SessionLogicalCopyEdges
-        }
         SessionStoreCursorV1::SessionAssertions { .. } => SessionStoreTableV1::SessionAssertions,
         SessionStoreCursorV1::SessionSummaryNodes { .. } => {
             SessionStoreTableV1::SessionSummaryNodes
-        }
-        SessionStoreCursorV1::SessionSummarySources { .. } => {
-            SessionStoreTableV1::SessionSummarySources
-        }
-        SessionStoreCursorV1::SessionSummarySuccessors { .. } => {
-            SessionStoreTableV1::SessionSummarySuccessors
         }
         SessionStoreCursorV1::MemoryV2Facts { .. } => SessionStoreTableV1::MemoryV2Facts,
         SessionStoreCursorV1::MemoryV2CurrentFacts { .. } => {
@@ -1535,7 +1514,7 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
     #[test]
     fn session_store_shape_helpers_accept_new_temporal_and_summary_families() {
         let digest = format!("sha256:{}", "1".repeat(64));
-        let cases: [(SessionStoreTableV1, SessionStoreRowV1, SessionStoreCursorV1); 17] = [
+        let cases: [(SessionStoreTableV1, SessionStoreRowV1, SessionStoreCursorV1); 16] = [
             (
                 SessionStoreTableV1::SessionTemporalProjectionReceipts,
                 SessionStoreRowV1::SessionTemporalProjectionReceipts {
@@ -1564,22 +1543,6 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
                     session_id: "session-1".to_owned(),
                     generation: 1,
                     occurrence_id: "occurrence-1".to_owned(),
-                },
-            ),
-            (
-                SessionStoreTableV1::SessionLogicalCopyEdges,
-                SessionStoreRowV1::SessionLogicalCopyEdges {
-                    session_id: "session-1".to_owned(),
-                    generation: 1,
-                    occurrence_id: "occurrence-1".to_owned(),
-                    copied_from_occurrence_id: "occurrence-0".to_owned(),
-                    row_digest: digest.clone(),
-                },
-                SessionStoreCursorV1::SessionLogicalCopyEdges {
-                    session_id: "session-1".to_owned(),
-                    generation: 1,
-                    occurrence_id: "occurrence-1".to_owned(),
-                    copied_from_occurrence_id: "occurrence-0".to_owned(),
                 },
             ),
             (

@@ -45,11 +45,6 @@ pub enum LcmLineageFaultForTest {
     CorruptRetrievalAnchorOwner {
         summary_id: String,
     },
-    ReplaceSummarySourceWithSummary {
-        summary_id: String,
-        ordinal: i64,
-        source_summary_id: String,
-    },
 }
 
 #[doc(hidden)]
@@ -58,8 +53,6 @@ pub struct LcmLineageCountsForTest {
     pub active_generations: i64,
     pub total_generations: i64,
     pub summary_nodes: i64,
-    pub summary_sources: i64,
-    pub summary_successors: i64,
     pub cursor_keys: i64,
 }
 
@@ -844,22 +837,6 @@ impl HostAdmissionTestRuntimeV1 {
                     )
                     .await
             }
-            LcmLineageFaultForTest::ReplaceSummarySourceWithSummary {
-                summary_id,
-                ordinal,
-                source_summary_id,
-            } => {
-                transaction
-                    .execute(
-                        "UPDATE session_summary_sources
-                         SET source_kind = 'summary',
-                             source_anchor_id = NULL,
-                             source_summary_id = ?3
-                         WHERE summary_id = ?1 AND source_ordinal = ?2",
-                        crate::db::engine::params![summary_id, ordinal, source_summary_id],
-                    )
-                    .await
-            }
         };
         result.map_err(|error| TraceDecayError::Database {
             operation: "apply bounded lcm lineage fault fixture".to_owned(),
@@ -891,10 +868,6 @@ impl HostAdmissionTestRuntimeV1 {
                 "DROP TRIGGER IF EXISTS retrieval_anchors_immutable_update;
                  DROP TRIGGER IF EXISTS observation_retrieval_anchors_immutable_update;",
                 "prepare corrupt lcm retrieval owner fixture",
-            ),
-            LcmLineageFaultForTest::ReplaceSummarySourceWithSummary { .. } => (
-                "DROP TRIGGER IF EXISTS session_summary_sources_immutable_update_v1",
-                "prepare corrupt lcm summary source fixture",
             ),
             _ => return Ok(()),
         };
@@ -990,13 +963,6 @@ impl HostAdmissionTestRuntimeV1 {
                      WHERE ?1 IS NULL OR session_id = ?1),
                     (SELECT COUNT(*) FROM session_summary_nodes
                      WHERE ?1 IS NULL OR session_id = ?1),
-                    (SELECT COUNT(*) FROM session_summary_sources source
-                     JOIN session_summary_nodes node ON node.summary_id = source.summary_id
-                     WHERE ?1 IS NULL OR node.session_id = ?1),
-                    (SELECT COUNT(*) FROM session_summary_successors successor
-                     JOIN session_summary_nodes node
-                       ON node.summary_id = successor.successor_summary_id
-                     WHERE ?1 IS NULL OR node.session_id = ?1),
                     (SELECT COUNT(*) FROM session_query_cursor_keys)",
                 [session_id],
             )
@@ -1027,9 +993,7 @@ impl HostAdmissionTestRuntimeV1 {
             active_generations: value(0)?,
             total_generations: value(1)?,
             summary_nodes: value(2)?,
-            summary_sources: value(3)?,
-            summary_successors: value(4)?,
-            cursor_keys: value(5)?,
+            cursor_keys: value(3)?,
         })
     }
 
@@ -1303,9 +1267,10 @@ impl HostAdmissionTestRuntimeV1 {
             })?;
         let mut rows = snapshot
             .query(
-                "SELECT predecessor_summary_id, successor_summary_id
-                 FROM session_summary_successors
-                 ORDER BY predecessor_summary_id, successor_summary_id",
+                "SELECT json_extract(publication_json, '$.predecessor_summary_id'), summary_id
+                 FROM session_summary_nodes
+                 WHERE json_extract(publication_json, '$.predecessor_summary_id') IS NOT NULL
+                 ORDER BY 1, 2",
                 (),
             )
             .await

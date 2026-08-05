@@ -8,6 +8,9 @@ async fn temporal_schema_complete_object_catalog() {
     let db = open_global_db(&db_path)
         .await
         .expect("temporal schema initialization should not error");
+    db.checkpoint_wal_truncate()
+        .await
+        .expect("fresh temporal schema must checkpoint before restart");
     drop(db);
 
     let mut expected = TEMPORAL_SCHEMA_OBJECTS
@@ -19,6 +22,51 @@ async fn temporal_schema_complete_object_catalog() {
     assert!(
         table_exists(&db_path, "lcm_raw_messages").await,
         "the additive temporal schema must preserve legacy LCM tables"
+    );
+}
+
+#[tokio::test]
+async fn fresh_temporal_schema_omits_legacy_relation_projection_objects() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("fresh temporal schema initialization should not error");
+    let mut rows = db
+        .query(
+            "SELECT type, name
+             FROM sqlite_schema
+             WHERE name IN (
+                 'session_logical_copy_edges',
+                 'session_thread_hierarchy_edges',
+                 'session_agent_hierarchy_edges',
+                 'session_summary_sources',
+                 'session_summary_successors',
+                 'idx_session_logical_copy_edges_target',
+                 'idx_session_thread_hierarchy_edges_child',
+                 'idx_session_agent_hierarchy_edges_child',
+                 'idx_session_summary_sources_anchor',
+                 'idx_session_summary_sources_summary',
+                 'idx_session_summary_successors_successor',
+                 'session_summary_sources_immutable_delete_v1',
+                 'session_summary_sources_immutable_update_v1',
+                 'session_summary_sources_owner_guard_v1',
+                 'session_summary_successors_immutable_delete_v1',
+                 'session_summary_successors_immutable_update_v1',
+                 'session_summary_successors_owner_guard_v1'
+             )
+             ORDER BY type, name",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut legacy_objects = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        legacy_objects.push((row.get::<String>(0).unwrap(), row.get::<String>(1).unwrap()));
+    }
+    assert!(
+        legacy_objects.is_empty(),
+        "fresh V2 temporal profiles must not create legacy SQLite relation projections: {legacy_objects:?}"
     );
 }
 

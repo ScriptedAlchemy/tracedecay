@@ -40,6 +40,25 @@ const REGISTRY_SCHEMA: &str = "
         last_seen_at INTEGER NOT NULL,
         FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS session_relation_receipts (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK(generation > 0),
+        scope_kind TEXT NOT NULL CHECK(scope_kind IN ('project', 'profile')),
+        scope_id TEXT NOT NULL,
+        expected_graph_watermark TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending', 'applied')),
+        graph_watermark TEXT,
+        created_at INTEGER NOT NULL,
+        applied_at INTEGER,
+        PRIMARY KEY(session_id, generation),
+        CHECK(
+            (state = 'pending' AND graph_watermark IS NULL AND applied_at IS NULL)
+            OR (state = 'applied' AND graph_watermark = expected_graph_watermark
+                AND applied_at IS NOT NULL)
+        ),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS store_instances (
         store_id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
@@ -76,6 +95,8 @@ const REGISTRY_SCHEMA: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_project_aliases_project_id
         ON project_aliases(project_id);
+    CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_pending
+        ON session_relation_receipts(state, created_at, session_id, generation);
     CREATE INDEX IF NOT EXISTS idx_store_instances_project_id
         ON store_instances(project_id);
     CREATE INDEX IF NOT EXISTS idx_graph_scopes_project_store

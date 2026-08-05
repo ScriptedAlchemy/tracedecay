@@ -171,6 +171,61 @@ async fn registered_mount_publishes_complete_migrated_schema() {
 }
 
 #[tokio::test]
+async fn fresh_admission_schema_installs_relation_receipts_before_temporal_mount() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &directory.path().join("sessions.db"),
+    );
+
+    super::schema_stages::ensure_registered_schema_for_admission(&connection)
+        .await
+        .expect("fresh admission schema must install before temporal services mount");
+    super::schema_contract::validate_authority_schema_contract(&connection)
+        .await
+        .expect("fresh admission schema must satisfy the full authority contract");
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            tracedecay_runtime_core::db::engine::params!["session_relation_receipts"],
+        )
+        .await
+        .unwrap();
+    assert!(
+        rows.next().await.unwrap().is_some(),
+        "fresh admission must install relation execution receipts before temporal services mount"
+    );
+}
+
+#[tokio::test]
+async fn fresh_admission_schema_persists_relation_receipts_across_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(&database_path);
+
+    super::schema_stages::ensure_registered_schema_for_admission(&connection)
+        .await
+        .expect("fresh admission schema must install before temporal services mount");
+    connection
+        .checkpoint_wal_truncate()
+        .await
+        .expect("fresh admission schema must checkpoint before restart");
+    drop(connection);
+
+    let reopened = tracedecay_runtime_core::db::engine::TestConnection::open(&database_path);
+    let mut rows = reopened
+        .query(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            tracedecay_runtime_core::db::engine::params!["session_relation_receipts"],
+        )
+        .await
+        .unwrap();
+    assert!(
+        rows.next().await.unwrap().is_some(),
+        "fresh admission must retain relation execution receipts across restart"
+    );
+}
+
+#[tokio::test]
 async fn registered_schema_validation_rejects_incomplete_authority_schema() {
     let harness = RegisteredGlobalDbHarness::open("reject-incomplete-authority-schema").await;
     harness

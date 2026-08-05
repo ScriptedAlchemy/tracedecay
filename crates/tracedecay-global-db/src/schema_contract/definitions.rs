@@ -1639,6 +1639,7 @@ pub(super) const REGISTRY_TABLE_NAMES: &[&str] = &[
     "projects",
     "code_projects",
     "project_aliases",
+    "session_relation_receipts",
     "store_instances",
     "graph_scopes",
     "store_artifacts",

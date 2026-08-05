@@ -199,8 +199,6 @@ async fn incremental_batch_commit_is_atomic_and_rolls_back_on_late_failure() {
         "session_turns",
         "session_agents",
         "session_turn_members",
-        "session_agent_hierarchy_edges",
-        "session_logical_copy_edges",
         "session_assertions",
         "session_assertion_supersession",
         "session_current_entities",
@@ -602,8 +600,8 @@ async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "CREATE TRIGGER abort_copy_insert
-         BEFORE INSERT ON session_logical_copy_edges
+        "CREATE TRIGGER abort_assertion_insert
+         BEFORE INSERT ON session_assertions
          BEGIN
              SELECT RAISE(ABORT, 'forced mid-batch projector failure');
          END;",
@@ -617,8 +615,8 @@ async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
                     2,
                     2,
                     vec![],
-                    vec![parent_message_copy(&second, &first)],
                     vec![],
+                    vec![assertion(&second, &first)],
                 )
                 .with_checkpoint(1, 2, 2)
                 .unwrap(),
@@ -627,7 +625,7 @@ async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
             .is_err()
     );
     assert_eq!(
-        scalar(&path, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
+        scalar(&path, "SELECT COUNT(*) FROM session_assertions").await,
         0
     );
     assert_eq!(
@@ -651,7 +649,8 @@ async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
         vec!["1:active", "2:building"]
     );
 
-    conn.execute("DROP TRIGGER abort_copy_insert", []).unwrap();
+    conn.execute("DROP TRIGGER abort_assertion_insert", [])
+        .unwrap();
     drop(conn);
     drop(runtime);
 
@@ -671,8 +670,8 @@ async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
                     2,
                     2,
                     vec![],
-                    vec![parent_message_copy(&second, &first)],
                     vec![],
+                    vec![assertion(&second, &first)],
                 )
                 .with_checkpoint(1, 2, 2)
                 .unwrap(),

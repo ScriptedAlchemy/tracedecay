@@ -116,12 +116,6 @@ pub(crate) fn session_table_spec(table: SessionStoreTable) -> TableSpec {
             "PRAGMA table_info(session_occurrences)",
             "PRAGMA foreign_key_list(session_occurrences)",
         ),
-        SessionStoreTable::SessionLogicalCopyEdges => session_table(
-            "session_logical_copy_edges",
-            "SELECT COUNT(*) FROM session_logical_copy_edges",
-            "PRAGMA table_info(session_logical_copy_edges)",
-            "PRAGMA foreign_key_list(session_logical_copy_edges)",
-        ),
         SessionStoreTable::SessionAssertions => session_table(
             "session_assertions",
             "SELECT COUNT(*) FROM session_assertions",
@@ -133,18 +127,6 @@ pub(crate) fn session_table_spec(table: SessionStoreTable) -> TableSpec {
             "SELECT COUNT(*) FROM session_summary_nodes",
             "PRAGMA table_info(session_summary_nodes)",
             "PRAGMA foreign_key_list(session_summary_nodes)",
-        ),
-        SessionStoreTable::SessionSummarySources => session_table(
-            "session_summary_sources",
-            "SELECT COUNT(*) FROM session_summary_sources",
-            "PRAGMA table_info(session_summary_sources)",
-            "PRAGMA foreign_key_list(session_summary_sources)",
-        ),
-        SessionStoreTable::SessionSummarySuccessors => session_table(
-            "session_summary_successors",
-            "SELECT COUNT(*) FROM session_summary_successors",
-            "PRAGMA table_info(session_summary_successors)",
-            "PRAGMA foreign_key_list(session_summary_successors)",
         ),
         SessionStoreTable::MemoryV2Facts => session_table(
             "memory_v2_facts",
@@ -458,42 +440,6 @@ pub(crate) fn session_page_query(
                 vec![session_id, generation, occurrence_id, Value::Integer(limit)],
             )
         }
-        (SessionStoreTable::SessionLogicalCopyEdges, cursor) => {
-            let (session_id, generation, occurrence_id, copied_from_occurrence_id) = match cursor {
-                Some(SessionStoreCursor::SessionLogicalCopyEdges {
-                    session_id,
-                    generation,
-                    occurrence_id,
-                    copied_from_occurrence_id,
-                }) => (
-                    Value::Text(session_id.clone()),
-                    Value::Integer(*generation),
-                    Value::Text(occurrence_id.clone()),
-                    Value::Text(copied_from_occurrence_id.clone()),
-                ),
-                _ => (Value::Null, Value::Null, Value::Null, Value::Null),
-            };
-            (
-                "SELECT session_id, generation, occurrence_id, copied_from_occurrence_id,
-                        proof_json, knowledge_at, valid_time_json, created_at
-                 FROM session_logical_copy_edges
-                 WHERE ?1 IS NULL
-                    OR session_id > ?1
-                    OR (session_id = ?1 AND generation > ?2)
-                    OR (session_id = ?1 AND generation = ?2 AND occurrence_id > ?3)
-                    OR (session_id = ?1 AND generation = ?2 AND occurrence_id = ?3
-                        AND copied_from_occurrence_id > ?4)
-                 ORDER BY session_id, generation, occurrence_id, copied_from_occurrence_id
-                 LIMIT ?5",
-                vec![
-                    session_id,
-                    generation,
-                    occurrence_id,
-                    copied_from_occurrence_id,
-                    Value::Integer(limit),
-                ],
-            )
-        }
         (SessionStoreTable::SessionAssertions, cursor) => {
             let (session_id, generation, assertion_id) = match cursor {
                 Some(SessionStoreCursor::SessionAssertions {
@@ -537,55 +483,6 @@ pub(crate) fn session_page_query(
                 Value::Integer(limit),
             ],
         ),
-        (SessionStoreTable::SessionSummarySources, cursor) => {
-            let (summary_id, source_ordinal) = match cursor {
-                Some(SessionStoreCursor::SessionSummarySources {
-                    summary_id,
-                    source_ordinal,
-                }) => (
-                    Value::Text(summary_id.clone()),
-                    Value::Integer(*source_ordinal),
-                ),
-                _ => (Value::Null, Value::Null),
-            };
-            (
-                "SELECT summary_id, source_ordinal, source_kind, source_anchor_id,
-                        source_summary_id
-                 FROM session_summary_sources
-                 WHERE ?1 IS NULL
-                    OR summary_id > ?1
-                    OR (summary_id = ?1 AND source_ordinal > ?2)
-                 ORDER BY summary_id, source_ordinal
-                 LIMIT ?3",
-                vec![summary_id, source_ordinal, Value::Integer(limit)],
-            )
-        }
-        (SessionStoreTable::SessionSummarySuccessors, cursor) => {
-            let (predecessor_summary_id, successor_summary_id) = match cursor {
-                Some(SessionStoreCursor::SessionSummarySuccessors {
-                    predecessor_summary_id,
-                    successor_summary_id,
-                }) => (
-                    Value::Text(predecessor_summary_id.clone()),
-                    Value::Text(successor_summary_id.clone()),
-                ),
-                _ => (Value::Null, Value::Null),
-            };
-            (
-                "SELECT predecessor_summary_id, successor_summary_id, created_at
-                 FROM session_summary_successors
-                 WHERE ?1 IS NULL
-                    OR predecessor_summary_id > ?1
-                    OR (predecessor_summary_id = ?1 AND successor_summary_id > ?2)
-                 ORDER BY predecessor_summary_id, successor_summary_id
-                 LIMIT ?3",
-                vec![
-                    predecessor_summary_id,
-                    successor_summary_id,
-                    Value::Integer(limit),
-                ],
-            )
-        }
         (SessionStoreTable::MemoryV2Facts, cursor) => {
             let (fact_id, owner_kind, project_id) = match cursor {
                 Some(SessionStoreCursor::MemoryV2Facts {
