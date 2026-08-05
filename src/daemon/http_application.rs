@@ -219,6 +219,7 @@ async fn dispatch_project_application(
     };
     *request.uri_mut() = uri;
     request.extensions_mut().clear();
+    tracedecay_api::delivery::mark_api_delivery_request(&mut request);
     match router.oneshot(request).await {
         Ok(response) => response,
         Err(never) => match never {},

@@ -213,7 +213,7 @@ fn status(response: &str) -> StatusCode {
 async fn service_with_probe() -> (DaemonHttpApplicationService, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let probe_calls = Arc::clone(&calls);
-    let canonical = Router::new().route(
+    let canonical = tracedecay_api::delivery::http_delivery_router(Router::new().route(
         "/tests/results",
         post(move || {
             let calls = Arc::clone(&probe_calls);
@@ -222,7 +222,7 @@ async fn service_with_probe() -> (DaemonHttpApplicationService, Arc<AtomicUsize>
                 StatusCode::NO_CONTENT
             }
         }),
-    );
+    ));
     let registry = DaemonHttpApplicationRegistry::default();
     registry
         .mount(PROJECT_ID, canonical)
@@ -286,6 +286,7 @@ async fn daemon_http_dispatches_authenticated_project_route_to_canonical_router(
     let response = request(&service, Some(&authorization), Some(&origin)).await;
 
     assert_eq!(status(&response), StatusCode::NO_CONTENT);
+    assert!(response.contains("cache-control: no-store"));
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     service.shutdown().await.expect("shutdown HTTP service");
 }
@@ -355,6 +356,7 @@ async fn daemon_http_authenticated_operations_cancel_and_resume_through_canonica
     .await;
     assert_eq!(status(&initial), StatusCode::OK);
     assert!(initial.contains("content-type: text/event-stream"));
+    assert!(initial.contains("cache-control: no-cache, no-transform"));
     assert!(initial.contains("event: open"));
     assert!(initial.contains("event: progress"));
     assert_eq!(initial.matches("event: cancelled").count(), 1);

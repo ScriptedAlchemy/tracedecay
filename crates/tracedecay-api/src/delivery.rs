@@ -81,6 +81,15 @@ struct EmbeddedAssetState {
     shell_path: &'static str,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ApiDeliveryRequest;
+
+/// Preserves API delivery policy when an outer transport strips its public
+/// application prefix before dispatching to the canonical application router.
+pub fn mark_api_delivery_request(request: &mut Request) {
+    request.extensions_mut().insert(ApiDeliveryRequest);
+}
+
 /// Applies API/SSE cache policy, conditional request handling, HEAD semantics,
 /// and gzip content negotiation to an Axum router.
 pub fn http_delivery_router(router: Router) -> Router {
@@ -157,7 +166,8 @@ pub fn embedded_asset_router(
 
 async fn delivery_policy(request: Request, next: Next) -> Response {
     let method = request.method().clone();
-    let path_is_api = is_api_path(request.uri().path());
+    let request_is_api = is_api_path(request.uri().path())
+        || request.extensions().get::<ApiDeliveryRequest>().is_some();
     let if_none_match = request
         .headers()
         .typed_try_get::<IfNoneMatch>()
@@ -169,7 +179,7 @@ async fn delivery_policy(request: Request, next: Next) -> Response {
         response
             .headers_mut()
             .insert(CACHE_CONTROL, HeaderValue::from_static(SSE_CACHE_POLICY));
-    } else if path_is_api && !response.headers().contains_key(CACHE_CONTROL) {
+    } else if request_is_api && !response.headers().contains_key(CACHE_CONTROL) {
         response
             .headers_mut()
             .insert(CACHE_CONTROL, HeaderValue::from_static(API_CACHE_POLICY));
@@ -478,7 +488,9 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
-    use super::{EmbeddedAsset, embedded_asset_router, http_delivery_router};
+    use super::{
+        EmbeddedAsset, embedded_asset_router, http_delivery_router, mark_api_delivery_request,
+    };
 
     const BODY_LIMIT: usize = 1024 * 1024;
 
@@ -645,6 +657,23 @@ mod tests {
                 .expect("bounded body")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn rewritten_api_request_retains_no_store_delivery_policy() {
+        let router = http_delivery_router(Router::new().route(
+            "/data",
+            get(|| async { Json(json!({"value": "rewritten"})) }),
+        ));
+        let mut request = Request::builder()
+            .uri("/data")
+            .body(Body::empty())
+            .expect("valid rewritten API request");
+        mark_api_delivery_request(&mut request);
+
+        let response = router.oneshot(request).await.expect("infallible router");
+
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
     }
 
     #[tokio::test]
