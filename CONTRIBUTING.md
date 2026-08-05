@@ -20,9 +20,8 @@ the UI, and fails the Rust build if npm is missing. `TRACEDECAY_SKIP_DASHBOARD_B
 only helps when an `app-dist` already exists but is stale — in a fresh clone it
 skips the build and then trips the "`dashboard/app-dist/index.html` is missing
 after build" assertion. CI builds the bundle once in the `dashboard-assets`
-job and every Rust job downloads it as an artifact; published crates ship a
-prebuilt `app-dist` through the `package.include` whitelist, so `cargo install`
-needs no Node toolchain.
+job and every Rust job downloads it as an artifact. GitHub Releases ship
+prebuilt binaries; workspace Cargo packages are private.
 
 The full `cargo nextest run --workspace --all-features` suite has not yet had a
 clean end-to-end run in this checkout. Run it and read the failures rather than

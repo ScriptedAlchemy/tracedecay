@@ -1,8 +1,8 @@
 //! Self-update for the tracedecay binary.
 //!
-//! Cargo installs upgrade through crates.io first. Other direct installs use
-//! GitHub release assets, extracting the binary and replacing the running
-//! executable using `self_replace`.
+//! Direct installs use GitHub release assets, extracting the binary and
+//! replacing the running executable using `self_replace`. Homebrew installs
+//! continue to delegate to Homebrew.
 //! Beta and stable are separate channels — a beta build only sees beta
 //! releases and vice versa.
 
@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
+
 use crate::cloud::{self, InstallMethod};
 use crate::errors::{Result, TraceDecayError};
 use crate::user_config::UserConfig;
-
-mod crates_io;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 
@@ -37,9 +37,16 @@ fn io_err(msg: &str) -> impl Fn(std::io::Error) -> TraceDecayError + '_ {
     }
 }
 
-/// Fetches the `browser_download_url` for the first matching asset name in a
-/// GitHub release.
-fn fetch_asset_url(tag: &str, candidates: &[String]) -> Result<String> {
+#[derive(Debug)]
+struct ReleaseDownload {
+    asset_name: String,
+    asset_url: String,
+    checksums_url: String,
+}
+
+/// Resolves both the platform archive and its checksum manifest from one
+/// GitHub release. An archive without `SHA256SUMS` is not installable.
+fn fetch_release_download(tag: &str, candidates: &[String]) -> Result<ReleaseDownload> {
     #[derive(serde::Deserialize)]
     struct Asset {
         name: String,
@@ -69,24 +76,96 @@ fn fetch_asset_url(tag: &str, candidates: &[String]) -> Result<String> {
             message: format!("failed to parse release info: {e}"),
         })?;
 
-    for candidate in candidates {
-        if let Some(asset) = release.assets.iter().find(|a| a.name == *candidate) {
-            return Ok(asset.browser_download_url.clone());
-        }
-    }
-    let expected = candidates.join("' or '");
-    Err(TraceDecayError::Config {
-        message: format!(
-            "release {tag} exists but asset '{expected}' is not yet available.\n  \
-             CI build may still be in progress — try again in a few minutes.\n  \
-             https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
-        ),
+    let archive = candidates
+        .iter()
+        .find_map(|candidate| release.assets.iter().find(|asset| asset.name == *candidate))
+        .ok_or_else(|| {
+            let expected = candidates.join("' or '");
+            TraceDecayError::Config {
+                message: format!(
+                    "release {tag} exists but asset '{expected}' is not yet available.\n  \
+                     CI build may still be in progress — try again in a few minutes.\n  \
+                     https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
+                ),
+            }
+        })?;
+    let checksums = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == "SHA256SUMS")
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "release {tag} has asset '{}' but no SHA256SUMS; refusing an unverified upgrade",
+                archive.name
+            ),
+        })?;
+    Ok(ReleaseDownload {
+        asset_name: archive.name.clone(),
+        asset_url: archive.browser_download_url.clone(),
+        checksums_url: checksums.browser_download_url.clone(),
     })
 }
 
-/// Downloads the archive from `url` into memory, then extracts the first
-/// entry matching any of `bin_names` to a temp path. Returns the temp path.
-fn download_and_extract(url: &str, bin_names: &[&str]) -> Result<std::path::PathBuf> {
+fn download_bytes(agent: &ureq::Agent, url: &str, description: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    agent
+        .get(url)
+        .header("User-Agent", "tracedecay")
+        .call()
+        .map_err(|e| TraceDecayError::Config {
+            message: format!("{description} download failed: {e}"),
+        })?
+        .body_mut()
+        .as_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("{description} download read failed: {error}"),
+        })?;
+    Ok(bytes)
+}
+
+fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
+    let text = std::str::from_utf8(manifest).map_err(|e| TraceDecayError::Config {
+        message: format!("SHA256SUMS is not valid UTF-8: {e}"),
+    })?;
+    let mut matches = text.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        let digest = fields.next()?;
+        let name = fields.next()?.trim_start_matches('*');
+        (fields.next().is_none() && name == asset_name).then_some(digest)
+    });
+    let digest = matches.next().ok_or_else(|| TraceDecayError::Config {
+        message: format!("SHA256SUMS has no entry for {asset_name}"),
+    })?;
+    if matches.next().is_some() {
+        return Err(TraceDecayError::Config {
+            message: format!("SHA256SUMS has duplicate entries for {asset_name}"),
+        });
+    }
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(TraceDecayError::Config {
+            message: format!("SHA256SUMS has an invalid digest for {asset_name}"),
+        });
+    }
+    Ok(digest.to_ascii_lowercase())
+}
+
+fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    if actual == expected {
+        return Ok(());
+    }
+    Err(TraceDecayError::Config {
+        message: format!("checksum mismatch for {asset_name}: expected {expected}, got {actual}"),
+    })
+}
+
+/// Downloads and verifies the archive, then extracts the first entry matching
+/// any of `bin_names` to a temp path. Returns the temp path.
+fn download_and_extract(
+    download: &ReleaseDownload,
+    bin_names: &[&str],
+) -> Result<std::path::PathBuf> {
     let tmp_path = std::env::temp_dir().join(format!(
         "tracedecay_upgrade_{}{}",
         std::process::id(),
@@ -100,26 +179,15 @@ fn download_and_extract(url: &str, bin_names: &[&str]) -> Result<std::path::Path
 
     eprint!("  Downloading...");
 
-    // Buffer the entire archive so the reader type is concrete (Cursor<Vec<u8>>),
-    // which makes type inference for tar::Entry and zip::ZipArchive unambiguous.
-    let raw: Vec<u8> = {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        agent
-            .get(url)
-            .header("User-Agent", "tracedecay")
-            .call()
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("download failed: {e}"),
-            })?
-            .body_mut()
-            .as_reader()
-            .read_to_end(&mut buf)
-            .map_err(io_err("download read failed"))?;
-        buf
-    };
+    let manifest = download_bytes(&agent, &download.checksums_url, "checksum manifest")?;
+    let expected = expected_sha256(&manifest, &download.asset_name)?;
+    // Buffer the entire archive so the reader type is concrete
+    // (Cursor<Vec<u8>>), which keeps archive extraction platform-neutral.
+    let raw = download_bytes(&agent, &download.asset_url, "release archive")?;
 
     eprintln!(" ({:.1} MiB)", raw.len() as f64 / 1_048_576.0);
+    verify_sha256(&raw, &expected, &download.asset_name)?;
+    eprintln!("  Checksum verified");
     eprint!("  Extracting...");
 
     #[cfg(not(windows))]
@@ -288,72 +356,21 @@ fn classify_upgrade<'a>(current: &str, latest: &'a str) -> UpgradeStatus<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpgradeSource {
-    CratesIo,
+    Homebrew,
     GitHubRelease,
 }
 
 fn upgrade_source_for(method: &InstallMethod) -> UpgradeSource {
     match method {
-        InstallMethod::Cargo => UpgradeSource::CratesIo,
-        InstallMethod::Brew | InstallMethod::Scoop | InstallMethod::Unknown => {
+        InstallMethod::Brew => UpgradeSource::Homebrew,
+        InstallMethod::Cargo | InstallMethod::Scoop | InstallMethod::Unknown => {
             UpgradeSource::GitHubRelease
         }
     }
 }
 
-impl UpgradeSource {
-    fn check_label(self) -> &'static str {
-        match self {
-            UpgradeSource::CratesIo => "crates.io",
-            UpgradeSource::GitHubRelease => "GitHub releases",
-        }
-    }
-
-    fn upgrade_suffix(self) -> &'static str {
-        match self {
-            UpgradeSource::CratesIo => " via crates.io",
-            UpgradeSource::GitHubRelease => "",
-        }
-    }
-}
-
-fn cargo_install_command(version: &str) -> (&'static str, Vec<String>) {
-    (
-        "cargo",
-        vec![
-            "install".to_string(),
-            "tracedecay".to_string(),
-            "--version".to_string(),
-            version.to_string(),
-            "--locked".to_string(),
-            "--force".to_string(),
-        ],
-    )
-}
-
-fn perform_cargo_upgrade(version: &str) -> Result<()> {
-    let (program, args) = cargo_install_command(version);
-    eprintln!("Delegating upgrade to Cargo: {program} {}", args.join(" "));
-    let status = std::process::Command::new(program)
-        .args(&args)
-        .status()
-        .map_err(io_err("failed to run cargo install"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(TraceDecayError::Config {
-            message: format!("cargo install failed with status: {status}"),
-        })
-    }
-}
-
-fn latest_upgrade_version(source: UpgradeSource, is_beta: bool) -> Result<String> {
-    match source {
-        UpgradeSource::CratesIo => crates_io::fetch_latest_version(is_beta),
-        UpgradeSource::GitHubRelease => {
-            cloud::fetch_latest_version().ok_or_else(|| github_latest_unavailable_error(is_beta))
-        }
-    }
+fn latest_upgrade_version(is_beta: bool) -> Result<String> {
+    cloud::fetch_latest_version().ok_or_else(|| github_latest_unavailable_error(is_beta))
 }
 
 fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
@@ -368,33 +385,21 @@ fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
 }
 
 fn install_upgrade_version(
-    source: UpgradeSource,
     latest: &str,
     is_beta: bool,
     method: &InstallMethod,
 ) -> Result<Option<PathBuf>> {
-    match source {
-        UpgradeSource::CratesIo => {
-            perform_cargo_upgrade(latest)?;
-            // Cargo replaces the binary in `$CARGO_HOME/bin` in place, so the
-            // PATH lookup in `which_tracedecay()` finds the new binary.
-            Ok(None)
-        }
-        UpgradeSource::GitHubRelease => {
-            let asset_url = preflight_asset_check(latest, is_beta)?;
-            perform_upgrade(latest, &asset_url, method)
-        }
-    }
+    let download = preflight_asset_check(latest, is_beta)?;
+    perform_upgrade(latest, &download, method)
 }
 
 fn run_versioned_upgrade(
     current: &str,
     is_beta: bool,
     method: &InstallMethod,
-    source: UpgradeSource,
 ) -> Result<UpgradeOutcome> {
-    eprintln!("Checking {}...", source.check_label());
-    let latest = latest_upgrade_version(source, is_beta)?;
+    eprintln!("Checking GitHub releases...");
+    let latest = latest_upgrade_version(is_beta)?;
     let latest = match classify_upgrade(current, &latest) {
         UpgradeStatus::AlreadyCurrent => {
             eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
@@ -403,11 +408,8 @@ fn run_versioned_upgrade(
         UpgradeStatus::UpgradeAvailable(latest) => latest,
     };
 
-    eprintln!(
-        "Upgrading v{current} → v{latest}{}...",
-        source.upgrade_suffix()
-    );
-    let binary = install_upgrade_version(source, latest, is_beta, method)?;
+    eprintln!("Upgrading v{current} → v{latest}...");
+    let binary = install_upgrade_version(latest, is_beta, method)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
     Ok(UpgradeOutcome::Installed { binary })
@@ -773,12 +775,12 @@ fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<Option<PathBu
 /// Verifies the release asset exists on GitHub and returns the download URL.
 /// Call this early so we fail fast when CI hasn't finished building the
 /// release yet.
-fn preflight_asset_check(version: &str, is_beta: bool) -> Result<String> {
+fn preflight_asset_check(version: &str, is_beta: bool) -> Result<ReleaseDownload> {
     let tag = release_tag(version);
     let candidates = asset_name_candidates(version, is_beta);
     let [primary_candidate] = &candidates;
     eprintln!("  Asset: {primary_candidate}");
-    fetch_asset_url(&tag, &candidates)
+    fetch_release_download(&tag, &candidates)
 }
 
 /// Record the *currently running* binary's version in user config just before
@@ -804,7 +806,7 @@ fn record_previous_version() {
 /// Returns the path the new binary was installed at, when known.
 fn perform_upgrade(
     version: &str,
-    asset_url: &str,
+    download: &ReleaseDownload,
     method: &InstallMethod,
 ) -> Result<Option<PathBuf>> {
     let bin_names: &[&str] = if cfg!(windows) {
@@ -813,7 +815,7 @@ fn perform_upgrade(
         &["tracedecay"]
     };
 
-    let tmp = download_and_extract(asset_url, bin_names)?;
+    let tmp = download_and_extract(download, bin_names)?;
 
     let label = match method {
         InstallMethod::Brew => " (Homebrew Cellar)",
@@ -952,22 +954,9 @@ pub fn run_upgrade() -> Result<UpgradeOutcome> {
     };
     eprintln!("Current version: v{current} ({channel} channel{method_suffix})");
 
-    if matches!(method, InstallMethod::Brew) {
-        return run_brew_upgrade();
-    }
-
     match upgrade_source_for(&method) {
-        UpgradeSource::CratesIo => {
-            run_versioned_upgrade(current, is_beta, &method, UpgradeSource::CratesIo).or_else(|error| {
-                eprintln!(
-                    "  \x1b[33mwarning:\x1b[0m crates.io update failed: {error}; falling back to GitHub releases"
-                );
-                run_versioned_upgrade(current, is_beta, &method, UpgradeSource::GitHubRelease)
-            })
-        }
-        UpgradeSource::GitHubRelease => {
-            run_versioned_upgrade(current, is_beta, &method, UpgradeSource::GitHubRelease)
-        }
+        UpgradeSource::Homebrew => run_brew_upgrade(),
+        UpgradeSource::GitHubRelease => run_versioned_upgrade(current, is_beta, &method),
     }
 }
 
@@ -1014,11 +1003,11 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
 
     eprintln!("  Target: v{latest}");
 
-    let asset_url = preflight_asset_check(&latest, target_is_beta)?;
+    let download = preflight_asset_check(&latest, target_is_beta)?;
 
     // Channel switches do not yet run the post-update refresh chain, so the
     // installed path is unused here (tracked as a follow-up on PR #193).
-    let _ = perform_upgrade(&latest, &asset_url, &method)?;
+    let _ = perform_upgrade(&latest, &download, &method)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Switched to {target_channel} channel: v{latest}");
     Ok(latest)
@@ -1036,6 +1025,39 @@ mod tests {
     // All remaining unwrap/expect usage in this module is test-only fixture or
     // assertion setup; production upgrade code above is kept panic-free.
     use super::*;
+
+    #[test]
+    fn checksum_manifest_selects_the_exact_release_asset() {
+        let digest = "a".repeat(64);
+        let manifest = format!(
+            "{digest}  tracedecay-v1.2.3-x86_64-linux.tar.gz\n{} *other.tar.gz\n",
+            "b".repeat(64)
+        );
+
+        assert_eq!(
+            expected_sha256(manifest.as_bytes(), "tracedecay-v1.2.3-x86_64-linux.tar.gz").unwrap(),
+            digest
+        );
+    }
+
+    #[test]
+    fn checksum_manifest_fails_closed_on_missing_duplicate_or_invalid_entries() {
+        let asset = "tracedecay-v1.2.3-x86_64-linux.tar.gz";
+        assert!(expected_sha256(b"", asset).is_err());
+        let duplicate = format!("{0}  {asset}\n{0}  {asset}\n", "a".repeat(64));
+        assert!(expected_sha256(duplicate.as_bytes(), asset).is_err());
+        let invalid = format!("not-a-digest  {asset}\n");
+        assert!(expected_sha256(invalid.as_bytes(), asset).is_err());
+    }
+
+    #[test]
+    fn release_archive_checksum_must_match_before_extraction() {
+        let bytes = b"verified archive bytes";
+        let digest = format!("{:x}", Sha256::digest(bytes));
+
+        assert!(verify_sha256(bytes, &digest, "archive.tar.gz").is_ok());
+        assert!(verify_sha256(b"tampered", &digest, "archive.tar.gz").is_err());
+    }
 
     #[test]
     fn test_asset_name_stable() {
@@ -1113,15 +1135,15 @@ mod tests {
     }
 
     #[test]
-    fn cargo_installs_prefer_crates_io_pipeline() {
+    fn cargo_installs_use_github_release_pipeline() {
         assert_eq!(
             upgrade_source_for(&InstallMethod::Cargo),
-            UpgradeSource::CratesIo
+            UpgradeSource::GitHubRelease
         );
     }
 
     #[test]
-    fn non_cargo_installs_use_github_release_pipeline() {
+    fn direct_installs_use_github_release_pipeline() {
         assert_eq!(
             upgrade_source_for(&InstallMethod::Scoop),
             UpgradeSource::GitHubRelease
@@ -1133,20 +1155,10 @@ mod tests {
     }
 
     #[test]
-    fn cargo_install_command_pins_requested_version() {
-        let (program, args) = cargo_install_command("0.0.18");
-
-        assert_eq!(program, "cargo");
+    fn homebrew_installs_keep_the_package_manager_pipeline() {
         assert_eq!(
-            args,
-            vec![
-                "install".to_string(),
-                "tracedecay".to_string(),
-                "--version".to_string(),
-                "0.0.18".to_string(),
-                "--locked".to_string(),
-                "--force".to_string()
-            ]
+            upgrade_source_for(&InstallMethod::Brew),
+            UpgradeSource::Homebrew
         );
     }
 
