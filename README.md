@@ -24,7 +24,7 @@ Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as
 - Typed MCP operations for discovery, call graphs, impact analysis, code health, test mapping, repository context, and anchored edits.
 - 50+ languages through Rust tree-sitter extractors, with lite/medium/full Cargo feature tiers.
 - Native integrations for Claude Code, Codex, Cursor, Gemini, Hermes, Kiro, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo, Kimi, and Vibe.
-- Local daemon-owned storage through the `rusqlite` runtime and embedded Grafeo graph store. Your code and project memory stay on your machine.
+- Daemon-owned local storage through the `rusqlite` runtime and embedded Grafeo graph store. Local operation is the default; configured remote sources and authorities follow explicit policy rather than an implicit local-only guarantee.
 - On-demand freshness checks with exact repository, worktree, ref, commit, and generation provenance across linked git worktrees.
 - Project-wide facts, sessions, and lossless LCM history remain available across branches; historical host transcripts enter through the same sanitized daemon ingestion path.
 - Local dashboard for evidence, memory, LCM sessions, savings, and cost analytics.
@@ -154,18 +154,27 @@ The dashboard includes graph exploration, project memory, LCM session search, to
 
 ## Privacy
 
-Core indexing, graph queries, MCP tools, memory, and dashboard data stay in the
-local daemon-owned authority. That local processing boundary does not mean that
-every command is offline or that network state can be inferred from an absent
-value.
+Core indexing, graph queries, MCP tools, memory, and dashboard data use the
+local daemon-owned authority by default. That default does not mean every
+command is offline: configured remote sources and authorities can exchange only
+authorized, sanitized, classified records under their remote policy.
 
 Network-capable effects are separate from core retrieval:
 
 - Worldwide counter: when opted in, sends the pending aggregate token-savings
   amount and may fetch the public total/country display data.
-- Release checks and updates: contact GitHub release endpoints.
+- GitHub release checks and updates: contact GitHub release endpoints. An
+  explicitly configured private GitHub review source can use a read-only
+  credential from the operating-system keyring; missing, ambiguous,
+  write-capable, or unverifiable credentials fail closed.
 - Cost pricing refresh: `tracedecay cost` may retrieve public model-pricing
   data and cache it locally.
+- Semantic models: when semantic auto-download is enabled, TraceDecay can
+  download missing revision-pinned artifacts from Hugging Face hosts and verify
+  their catalog-pinned lengths and SHA-256 digests before publication.
+- Configured remote authority: an authenticated, policy-authorized peer can
+  perform remote retrieval, replication, backup, restore, or failover. This
+  path fails closed with typed `unavailable`, `denied`, or `stale-peer` state.
 
 These services receive normal transport metadata, including the connection's
 source address, in addition to any request payload. The counter request is an
@@ -173,7 +182,8 @@ aggregate amount, not repository content, but it is not an anonymity guarantee.
 Use a network policy or firewall if a command must make no outbound connection.
 An opt-out, denial, timeout, or unavailable remote service must remain visible
 as that state; it is not evidence of a zero counter, an up-to-date release, or
-current pricing.
+current pricing. See [Security](SECURITY.md#network-access) for the complete
+outbound-access and credential boundary.
 
 Disable the worldwide counter with:
 

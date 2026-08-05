@@ -51,6 +51,20 @@ root or working directory for routing. The native context engine exposes
 `lcm_expand_query`, `lcm_status`, and `lcm_doctor`; each maps to the matching
 daemon-routed LCM operation.
 
+The wrapper reads these runtime environment variables before its installed
+defaults:
+
+| Variable | Effect |
+|---|---|
+| `TRACEDECAY_DASHBOARD_URL` | Uses the specified existing dashboard server instead of spawning one. |
+| `TRACEDECAY_BIN` | Selects the `tracedecay` executable used when the wrapper starts the dashboard. |
+| `TRACEDECAY_DASHBOARD_PROJECT` | Selects the project root passed to the dashboard; when unset, the wrapper uses the Hermes process working directory. |
+
+Hermes homes and profiles never select a TraceDecay project or store. The
+wrapper's server is loopback-bound and inherits Hermes dashboard-session
+protection; use the variables only for the wrapper's runtime route, not as a
+store selector.
+
 For a Hermes problem, run the doctor command first. For a session or
 compression problem, inspect `lcm_status` and `lcm_doctor` (or the matching
 `tracedecay_lcm_*` operation) and retain the reported coverage, retention,
