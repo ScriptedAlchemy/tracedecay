@@ -110,7 +110,7 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
         scope.clone(),
         token_digest(&"s".repeat(48)),
         UtcMicros(10),
-        UtcMicros(1_000_000),
+        UtcMicros(60_000_010),
     )
     .unwrap();
     // --- First admission: definitions and handoff. ---

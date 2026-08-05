@@ -179,13 +179,7 @@ pub(super) async fn execute_workflow_application(
                 .and_then(|token| {
                     services
                         .handoffs()
-                        .issue(
-                            &context,
-                            request.scope,
-                            &token,
-                            request.expires_at,
-                            observed_at,
-                        )
+                        .issue(&context, request.scope, &token, observed_at)
                         .map_err(task_handoff_problem)
                 });
             complete_workflow_effect(

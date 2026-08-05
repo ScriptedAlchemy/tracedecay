@@ -15,8 +15,8 @@ use tracedecay_domain::{
     WorkflowDefinition, WorkflowDefinitionId, WorkflowStepId, WorktreeId, canonical_sha256,
 };
 
-/// Maximum task-handoff grant lifetime (60 seconds), as `UtcMicros` duration micros.
-pub const MAX_TASK_HANDOFF_LIFETIME_MICROS: UtcMicros = UtcMicros(60_000_000);
+/// Fixed task-handoff grant lifetime (60 seconds), as `UtcMicros` duration micros.
+pub const TASK_HANDOFF_LIFETIME_MICROS: UtcMicros = UtcMicros(60_000_000);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowDefinitionAuthorityError {
@@ -472,7 +472,7 @@ impl TaskHandoffGrant {
         let Some(lifetime_micros) = self.expires_at.0.checked_sub(self.issued_at.0) else {
             return Err(TaskHandoffError::InvalidExpiry);
         };
-        if lifetime_micros > MAX_TASK_HANDOFF_LIFETIME_MICROS.0 {
+        if lifetime_micros != TASK_HANDOFF_LIFETIME_MICROS.0 {
             return Err(TaskHandoffError::InvalidExpiry);
         }
         Ok(())
@@ -539,7 +539,6 @@ pub enum TaskHandoffConsumeOutcome {
 pub struct TaskHandoffIssueRequest {
     pub scope: TaskHandoffScope,
     pub secret: String,
-    pub expires_at: UtcMicros,
 }
 
 impl fmt::Debug for TaskHandoffIssueRequest {
@@ -548,7 +547,6 @@ impl fmt::Debug for TaskHandoffIssueRequest {
             .debug_struct("TaskHandoffIssueRequest")
             .field("scope", &self.scope)
             .field("secret", &"[REDACTED]")
-            .field("expires_at", &self.expires_at)
             .finish()
     }
 }
@@ -648,7 +646,6 @@ where
         context: &RequestContext,
         scope: TaskHandoffScope,
         token: &TaskHandoffToken,
-        expires_at: UtcMicros,
         issued_at: UtcMicros,
     ) -> Result<TaskHandoffGrant, TaskHandoffError> {
         if !handoff_scope_matches_context(context, &scope)
@@ -656,6 +653,12 @@ where
         {
             return Err(TaskHandoffError::Unauthorized);
         }
+        let expires_at = UtcMicros(
+            issued_at
+                .0
+                .checked_add(TASK_HANDOFF_LIFETIME_MICROS.0)
+                .ok_or(TaskHandoffError::InvalidExpiry)?,
+        );
         let grant = TaskHandoffGrant::new(scope, token.digest()?, issued_at, expires_at)?;
         self.authority
             .issue(&grant)
