@@ -957,14 +957,11 @@ impl DaemonLspOwnerRegistrar {
             supports_diagnostics: semantics.analyzer_available,
             semantic: semantics.semantic_capabilities.clone(),
         };
-        let workspace_index = Arc::new(
-            PublishedCodeIndexWorkspaceDocuments::mount(
-                code_index.as_ref().clone(),
-                scope_grant.scope.clone(),
-                project_root.clone(),
-            )
-            .await,
-        );
+        let workspace_index = Arc::new(PublishedCodeIndexWorkspaceDocuments::new(
+            code_index.as_ref().clone(),
+            scope_grant.scope.clone(),
+            project_root.clone(),
+        ));
         let factory = Arc::new(
             lsp_session_factory(
                 runtime,

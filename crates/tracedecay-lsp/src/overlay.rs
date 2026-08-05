@@ -336,6 +336,8 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
             source_generation,
             expected_content_digest: overlay
                 .map(|overlay| ContentDigest::of_bytes(overlay.text.as_bytes())),
+            expected_code_generation_id: None,
+            expected_snapshot_digest: None,
         };
         let authority = Arc::clone(&self.authority);
         let admission: Result<_, crate::request_sequence::SequenceExhausted> =

@@ -45,9 +45,6 @@ impl DaemonLspSessionFactory {
         gateway_capabilities: GatewayCapabilities,
         upstream_capabilities: UpstreamCapabilities,
     ) -> Self {
-        let mut gateway_capabilities = gateway_capabilities;
-        gateway_capabilities.supports_workspace_diagnostics =
-            diagnostics.supports_workspace_diagnostics();
         let feedback = Arc::new(FeedbackCycleAdapter::new(
             runtime_spawner(runtime.clone()),
             feedback,
@@ -67,6 +64,7 @@ impl DaemonLspSessionFactory {
     /// Creates isolated per-client correlation adapters around shared daemon
     /// authorities.
     pub fn provider_bundle(&self) -> DaemonLspProviderBundle {
+        let gateway_capabilities = self.current_gateway_capabilities();
         DaemonLspProviderBundle::from_shared(
             self.feedback.clone() as Arc<dyn FeedbackCyclePort + Send + Sync>,
             self.semantics.clone(),
@@ -80,9 +78,16 @@ impl DaemonLspSessionFactory {
                 runtime_spawner(self.runtime.clone()),
                 self.context.clone(),
             )) as Arc<dyn ContextProjectionPort + Send + Sync>,
-            self.gateway_capabilities.clone(),
+            gateway_capabilities,
             self.upstream_capabilities.clone(),
         )
+    }
+
+    fn current_gateway_capabilities(&self) -> GatewayCapabilities {
+        let mut capabilities = self.gateway_capabilities.clone();
+        capabilities.supports_workspace_diagnostics &=
+            self.diagnostics.supports_workspace_diagnostics();
+        capabilities
     }
 
     pub fn open_session(&self, root: AdmittedRoot) -> DaemonLspRuntimeSession {
@@ -140,27 +145,28 @@ impl DaemonLspSessionFactory {
                     factory.context.clone(),
                 )) as Arc<dyn ContextProjectionPort + Send + Sync>,
             );
+            let current_gateway_capabilities = factory.current_gateway_capabilities();
             if let Some(capabilities) = gateway_capabilities.as_mut() {
                 capabilities.supports_publish_diagnostics &=
-                    factory.gateway_capabilities.supports_publish_diagnostics;
+                    current_gateway_capabilities.supports_publish_diagnostics;
                 capabilities.supports_document_diagnostics &=
-                    factory.gateway_capabilities.supports_document_diagnostics;
+                    current_gateway_capabilities.supports_document_diagnostics;
                 capabilities.supports_managed_diagnostics &=
-                    factory.gateway_capabilities.supports_managed_diagnostics;
+                    current_gateway_capabilities.supports_managed_diagnostics;
                 capabilities.supports_workspace_folders &=
-                    factory.gateway_capabilities.supports_workspace_folders;
+                    current_gateway_capabilities.supports_workspace_folders;
                 capabilities.supports_workspace_diagnostics &=
-                    factory.gateway_capabilities.supports_workspace_diagnostics;
+                    current_gateway_capabilities.supports_workspace_diagnostics;
                 capabilities.supports_context_expansion &=
-                    factory.gateway_capabilities.supports_context_expansion;
+                    current_gateway_capabilities.supports_context_expansion;
                 capabilities.semantic.retain(|capability| {
-                    factory.gateway_capabilities.semantic.contains(capability)
+                    current_gateway_capabilities.semantic.contains(capability)
                 });
                 capabilities.context_projections.retain(|kind, revision| {
-                    factory.gateway_capabilities.context_projections.get(kind) == Some(revision)
+                    current_gateway_capabilities.context_projections.get(kind) == Some(revision)
                 });
             } else {
-                gateway_capabilities = Some(factory.gateway_capabilities.clone());
+                gateway_capabilities = Some(current_gateway_capabilities);
             }
             if let Some(capabilities) = upstream_capabilities.as_mut() {
                 capabilities.supports_diagnostics &=
@@ -401,8 +407,66 @@ impl ContextProjectionPort for FederatedContext {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
-    use tracedecay_lsp::LspPosition;
+    use serde_json::{Value, json};
+    use tracedecay_lsp::{
+        CanonicalDiagnosticRefreshRequest, ContextProjectionRequest, FeedbackCycleRequest,
+        LspPosition, LspRuntimeFailure, LspRuntimeFuture, UnavailableSemanticProvider,
+    };
+
+    struct RuntimeFeedback;
+
+    impl FeedbackCycleRuntimePort for RuntimeFeedback {
+        fn execute(
+            &self,
+            _request: FeedbackCycleRequest,
+        ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct RuntimeCancellation;
+
+    impl LspAnalyzerCancellationAuthority for RuntimeCancellation {
+        fn cancel_request(&self, _root: &AdmittedRoot, _request_id: &LspRequestId) -> bool {
+            false
+        }
+    }
+
+    struct RuntimeContext;
+
+    impl CanonicalContextProjectionAuthority for RuntimeContext {
+        fn registrations(&self) -> Vec<ContextProjectionRegistration> {
+            Vec::new()
+        }
+
+        fn snapshot(
+            &self,
+            _root: AdmittedRoot,
+            _request_id: LspRequestId,
+            _request: ContextProjectionRequest,
+        ) -> LspRuntimeFuture<ContextProjectionOutcome> {
+            Box::pin(async { ContextProjectionOutcome::Unsupported })
+        }
+    }
+
+    struct ToggleWorkspaceDiagnostics(Arc<AtomicBool>);
+
+    impl CanonicalDiagnosticSnapshotAuthority for ToggleWorkspaceDiagnostics {
+        fn refresh(
+            &self,
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<tracedecay_lsp::GenerationDiagnostics, LspRuntimeFailure>>
+        {
+            Box::pin(async { Err(LspRuntimeFailure::new("diagnostics-unavailable")) })
+        }
+
+        fn supports_workspace_diagnostics(&self) -> bool {
+            self.0.load(Ordering::Acquire)
+        }
+    }
 
     struct RootSemantic {
         root_uri: &'static str,
@@ -459,5 +523,59 @@ mod tests {
             ),
             SemanticProviderOutcome::Complete(SemanticResponse::Hover(None))
         ));
+    }
+
+    #[tokio::test]
+    async fn workspace_diagnostics_are_advertised_when_readiness_arrives_after_owner_registration()
+    {
+        let ready = Arc::new(AtomicBool::new(false));
+        let factory = DaemonLspSessionFactory::new(
+            Handle::current(),
+            Arc::new(RuntimeFeedback),
+            Arc::new(UnavailableSemanticProvider),
+            Arc::new(ToggleWorkspaceDiagnostics(Arc::clone(&ready))),
+            Arc::new(RuntimeCancellation),
+            Arc::new(RuntimeContext),
+            GatewayCapabilities {
+                supports_document_diagnostics: true,
+                supports_managed_diagnostics: true,
+                supports_workspace_diagnostics: true,
+                supports_workspace_folders: true,
+                ..GatewayCapabilities::default()
+            },
+            UpstreamCapabilities::default(),
+        );
+        let initialize = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "rootUri": "file:///workspace",
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "textDocument": { "diagnostic": {} },
+                    "workspace": { "diagnostic": { "refreshSupport": true } },
+                },
+            },
+        }))
+        .unwrap();
+        let mut unavailable_session = factory.open_session(AdmittedRoot::new("file:///workspace"));
+        unavailable_session.handle_payload(&initialize, 0);
+        let unavailable: Value =
+            serde_json::from_slice(&unavailable_session.drain_outbound()[0]).unwrap();
+        assert_ne!(
+            unavailable["result"]["capabilities"]["diagnosticProvider"]["workspaceDiagnostics"],
+            true
+        );
+
+        ready.store(true, Ordering::Release);
+        let mut ready_session = factory.open_session(AdmittedRoot::new("file:///workspace"));
+        ready_session.handle_payload(&initialize, 0);
+        let response: Value = serde_json::from_slice(&ready_session.drain_outbound()[0]).unwrap();
+
+        assert_eq!(
+            response["result"]["capabilities"]["diagnosticProvider"]["workspaceDiagnostics"],
+            true
+        );
     }
 }
