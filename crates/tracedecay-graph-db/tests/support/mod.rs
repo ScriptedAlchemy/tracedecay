@@ -82,8 +82,7 @@ fn create_private_graph_directory(root: &Path) {
 
 #[cfg(windows)]
 fn create_private_graph_directory(root: &Path) {
-    let path = root.join(GRAPH_STORE_PRIVATE_DIRECTORY);
-    match tracedecay_runtime_core::windows_security::create_private_directory(&path) {
+    match std::fs::create_dir(root.join(GRAPH_STORE_PRIVATE_DIRECTORY)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => panic!("create private graph directory: {error}"),

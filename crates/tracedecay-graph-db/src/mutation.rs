@@ -6,7 +6,8 @@ use grafeo_engine::{GrafeoDB, Session};
 
 use crate::error::rollback_failure;
 use crate::schema::{
-    ENTITY_LABEL, FORMAT_LABEL, PROJECTION_LABEL, PUBLICATION_LABEL, RELATION_LABEL,
+    ENTITY_KEY_PROPERTY, ENTITY_LABEL, FORMAT_LABEL, PROJECTION_KEY_PROPERTY, PROJECTION_LABEL,
+    PUBLICATION_KEY_PROPERTY, PUBLICATION_LABEL, RELATION_KEY_PROPERTY, RELATION_LABEL,
     SEQUENCE_PROPERTY, edge_properties, entity_key_label, entity_labels, entity_properties,
     projection_properties, projection_state_label, publication_key_label, publication_properties,
     relation_locator_labels, relation_properties, relation_type_for_kind, stable_key,
@@ -423,6 +424,19 @@ fn tracked_create_node(
     properties: &[(String, Value)],
     batch: &GraphWriteBatch,
 ) -> Result<grafeo_common::types::NodeId, GraphDbError> {
+    if !properties.iter().any(|(name, _)| {
+        matches!(
+            name.as_str(),
+            ENTITY_KEY_PROPERTY
+                | RELATION_KEY_PROPERTY
+                | PROJECTION_KEY_PROPERTY
+                | PUBLICATION_KEY_PROPERTY
+        )
+    }) {
+        return Err(GraphDbError::Corrupt {
+            message: "tracked Grafeo node creation has no native locator".to_owned(),
+        });
+    }
     check_cancelled(batch)?;
     let labels = labels.iter().map(String::as_str).collect::<Vec<_>>();
     let node = session

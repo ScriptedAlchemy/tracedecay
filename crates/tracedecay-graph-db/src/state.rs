@@ -5,14 +5,13 @@ use grafeo_core::graph::Direction;
 use grafeo_engine::GrafeoDB;
 
 use crate::schema::{
-    COMMIT_SEQUENCE_PROPERTY, DIGEST_PROPERTY, ENTITY_ID_PROPERTY, ENTITY_KEY_PROPERTY,
-    ENTITY_LABEL, FORMAT_LABEL, IDEMPOTENCY_KEY_PROPERTY, NAMESPACE_PROPERTY, PROJECTION_LABEL,
-    PROJECTION_PROPERTY, PUBLICATION_DIGEST_PROPERTY, PUBLICATION_INPUT_DIGEST_PROPERTY,
-    PUBLICATION_LABEL, RELATION_EDGE_PROPERTY, RELATION_KEY_PROPERTY, RELATION_LABEL,
-    SEQUENCE_PROPERTY, SOURCE_GENERATION_PROPERTY, WATERMARK_PROPERTY, decode_entity,
-    decode_relation, entity_key_label, entity_projection_label, projection_state_label,
-    publication_key_label, relation_edge_label, relation_key_label, relation_projection_label,
-    required_i64, required_string, stable_key,
+    COMMIT_SEQUENCE_PROPERTY, DIGEST_PROPERTY, ENTITY_ID_PROPERTY, ENTITY_LABEL, FORMAT_LABEL,
+    IDEMPOTENCY_KEY_PROPERTY, NAMESPACE_PROPERTY, PROJECTION_LABEL, PROJECTION_PROPERTY,
+    PUBLICATION_DIGEST_PROPERTY, PUBLICATION_INPUT_DIGEST_PROPERTY, PUBLICATION_LABEL,
+    RELATION_EDGE_PROPERTY, RELATION_LABEL, SEQUENCE_PROPERTY, SOURCE_GENERATION_PROPERTY,
+    WATERMARK_PROPERTY, decode_entity, decode_relation, entity_key_label, entity_projection_label,
+    projection_state_label, publication_key_label, relation_edge_label, relation_key_label,
+    relation_projection_label, required_i64, required_string, stable_key,
 };
 use crate::{
     GraphCommit, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphMutation,
@@ -53,28 +52,46 @@ impl ExistingBatchState {
         if batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let mut entity_keys = BTreeSet::new();
-        let mut relation_keys = BTreeSet::new();
+        let mut entity_keys = BTreeMap::new();
+        let mut relation_keys = BTreeMap::new();
         for mutation in &batch.mutations {
             match mutation {
                 GraphMutation::DeleteEntity(identity) => {
-                    entity_keys.insert(stable_key(&batch.namespace, identity.as_str()));
+                    entity_keys.insert(
+                        stable_key(&batch.namespace, identity.as_str()),
+                        identity.clone(),
+                    );
                 }
                 GraphMutation::UpsertEntity(entity) => {
-                    entity_keys.insert(stable_key(&batch.namespace, entity.identity.as_str()));
+                    entity_keys.insert(
+                        stable_key(&batch.namespace, entity.identity.as_str()),
+                        entity.identity.clone(),
+                    );
                 }
                 GraphMutation::DeleteRelation(identity) => {
-                    relation_keys.insert(stable_key(&batch.namespace, identity.as_str()));
+                    relation_keys.insert(
+                        stable_key(&batch.namespace, identity.as_str()),
+                        identity.clone(),
+                    );
                 }
                 GraphMutation::UpsertRelation(relation) => {
-                    relation_keys.insert(stable_key(&batch.namespace, relation.identity.as_str()));
-                    entity_keys.insert(stable_key(&batch.namespace, relation.from.as_str()));
-                    entity_keys.insert(stable_key(&batch.namespace, relation.to.as_str()));
+                    relation_keys.insert(
+                        stable_key(&batch.namespace, relation.identity.as_str()),
+                        relation.identity.clone(),
+                    );
+                    entity_keys.insert(
+                        stable_key(&batch.namespace, relation.from.as_str()),
+                        relation.from.clone(),
+                    );
+                    entity_keys.insert(
+                        stable_key(&batch.namespace, relation.to.as_str()),
+                        relation.to.clone(),
+                    );
                 }
             }
         }
-        let entities = load_requested_entities(database, &entity_keys, batch)?;
-        let relations = load_requested_relations(database, &relation_keys, batch)?;
+        let entities = load_requested_entities(database, &batch.namespace, entity_keys, batch)?;
+        let relations = load_requested_relations(database, &batch.namespace, relation_keys, batch)?;
         Ok(Self {
             entities,
             relations,
@@ -168,60 +185,17 @@ pub(crate) fn load_entity(
 
 fn load_requested_entities(
     database: &GrafeoDB,
-    requested: &BTreeSet<String>,
+    namespace: &GraphNamespace,
+    requested: BTreeMap<String, GraphEntityId>,
     batch: &GraphWriteBatch,
 ) -> Result<BTreeMap<String, StoredEntity>, GraphDbError> {
-    let store = database.graph_store();
     let mut loaded = BTreeMap::new();
-    for (index, node_id) in store.nodes_by_label(ENTITY_LABEL).into_iter().enumerate() {
+    for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let node = store
-            .get_node(node_id)
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: "entity label index points to an unreadable node".to_owned(),
-            })?;
-        let key = required_string(
-            node.get_property(ENTITY_KEY_PROPERTY),
-            "entity stable identity",
-        )?;
-        if !requested.contains(&key) {
-            continue;
-        }
-        let namespace = GraphNamespace::new(required_string(
-            node.get_property(NAMESPACE_PROPERTY),
-            "entity namespace",
-        )?)
-        .map_err(|error| persisted_validation_error("entity namespace", error))?;
-        let projection = GraphProjectionId::new(required_string(
-            node.get_property(PROJECTION_PROPERTY),
-            "entity projection",
-        )?)
-        .map_err(|error| persisted_validation_error("entity projection", error))?;
-        let entity = decode_entity(&node)?;
-        if stable_key(&namespace, entity.identity.as_str()) != key
-            || !node.has_label(&entity_key_label(&namespace, &entity.identity))
-        {
-            return Err(GraphDbError::Corrupt {
-                message: "entity native index does not match its scalar identity".to_owned(),
-            });
-        }
-        if loaded
-            .insert(
-                key,
-                StoredEntity {
-                    node: node_id,
-                    namespace,
-                    projection,
-                    entity,
-                },
-            )
-            .is_some()
-        {
-            return Err(GraphDbError::Corrupt {
-                message: "entity native identity is not unique".to_owned(),
-            });
+        if let Some(entity) = load_entity(database, namespace, &identity)? {
+            loaded.insert(key, entity);
         }
     }
     Ok(loaded)
@@ -229,44 +203,17 @@ fn load_requested_entities(
 
 fn load_requested_relations(
     database: &GrafeoDB,
-    requested: &BTreeSet<String>,
+    namespace: &GraphNamespace,
+    requested: BTreeMap<String, GraphRelationId>,
     batch: &GraphWriteBatch,
 ) -> Result<BTreeMap<String, StoredRelation>, GraphDbError> {
-    let store = database.graph_store();
     let mut loaded = BTreeMap::new();
-    for (index, locator_id) in store.nodes_by_label(RELATION_LABEL).into_iter().enumerate() {
+    for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let locator = store
-            .get_node(locator_id)
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: "relation label index points to an unreadable node".to_owned(),
-            })?;
-        let key = required_string(
-            locator.get_property(RELATION_KEY_PROPERTY),
-            "relation stable identity",
-        )?;
-        if !requested.contains(&key) {
-            continue;
-        }
-        let relation = load_relation_by_locator(database, locator_id)?;
-        let namespace = GraphNamespace::new(required_string(
-            locator.get_property(NAMESPACE_PROPERTY),
-            "relation namespace",
-        )?)
-        .map_err(|error| persisted_validation_error("relation namespace", error))?;
-        if stable_key(&namespace, relation.relation.identity.as_str()) != key
-            || !locator.has_label(&relation_key_label(&namespace, &relation.relation.identity))
-        {
-            return Err(GraphDbError::Corrupt {
-                message: "relation native index does not match its scalar identity".to_owned(),
-            });
-        }
-        if loaded.insert(key, relation).is_some() {
-            return Err(GraphDbError::Corrupt {
-                message: "relation native identity is not unique".to_owned(),
-            });
+        if let Some(relation) = load_relation(database, namespace, &identity)? {
+            loaded.insert(key, relation);
         }
     }
     Ok(loaded)
