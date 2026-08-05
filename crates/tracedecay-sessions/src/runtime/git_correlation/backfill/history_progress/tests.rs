@@ -82,64 +82,101 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
         Some(initial.clone())
     );
 
-    let mut captured = initial;
-    captured.generation = 1;
+    let mut partial = initial;
+    partial.generation = 1;
+    partial.reflog_byte_offset = 256;
+    partial.segment_cursor = 1;
+    assert!(compare_and_swap_progress(&conn, 0, &partial).await.unwrap());
+    let mut rewound = partial.clone();
+    rewound.generation = 2;
+    rewound.reflog_byte_offset = 300;
+    assert!(!compare_and_swap_progress(&conn, 1, &rewound).await.unwrap());
+    let mut counter_back = partial.clone();
+    counter_back.generation = 2;
+    counter_back.reflog_byte_offset = 200;
+    counter_back.segment_cursor = 0;
+    assert!(
+        !compare_and_swap_progress(&conn, 1, &counter_back)
+            .await
+            .unwrap()
+    );
+
+    let mut captured = partial;
+    captured.generation = 2;
     captured.scan_mode = GitHistoryScanMode::ReflogVerify;
     captured.reflog_byte_offset = 128;
     captured.capture_target_offset = Some(128);
     captured.reflog_digest = "sha256:captured".to_string();
     assert!(
-        compare_and_swap_progress(&conn, 0, &captured)
+        compare_and_swap_progress(&conn, 1, &captured)
             .await
             .unwrap()
     );
     assert!(
-        !compare_and_swap_progress(&conn, 0, &captured)
+        !compare_and_swap_progress(&conn, 1, &captured)
             .await
             .unwrap()
     );
     let mut drifted = captured.clone();
-    drifted.generation = 2;
-    drifted.segment_cursor = 1;
-    assert!(!compare_and_swap_progress(&conn, 1, &drifted).await.unwrap());
+    drifted.generation = 3;
+    drifted.segment_cursor = 2;
+    assert!(!compare_and_swap_progress(&conn, 2, &drifted).await.unwrap());
 
     let mut verified = captured;
-    verified.generation = 2;
+    verified.generation = 3;
     verified.scan_mode = GitHistoryScanMode::Graph;
     verified.verify_byte_offset = 128;
     verified.verify_digest.clone_from(&verified.reflog_digest);
     assert!(
-        compare_and_swap_progress(&conn, 1, &verified)
+        compare_and_swap_progress(&conn, 2, &verified)
             .await
             .unwrap()
     );
 
     let mut regressed = verified.clone();
-    regressed.generation = 3;
+    regressed.generation = 4;
     regressed.scan_mode = GitHistoryScanMode::ReflogVerify;
     assert!(
-        !compare_and_swap_progress(&conn, 2, &regressed)
+        !compare_and_swap_progress(&conn, 3, &regressed)
             .await
             .unwrap()
     );
     let mut rewritten = verified.clone();
-    rewritten.generation = 3;
+    rewritten.generation = 4;
     rewritten.cursor_oid = "bbbbbbbb".to_string();
     assert!(
-        !compare_and_swap_progress(&conn, 2, &rewritten)
+        !compare_and_swap_progress(&conn, 3, &rewritten)
             .await
             .unwrap()
     );
 
     let mut resealed = verified.clone();
-    resealed.generation = 3;
+    resealed.generation = 4;
     resealed.source_head_oid = "bbbbbbbb".to_string();
     assert!(
-        !compare_and_swap_progress(&conn, 2, &resealed)
+        !compare_and_swap_progress(&conn, 3, &resealed)
             .await
             .unwrap()
     );
-    assert_eq!(read_progress(&conn, key).await.unwrap(), Some(verified));
+    let mut advanced = verified;
+    advanced.generation = 4;
+    advanced.segment_cursor = 2;
+    advanced.emitted_count = 1;
+    assert!(
+        compare_and_swap_progress(&conn, 3, &advanced)
+            .await
+            .unwrap()
+    );
+    let mut backslid = advanced.clone();
+    backslid.generation = 5;
+    backslid.segment_cursor = 1;
+    backslid.emitted_count = 0;
+    assert!(
+        !compare_and_swap_progress(&conn, 4, &backslid)
+            .await
+            .unwrap()
+    );
+    assert_eq!(read_progress(&conn, key).await.unwrap(), Some(advanced));
 }
 
 #[tokio::test]
