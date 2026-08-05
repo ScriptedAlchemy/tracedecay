@@ -276,12 +276,9 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
 }
 
 impl RegisteredWorkRuntime {
-    pub(super) fn product_service(
+    pub(in crate::daemon) fn product_service(
         &self,
-    ) -> tracedecay_application::WorkProductService<
-        Arc<RegisteredWorkGraphAdapter>,
-        Arc<RegisteredWorkGraphAdapter>,
-    > {
+    ) -> crate::daemon::work_product_graph::RegisteredWorkProductService {
         tracedecay_application::WorkProductService::new(
             Arc::clone(&self.product_graph),
             Arc::clone(&self.product_graph),

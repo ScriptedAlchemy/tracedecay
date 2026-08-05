@@ -717,17 +717,88 @@ async fn registered_work_product_graph_survives_replay_rollback_and_reopen() {
     let admitted = admitted_effect.payload.expect("admitted product graph");
     let admitted_version = admitted.graph().version();
 
+    let product_context = RequestContext::new(
+        actor.clone(),
+        scope.clone(),
+        grant.clone(),
+        tracedecay_application::RequestId::new("request.workflow.product-retry")
+            .expect("request id"),
+        Deadline::new(UtcMicros(1_000)).expect("deadline"),
+        CancellationContext::active("cancel.workflow.product-retry").expect("cancellation"),
+    )
+    .expect("Workflow product context");
+    let registered = service
+        .project_runtimes
+        .get::<RegisteredWorkRuntime>(project.path())
+        .await
+        .expect("registered Work product runtime");
+    let product = registered.product_service();
+    let snapshot = product
+        .snapshot(&product_context)
+        .expect("product snapshot");
+    assert_eq!(snapshot.graph().version(), admitted_version);
+    let cancelled = product
+        .apply(
+            &product_context,
+            ApplyWorkProductCommandV1 {
+                expected_version: admitted_version,
+                command_id: tracedecay_domain::WorkCommandId::new(
+                    "command.workflow.product.pause-cancel",
+                )
+                .expect("command id"),
+                occurred_at: UtcMicros(35),
+                command: WorkProductCommandV1::CancelAttempt {
+                    task_id: task_id.clone(),
+                    identity: identity.clone(),
+                },
+            },
+        )
+        .expect("canonical pause cancellation");
+    let retry_identity = WorkAttemptIdentityV1::new(
+        task_id.clone(),
+        RunId::new("run.work.product-invocation").expect("run id"),
+        AttemptId::new("attempt.work.product-invocation.retry").expect("attempt id"),
+    )
+    .expect("retry identity");
+    let retried = product
+        .apply(
+            &product_context,
+            ApplyWorkProductCommandV1 {
+                expected_version: cancelled.graph().version(),
+                command_id: tracedecay_domain::WorkCommandId::new(
+                    "command.workflow.product.resume-retry",
+                )
+                .expect("command id"),
+                occurred_at: UtcMicros(36),
+                command: WorkProductCommandV1::RetryAttempt {
+                    task_id: task_id.clone(),
+                    prior_identity: identity.clone(),
+                    identity: retry_identity.clone(),
+                    route: route.clone(),
+                },
+            },
+        )
+        .expect("canonical Workflow retry");
+    assert_eq!(
+        retried
+            .graph()
+            .item(&task_id)
+            .and_then(|item| item.provider_admission())
+            .map(tracedecay_domain::WorkProviderAdmissionV1::identity),
+        Some(&retry_identity)
+    );
+
     let rollback = invoke!(
         "request.work.product.rollback",
         WorkApplicationInvocationV1::ApplyWorkCommand(WorkProductMutationRequestV1::Apply(
             ApplyWorkProductCommandV1 {
-                expected_version: admitted_version,
+                expected_version: retried.graph().version(),
                 command_id: tracedecay_domain::WorkCommandId::new("command.work.product.rollback",)
                     .expect("command id"),
                 occurred_at: UtcMicros(40),
                 command: WorkProductCommandV1::RollbackAdmission {
                     task_id: task_id.clone(),
-                    identity: identity.clone(),
+                    identity: retry_identity.clone(),
                 },
             },
         ))

@@ -56,6 +56,12 @@ pub(in crate::daemon) struct RegisteredWorkGraphAdapter {
     lifecycle: Arc<WorkGraphLifecycleCancellation>,
 }
 
+pub(in crate::daemon) type RegisteredWorkProductService =
+    tracedecay_application::WorkProductService<
+        Arc<RegisteredWorkGraphAdapter>,
+        Arc<RegisteredWorkGraphAdapter>,
+    >;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkGraphScope {
     project_id: String,
