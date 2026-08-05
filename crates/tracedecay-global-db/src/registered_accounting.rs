@@ -462,7 +462,19 @@ impl RegisteredGlobalDb {
 
     /// One-snapshot denominator and aggregate for the canonical turn store.
     pub async fn accounting_totals_since(&self, since: u64) -> Option<(u64, u64, f64, i64)> {
-        let snapshot = self.read_snapshot().await.ok()?;
+        self.try_accounting_totals_since(since).await.ok()
+    }
+
+    /// Checked accounting aggregate used by authorities that must distinguish
+    /// an empty ledger from an unavailable projection.
+    pub async fn try_accounting_totals_since(
+        &self,
+        since: u64,
+    ) -> Result<(u64, u64, f64, i64), String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to open accounting totals snapshot: {error}"))?;
         let mut rows = snapshot
             .query(
                 "SELECT COUNT(*),
@@ -473,13 +485,24 @@ impl RegisteredGlobalDb {
                 tracedecay_runtime_core::db::engine::params![since as i64],
             )
             .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        Some((
-            row.get::<i64>(0).ok()?.max(0) as u64,
-            row.get::<i64>(1).ok()?.max(0) as u64,
-            row.get::<f64>(2).ok()?,
-            row.get::<i64>(3).ok()?.max(0),
+            .map_err(|error| format!("failed to query accounting totals: {error}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read accounting totals row: {error}"))?
+            .ok_or_else(|| "accounting totals query returned no row".to_owned())?;
+        Ok((
+            row.get::<i64>(0)
+                .map_err(|error| format!("failed to decode accounting turn count: {error}"))?
+                .max(0) as u64,
+            row.get::<i64>(1)
+                .map_err(|error| format!("failed to decode accounting token total: {error}"))?
+                .max(0) as u64,
+            row.get::<f64>(2)
+                .map_err(|error| format!("failed to decode accounting cost total: {error}"))?,
+            row.get::<i64>(3)
+                .map_err(|error| format!("failed to decode accounting watermark: {error}"))?
+                .max(0),
         ))
     }
 

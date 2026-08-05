@@ -5,6 +5,7 @@
 //! signatures, or behavior changed. `use super::*` re-exposes every name the
 //! parent `daemon` module had in scope so the moved code resolves unchanged.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -21,10 +22,17 @@ pub(super) async fn serve_projectless_client(
     lifecycle: &DaemonLifecycle,
     store_administration: &StoreAdministration,
 ) -> Result<()> {
+    const MAX_PIPELINED_REQUESTS: usize = 64;
+    let mut pending = VecDeque::new();
+    let mut queued_cancellations = Vec::new();
+    let mut request_sequence = 0_u64;
     loop {
-        let line = tokio::select! {
-            result = read_line_handling_wire_oversized(transport) => result?,
-            () = lifecycle.wait_for_draining() => break,
+        let line = match pending.pop_front() {
+            Some(line) => Some(line),
+            None => tokio::select! {
+                result = read_line_handling_wire_oversized(transport) => result?,
+                () = lifecycle.wait_for_draining() => break,
+            },
         };
         let Some(line) = line else {
             break;
@@ -32,15 +40,103 @@ pub(super) async fn serve_projectless_client(
         let Some(_activity) = lifecycle.try_enter() else {
             break;
         };
-        let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-            Ok(request) => {
-                projectless_response(&request, client_identity, store_administration).await
+        let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                write_json_rpc_response(
+                    transport,
+                    &JsonRpcResponse::error(
+                        json!(null),
+                        ErrorCode::ParseError,
+                        format!("Parse error: {error}"),
+                    ),
+                )
+                .await?;
+                continue;
             }
-            Err(e) => Some(JsonRpcResponse::error(
-                json!(null),
-                ErrorCode::ParseError,
-                format!("Parse error: {e}"),
-            )),
+        };
+        request_sequence = request_sequence.checked_add(1).ok_or_else(|| {
+            crate::errors::TraceDecayError::Config {
+                message: "projectless cancellation sequence exhausted".to_owned(),
+            }
+        })?;
+        let cancellation = if request.id.is_some() {
+            Some(
+                tracedecay_application::CancellationSignal::active(format!(
+                    "cancellation.projectless.{request_sequence}"
+                ))
+                .map_err(|error| crate::errors::TraceDecayError::Config {
+                    message: format!("projectless cancellation admission failed: {error}"),
+                })?,
+            )
+        } else {
+            None
+        };
+        if let Some(request_id) = request.id.as_ref()
+            && let Some(index) = queued_cancellations
+                .iter()
+                .position(|queued| queued == request_id)
+        {
+            queued_cancellations.swap_remove(index);
+            if let Some(cancellation) = cancellation.as_ref() {
+                cancellation.cancel(tracedecay_application::clock::now_micros());
+            }
+        }
+        let response = projectless_response(
+            &request,
+            client_identity,
+            store_administration,
+            cancellation.clone(),
+        );
+        tokio::pin!(response);
+        let response = loop {
+            tokio::select! {
+                response = &mut response => break response,
+                result = read_line_handling_wire_oversized(transport) => {
+                    match result {
+                        Ok(Some(line)) => {
+                            if let Some(cancelled_id) = cancellation_request_id(&line) {
+                                if request.id.as_ref() == Some(&cancelled_id) {
+                                    if let Some(cancellation) = cancellation.as_ref() {
+                                        cancellation.cancel(
+                                            tracedecay_application::clock::now_micros(),
+                                        );
+                                    }
+                                } else if pending_contains_request(&pending, &cancelled_id)
+                                    && !queued_cancellations.contains(&cancelled_id)
+                                {
+                                    queued_cancellations.push(cancelled_id);
+                                }
+                            } else if pending.len() < MAX_PIPELINED_REQUESTS {
+                                pending.push_back(line);
+                            } else {
+                                let response = projectless_overload_response(&line);
+                                if let Some(response) = response {
+                                    write_json_rpc_response(transport, &response).await?;
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            if let Some(cancellation) = cancellation.as_ref() {
+                                cancellation.cancel(tracedecay_application::clock::now_micros());
+                            }
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            if let Some(cancellation) = cancellation.as_ref() {
+                                cancellation.cancel(tracedecay_application::clock::now_micros());
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                () = lifecycle.wait_for_draining() => {
+                    if let Some(cancellation) = cancellation.as_ref() {
+                        cancellation.cancel(tracedecay_application::clock::now_micros());
+                    }
+                    return Ok(());
+                }
+            }
         };
         if let Some(response) = response {
             write_json_rpc_response(transport, &response).await?;
@@ -56,6 +152,7 @@ async fn projectless_response(
     request: &crate::mcp::JsonRpcRequest,
     client_identity: &DaemonClientIdentity,
     store_administration: &StoreAdministration,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Option<crate::mcp::JsonRpcResponse> {
     let id = request.id.clone()?;
     match request.method.as_str() {
@@ -75,11 +172,12 @@ async fn projectless_response(
             }),
         )),
         "tools/call" => Some(
-            projectless_tools_call_response(
+            projectless_tools_call_response_with_cancellation(
                 id,
                 request.params.as_ref(),
                 client_identity,
                 store_administration,
+                cancellation,
             )
             .await,
         ),
@@ -97,6 +195,23 @@ pub(super) async fn projectless_tools_call_response(
     params: Option<&serde_json::Value>,
     client_identity: &DaemonClientIdentity,
     store_administration: &StoreAdministration,
+) -> crate::mcp::JsonRpcResponse {
+    projectless_tools_call_response_with_cancellation(
+        id,
+        params,
+        client_identity,
+        store_administration,
+        None,
+    )
+    .await
+}
+
+async fn projectless_tools_call_response_with_cancellation(
+    id: serde_json::Value,
+    params: Option<&serde_json::Value>,
+    client_identity: &DaemonClientIdentity,
+    store_administration: &StoreAdministration,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> crate::mcp::JsonRpcResponse {
     let (tool_name, arguments) = match projectless_tool_call(params) {
         Ok(tool_call) => tool_call,
@@ -220,7 +335,7 @@ pub(super) async fn projectless_tools_call_response(
         {
             Ok(result) => {
                 refresh_wake.wake();
-                JsonRpcResponse::success(id, result.value)
+                projectless_tool_result_response(id, result)
             }
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };
@@ -271,13 +386,6 @@ pub(super) async fn projectless_tools_call_response(
             profile_identity.profile_id().as_str(),
         )
         .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
-        let cancellation = request_id.as_ref().and_then(|request_id| {
-            tracedecay_application::CancellationSignal::active(format!(
-                "cancellation.{}",
-                request_id.as_str()
-            ))
-            .ok()
-        });
         let now = tracedecay_application::clock::now_micros();
         let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
             now.0.saturating_add(600_000_000),
@@ -299,7 +407,7 @@ pub(super) async fn projectless_tools_call_response(
         )
         .await
         {
-            Ok(result) => JsonRpcResponse::success(id, result.value),
+            Ok(result) => projectless_tool_result_response(id, result),
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };
     }
@@ -342,7 +450,7 @@ pub(super) async fn projectless_tools_call_response(
         )
         .await
         {
-            Ok(result) => JsonRpcResponse::success(id, result.value),
+            Ok(result) => projectless_tool_result_response(id, result),
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };
     }
@@ -439,10 +547,59 @@ async fn projectless_user_lcm_tools_call_response(
             ) {
                 refresh_wake.wake();
             }
-            JsonRpcResponse::success(id, result.value)
+            projectless_tool_result_response(id, result)
         }
         Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
+}
+
+fn projectless_tool_result_response(
+    id: serde_json::Value,
+    mut result: crate::mcp::tools::ToolResult,
+) -> JsonRpcResponse {
+    crate::mcp::server::mark_semantic_tool_error(&mut result);
+    JsonRpcResponse::success(id, result.value)
+}
+
+fn cancellation_request_id(line: &str) -> Option<serde_json::Value> {
+    let Ok(notification) = serde_json::from_str::<serde_json::Value>(line) else {
+        return None;
+    };
+    (notification
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        == Some("notifications/cancelled"))
+    .then(|| {
+        notification
+            .get("params")
+            .and_then(|params| params.get("requestId"))
+            .cloned()
+    })
+    .flatten()
+}
+
+fn pending_contains_request(pending: &VecDeque<String>, request_id: &serde_json::Value) -> bool {
+    pending.iter().any(|line| {
+        serde_json::from_str::<JsonRpcRequest>(line)
+            .ok()
+            .and_then(|request| request.id)
+            .as_ref()
+            == Some(request_id)
+    })
+}
+
+fn projectless_overload_response(line: &str) -> Option<JsonRpcResponse> {
+    let request = serde_json::from_str::<JsonRpcRequest>(line).ok()?;
+    let id = request.id?;
+    Some(JsonRpcResponse::error_with_data(
+        id,
+        ErrorCode::InternalError,
+        "projectless request queue is full".to_owned(),
+        Some(json!({
+            "reason_code": "projectless_request_queue_full",
+            "retryable": true,
+        })),
+    ))
 }
 
 pub(super) fn projectless_tool_call(
@@ -476,4 +633,56 @@ pub(super) fn projectless_user_session_request(request_line: &str) -> bool {
             .get("storage_scope")
             .and_then(serde_json::Value::as_str)
             == Some("user")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use serde_json::json;
+
+    use super::{cancellation_request_id, pending_contains_request, projectless_overload_response};
+
+    #[test]
+    fn queued_request_cancellation_is_retained_by_exact_request_id() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "queued-request",
+            "method": "tools/call",
+            "params": {"name": "tracedecay_admin_cli", "arguments": {}},
+        })
+        .to_string();
+        let cancellation = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": "queued-request"},
+        })
+        .to_string();
+        let pending = VecDeque::from([request]);
+
+        let request_id = cancellation_request_id(&cancellation).expect("cancellation request id");
+        assert_eq!(request_id, json!("queued-request"));
+        assert!(pending_contains_request(&pending, &request_id));
+    }
+
+    #[test]
+    fn saturated_queue_rejection_is_typed_and_retryable() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "tools/call",
+            "params": {"name": "tracedecay_status", "arguments": {}},
+        })
+        .to_string();
+
+        let response = projectless_overload_response(&request).expect("overload response");
+        assert_eq!(response.id, json!(42));
+        let data = response
+            .error
+            .expect("error")
+            .data
+            .expect("structured error data");
+        assert_eq!(data["reason_code"], "projectless_request_queue_full");
+        assert_eq!(data["retryable"], true);
+    }
 }

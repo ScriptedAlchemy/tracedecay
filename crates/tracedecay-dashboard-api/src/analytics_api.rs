@@ -28,6 +28,14 @@ use super::DashboardState;
 use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
 use super::util::{i64_field, query_i64, query_rows, str_field};
 
+mod hook_read;
+pub use hook_read::{
+    HOOK_ANALYTICS_WINDOW_ROWS, HookAnalyticsReadFailure, HookAnalyticsReadOutcome,
+    HookAnalyticsRows, HookAnalyticsWindow, read_hook_analytics_rows_at,
+    read_hook_analytics_rows_from_paths, read_hook_analytics_rows_from_paths_checked,
+};
+use hook_read::{read_hook_analytics_file, sort_hook_analytics_rows};
+
 const HINT_CATEGORIES: &[&str] = &[
     "search",
     "semantic_search",
@@ -1275,263 +1283,9 @@ fn count_rows(label: &str, counts: BTreeMap<String, i64>) -> Vec<Value> {
         .collect()
 }
 
-/// Trailing rows read per `hook_analytics.jsonl` file.
-///
-/// The hook stream is append-only and unbounded: on an active profile the
-/// project-level file reaches hundreds of megabytes and over a million rows,
-/// and folding all of it per request cost ~14s. Diagnostics therefore reads a
-/// bounded suffix of each file. Every figure derived from hook rows describes
-/// that window, not all time, and the payload captions it under `hook_window`.
-pub const HOOK_ANALYTICS_WINDOW_ROWS: usize = 10_000;
-
-/// Suffix chunk size used when walking a hook analytics file backwards.
-const HOOK_ANALYTICS_TAIL_CHUNK_BYTES: u64 = 1 << 20;
-
-/// Window provenance for the hook rows folded into a diagnostics payload.
-#[derive(Default)]
-pub struct HookAnalyticsWindow {
-    /// Per-file cap on trailing rows scanned.
-    pub window_rows: usize,
-    /// Rows actually scanned across every file in the window.
-    pub rows_scanned: i64,
-    /// True when at least one file was larger than its window, so the
-    /// aggregates cover a recent suffix rather than the full history.
-    pub truncated: bool,
-}
-
-pub struct HookAnalyticsRows {
-    pub rows: Vec<Value>,
-    pub sources: Vec<Value>,
-    pub window: HookAnalyticsWindow,
-}
-
-impl HookAnalyticsRows {
-    fn empty() -> Self {
-        Self {
-            rows: Vec::new(),
-            sources: Vec::new(),
-            window: HookAnalyticsWindow {
-                window_rows: HOOK_ANALYTICS_WINDOW_ROWS,
-                rows_scanned: 0,
-                truncated: false,
-            },
-        }
-    }
-
-    /// Caption describing exactly which slice of the hook stream the sibling
-    /// hook figures (`hook_call_count`, `by_hook`, `by_prompt_category`,
-    /// `hook_readiness`, `recent_hooks`) were computed over.
-    fn window_payload(&self) -> Value {
-        let timestamps = || {
-            self.rows
-                .iter()
-                .filter_map(|row| row.get("ts_unix_ms").and_then(Value::as_i64))
-        };
-        json!({
-            "window_rows": self.window.window_rows as i64,
-            "rows_scanned": self.window.rows_scanned,
-            "rows_included": self.rows.len() as i64,
-            "truncated": self.window.truncated,
-            "total_rows_known": !self.window.truncated,
-            "oldest_ts_unix_ms": timestamps().min(),
-            "newest_ts_unix_ms": timestamps().max(),
-        })
-    }
-}
-
-/// Hooks write `hook_analytics.jsonl` into the project store when they can
-/// resolve a project root and into the user-level profile root otherwise, so
-/// a project's hook stream is split across both files. Read both, keeping
 /// only user-level rows whose attribution places them inside this project.
 fn read_hook_analytics_rows(state: &DashboardState) -> HookAnalyticsRows {
     read_hook_analytics_rows_at(Some(&state.store_root), Some(&state.project_root))
-}
-
-/// Path-based variant shared with the `tracedecay analytics` CLI. Passing no
-/// `project_root` includes every user-level row instead of filtering.
-///
-/// Reads only the trailing [`HOOK_ANALYTICS_WINDOW_ROWS`] rows of each file;
-/// see [`HookAnalyticsRows::window_payload`] for the caption callers must
-/// surface alongside any derived figure.
-pub fn read_hook_analytics_rows_at(
-    store_root: Option<&std::path::Path>,
-    project_root: Option<&std::path::Path>,
-) -> HookAnalyticsRows {
-    let mut out = HookAnalyticsRows::empty();
-    let store_path = store_root.map(|root| root.join("hook_analytics.jsonl"));
-    if let Some(store_path) = &store_path {
-        read_hook_analytics_file(store_path, None, &mut out);
-    }
-    if let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() {
-        let global_path = profile_root.join("hook_analytics.jsonl");
-        if store_path.as_deref() != Some(global_path.as_path()) {
-            read_hook_analytics_file(&global_path, project_root, &mut out);
-        }
-    }
-    sort_hook_analytics_rows(&mut out.rows);
-    out
-}
-
-fn sort_hook_analytics_rows(rows: &mut [Value]) {
-    // `sort_by` is stable. Rows sort chronologically, then by durable event fields.
-    // Exact-key ties (including rows with all fields missing) retain deterministic
-    // ingestion order: project JSONL line order, followed by profile JSONL line order.
-    rows.sort_by(|left, right| {
-        hook_analytics_row_order_key(left).cmp(&hook_analytics_row_order_key(right))
-    });
-}
-
-fn hook_analytics_row_order_key(row: &Value) -> (i64, &str, &str, &str) {
-    (
-        row.get("ts_unix_ms")
-            .and_then(Value::as_i64)
-            .unwrap_or_default(),
-        row.get("session_id").and_then(Value::as_str).unwrap_or(""),
-        row.get("hook_name").and_then(Value::as_str).unwrap_or(""),
-        row.get("agent").and_then(Value::as_str).unwrap_or(""),
-    )
-}
-
-/// Read the last `window_rows` newline-delimited records of `path`.
-///
-/// Walks the file backwards in [`HOOK_ANALYTICS_TAIL_CHUNK_BYTES`] chunks so
-/// cost tracks the window, not the file. Returns the lines oldest-first
-/// alongside `reached_file_start`, which is false when the file held more rows
-/// than the window and the result is therefore a suffix.
-fn read_hook_analytics_tail(
-    path: &std::path::Path,
-    window_rows: usize,
-) -> std::io::Result<(Vec<String>, bool)> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(path)?;
-    let mut end = file.metadata()?.len();
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut reached_file_start = true;
-    let mut starts_at_line_boundary = true;
-
-    while end > 0 {
-        let chunk_len = HOOK_ANALYTICS_TAIL_CHUNK_BYTES.min(end);
-        let start = end - chunk_len;
-        let mut chunk = vec![0u8; usize::try_from(chunk_len).unwrap_or(usize::MAX)];
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut chunk)?;
-        chunk.extend_from_slice(&buffer);
-        buffer = chunk;
-        end = start;
-
-        // Every newline in the retained bytes terminates a record we hold in
-        // full, so it is a lower bound on complete records available.
-        if end > 0 && bytecount(&buffer, b'\n') >= window_rows {
-            reached_file_start = false;
-            file.seek(SeekFrom::Start(end.saturating_sub(1)))?;
-            let mut preceding = [0_u8; 1];
-            file.read_exact(&mut preceding)?;
-            starts_at_line_boundary = preceding[0] == b'\n';
-            break;
-        }
-    }
-
-    let text = String::from_utf8_lossy(&buffer);
-    let mut lines: Vec<&str> = text.lines().collect();
-    if !reached_file_start && !starts_at_line_boundary && !lines.is_empty() {
-        // The first retained line began before the chunk boundary and is
-        // truncated; drop it rather than reporting it as malformed.
-        lines.remove(0);
-    }
-    if lines.len() > window_rows {
-        reached_file_start = false;
-        lines.drain(..lines.len() - window_rows);
-    }
-
-    Ok((
-        lines.into_iter().map(str::to_string).collect(),
-        reached_file_start,
-    ))
-}
-
-fn bytecount(haystack: &[u8], needle: u8) -> usize {
-    let mut count = 0;
-    let mut remaining = haystack;
-    while let Some(index) = remaining.iter().position(|byte| *byte == needle) {
-        count += 1;
-        remaining = &remaining[index + 1..];
-    }
-    count
-}
-
-fn read_hook_analytics_file(
-    path: &std::path::Path,
-    project_filter: Option<&std::path::Path>,
-    out: &mut HookAnalyticsRows,
-) {
-    let window_rows = out.window.window_rows;
-    let Ok((lines, reached_file_start)) = read_hook_analytics_tail(path, window_rows) else {
-        return;
-    };
-    // `rows_scanned` counts every line in the window; `rows_total` keeps its
-    // original meaning of well-formed rows, so malformed lines stay visible as
-    // the difference between the two rather than inflating the parsed count.
-    let rows_scanned = lines.len() as i64;
-    let mut rows_total = 0i64;
-    let mut rows_included = 0i64;
-    let mut rows_malformed = 0i64;
-    let mut first_malformed_offset = None;
-    let mut first_malformed_error = None;
-    for (index, line) in lines.iter().enumerate() {
-        let row = match serde_json::from_str::<Value>(line) {
-            Ok(row) => row,
-            Err(err) => {
-                rows_malformed += 1;
-                if first_malformed_offset.is_none() {
-                    first_malformed_offset = Some(index + 1);
-                    first_malformed_error = Some(err.to_string());
-                }
-                tracing::warn!(
-                    hook_analytics_path = %path.display(),
-                    window_line_number = index + 1,
-                    error = %err,
-                    "skipping malformed hook analytics jsonl row"
-                );
-                continue;
-            }
-        };
-        rows_total += 1;
-        let included = match project_filter {
-            None => true,
-            Some(root) => hook_row_matches_project(&row, root),
-        };
-        if included {
-            rows_included += 1;
-            out.rows.push(row);
-        }
-    }
-    out.window.rows_scanned += rows_scanned;
-    out.window.truncated |= !reached_file_start;
-    out.sources.push(json!({
-        "path": path.display().to_string(),
-        // Counts describe the trailing window only. `window_truncated` is true
-        // when the file extends past it, so `rows_total` is not the file total.
-        "rows_scanned": rows_scanned,
-        "rows_total": rows_total,
-        "rows_included": rows_included,
-        "rows_malformed": rows_malformed,
-        "window_rows": window_rows as i64,
-        "window_truncated": !reached_file_start,
-        // Line numbers are relative to the window, not the file, when truncated.
-        "first_malformed_line": first_malformed_offset,
-        "first_malformed_error": first_malformed_error,
-    }));
-}
-
-/// Rows written since project attribution landed carry `project_root` and/or
-/// `event_cwd`; earlier user-level rows carry neither and stay unattributed.
-fn hook_row_matches_project(row: &Value, project_root: &std::path::Path) -> bool {
-    ["project_root", "event_cwd"].iter().any(|key| {
-        row.get(*key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| std::path::Path::new(value).starts_with(project_root))
-    })
 }
 
 fn hook_invocation_count(rows: &[Value]) -> i64 {
@@ -1635,7 +1389,7 @@ mod tests {
         AnalyticsDiagnosticsPayloadV1, HOOK_ANALYTICS_WINDOW_ROWS, HookAnalyticsRows,
         HookAnalyticsWindow, decode_analytics_contract, diagnostics_summary_from_parts,
         hint_efficacy_from_events, hint_summary_from_events, read_hook_analytics_file,
-        recent_hook_rows, sort_hook_analytics_rows,
+        read_hook_analytics_rows_from_paths_checked, recent_hook_rows, sort_hook_analytics_rows,
     };
 
     #[test]
@@ -1810,7 +1564,8 @@ mod tests {
         .unwrap();
 
         let mut rows = HookAnalyticsRows::empty();
-        read_hook_analytics_file(&store_root.join("hook_analytics.jsonl"), None, &mut rows);
+        read_hook_analytics_file(&store_root.join("hook_analytics.jsonl"), None, &mut rows)
+            .expect("read hook analytics fixture");
 
         assert_eq!(rows.rows.len(), 2);
         assert_eq!(rows.sources.len(), 1);
@@ -1825,6 +1580,22 @@ mod tests {
                 .as_str()
                 .is_some_and(|error| error.contains("EOF"))
         );
+    }
+
+    #[test]
+    fn checked_hook_read_reports_missing_sources_instead_of_empty_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_store = dir.path().join("missing-store");
+
+        let outcome = read_hook_analytics_rows_from_paths_checked(Some(&missing_store), None, None);
+
+        assert_eq!(outcome.sources_attempted, 1);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(
+            outcome.failures[0].path,
+            missing_store.join("hook_analytics.jsonl")
+        );
+        assert!(outcome.rows.rows.is_empty());
     }
 
     /// Writes `count` chronologically ordered hook rows, each padded so the
@@ -1853,7 +1624,7 @@ mod tests {
 
         let mut rows = HookAnalyticsRows::empty();
         rows.window.window_rows = 250;
-        read_hook_analytics_file(&path, None, &mut rows);
+        read_hook_analytics_file(&path, None, &mut rows).expect("read hook analytics fixture");
 
         assert_eq!(rows.rows.len(), 250);
         // The window is the newest suffix, and no row is truncated mid-line.
@@ -1871,7 +1642,7 @@ mod tests {
         write_hook_analytics_fixture(&path, 40);
 
         let mut rows = HookAnalyticsRows::empty();
-        read_hook_analytics_file(&path, None, &mut rows);
+        read_hook_analytics_file(&path, None, &mut rows).expect("read hook analytics fixture");
 
         assert_eq!(rows.rows.len(), 40);
         assert_eq!(rows.rows[0]["session_id"], json!("session-000000"));
@@ -1907,7 +1678,7 @@ mod tests {
 
         let mut rows = HookAnalyticsRows::empty();
         rows.window.window_rows = 1_024;
-        read_hook_analytics_file(&path, None, &mut rows);
+        read_hook_analytics_file(&path, None, &mut rows).expect("read hook analytics fixture");
 
         assert_eq!(rows.rows.len(), 1_024);
         assert_eq!(rows.rows[0]["session_id"], json!("session-001024"));
@@ -1922,7 +1693,8 @@ mod tests {
 
         let mut hook_analytics = HookAnalyticsRows::empty();
         hook_analytics.window.window_rows = 100;
-        read_hook_analytics_file(&path, None, &mut hook_analytics);
+        read_hook_analytics_file(&path, None, &mut hook_analytics)
+            .expect("read hook analytics fixture");
         sort_hook_analytics_rows(&mut hook_analytics.rows);
 
         let summary = diagnostics_summary_from_parts(0, &hook_analytics, None);

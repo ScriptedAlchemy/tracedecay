@@ -178,7 +178,7 @@ async fn invoke_accounting_authority(
     );
     let semantic_error = matches!(
         value.get("status").and_then(Value::as_str),
-        Some("unavailable" | "cancelled" | "timed_out")
+        Some("unavailable" | "cancelled" | "timed_out" | "effect_unknown")
     );
     json_result(&value).with_semantic_error(semantic_error)
 }

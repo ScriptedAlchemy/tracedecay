@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use tracedecay_application::AccountingSourceV1;
 
 use crate::global_db::RegisteredGlobalDb;
 
@@ -129,10 +130,11 @@ pub(crate) async fn analytics_diagnostics_with_db(
     user_sessions: Option<&RegisteredGlobalDb>,
     project_root: Option<&Path>,
     project_store_root: Option<&Path>,
+    profile_hook_path: &Path,
     hook_sources: Vec<HookImportSource>,
     all_projects: bool,
     no_sync: bool,
-) -> crate::errors::Result<Value> {
+) -> Result<AnalyticsDiagnosticsResult, AnalyticsDiagnosticsError> {
     const EVENT_SAMPLE_LIMIT: usize = 10_000;
 
     let import = if no_sync {
@@ -158,32 +160,87 @@ pub(crate) async fn analytics_diagnostics_with_db(
             limit: EVENT_SAMPLE_LIMIT,
         })
         .await
-        .map_err(cli_error)?;
-    let observatory = crate::application::observability::observatory_read_model(
+        .map_err(|reason| {
+            AnalyticsDiagnosticsError::new(AccountingSourceV1::AccountingLedger, reason)
+        })?;
+    let observatory = crate::application::observability::observatory_read_model_checked(
         gdb,
         project_filter.as_deref(),
         0,
     )
-    .await;
+    .await
+    .map_err(|reason| {
+        AnalyticsDiagnosticsError::new(AccountingSourceV1::AccountingLedger, reason)
+    })?;
     let observatory = crate::application::observability::observatory_cli_value(&observatory)
-        .map_err(cli_error)?;
-    let costs =
-        crate::application::observability::costs_read_model(gdb, project_filter.as_deref(), 0)
-            .await;
-    let costs = crate::application::observability::costs_cli_value(&costs).map_err(cli_error)?;
+        .map_err(|error| {
+            AnalyticsDiagnosticsError::new(AccountingSourceV1::AccountingLedger, error.to_string())
+        })?;
+    let costs = crate::application::observability::costs_read_model_checked(
+        gdb,
+        project_filter.as_deref(),
+        0,
+    )
+    .await
+    .map_err(|reason| {
+        AnalyticsDiagnosticsError::new(AccountingSourceV1::AccountingLedger, reason)
+    })?;
+    let costs = crate::application::observability::costs_cli_value(&costs).map_err(|error| {
+        AnalyticsDiagnosticsError::new(AccountingSourceV1::AccountingLedger, error.to_string())
+    })?;
     let event_rows: Vec<Value> = events
         .iter()
         .map(crate::dashboard::analytics_api::durable_analytics_event_row)
         .collect();
 
-    let hook_filter_root = if all_projects { None } else { project_root };
-    let hook_analytics = crate::dashboard::analytics_api::read_hook_analytics_rows_at(
-        project_store_root,
-        hook_filter_root,
-    );
+    let hook_filter_root = if all_projects {
+        None
+    } else {
+        project_root.map(Path::to_path_buf)
+    };
+    let project_store_root = project_store_root.map(Path::to_path_buf);
+    let profile_hook_path = profile_hook_path.to_path_buf();
+    let hook_read = tokio::task::spawn_blocking(move || {
+        crate::dashboard::analytics_api::read_hook_analytics_rows_from_paths_checked(
+            project_store_root.as_deref(),
+            Some(&profile_hook_path),
+            hook_filter_root.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| {
+        AnalyticsDiagnosticsError::new(
+            AccountingSourceV1::HookAnalytics,
+            format!("hook analytics diagnostics read failed: {error}"),
+        )
+    })?;
+    let hook_failures = hook_read
+        .failures
+        .iter()
+        .map(|failure| {
+            json!({
+                "path": failure.path.display().to_string(),
+                "reason": failure.reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    let hook_sources_attempted = hook_read.sources_attempted;
+    let hook_sources_failed = hook_failures.len();
+    let hook_analytics = hook_read.rows;
 
     let message_count =
-        registered_diagnostics_message_count(project_sessions, user_sessions, all_projects).await?;
+        registered_diagnostics_message_count(project_sessions, user_sessions, all_projects)
+            .await
+            .map_err(|error| {
+                AnalyticsDiagnosticsError::new(
+                    if all_projects {
+                        AccountingSourceV1::ProfileSessions
+                    } else {
+                        AccountingSourceV1::ProjectSessions
+                    },
+                    error.to_string(),
+                )
+            })?;
 
     let durable = if event_rows.is_empty() {
         None
@@ -204,6 +261,14 @@ pub(crate) async fn analytics_diagnostics_with_db(
         summary.insert("costs".to_string(), costs);
         summary.insert("import".to_string(), import);
         summary.insert(
+            "hook_read".to_string(),
+            json!({
+                "sources_attempted": hook_read.sources_attempted,
+                "sources_failed": hook_failures.len(),
+                "failures": hook_failures,
+            }),
+        );
+        summary.insert(
             "global_db".to_string(),
             json!(gdb.db_path().display().to_string()),
         );
@@ -213,7 +278,31 @@ pub(crate) async fn analytics_diagnostics_with_db(
             json!(event_rows.len() >= EVENT_SAMPLE_LIMIT),
         );
     }
-    Ok(summary)
+    Ok(AnalyticsDiagnosticsResult {
+        payload: summary,
+        hook_sources_attempted,
+        hook_sources_failed,
+    })
+}
+
+pub(crate) struct AnalyticsDiagnosticsResult {
+    pub(crate) payload: Value,
+    pub(crate) hook_sources_attempted: usize,
+    pub(crate) hook_sources_failed: usize,
+}
+
+pub(crate) struct AnalyticsDiagnosticsError {
+    pub(crate) source: AccountingSourceV1,
+    pub(crate) reason: String,
+}
+
+impl AnalyticsDiagnosticsError {
+    fn new(source: AccountingSourceV1, reason: impl Into<String>) -> Self {
+        Self {
+            source,
+            reason: reason.into(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -285,12 +374,14 @@ mod tests {
             None,
             None,
             None,
+            Path::new("/profile/hook_analytics.jsonl"),
             Vec::new(),
             true,
             true,
         )
         .await
         .expect("CLI diagnostics");
+        let output = output.payload;
 
         assert!(
             output["observatory"]["metrics"]

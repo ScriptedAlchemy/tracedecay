@@ -127,7 +127,7 @@ impl DaemonAccountingAuthority {
     async fn execute(
         &self,
         operation: AccountingOperationV1,
-    ) -> Result<ServedAccountingPayload, String> {
+    ) -> Result<ServedAccountingPayload, AccountingExecutionError> {
         match operation {
             AccountingOperationV1::CostSummary { range } => self.cost_summary(range).await,
             AccountingOperationV1::AnalyticsSync => self.analytics_sync().await,
@@ -139,7 +139,10 @@ impl DaemonAccountingAuthority {
         }
     }
 
-    async fn cost_summary(&self, range: String) -> Result<ServedAccountingPayload, String> {
+    async fn cost_summary(
+        &self,
+        range: String,
+    ) -> Result<ServedAccountingPayload, AccountingExecutionError> {
         crate::accounting::pricing::refresh_if_stale();
         let ingest = match self.transcript_source_home.as_deref() {
             Some(home) => Some(crate::accounting::parser::ingest_at(&self.accounting, home).await),
@@ -158,12 +161,15 @@ impl DaemonAccountingAuthority {
             .accounting
             .try_token_breakdown_since(today_since)
             .await?;
-        let costs = crate::application::observability::costs_read_model(
+        let costs = crate::application::observability::costs_read_model_checked(
             &self.accounting,
             None,
             since as i64,
         )
-        .await;
+        .await
+        .map_err(|reason| {
+            AccountingExecutionError::new(AccountingSourceV1::AccountingLedger, reason)
+        })?;
         let (transcript_state, transcript_reason) = match ingest.as_ref() {
             Some(ingest) if ingest.sources_failed == 0 => (AccountingSourceStateV1::Complete, None),
             Some(ingest) => (
@@ -222,8 +228,10 @@ impl DaemonAccountingAuthority {
         })
     }
 
-    async fn analytics_sync(&self) -> Result<ServedAccountingPayload, String> {
-        let hook_sources = self.hook_import_sources(false).await?;
+    async fn analytics_sync(&self) -> Result<ServedAccountingPayload, AccountingExecutionError> {
+        let hook_sources = self.hook_import_sources(false).await.map_err(|reason| {
+            AccountingExecutionError::new(AccountingSourceV1::HookAnalytics, reason)
+        })?;
         let outcome =
             crate::analytics_bridge::analytics_sync_with_db(&self.accounting, hook_sources).await;
         let failed = import_failure_count(&outcome);
@@ -247,38 +255,73 @@ impl DaemonAccountingAuthority {
         &self,
         all_projects: bool,
         no_sync: bool,
-    ) -> Result<ServedAccountingPayload, String> {
+    ) -> Result<ServedAccountingPayload, AccountingExecutionError> {
         let project_root = self.project.as_ref().map(|project| project.root.as_path());
         let project_store_root = match self.project.as_ref() {
             Some(project) => Some(project.graph.read().await.store_layout().data_root.clone()),
             None => None,
         };
         if !all_projects && project_root.is_some() && self.project_sessions.is_none() {
-            return Err("registered project session authority is unavailable".to_owned());
+            return Err(AccountingExecutionError::new(
+                AccountingSourceV1::ProjectSessions,
+                "registered project session authority is unavailable",
+            ));
         }
         if all_projects && self.profile_sessions.is_none() {
-            return Err("registered profile session authority is unavailable".to_owned());
+            return Err(AccountingExecutionError::new(
+                AccountingSourceV1::ProfileSessions,
+                "registered profile session authority is unavailable",
+            ));
         }
         if !all_projects && self.project.is_none() {
-            return Err("registered project accounting scope is unavailable".to_owned());
+            return Err(AccountingExecutionError::new(
+                AccountingSourceV1::ProjectSessions,
+                "registered project accounting scope is unavailable",
+            ));
         }
-        let hook_sources = self.hook_import_sources(all_projects).await?;
-        let payload = crate::analytics_bridge::analytics_diagnostics_with_db(
+        let hook_sources = self
+            .hook_import_sources(all_projects)
+            .await
+            .map_err(|reason| {
+                AccountingExecutionError::new(AccountingSourceV1::HookAnalytics, reason)
+            })?;
+        let diagnostics = crate::analytics_bridge::analytics_diagnostics_with_db(
             &self.accounting,
             self.project_sessions.as_deref(),
             self.profile_sessions.as_deref(),
             project_root,
             project_store_root.as_deref(),
+            &self.profile_root.join("hook_analytics.jsonl"),
             hook_sources,
             all_projects,
             no_sync,
         )
         .await
-        .map_err(|error| error.to_string())?;
-        let failed = payload
+        .map_err(|error| AccountingExecutionError::new(error.source, error.reason))?;
+        let failed = diagnostics
+            .payload
             .get("import")
             .filter(|import| !import.is_null())
             .map_or(0, import_failure_count);
+        let hook_reads_attempted = diagnostics.hook_sources_attempted;
+        let hook_reads_failed = diagnostics.hook_sources_failed;
+        let hook_read_state =
+            if hook_reads_attempted == 0 || hook_reads_failed == hook_reads_attempted {
+                AccountingSourceStateV1::Unavailable
+            } else if hook_reads_failed > 0 || failed > 0 {
+                AccountingSourceStateV1::Partial
+            } else {
+                AccountingSourceStateV1::Complete
+            };
+        let hook_reason = if hook_reads_attempted == 0 {
+            Some("diagnostics hook read receipt is unavailable".to_owned())
+        } else if hook_reads_failed > 0 || failed > 0 {
+            Some(format!(
+                "{hook_reads_failed} diagnostics read source(s) and {failed} import source(s) failed"
+            ))
+        } else {
+            None
+        };
         let mut coverage = vec![
             source_coverage(
                 AccountingSourceV1::AccountingLedger,
@@ -287,14 +330,8 @@ impl DaemonAccountingAuthority {
             ),
             source_coverage(
                 AccountingSourceV1::HookAnalytics,
-                if no_sync {
-                    AccountingSourceStateV1::NotRequested
-                } else if failed == 0 {
-                    AccountingSourceStateV1::Complete
-                } else {
-                    AccountingSourceStateV1::Partial
-                },
-                (failed > 0).then(|| format!("{failed} hook analytics source(s) failed")),
+                hook_read_state,
+                hook_reason,
             ),
         ];
         coverage.push(source_coverage(
@@ -307,7 +344,7 @@ impl DaemonAccountingAuthority {
             None,
         ));
         Ok(ServedAccountingPayload {
-            payload,
+            payload: diagnostics.payload,
             scope: self.scope(!all_projects && self.project.is_some()),
             coverage,
             ingest_guarantee: if no_sync {
@@ -318,7 +355,7 @@ impl DaemonAccountingAuthority {
         })
     }
 
-    async fn status_accounting(&self) -> Result<ServedAccountingPayload, String> {
+    async fn status_accounting(&self) -> Result<ServedAccountingPayload, AccountingExecutionError> {
         let project = self
             .project
             .as_ref()
@@ -385,6 +422,13 @@ impl DaemonAccountingAuthority {
                                 registered.project_id
                             )
                         })?;
+                    if layout.identity.project_id.as_deref() != Some(registered.project_id.as_str())
+                    {
+                        return Err(format!(
+                            "registered accounting project '{}' resolved store identity {:?}",
+                            registered.project_id, layout.identity.project_id
+                        ));
+                    }
                     let path = layout.data_root.join("hook_analytics.jsonl");
                     if !sources.iter().any(|source| source.path == path) {
                         sources.push(crate::analytics_bridge::HookImportSource {
@@ -419,6 +463,12 @@ impl AccountingAuthorityPort for DaemonAccountingAuthority {
             );
             let unavailable_scope = self.scope(include_project);
             let started_at = tracedecay_application::clock::now_micros();
+            let effect_source = accounting_effect_source(&invocation.operation);
+            let before_operation_stage = if effect_source.is_some() {
+                CancellationStage::BeforeEffect
+            } else {
+                CancellationStage::BeforeRead
+            };
             if invocation.cancellation.is_cancelled() {
                 return terminal_without_payload(
                     unavailable_scope,
@@ -426,6 +476,7 @@ impl AccountingAuthorityPort for DaemonAccountingAuthority {
                     started_at,
                     started_at,
                     OperationTermination::Cancelled,
+                    before_operation_stage,
                 );
             }
             let Some(remaining) = remaining_until(&invocation.deadline, started_at) else {
@@ -435,6 +486,7 @@ impl AccountingAuthorityPort for DaemonAccountingAuthority {
                     started_at,
                     started_at,
                     OperationTermination::TimedOut,
+                    before_operation_stage,
                 );
             };
             let operation_name = invocation.operation.name();
@@ -456,7 +508,7 @@ impl AccountingAuthorityPort for DaemonAccountingAuthority {
                     } else {
                         OperationTermination::Completed
                     };
-                    let receipt = receipt(&invocation, started_at, ended_at, termination);
+                    let receipt = receipt(&invocation, started_at, ended_at, termination, None);
                     let response = AccountingResponseV1 {
                         scope: served.scope,
                         payload: served.payload,
@@ -470,28 +522,40 @@ impl AccountingAuthorityPort for DaemonAccountingAuthority {
                         AccountingOutcomeV1::Complete(response)
                     }
                 }
-                Controlled::Completed(Err(reason)) => unavailable(
+                Controlled::Completed(Err(error)) => unavailable(
                     unavailable_scope,
-                    format!("{operation_name} unavailable: {reason}"),
-                    AccountingSourceV1::AccountingLedger,
+                    format!("{operation_name} unavailable: {}", error.reason),
+                    error.source,
                     &invocation,
                     started_at,
                     ended_at,
                 ),
-                Controlled::Cancelled => terminal_without_payload(
-                    unavailable_scope,
-                    &invocation,
-                    started_at,
-                    ended_at,
-                    OperationTermination::Cancelled,
-                ),
-                Controlled::TimedOut => terminal_without_payload(
-                    unavailable_scope,
-                    &invocation,
-                    started_at,
-                    ended_at,
-                    OperationTermination::TimedOut,
-                ),
+                Controlled::Cancelled => match effect_source {
+                    Some(source) => {
+                        effect_unknown(unavailable_scope, source, &invocation, started_at, ended_at)
+                    }
+                    None => terminal_without_payload(
+                        unavailable_scope,
+                        &invocation,
+                        started_at,
+                        ended_at,
+                        OperationTermination::Cancelled,
+                        CancellationStage::DuringRead,
+                    ),
+                },
+                Controlled::TimedOut => match effect_source {
+                    Some(source) => {
+                        effect_unknown(unavailable_scope, source, &invocation, started_at, ended_at)
+                    }
+                    None => terminal_without_payload(
+                        unavailable_scope,
+                        &invocation,
+                        started_at,
+                        ended_at,
+                        OperationTermination::TimedOut,
+                        CancellationStage::DuringRead,
+                    ),
+                },
             }
         })
     }
@@ -502,6 +566,26 @@ struct ServedAccountingPayload {
     scope: AccountingScopeV1,
     coverage: Vec<AccountingSourceCoverageV1>,
     ingest_guarantee: AccountingIngestGuaranteeV1,
+}
+
+struct AccountingExecutionError {
+    source: AccountingSourceV1,
+    reason: String,
+}
+
+impl AccountingExecutionError {
+    fn new(source: AccountingSourceV1, reason: impl Into<String>) -> Self {
+        Self {
+            source,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl From<String> for AccountingExecutionError {
+    fn from(reason: String) -> Self {
+        Self::new(AccountingSourceV1::AccountingLedger, reason)
+    }
 }
 
 enum Controlled<T> {
@@ -540,13 +624,10 @@ fn receipt(
     started_at: UtcMicros,
     ended_at: UtcMicros,
     termination: OperationTermination,
+    cancellation_stage: Option<CancellationStage>,
 ) -> OperationReceipt {
-    let cancellation = matches!(
-        termination,
-        OperationTermination::Cancelled | OperationTermination::TimedOut
-    )
-    .then(|| CancellationObservation {
-        stage: CancellationStage::DuringRead,
+    let cancellation = cancellation_stage.map(|stage| CancellationObservation {
+        stage,
         observed_at: ended_at,
     });
     OperationReceipt {
@@ -569,8 +650,15 @@ fn terminal_without_payload(
     started_at: UtcMicros,
     observed_at: UtcMicros,
     termination: OperationTermination,
+    cancellation_stage: CancellationStage,
 ) -> AccountingOutcomeV1 {
-    let receipt = receipt(invocation, started_at, observed_at, termination);
+    let receipt = receipt(
+        invocation,
+        started_at,
+        observed_at,
+        termination,
+        Some(cancellation_stage),
+    );
     match termination {
         OperationTermination::Cancelled => AccountingOutcomeV1::Cancelled { scope, receipt },
         OperationTermination::TimedOut => AccountingOutcomeV1::TimedOut { scope, receipt },
@@ -582,6 +670,42 @@ fn terminal_without_payload(
             started_at,
             observed_at,
         ),
+    }
+}
+
+fn effect_unknown(
+    scope: AccountingScopeV1,
+    source: AccountingSourceV1,
+    invocation: &AccountingInvocationV1,
+    started_at: UtcMicros,
+    observed_at: UtcMicros,
+) -> AccountingOutcomeV1 {
+    AccountingOutcomeV1::EffectUnknown {
+        scope,
+        coverage: vec![source_coverage(
+            source,
+            AccountingSourceStateV1::Partial,
+            Some("cancellation or deadline raced a durable accounting effect".to_owned()),
+        )],
+        receipt: receipt(
+            invocation,
+            started_at,
+            observed_at,
+            OperationTermination::EffectUnknown,
+            Some(CancellationStage::EffectInFlight),
+        ),
+    }
+}
+
+fn accounting_effect_source(operation: &AccountingOperationV1) -> Option<AccountingSourceV1> {
+    match operation {
+        AccountingOperationV1::CostSummary { .. } => Some(AccountingSourceV1::TurnTranscript),
+        AccountingOperationV1::AnalyticsSync
+        | AccountingOperationV1::AnalyticsDiagnostics { no_sync: false, .. } => {
+            Some(AccountingSourceV1::HookAnalytics)
+        }
+        AccountingOperationV1::StatusAccounting => Some(AccountingSourceV1::AccountingLedger),
+        AccountingOperationV1::AnalyticsDiagnostics { no_sync: true, .. } => None,
     }
 }
 
@@ -607,6 +731,7 @@ fn unavailable(
             started_at,
             ended_at,
             OperationTermination::Unavailable,
+            None,
         ),
     }
 }
@@ -639,11 +764,11 @@ fn import_failure_count(import: &Value) -> usize {
 mod tests {
     use tracedecay_application::{
         AccountingInvocationV1, AccountingOperationV1, AccountingOutcomeV1, AccountingScopeV1,
-        CancellationSignal, Deadline, OperationTermination, RequestId,
+        CancellationSignal, CancellationStage, Deadline, OperationTermination, RequestId,
     };
     use tracedecay_domain::{UserProfileId, UtcMicros};
 
-    use super::terminal_without_payload;
+    use super::{accounting_effect_source, effect_unknown, terminal_without_payload};
 
     fn invocation() -> AccountingInvocationV1 {
         AccountingInvocationV1 {
@@ -670,6 +795,7 @@ mod tests {
             UtcMicros(10),
             UtcMicros(20),
             OperationTermination::TimedOut,
+            CancellationStage::DuringRead,
         );
         let AccountingOutcomeV1::TimedOut { receipt, .. } = outcome else {
             panic!("expected timed-out accounting outcome");
@@ -678,5 +804,39 @@ mod tests {
         assert_eq!(receipt.ended_at, UtcMicros(20));
         assert_eq!(receipt.termination, OperationTermination::TimedOut);
         receipt.validate().expect("valid terminal receipt");
+    }
+
+    #[test]
+    fn mutating_accounting_cancellation_reports_unknown_effect() {
+        assert_eq!(
+            accounting_effect_source(&AccountingOperationV1::AnalyticsSync),
+            Some(tracedecay_application::AccountingSourceV1::HookAnalytics)
+        );
+        let outcome = effect_unknown(
+            scope(),
+            tracedecay_application::AccountingSourceV1::HookAnalytics,
+            &invocation(),
+            UtcMicros(10),
+            UtcMicros(20),
+        );
+        let AccountingOutcomeV1::EffectUnknown {
+            coverage, receipt, ..
+        } = outcome
+        else {
+            panic!("expected unknown accounting effect");
+        };
+        assert_eq!(
+            receipt
+                .cancellation
+                .as_ref()
+                .expect("cancellation observation")
+                .stage,
+            CancellationStage::EffectInFlight
+        );
+        assert_eq!(
+            coverage[0].source,
+            tracedecay_application::AccountingSourceV1::HookAnalytics
+        );
+        receipt.validate().expect("valid effect receipt");
     }
 }

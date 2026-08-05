@@ -119,6 +119,11 @@ pub enum AccountingOutcomeV1 {
         scope: AccountingScopeV1,
         receipt: OperationReceipt,
     },
+    EffectUnknown {
+        scope: AccountingScopeV1,
+        coverage: Vec<AccountingSourceCoverageV1>,
+        receipt: OperationReceipt,
+    },
     Unavailable {
         scope: AccountingScopeV1,
         reason: String,
@@ -134,6 +139,7 @@ impl AccountingOutcomeV1 {
             Self::Partial(_) => OperationTermination::Partial,
             Self::Cancelled { .. } => OperationTermination::Cancelled,
             Self::TimedOut { .. } => OperationTermination::TimedOut,
+            Self::EffectUnknown { .. } => OperationTermination::EffectUnknown,
             Self::Unavailable { .. } => OperationTermination::Unavailable,
         }
     }
