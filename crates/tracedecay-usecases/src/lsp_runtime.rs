@@ -65,7 +65,8 @@ use crate::feedback::owner::{
 };
 pub use crate::lsp_support::{
     BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, DaemonSemanticProviderAdapter,
-    LspDiagnosticDocumentPort, LspSemanticRequestAuthority,
+    FederatedLspProviderAuthority, LspDiagnosticDocumentPort, LspSemanticRequestAuthority,
+    LspWorkspaceDocumentIndexPort, PreparedFederatedLspProviderRoutes,
 };
 use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
