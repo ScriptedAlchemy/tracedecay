@@ -75,9 +75,6 @@ impl AgentIntegration for CodexIntegration {
         &self,
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
-        if codex_plugin_is_natively_active(&ctx.home)? {
-            return Ok(NonInteractiveInstallOutcome::Ready);
-        }
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
         codex_non_interactive_install_state(
             &ctx.home,

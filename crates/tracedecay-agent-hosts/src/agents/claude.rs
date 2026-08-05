@@ -64,9 +64,6 @@ impl AgentIntegration for ClaudeIntegration {
         &self,
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
-        if claude_plugin_is_natively_active(&ctx.home)? {
-            return Ok(NonInteractiveInstallOutcome::Ready);
-        }
         let deploy_dir = deploy_plugin_bundle(&ctx.home, &ctx.tracedecay_bin)?;
         claude_non_interactive_install_state(&ctx.home, vec![deploy_dir])
     }

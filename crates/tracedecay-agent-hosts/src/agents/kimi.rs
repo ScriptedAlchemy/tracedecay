@@ -73,10 +73,12 @@ impl AgentIntegration for KimiIntegration {
         &self,
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
+        let deferred = stage_kimi_install_action(ctx)?;
         if kimi_plugin_is_natively_active(&ctx.home, &kimi_code_home(&ctx.home))? {
-            return Ok(NonInteractiveInstallOutcome::Ready);
+            Ok(NonInteractiveInstallOutcome::Ready)
+        } else {
+            Ok(NonInteractiveInstallOutcome::DeferredUserAction(deferred))
         }
-        stage_kimi_install_action(ctx).map(NonInteractiveInstallOutcome::DeferredUserAction)
     }
 
     fn interactive_activation_guidance(&self) -> Option<String> {
