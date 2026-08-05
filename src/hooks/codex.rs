@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
+#[cfg(test)]
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::claude::is_code_research_prompt;
@@ -15,8 +16,7 @@ use super::post_tool_use::{
     trusted_tool_failure,
 };
 use super::steering::{
-    HookWorkspaceStatus, append_context_recovery_hint, build_codex_session_context_for_workspace,
-    cursor_index_signals_for_root, session_start_from_compaction,
+    HookWorkspaceStatus, build_codex_session_context_for_workspace, cursor_index_signals_for_root,
 };
 use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
@@ -57,25 +57,30 @@ pub async fn hook_codex_session_start() -> i32 {
         &event,
         &parsed,
     );
-    if let (Some(root), Some(event)) = (root.as_ref(), codex_session_start_hook_event(&parsed)) {
-        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
+    let guidance = if let Some(root) = root.as_deref() {
+        super::v2::dispatch(
+            tracedecay_hooks::HookHostV1::Codex,
+            &event,
+            root,
+            Some(&hook_telemetry),
+        )
+        .await
+        .into_recorded_guidance(&hook_telemetry)
+        .flatten()
+    } else {
+        None
+    };
+    match guidance {
+        Some(guidance) => println!(
+            "{}",
+            codex_additional_context_json("SessionStart", &guidance)
+        ),
+        None => println!("{}", serde_json::json!({})),
     }
-    let (mut context, _) = codex_session_context_for_event(&event).await;
-    let session_id = event_session_id(&parsed);
-    if root.is_none() && ingest_user_codex_session(session_id.clone(), Some(&hook_telemetry)).await
-    {
-        super::schedule_user_session_review("codex", session_id.as_deref());
-    }
-    if session_start_from_compaction(&event) {
-        append_context_recovery_hint(&mut context);
-    }
-    println!(
-        "{}",
-        codex_additional_context_json("SessionStart", &context)
-    );
     0
 }
 
+#[cfg(test)]
 fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
     event_cwd_from_parsed(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Codex, cwd))
 }
@@ -175,13 +180,31 @@ pub async fn hook_codex_post_tool_use() -> i32 {
     // analytics, the hint decision, and the daemon notification all read it.
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(&parsed).await;
-    let _hook_telemetry = record_hook_invoked_parsed(
+    let hook_telemetry = record_hook_invoked_parsed(
         root.as_deref(),
         HintAgent::Codex,
         "PostToolUse",
         &event,
         &parsed,
     );
+    if let Some(root) = root.as_deref()
+        && let Some(guidance) = super::v2::dispatch(
+            tracedecay_hooks::HookHostV1::Codex,
+            &event,
+            root,
+            Some(&hook_telemetry),
+        )
+        .await
+        .into_recorded_guidance(&hook_telemetry)
+    {
+        if let Some(guidance) = guidance {
+            println!(
+                "{}",
+                codex_additional_context_json("PostToolUse", &guidance)
+            );
+        }
+        return 0;
+    }
     if let Some(context) = codex_post_tool_use_hint(&parsed) {
         println!("{}", codex_additional_context_json("PostToolUse", &context));
     }
