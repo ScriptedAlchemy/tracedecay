@@ -8,14 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
-use tracedecay_hooks::{DaemonHookEvent, HookAgent};
+use tracedecay_hooks::DaemonHookEvent;
 
 use super::post_tool_use::{
     EmptyPathPolicy, captured_tool_output, notify_edited_paths, trusted_tool_failure,
-};
-use super::steering::{
-    append_context_recovery_hint, build_cursor_session_context, cursor_index_signals_for_root,
-    session_start_from_compaction,
 };
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint};
 use super::{
@@ -35,8 +31,6 @@ pub const CURSOR_CATCH_UP_INGEST_MAX_BYTES: u64 =
 /// Hard wall-clock budget for the `beforeSubmitPrompt` tail ingest. Well under
 /// Cursor's 5s hook timeout; on expiry we fail open and let heavier hooks catch up.
 const CURSOR_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
-/// Budget for the `sessionStart` catch-up ingest (registered with a 5s timeout).
-const CURSOR_SESSION_INGEST_BUDGET: Duration = Duration::from_secs(4);
 /// Budget for the end-of-turn `stop` catch-up ingest (registered with a 30s timeout).
 const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
 
@@ -330,52 +324,27 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
     0
 }
 
-/// Cursor `sessionStart` hook handler (fire-and-forget).
-///
-/// Emits Cursor's `sessionStart` output shape (`additional_context` + `env`)
-/// steering the agent toward tracedecay MCP tools and reporting index freshness
-/// for the resolved workspace. Never blocks session creation.
+/// Cursor `sessionStart` hook handler.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
-    if let (Some(root), Some(event)) = (root.as_ref(), cursor_session_start_hook_event(&parsed)) {
-        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
-    }
-    ingest_cursor_transcript_for_event_inner(
-        &event,
-        Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
-        CURSOR_SESSION_INGEST_BUDGET,
-        Some(&hook_telemetry),
-    )
-    .await;
-    let mut context = cursor_session_context_for_root(root.as_deref()).await;
-    if session_start_from_compaction(&event) {
-        append_context_recovery_hint(&mut context);
-    }
-    println!("{}", cursor_session_start_json(root.as_deref(), &context));
+    println!("{}", cursor_session_start_response(&event).await);
     0
 }
 
-fn cursor_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
-    cursor_event_cwd(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Cursor, cwd))
-}
-
-/// Builds the lean Cursor `sessionStart` context for a resolved project root.
-///
-/// Adds index freshness, the skill index, and tokens-saved counter that the
-/// always-on plugin rule cannot know.
-async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
-    let (initialized, staleness, tokens_saved) = match root {
-        Some(r) if crate::tracedecay::TraceDecay::is_initialized(r) => {
-            let (staleness, tokens_saved) = cursor_index_signals_for_root(r).await;
-            (true, staleness, tokens_saved)
-        }
-        _ => (false, None, None),
-    };
-    build_cursor_session_context(initialized, staleness.as_deref(), tokens_saved)
+async fn cursor_session_start_response(event: &str) -> String {
+    let root = cursor_project_root_from_event_with_identity(event).await;
+    let hook_telemetry =
+        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", event);
+    let guidance = super::v2::dispatch_for_scope(
+        tracedecay_hooks::HookHostV1::CursorDesktop,
+        event,
+        root.as_deref(),
+        Some(&hook_telemetry),
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    .flatten();
+    cursor_session_start_json(root.as_deref(), guidance.as_deref().unwrap_or(""))
 }
 
 /// Cursor `afterShellExecution` hook handler.
@@ -896,9 +865,8 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
 /// Builds the redundancy-hint input for a Cursor `afterFileEdit` event.
 ///
 /// `afterFileEdit` reports `file_path` at the top level and the applied edit(s)
-/// as `edits: [{ old_string, new_string }]`. We join the `new_string`s (mirroring
-/// the Claude `MultiEdit` handling in [`super::post_tool_use::tool_input_edit_text`])
-/// into `edit_text` and label the synthetic tool `Edit` so the shared
+/// as `edits: [{ old_string, new_string }]`. We join the `new_string`s into
+/// `edit_text` and label the synthetic tool `Edit` so the shared
 /// [`is_redundancy_candidate_edit`](super::tool_hints) classifier recognizes it.
 /// Prompt/command/subagent fields are left empty: this surface only ever drives
 /// the edit-shaped categories (redundancy and harness-memory edits), never a
@@ -1007,21 +975,6 @@ mod tests {
         assert_eq!(calls[0].1["max_new_bytes"], 4_096);
         assert_eq!(calls[0].1["timeout_budget_ms"], 250);
         assert_eq!(calls[0].1["format"], "json");
-    }
-
-    #[test]
-    fn cursor_session_start_event_signals_daemon_with_real_cwd() {
-        let event = cursor_session_start_hook_event(&serde_json::json!({
-            "cwd": "/workspace/cursor-session"
-        }))
-        .unwrap();
-
-        assert_eq!(event.agent, HookAgent::Cursor.as_wire());
-        assert_eq!(event.event, "sessionStart");
-        assert_eq!(
-            event.cwd.as_deref(),
-            Some(Path::new("/workspace/cursor-session"))
-        );
     }
 
     #[test]
