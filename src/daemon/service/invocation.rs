@@ -200,14 +200,15 @@ mod tests;
 mod types;
 mod work;
 
-use clock::{current_micros, now_millis};
+use clock::{current_micros, now_micros, now_millis};
 use configuration::*;
 use feedback::*;
 use git::*;
+#[cfg(test)]
+use invocation_observability::invocation_rejected_argument;
 use invocation_observability::{
     emit_invocation_observation, feedback_observation_operation, invocation_observation_subject,
-    invocation_problem_rejected_argument, invocation_rejected_argument, is_observable_operation,
-    observe_invocation_response,
+    invocation_problem_rejected_argument, is_observable_operation, observe_invocation_response,
 };
 use lsp::PublishedCodeIndexWorkspaceDocuments;
 #[cfg(test)]
