@@ -97,18 +97,13 @@ mod tests {
     #[test]
     fn sdk_registry_projects_mounted_routes_as_named_direct_methods() {
         let registry = sdk_executable_binding_registry().expect("SDK registry");
-        let snapshot = registry
-            .get(&OperationId::new("operation.work.snapshot").expect("operation ID"))
-            .and_then(|availability| availability.binding())
-            .expect("mounted work snapshot");
-
-        assert_eq!(snapshot.sdk_method().as_str(), "work_snapshot");
-        assert_eq!(snapshot.binding_id().as_str(), "binding.http.work.snapshot");
-        assert!(matches!(
-            snapshot.transport(),
-            SdkTransportBindingV1::Http { route_path }
-                if route_path == "/application/work/snapshot"
-        ));
+        assert!(
+            registry.iter().all(|availability| !availability
+                .operation_id()
+                .as_str()
+                .starts_with("operation.work.")),
+            "the unavailable Work family must not leak stale SDK bindings"
+        );
 
         let workflow = registry
             .get(&OperationId::new("operation.workflow.register_definition").expect("operation ID"))

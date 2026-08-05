@@ -24,17 +24,15 @@ pub struct RegisteredGlobalDb {
     authority: DatabaseAuthority,
 }
 
-/// PR17 workflow definition/activation and task-handoff-token services over
-/// the registered exact-SQL channel.
+/// Workflow definition reads and journaled mutation authority over the
+/// registered exact-SQL channel.
 ///
 /// [`WorkflowSqliteAuthority`]: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority
 pub struct RegisteredWorkflowApplicationServicesV1 {
     definitions: tracedecay_application::WorkflowDefinitionService<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     >,
-    handoffs: tracedecay_application::TaskHandoffService<
-        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
-    >,
+    effects: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
 }
 
 impl RegisteredWorkflowApplicationServicesV1 {
@@ -46,12 +44,8 @@ impl RegisteredWorkflowApplicationServicesV1 {
         &self.definitions
     }
 
-    pub fn handoffs(
-        &self,
-    ) -> &tracedecay_application::TaskHandoffService<
-        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
-    > {
-        &self.handoffs
+    pub fn effects(&self) -> &tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority {
+        &self.effects
     }
 }
 
@@ -390,7 +384,7 @@ impl RegisteredGlobalDb {
         let authority = self.workflow_storage()?;
         Ok(RegisteredWorkflowApplicationServicesV1 {
             definitions: tracedecay_application::WorkflowDefinitionService::new(authority.clone()),
-            handoffs: tracedecay_application::TaskHandoffService::new(authority),
+            effects: authority,
         })
     }
 

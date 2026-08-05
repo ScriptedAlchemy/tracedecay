@@ -1,13 +1,17 @@
 //! Durable workflow authority over the registered Work writer.
 
 use tracedecay_application::{
-    TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrant, TaskHandoffScope, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort,
+    AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, EffectId, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
+    ResolvedScope, TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
+    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowDefinitionAuthorityError,
+    WorkflowDefinitionAuthorityPort, WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1,
+    WorkflowEffectJournalStateV1, WorkflowEffectOperationV1, WorkflowEffectOutcomeV1,
+    WorkflowEffectPreparedV1, WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
+    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId,
+    UtcMicros, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
     WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::workflow::{
@@ -81,6 +85,81 @@ fn authority(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
     WorkflowSqliteAuthority::from_registered(store.storage().clone()).unwrap()
 }
 
+fn effect_context(actor: &str) -> RequestContext {
+    let scope = ResolvedScope::new(
+        id("project.workflow.runtime-store"),
+        id("repository.workflow.runtime-store"),
+        id("worktree.workflow.runtime-store"),
+        None,
+    )
+    .unwrap();
+    let actor = id(actor);
+    let grant = CapabilityGrantSnapshot::new(
+        id::<CapabilityGrantId>("grant.workflow.runtime-store"),
+        1,
+        digest('1'),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(90_000_000),
+        scope.clone(),
+        [id("capability.workflow.handoff_issue")]
+            .into_iter()
+            .collect(),
+        [id("use-case.workflow.handoff_issue")]
+            .into_iter()
+            .collect(),
+        DisclosureClass::Metadata,
+    )
+    .unwrap();
+    RequestContext::new(
+        actor,
+        scope,
+        grant,
+        id::<RequestId>("request.workflow.runtime-store"),
+        Deadline::new(UtcMicros(80_000_000)).unwrap(),
+        CancellationContext::active("cancel.workflow.runtime-store").unwrap(),
+    )
+    .unwrap()
+}
+
+fn effect_identity(
+    operation: WorkflowEffectOperationV1,
+    actor: &str,
+    input: char,
+) -> WorkflowEffectIdentityV1 {
+    let context = effect_context(actor);
+    let policy = PolicyDecisionRef::new(
+        "policy.workflow.runtime-store.v1",
+        1,
+        digest('6'),
+        ComponentVersion::new("workflow-runtime-store.v1").unwrap(),
+    )
+    .unwrap();
+    let authority = AuthorityReceipt::from_context(&context, policy, UtcMicros(10)).unwrap();
+    let receipt_context = WorkflowEffectReceiptContextV1::new(
+        id(&format!("use-case.workflow.{}", operation.as_str())),
+        id::<EffectId>(&format!("effect.workflow.runtime-store.{input}")),
+        authority,
+        digest('7'),
+        digest('8'),
+        digest('9'),
+        digest('a'),
+    );
+    WorkflowEffectIdentityV1::new(
+        operation,
+        id::<IdempotencyKey>(&format!("workflow.effect.{input}")),
+        context.request_id().clone(),
+        context.actor().clone(),
+        context.scope().clone(),
+        digest(input),
+        UtcMicros(10),
+        context.deadline().clone(),
+        context.cancellation().clone(),
+        receipt_context,
+    )
+    .unwrap()
+}
+
 #[test]
 fn non_final_store_requires_reset_without_runtime_schema_mutation() {
     let store =
@@ -89,6 +168,7 @@ fn non_final_store_requires_reset_without_runtime_schema_mutation() {
                 .execute_batch(
                     "DROP TABLE workflow_handoffs;
                  DROP TABLE workflow_definitions;
+                 DROP TABLE workflow_effect_journal;
                  DROP TABLE workflow_schema;",
                 )
                 .unwrap();
@@ -328,4 +408,181 @@ fn definition_and_handoff_survive_registered_store_restart() {
             .unwrap(),
         TaskHandoffConsumeOutcome::Replay
     );
+}
+
+#[test]
+fn lost_issue_response_replays_the_exact_committed_terminal() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-issue-replay");
+    let authority = authority(&store);
+    let scope = handoff_scope();
+    let grant = TaskHandoffGrant::new(
+        scope,
+        token_digest(&"i".repeat(48)),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+    )
+    .unwrap();
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::HandoffIssue,
+        "actor.workflow.source",
+        '2',
+    );
+    let prepared = WorkflowEffectPreparedV1::HandoffIssue(grant.clone());
+
+    let first = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(20),
+    )
+    .unwrap();
+    let retry = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(30),
+    )
+    .unwrap();
+
+    assert_eq!(retry, first);
+    assert_eq!(first.state(), WorkflowEffectJournalStateV1::Reconciled);
+    assert_eq!(
+        first.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(grant))
+    );
+    assert_eq!(store.count("workflow_handoffs"), 1);
+}
+
+#[test]
+fn lost_redeem_response_replays_success_instead_of_token_replay() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-redeem-replay");
+    let authority = authority(&store);
+    let scope = handoff_scope();
+    let secret = "r".repeat(48);
+    let grant = TaskHandoffGrant::new(
+        scope.clone(),
+        token_digest(&secret),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+    )
+    .unwrap();
+    TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::HandoffRedeem,
+        "actor.workflow.target",
+        '3',
+    );
+    let prepared = WorkflowEffectPreparedV1::HandoffRedeem {
+        token_digest: token_digest(&secret),
+        expected_scope: scope.clone(),
+        consumed_at: UtcMicros(20),
+    };
+
+    let first = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(21),
+    )
+    .unwrap();
+    let restarted = store.restart("workflow-effect-redeem-replay");
+    let authority = authority(&restarted);
+    let retry = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(40),
+    )
+    .unwrap();
+
+    assert_eq!(retry, first);
+    assert_eq!(
+        retry.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffRedeemed(
+            TaskHandoffRedeemed { scope }
+        ))
+    );
+}
+
+#[test]
+fn rejected_effect_replays_the_exact_problem_without_reapplying() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-problem-replay");
+    let authority = authority(&store);
+    let scope = handoff_scope();
+    let grant = TaskHandoffGrant::new(
+        scope,
+        token_digest(&"p".repeat(48)),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+    )
+    .unwrap();
+    TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::HandoffIssue,
+        "actor.workflow.source",
+        '5',
+    );
+    let prepared = WorkflowEffectPreparedV1::HandoffIssue(grant);
+
+    let first = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(20),
+    )
+    .unwrap();
+    let retry = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(30),
+    )
+    .unwrap();
+
+    assert_eq!(retry, first);
+    assert_eq!(
+        retry.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Problem(
+            tracedecay_application::WorkflowEffectProblemV1::InvalidRequest
+        )
+    );
+    assert_eq!(store.count("workflow_handoffs"), 1);
+}
+
+#[test]
+fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-in-flight");
+    let authority = authority(&store);
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        '4',
+    );
+    let reserved = WorkflowEffectAuthorityPortV1::reserve_effect(&authority, &identity).unwrap();
+    assert_eq!(reserved.state(), WorkflowEffectJournalStateV1::BeforeEffect);
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE workflow_effect_journal
+                 SET state = 'in_flight'
+                 WHERE idempotency_key = ?1",
+                [identity.idempotency_key().as_str()],
+            )
+            .unwrap();
+    });
+    let restarted = store.restart("workflow-effect-in-flight");
+    let authority = authority(&restarted);
+    let prepared =
+        WorkflowEffectPreparedV1::RegisterDefinition(definition(1, "operation.prepare.v1"));
+
+    let reconciled = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(20),
+    )
+    .unwrap();
+
+    assert_eq!(reconciled.state(), WorkflowEffectJournalStateV1::Reconciled);
+    assert_eq!(restarted.count("workflow_definitions"), 1);
 }
