@@ -13,8 +13,13 @@ use tracedecay_domain::git::{
 };
 
 mod history;
+mod native_integration;
 pub use history::{
     GitHistoryBudget, GitHistoryOptions, GitHistoryTermination, GitRepositoryHistory,
+};
+pub use native_integration::{
+    GitNativeApplyOutcome, GitNativeIntegrationMode, GitNativePreflight,
+    GitNativePreflightDisposition, GitNativeUnsupportedReason,
 };
 
 /// A typed failure from the in-process Git repository authority.
