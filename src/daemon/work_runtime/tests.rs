@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, CancellationContext, CapabilityGrantSnapshot,
     CreateWorkCommand, Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
@@ -38,25 +39,23 @@ fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
 }
 
-fn execution_snapshot(route: WorkProviderRouteV1) -> WorkExecutionSnapshot {
+fn execution_snapshot(
+    route: WorkProviderRouteV1,
+    executable: WorkExecutableReference,
+    configuration_snapshot_id: ConfigurationSnapshotId,
+) -> WorkExecutionSnapshot {
     WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
         configuration_revision_id: id::<ConfigurationRevisionId>(
             "configuration-revision.work.daemon",
         ),
-        configuration_snapshot_id: id::<ConfigurationSnapshotId>(
-            "configuration-snapshot.work.daemon",
-        ),
+        configuration_snapshot_id,
         effective_behavior_digest: digest('c'),
         resolution_provenance_digest: digest('d'),
         route,
         backend: WorkProviderBackendV1::CodexAppServer,
         protocol: WorkProviderProtocol::CodexAppServerJsonRpc,
         model: "codex-work-fixture".to_owned(),
-        executable: WorkExecutableReference::new(
-            "executable.codex.app-server".to_owned(),
-            digest('e'),
-        )
-        .unwrap(),
+        executable,
         sandbox: WorkSandboxPolicy::Required,
         approval: WorkApprovalPolicy::Never,
         filesystem: WorkFilesystemPolicy::WorkspaceWrite,
@@ -329,6 +328,7 @@ impl Harness {
                 model: None,
                 timeout,
             },
+            self.executable_bindings(codex_bin).0,
             digest('c'),
             Arc::clone(&self.observation_db),
             self.project_root.clone(),
@@ -336,13 +336,18 @@ impl Harness {
         )
     }
 
-    fn execution(&self, identity: WorkAttemptIdentityV1) -> WorkExecutionEnvelopeV1 {
+    fn execution(
+        &self,
+        identity: WorkAttemptIdentityV1,
+        codex_bin: &Path,
+    ) -> WorkExecutionEnvelopeV1 {
         let projection = self
             .snapshot
             .projections()
             .iter()
             .find(|projection| projection.task_id() == identity.task_id())
             .unwrap();
+        let (_, executable, configuration_snapshot_id) = self.executable_bindings(codex_bin);
         WorkExecutionEnvelopeV1::new(
             identity,
             WorkAttemptProjectionBindingV1::new(
@@ -355,6 +360,8 @@ impl Harness {
             id::<WorkflowOperationRef>("operation.work.attempt_start"),
             execution_snapshot(
                 NativeWorkProviderV1::<WorkSqliteStorage>::codex_app_server_route().unwrap(),
+                executable,
+                configuration_snapshot_id,
             ),
             self.authority.project_id().clone(),
             self.authority.repository_id().clone(),
@@ -370,6 +377,71 @@ impl Harness {
 
     fn path(&self, name: &str) -> std::path::PathBuf {
         self.project_root.join(name)
+    }
+
+    fn executable_bindings(
+        &self,
+        codex_bin: &Path,
+    ) -> (
+        Arc<
+            dyn crate::config::work_executable_binding::WorkExecutableBindingResolver + Send + Sync,
+        >,
+        WorkExecutableReference,
+        ConfigurationSnapshotId,
+    ) {
+        let bytes = fs::read(codex_bin).unwrap();
+        let executable = WorkExecutableReference::new(
+            "executable.codex.app-server".to_owned(),
+            ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))).unwrap(),
+        )
+        .unwrap();
+        let binding = tracedecay_domain::configuration::WorkExecutableBindingV1::new(
+            executable.clone(),
+            codex_bin.canonicalize().unwrap(),
+            vec![
+                tracedecay_domain::configuration::WorkExecutableCapabilityV1::CodexAppServerJsonRpc,
+            ],
+        )
+        .unwrap();
+        let revision_id = id::<ConfigurationRevisionId>("configuration-revision.work.daemon");
+        let setting = tracedecay_domain::configuration::SettingKey::new(
+            tracedecay_domain::configuration::WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+        )
+        .unwrap();
+        let resolution = crate::config::resolver::resolve_configuration(
+            &crate::config::registry::ConfigurationRegistry::core().unwrap(),
+            &[crate::config::resolver::ConfigurationLayerV1 {
+                layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                    project_id: self.authority.project_id().clone(),
+                },
+                revision_id: revision_id.clone(),
+                entries: std::collections::BTreeMap::from([(
+                    setting,
+                    tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
+                        vec![binding],
+                    ),
+                )]),
+            }],
+        )
+        .unwrap();
+        let configuration_snapshot_id = resolution.snapshot.snapshot_id.clone();
+        let pinned = crate::config::PinnedRuntimeConfiguration::new(
+            crate::config::RuntimeConfigurationTarget {
+                project_id: self.authority.project_id().clone(),
+                project_root: self.project_root.clone(),
+            },
+            revision_id,
+            resolution.snapshot,
+        )
+        .unwrap();
+        (
+            crate::config::work_executable_binding::PinnedWorkExecutableBindingResolver::shared_from_configuration(
+                &pinned,
+            )
+            .unwrap(),
+            executable,
+            configuration_snapshot_id,
+        )
     }
 }
 
@@ -394,7 +466,7 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
         .acquire_lease(
             &snapshot,
             successful_identity.clone(),
-            harness.execution(successful_identity.clone()),
+            harness.execution(successful_identity.clone(), &fixture),
             lease(1),
         )
         .await
@@ -462,7 +534,7 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
         .acquire_lease(
             &snapshot,
             cancelled_identity.clone(),
-            harness.execution(cancelled_identity.clone()),
+            harness.execution(cancelled_identity.clone(), &fixture),
             lease(1),
         )
         .await
@@ -494,7 +566,7 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
         .acquire_lease(
             &snapshot,
             resumed_identity.clone(),
-            harness.execution(resumed_identity.clone()),
+            harness.execution(resumed_identity.clone(), &fixture),
             lease(1),
         )
         .await
@@ -524,7 +596,7 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
         .acquire_lease(
             &snapshot,
             restarted_identity.clone(),
-            harness.execution(restarted_identity.clone()),
+            harness.execution(restarted_identity.clone(), &fixture),
             lease(1),
         )
         .await
@@ -554,7 +626,7 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
         .acquire_lease(
             &snapshot,
             recovery_identity.clone(),
-            harness.execution(recovery_identity.clone()),
+            harness.execution(recovery_identity.clone(), &fixture),
             lease(1),
         )
         .await
@@ -616,7 +688,7 @@ async fn codex_cancel_terminates_and_reaps_stubborn_process_tree() {
         .acquire_lease(
             &harness.snapshot,
             attempt_identity.clone(),
-            harness.execution(attempt_identity.clone()),
+            harness.execution(attempt_identity.clone(), &fixture),
             lease(1),
         )
         .await
@@ -661,7 +733,7 @@ async fn saturated_work_queue_refuses_new_executions_and_keeps_the_durable_inten
         .acquire_lease(
             &harness.snapshot,
             occupying.clone(),
-            harness.execution(occupying.clone()),
+            harness.execution(occupying.clone(), &fixture),
             lease(1),
         )
         .await
@@ -677,7 +749,7 @@ async fn saturated_work_queue_refuses_new_executions_and_keeps_the_durable_inten
         .acquire_lease(
             &harness.snapshot,
             refused.clone(),
-            harness.execution(refused.clone()),
+            harness.execution(refused.clone(), &fixture),
             lease(1),
         )
         .await
@@ -734,7 +806,7 @@ async fn a_rejected_transition_starts_no_provider_execution() {
         .acquire_lease(
             &harness.snapshot,
             fenced.clone(),
-            harness.execution(fenced.clone()),
+            harness.execution(fenced.clone(), &fixture),
             lease(2),
         )
         .await
@@ -779,7 +851,7 @@ async fn a_restarted_runtime_replays_terminals_and_never_invents_success() {
         .acquire_lease(
             &harness.snapshot,
             orphaned.clone(),
-            harness.execution(orphaned.clone()),
+            harness.execution(orphaned.clone(), &fixture),
             lease(1),
         )
         .await
@@ -839,7 +911,7 @@ async fn cancelling_a_provider_that_already_completed_still_terminates_as_cancel
         .acquire_lease(
             &harness.snapshot,
             raced.clone(),
-            harness.execution(raced.clone()),
+            harness.execution(raced.clone(), &fixture),
             lease(1),
         )
         .await
@@ -885,7 +957,7 @@ async fn a_cancellation_resolves_without_an_execution_this_process_owns() {
         .acquire_lease(
             &harness.snapshot,
             stranded.clone(),
-            harness.execution(stranded.clone()),
+            harness.execution(stranded.clone(), &fixture),
             lease(1),
         )
         .await
@@ -931,7 +1003,7 @@ async fn terminalizing_an_attempt_releases_its_execution_slot() {
             .acquire_lease(
                 &harness.snapshot,
                 attempt.clone(),
-                harness.execution(attempt.clone()),
+                harness.execution(attempt.clone(), &fixture),
                 lease(1),
             )
             .await

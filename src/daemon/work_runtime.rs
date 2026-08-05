@@ -20,11 +20,13 @@ use tracedecay_domain::{
 };
 
 use crate::application::event_lane::{self, ActivityFamilyV1};
+use crate::config::work_executable_binding::WorkExecutableBindingResolver;
 use crate::daemon_contract::WorkAttemptInvocationV1;
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::codex_app_server::CodexAppServerSummaryConfig;
 
 mod codex_provider;
+mod native_cli;
 mod provider_registry;
 #[cfg(all(test, unix))]
 mod tests;
@@ -58,6 +60,7 @@ where
         authority: WorkAuthority,
         storage: S,
         config: CodexAppServerSummaryConfig,
+        executable_bindings: Arc<dyn WorkExecutableBindingResolver + Send + Sync>,
         configuration_digest: ManifestDigest,
         observation_db: Arc<RegisteredGlobalDb>,
         project_root: PathBuf,
@@ -66,6 +69,7 @@ where
             authority,
             storage,
             config,
+            executable_bindings,
             configuration_digest,
             observation_db,
             project_root,
@@ -77,6 +81,7 @@ where
         authority: WorkAuthority,
         storage: S,
         config: CodexAppServerSummaryConfig,
+        executable_bindings: Arc<dyn WorkExecutableBindingResolver + Send + Sync>,
         configuration_digest: ManifestDigest,
         observation_db: Arc<RegisteredGlobalDb>,
         project_root: PathBuf,
@@ -87,6 +92,7 @@ where
             authority.clone(),
             NativeWorkProviderConfigV1::from_registered(
                 config,
+                executable_bindings,
                 configuration_digest.clone(),
                 project_root.clone(),
             ),
@@ -112,7 +118,7 @@ where
 
     #[cfg(all(test, unix))]
     pub(crate) fn is_ready(&self) -> bool {
-        self.queue.provider().is_ready() && event_lane::enabled(Some(self.observation_db.as_ref()))
+        event_lane::enabled(Some(self.observation_db.as_ref()))
     }
 
     #[cfg(all(test, unix))]

@@ -10,7 +10,18 @@ use crate::cli::WorkflowInvocationArgs;
 pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay::errors::Result<()> {
     let body = read_request(&invocation.request_file)?;
     let project_root = tracedecay::config::resolve_path_with_discovery(invocation.project);
-    let operation = invocation.operation;
+    let operation = tracedecay_api::WorkflowOperation::from_cli_name(&invocation.operation)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "unknown Workflow operation '{}'; expected one of: {}",
+                invocation.operation,
+                tracedecay_api::WorkflowOperation::ALL
+                    .iter()
+                    .map(|operation| operation.operation_key())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        })?;
     let outcome =
         tracedecay::workflow_cli::invoke_workflow_cli(project_root.clone(), operation, body)
             .await?;
@@ -20,7 +31,7 @@ pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay::error
         let outcome = outcome.map_err(|problem| tracedecay::errors::TraceDecayError::Config {
             message: format!("{}: {}", problem.problem.code, problem.problem.message),
         })?;
-        println!("Workflow {}", operation.route_segment().replace('-', " "));
+        println!("Workflow {}", operation.operation_key().replace('_', " "));
         println!("Project: {}", project_root.display());
         println!("{}", serde_json::to_string_pretty(&outcome)?);
     }

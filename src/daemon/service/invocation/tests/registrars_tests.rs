@@ -210,6 +210,7 @@ async fn registered_work_runtime_dispatches_attempt_requests() {
                 model: None,
                 timeout: Duration::from_secs(5),
             },
+            unavailable_work_executable_bindings(),
         )
         .await
         .expect("registered Work runtime");
@@ -260,6 +261,7 @@ async fn registered_work_runtime_dispatches_attempt_requests() {
                 model: None,
                 timeout: Duration::from_secs(5),
             },
+            unavailable_work_executable_bindings(),
         )
         .await
         .expect("rotated Work runtime authority");
@@ -298,6 +300,7 @@ async fn registered_work_runtime_dispatches_attempt_requests() {
                     model: None,
                     timeout: Duration::from_secs(5),
                 },
+                unavailable_work_executable_bindings(),
             )
             .await
             .is_err()
@@ -478,6 +481,16 @@ async fn expiring_registries_reaps_running_work_executions() {
     let service = DaemonInvocationService::default();
     let configuration_digest =
         ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).expect("configuration digest");
+    let configuration_revision_id =
+        tracedecay_domain::ConfigurationRevisionId::new("configuration-revision.work.expire")
+            .expect("configuration revision");
+    let (executable_bindings, provider_executable, provider_configuration_snapshot_id) =
+        fixture_work_executable_bindings(
+            authority.project_id(),
+            project.path(),
+            &fixture,
+            configuration_revision_id.clone(),
+        );
     DaemonWorkRuntimeRegistrar::new(&service)
         .register(
             project.path().to_path_buf(),
@@ -492,6 +505,7 @@ async fn expiring_registries_reaps_running_work_executions() {
                 model: None,
                 timeout: Duration::from_secs(30),
             },
+            executable_bindings,
         )
         .await
         .expect("registered Work runtime");
@@ -529,16 +543,8 @@ async fn expiring_registries_reaps_running_work_executions() {
             .expect("operation"),
         tracedecay_domain::WorkExecutionSnapshot::new(
             tracedecay_domain::WorkExecutionSnapshotInput {
-                configuration_revision_id:
-                    tracedecay_domain::configuration::ConfigurationRevisionId::new(
-                        "configuration-revision.work.expire",
-                    )
-                    .expect("configuration revision"),
-                configuration_snapshot_id:
-                    tracedecay_domain::configuration::ConfigurationSnapshotId::new(
-                        "configuration-snapshot.work.expire",
-                    )
-                    .expect("configuration snapshot"),
+                configuration_revision_id,
+                configuration_snapshot_id: provider_configuration_snapshot_id,
                 effective_behavior_digest: configuration_digest,
                 resolution_provenance_digest: ManifestDigest::new(format!(
                     "sha256:{}",
@@ -557,12 +563,7 @@ async fn expiring_registries_reaps_running_work_executions() {
                 backend: tracedecay_domain::WorkProviderBackendV1::CodexAppServer,
                 protocol: tracedecay_domain::WorkProviderProtocol::CodexAppServerJsonRpc,
                 model: "codex-work-expire".to_owned(),
-                executable: tracedecay_domain::WorkExecutableReference::new(
-                    "executable.codex.app-server".to_owned(),
-                    ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
-                        .expect("executable digest"),
-                )
-                .expect("executable"),
+                executable: provider_executable,
                 sandbox: tracedecay_domain::WorkSandboxPolicy::Required,
                 approval: tracedecay_domain::WorkApprovalPolicy::Never,
                 filesystem: tracedecay_domain::WorkFilesystemPolicy::WorkspaceWrite,

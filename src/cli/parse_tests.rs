@@ -222,10 +222,7 @@ fn workflow_command_binds_one_closed_typed_operation() {
     let Some(Commands::Workflow { invocation }) = cli.command else {
         panic!("unexpected Workflow command");
     };
-    assert_eq!(
-        invocation.operation,
-        tracedecay_api::WorkflowOperation::ExecuteFanOut
-    );
+    assert_eq!(invocation.operation, "execute-fan-out");
     assert_eq!(
         invocation.request_file,
         std::path::Path::new("workflow.json")

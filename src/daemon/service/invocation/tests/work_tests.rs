@@ -7,16 +7,15 @@ fn workflow_execution_snapshot(
     configuration_digest: ManifestDigest,
     deadline: UtcMicros,
     model: &str,
+    executable: tracedecay_domain::WorkExecutableReference,
+    configuration_snapshot_id: tracedecay_domain::ConfigurationSnapshotId,
 ) -> tracedecay_domain::WorkExecutionSnapshot {
     tracedecay_domain::WorkExecutionSnapshot::new(tracedecay_domain::WorkExecutionSnapshotInput {
         configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId::new(
             "configuration-revision.workflow.invocation",
         )
         .expect("configuration revision"),
-        configuration_snapshot_id: tracedecay_domain::configuration::ConfigurationSnapshotId::new(
-            "configuration-snapshot.workflow.invocation",
-        )
-        .expect("configuration snapshot"),
+        configuration_snapshot_id,
         effective_behavior_digest: configuration_digest,
         resolution_provenance_digest: digest('7'),
         route: tracedecay_domain::WorkProviderRouteV1::new(
@@ -29,11 +28,7 @@ fn workflow_execution_snapshot(
         backend: tracedecay_domain::WorkProviderBackendV1::CodexAppServer,
         protocol: tracedecay_domain::WorkProviderProtocol::CodexAppServerJsonRpc,
         model: model.to_owned(),
-        executable: tracedecay_domain::WorkExecutableReference::new(
-            "executable.codex.app-server".to_owned(),
-            digest('6'),
-        )
-        .expect("executable"),
+        executable,
         sandbox: tracedecay_domain::WorkSandboxPolicy::Required,
         approval: tracedecay_domain::WorkApprovalPolicy::Never,
         filesystem: tracedecay_domain::WorkFilesystemPolicy::WorkspaceWrite,
@@ -164,6 +159,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
                 model: None,
                 timeout: Duration::from_secs(5),
             },
+            unavailable_work_executable_bindings(),
         )
         .await
         .expect("registered Work runtime");
@@ -483,6 +479,16 @@ for line in sys.stdin:
         ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest");
     let configuration_digest =
         ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).expect("configuration digest");
+    let (executable_bindings, provider_executable, provider_configuration_snapshot_id) =
+        fixture_work_executable_bindings(
+            &project_id,
+            project.path(),
+            &fixture,
+            tracedecay_domain::ConfigurationRevisionId::new(
+                "configuration-revision.workflow.invocation",
+            )
+            .expect("configuration revision"),
+        );
     let service = DaemonInvocationService::default();
     DaemonWorkRuntimeRegistrar::new(&service)
         .register(
@@ -498,6 +504,7 @@ for line in sys.stdin:
                 model: None,
                 timeout: Duration::from_secs(5),
             },
+            Arc::clone(&executable_bindings),
         )
         .await
         .expect("registered Work and Workflow runtime");
@@ -614,6 +621,8 @@ for line in sys.stdin:
                 configuration_digest.clone(),
                 UtcMicros(now.0 + 20_000_000),
                 "gpt-workflow-fixture",
+                provider_executable,
+                provider_configuration_snapshot_id,
             ),
             topology_digest: digest('8'),
             provider_registry_digest: digest('9'),
@@ -689,6 +698,7 @@ for line in sys.stdin:
                 model: None,
                 timeout: Duration::from_secs(5),
             },
+            executable_bindings,
         )
         .await
         .expect("restarted Work and Workflow runtime");

@@ -78,6 +78,35 @@ impl WorkflowOperation {
         }
     }
 
+    pub const fn operation_key(self) -> &'static str {
+        match self {
+            Self::RegisterDefinition => "register_definition",
+            Self::ValidateDefinition => "validate_definition",
+            Self::GetDefinition => "get_definition",
+            Self::ListDefinitions => "list_definitions",
+            Self::DefinitionHistory => "definition_history",
+            Self::DiffDefinition => "diff_definition",
+            Self::ActivateDefinition => "activate_definition",
+            Self::RetireDefinition => "retire_definition",
+            Self::ExecuteFanOut => "execute_fan_out",
+            Self::HandoffIssue => "handoff_issue",
+            Self::HandoffRedeem => "handoff_redeem",
+        }
+    }
+
+    pub fn from_operation_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|operation| operation.operation_key() == key)
+    }
+
+    pub fn from_cli_name(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|operation| {
+            operation.operation_key() == name || operation.route_segment() == name
+        })
+    }
+
     pub const fn route_segment(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "register-definition",
