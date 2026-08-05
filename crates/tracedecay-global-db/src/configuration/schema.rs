@@ -6,7 +6,6 @@ use tracedecay_runtime_core::db::engine::Executor;
 
 /// Version of the sealed complete topology value stored by this schema.
 pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
-pub const WORK_TOPOLOGY_POLICY_MIGRATION_RECEIPT_NAME: &str = "work-topology-policy";
 
 #[derive(Debug, Error)]
 pub enum ConfigurationSchemaError {
@@ -221,24 +220,6 @@ CREATE TABLE IF NOT EXISTS configuration_audit_redaction_keys (
     created_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS configuration_migration_quarantine (
-    source_kind TEXT NOT NULL,
-    source_key_digest TEXT NOT NULL,
-    reason_code TEXT NOT NULL,
-    redacted_value_digest TEXT NOT NULL,
-    quarantined_at INTEGER NOT NULL,
-    PRIMARY KEY(source_kind, source_key_digest, redacted_value_digest)
-);
-
-CREATE TABLE IF NOT EXISTS configuration_migration_receipts (
-    receipt_name TEXT NOT NULL,
-    source_snapshot_digest TEXT NOT NULL,
-    initial_revision_id TEXT NOT NULL,
-    initial_snapshot_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY(receipt_name, source_snapshot_digest)
-);
-
 CREATE TABLE IF NOT EXISTS configuration_credential_references (
     reference_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -360,18 +341,6 @@ BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); E
 CREATE TRIGGER IF NOT EXISTS configuration_audit_redaction_keys_immutable_delete
 BEFORE DELETE ON configuration_audit_redaction_keys
 BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_migration_quarantine_immutable_update
-BEFORE UPDATE ON configuration_migration_quarantine
-BEGIN SELECT RAISE(ABORT, 'configuration migration quarantine is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_migration_quarantine_immutable_delete
-BEFORE DELETE ON configuration_migration_quarantine
-BEGIN SELECT RAISE(ABORT, 'configuration migration quarantine is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_migration_receipts_immutable_update
-BEFORE UPDATE ON configuration_migration_receipts
-BEGIN SELECT RAISE(ABORT, 'configuration migration receipts are immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_migration_receipts_immutable_delete
-BEFORE DELETE ON configuration_migration_receipts
-BEGIN SELECT RAISE(ABORT, 'configuration migration receipts are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_credential_references_immutable_update
 BEFORE UPDATE ON configuration_credential_references
 BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
@@ -467,15 +436,6 @@ mod tests {
                       NULL, NULL, NULL, 1);
                   INSERT INTO configuration_audit_redaction_keys VALUES
                      (1, zeroblob(32), 1);
-                 INSERT INTO configuration_migration_quarantine VALUES
-                    ('config_json',
-                     'sha256:8888888888888888888888888888888888888888888888888888888888888888',
-                     'unknown_key',
-                     'sha256:9999999999999999999999999999999999999999999999999999999999999999', 1);
-                 INSERT INTO configuration_migration_receipts VALUES
-                    ('configuration-control-plane-v1',
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab',
-                     'revision.1', 'snapshot.1', 1);
                  INSERT INTO configuration_credential_references VALUES
                     ('credential.1', 'api_token',
                      'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac', 1, 0);

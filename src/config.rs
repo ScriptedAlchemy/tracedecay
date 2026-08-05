@@ -31,11 +31,7 @@ use crate::global_db::configuration::{
     CanonicalGenesisConfigurationV1, GlobalDbConfigurationControlStore,
 };
 
-pub use tracedecay_global_db::configuration::{
-    LegacyConfigurationDecodeTargetV1, decode_legacy_config_json,
-    decode_legacy_configuration_inputs, decode_legacy_environment_overrides, registry,
-    resolve_legacy_configuration_inputs, resolver,
-};
+pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_usecases::config::retrieval;
 pub mod scope_control;
 pub mod topology;
@@ -1376,28 +1372,6 @@ async fn commit_runtime_configuration_mutation(
         PinnedRuntimeConfiguration::new(current.target.clone(), next.revision_id, next.snapshot)?;
     runtime_configuration_cache().insert(next.clone())?;
     Ok(next)
-}
-
-/// Decodes a legacy file only as migration input. This function never writes
-/// the file and callers must pass the already-authorized target layer/revision
-/// supplied by the control-plane migration.
-pub fn read_legacy_configuration_inputs(
-    config_path: &Path,
-    environment: &BTreeMap<String, String>,
-    target: &LegacyConfigurationDecodeTargetV1,
-) -> Result<crate::global_db::configuration::migration::ReadonlyLegacyConfigurationInputsV1> {
-    let config_json = if config_path.exists() {
-        fs::read_to_string(config_path).map_err(|error| {
-            config_error(format!(
-                "failed to read legacy config input '{}': {error}",
-                config_path.display()
-            ))
-        })?
-    } else {
-        "{}".to_owned()
-    };
-    decode_legacy_configuration_inputs(&config_json, environment, target)
-        .map_err(|error| config_error(format!("legacy configuration input is invalid: {error}")))
 }
 
 /// Converts a complete typed snapshot into the legacy runtime shape without

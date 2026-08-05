@@ -1,8 +1,4 @@
-//! Typed configuration registry for the PR11 control plane.
-//!
-//! The legacy `config.json` model remains read-only migration input. This
-//! registry is the only definition source for settings admitted into the new
-//! revisioned control plane; adapters may not add their own defaults.
+//! Typed configuration registry for the revisioned control plane.
 
 use std::collections::BTreeMap;
 
@@ -34,10 +30,6 @@ use super::semantic::SemanticConfig;
 /// Canonical Plan 20 default for configured-tier proximity warnings.
 pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
 pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
-
-/// Read-only cutover contract used by the legacy transition bridge.
-#[path = "legacy_decoder.rs"]
-pub(crate) mod legacy_decoder;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.

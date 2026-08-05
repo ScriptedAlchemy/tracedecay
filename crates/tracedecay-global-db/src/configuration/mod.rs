@@ -11,32 +11,16 @@
 //! shim.
 
 pub mod contracts;
-pub mod migration;
+mod genesis;
 pub mod registry;
 pub mod resolver;
 pub mod schema;
 pub mod semantic;
 pub mod store;
 
-pub use migration::{
-    CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME, CanonicalGenesisConfigurationV1,
-    ConfigurationMigrationError, ConfigurationMigrationOutcomeV1,
-    ConfigurationMigrationQuarantineEntryV1, ConfigurationMigrationQuarantineReasonV1,
-    ConfigurationMigrationReceiptV1, ConfigurationMigrationStore, LegacyConfigurationEntryV1,
-    LegacyConfigurationSourceKindV1, ReadonlyLegacyConfigurationInputV1,
-    migrate_legacy_configuration, migrate_legacy_configuration_inputs,
-    migrate_legacy_configuration_inputs_with_genesis,
-};
-pub use registry::legacy_decoder::{
-    LegacyConfigurationDecodeTargetV1, decode_legacy_config_json,
-    decode_legacy_configuration_inputs, decode_legacy_environment_overrides,
-    resolve_legacy_configuration_inputs,
-};
+pub use genesis::CanonicalGenesisConfigurationV1;
 pub use schema::ensure_configuration_schema;
-pub use schema::{
-    ConfigurationSchemaError, TOPOLOGY_POLICY_SCHEMA_VERSION,
-    WORK_TOPOLOGY_POLICY_MIGRATION_RECEIPT_NAME,
-};
+pub use schema::{ConfigurationSchemaError, TOPOLOGY_POLICY_SCHEMA_VERSION};
 pub use store::{
     ConfigurationStorageError, GlobalDbConfigurationControlStore,
     OwnedGlobalDbConfigurationControlStore,

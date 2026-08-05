@@ -353,8 +353,6 @@ fn purge_configuration_rows(conn: &Connection) -> io::Result<()> {
         "PRAGMA foreign_keys = OFF;
          DELETE FROM configuration_component_activation_events;
          DELETE FROM configuration_credential_references;
-         DELETE FROM configuration_migration_receipts;
-         DELETE FROM configuration_migration_quarantine;
          DELETE FROM configuration_audit_redaction_keys;
          DELETE FROM configuration_audit_events;
          DELETE FROM configuration_mutation_receipts;
