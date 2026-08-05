@@ -458,13 +458,15 @@ impl DaemonInvocationService {
         now_ms: u64,
         lsp_owner: Option<DaemonLspInvocationOwner>,
     ) -> DaemonInvocationResponse {
-        let admission_open = self.lsp_admission_open.lock().await;
-        if !*admission_open {
+        let admission_guard = self.lsp_admission_open.lock().await;
+        if !*admission_guard {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
             );
         }
+        // Retain this bounded admission lease through endpoint and actor
+        // publication so state shutdown cannot sweep between the two.
         let Some(workspace) = workspace else {
             return DaemonInvocationResponse::problem(
                 request_id,
@@ -707,13 +709,15 @@ impl DaemonInvocationService {
         session: DaemonLspSessionAccess,
         now_ms: u64,
     ) -> DaemonInvocationResponse {
-        let admission_open = self.lsp_admission_open.lock().await;
-        if !*admission_open {
+        let admission_guard = self.lsp_admission_open.lock().await;
+        if !*admission_guard {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
             );
         }
+        // Reconnect owns this bounded admission lease until endpoint, actor,
+        // and expiry-task state have converged.
         let access = match session.into_access() {
             Ok(access) => access,
             Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
@@ -731,29 +735,38 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         };
-        let reconnected_access = lsp_registry
-            .lock()
-            .await
-            .reconnect_with_credential(&access, credential, now_ms);
-        let Ok(reconnected_access) = reconnected_access else {
+        let mut registry = lsp_registry.lock().await;
+        if registry.authenticate(&access, now_ms).is_err() {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
-        };
+        }
         if self
             .lsp_lease_tasks
             .cancel(access.session_id())
             .await
             .is_err()
         {
-            lsp_registry.lock().await.reclaim(access.session_id());
+            registry.reclaim(access.session_id());
+            drop(registry);
             self.lsp_sessions.lock().await.remove(access.session_id());
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
             );
         }
+        let reconnected_access = registry.reconnect_with_credential(&access, credential, now_ms);
+        let Ok(reconnected_access) = reconnected_access else {
+            registry.reclaim(access.session_id());
+            drop(registry);
+            self.lsp_sessions.lock().await.remove(access.session_id());
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        };
+        drop(registry);
         let mut sessions = self.lsp_sessions.lock().await;
         let Some(session) = sessions.get_mut(access.session_id()) else {
             drop(sessions);
@@ -816,7 +829,11 @@ impl DaemonInvocationService {
                 .retain(|_, session| session.expires_at_ms > expires_at_ms);
         };
         let mut registry = lsp_registry.lock().await;
-        if registry.authenticate(&access, now_ms).is_err() {
+        let lifecycle = match registry.authenticate(&access, now_ms) {
+            Ok(control) => control.lifecycle(),
+            Err(_) => return,
+        };
+        if lifecycle == SessionLifecycle::Detached {
             return;
         }
         if let Err(problem) = self.lsp_lease_tasks.start(session_id, expiry).await {
