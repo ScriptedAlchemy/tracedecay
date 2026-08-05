@@ -32,11 +32,11 @@ impl AgentIntegration for HermesIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        lifecycle::activate_catalog_plugin_profiles(ctx)
+        lifecycle::activate_deployed_plugin_registration(ctx)
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        lifecycle::deactivate_catalog_plugin_profiles(ctx)
+        lifecycle::deactivate_deployed_plugin_registration(ctx)
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -253,13 +253,22 @@ fn read_manifest_version(manifest_path: &Path) -> Option<String> {
         .filter(|version| !version.is_empty())
 }
 
-pub(super) fn install_plugin(
+pub(super) fn activate_deployed_plugin_profile(
+    deployed_plugin_dir: &Path,
     plugin_dir: &Path,
     tracedecay_bin: &str,
     deploy_dashboard: bool,
     profile_root: &Path,
 ) -> Result<()> {
-    write_plugin_files(plugin_dir, tracedecay_bin)?;
+    let deployed_files = read_deployed_plugin_files(deployed_plugin_dir)?;
+    if plugin_dir != deployed_plugin_dir {
+        for (path, contents) in managed_plugin_paths(plugin_dir)
+            .into_iter()
+            .zip(deployed_files)
+        {
+            super::safe_write_bytes_file(&path, &contents, None)?;
+        }
+    }
     dashboard_wrapper::apply_install_policy(plugin_dir, tracedecay_bin, deploy_dashboard)?;
     reconcile_managed_skill_overlay(profile_root, plugin_dir)?;
     if let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) {
@@ -274,17 +283,18 @@ pub(super) fn install_plugin(
     Ok(())
 }
 
-/// Writes the generated agent-plugin files (manifest, schemas, tools,
-/// entrypoint, skill). Shared by install and the config-preserving update
-/// lifecycle path; never touches config.yaml.
-pub(super) fn write_plugin_files(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
-    std::fs::create_dir_all(plugin_dir).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to create {}: {e}", plugin_dir.display()),
-    })?;
-    for (relative_path, contents) in rendered_plugin_files(tracedecay_bin)? {
-        write_text_file(&plugin_dir.join(relative_path), &contents)?;
-    }
-    Ok(())
+fn read_deployed_plugin_files(plugin_dir: &Path) -> Result<Vec<Vec<u8>>> {
+    managed_plugin_paths(plugin_dir)
+        .into_iter()
+        .map(|path| {
+            std::fs::read(&path).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "deployed Hermes plugin artifact {} is unavailable: {error}",
+                    path.display()
+                ),
+            })
+        })
+        .collect()
 }
 
 /// Canonical rendered Hermes plugin inventory used by the receipt-backed
@@ -362,11 +372,19 @@ fn managed_profile_files_match(default_plugin: &Path, profile_plugin: &Path) -> 
         .all(|(expected, observed)| std::fs::read(expected).ok() == std::fs::read(observed).ok())
 }
 
-pub(super) fn uninstall_plugin(plugin_dir: &Path) -> Result<()> {
+pub(super) fn deactivate_deployed_plugin_profile(
+    deployed_plugin_dir: &Path,
+    plugin_dir: &Path,
+) -> Result<()> {
     if let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) {
         disable_plugin(&profile_dir.join("config.yaml"))?;
     }
-    remove_generated_plugin_files(plugin_dir)
+    if plugin_dir == deployed_plugin_dir {
+        remove_managed_skill_overlay(plugin_dir)?;
+        dashboard_wrapper::uninstall(plugin_dir)
+    } else {
+        remove_generated_plugin_files(plugin_dir)
+    }
 }
 
 pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
