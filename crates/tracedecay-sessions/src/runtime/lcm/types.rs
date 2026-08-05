@@ -636,7 +636,6 @@ pub enum LcmMaintenanceDebt {
 pub struct LcmPreflightRequest {
     pub provider: String,
     pub session_id: String,
-    pub messages: Vec<serde_json::Value>,
     pub current_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold_tokens: Option<i64>,
@@ -664,8 +663,6 @@ pub struct LcmPreflightRequest {
     pub ignore_session_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stateless_session_patterns: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ignore_message_patterns: Vec<String>,
 }
 
 /// Host notification that a session crossed a compression boundary.
@@ -751,6 +748,14 @@ pub struct LcmSummaryRequest {
     pub extraction_request: Option<LcmExtractionRequest>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcmRelationProjectionStatus {
+    #[default]
+    NotApplicable,
+    Pending,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmCompressionResponse {
     pub status: String,
@@ -766,6 +771,8 @@ pub struct LcmCompressionResponse {
     pub context_recovery_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_status: Option<String>,
+    #[serde(default)]
+    pub relation_projection_status: LcmRelationProjectionStatus,
     pub frontier: LcmLifecycleState,
     pub summary_request: Option<LcmSummaryRequest>,
 }

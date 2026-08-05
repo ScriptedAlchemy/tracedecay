@@ -348,7 +348,6 @@ mod tests {
         let request = LcmPreflightRequest {
             provider: "cursor".to_string(),
             session_id: "session-1".to_string(),
-            messages: vec![serde_json::json!({"role": "user", "content": "active"})],
             current_tokens: Some(12),
             threshold_tokens: None,
             max_assembly_tokens: Some(8),
@@ -363,7 +362,6 @@ mod tests {
             reserve_tokens_floor: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
         };
         let frontier = LcmLifecycleState {
             provider: "cursor".to_string(),
