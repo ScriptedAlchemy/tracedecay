@@ -1858,6 +1858,7 @@ dependencies = [
  "gix-ignore",
  "gix-index",
  "gix-lock",
+ "gix-merge",
  "gix-object",
  "gix-odb",
  "gix-pack",
@@ -2219,6 +2220,32 @@ checksum = "d4c69157820343bf1c6e4b88b9808e920900de02e18aaf5862b30ada43814848"
 dependencies = [
  "gix-tempfile",
  "gix-utils",
+ "thiserror",
+]
+
+[[package]]
+name = "gix-merge"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7b2e202fa474a3dd0bbd551be35adf199be0bf5c925fd7707fff2fdb520f651"
+dependencies = [
+ "bstr",
+ "gix-command",
+ "gix-diff",
+ "gix-filter",
+ "gix-fs",
+ "gix-hash",
+ "gix-imara-diff",
+ "gix-index",
+ "gix-object",
+ "gix-path",
+ "gix-quote",
+ "gix-revision",
+ "gix-revwalk",
+ "gix-tempfile",
+ "gix-trace",
+ "gix-worktree",
+ "nonempty",
  "thiserror",
 ]
 
@@ -2669,7 +2696,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "dashmap",
- "foldhash 0.2.0",
+ "foldhash",
  "hashbrown 0.17.1",
  "indexmap",
  "parking_lot",
@@ -2690,7 +2717,7 @@ dependencies = [
  "bytes",
  "crc32fast",
  "dashmap",
- "foldhash 0.2.0",
+ "foldhash",
  "grafeo-common",
  "hashbrown 0.17.1",
  "indexmap",
@@ -2792,7 +2819,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash 0.2.0",
+ "foldhash",
  "serde",
  "serde_core",
 ]

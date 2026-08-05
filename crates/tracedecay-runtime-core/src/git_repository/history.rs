@@ -110,7 +110,7 @@ impl GitRepositoryAuthority {
             repository
                 .rev_walk([tip])
                 .sorting(gix::revision::walk::Sorting::ByCommitTime(
-                    Default::default(),
+                    gix::traverse::commit::simple::CommitTimeOrder::default(),
                 ));
         if options.first_parent {
             walk = walk.first_parent_only();
@@ -444,10 +444,9 @@ fn charge_nested_path(
         return Some(GitHistoryTermination::Cancelled);
     }
     let nested_trees = path
-        .as_bytes()
-        .iter()
-        .filter(|byte| **byte == b'/')
+        .split('/')
         .count()
+        .saturating_sub(1)
         .saturating_mul(tree_count);
     if counters.trees.saturating_add(nested_trees) > budget.trees {
         return Some(GitHistoryTermination::TreeBudget);

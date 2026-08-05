@@ -33,7 +33,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 dirs = "6"
 fs2 = "0.4"
 getrandom = "0.2"
-gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "merge", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
 regex = "1.12.3"
 reflink-copy = "0.1"
