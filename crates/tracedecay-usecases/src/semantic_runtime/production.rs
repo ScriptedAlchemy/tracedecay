@@ -62,12 +62,11 @@ use tracedecay_semantic::rerank_adapter::{
     GenerationBoundCodeRerankViewsV1, ProductionCodeRerankAuthorityV1,
 };
 use tracedecay_semantic::{
-    DaemonSemanticQueryFactoryV1, DaemonSemanticRuntimeHandleV1,
-    FastEmbedSemanticGenerationRequestV1, LoadedSemanticArtifactV1,
+    DaemonSemanticRuntimeHandleV1, FastEmbedSemanticGenerationRequestV1, LoadedSemanticArtifactV1,
     PreparedSemanticEvaluationProjectionV1, PreparedSemanticRuntimeCommitV1,
-    SemanticGenerationPointerV1, SemanticModelLifecycleOwnerV1, SemanticRuntimeScheduleFailureV1,
-    SemanticRuntimeScheduleStatusV1, SemanticRuntimeStatusProjectionV1,
-    prepare_semantic_evaluation_projection,
+    SemanticEvaluationQueryFactoryV1, SemanticGenerationPointerV1, SemanticModelLifecycleOwnerV1,
+    SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
+    SemanticRuntimeStatusProjectionV1, prepare_semantic_evaluation_projection,
 };
 
 #[cfg(test)]
@@ -1245,7 +1244,7 @@ pub struct PreparedSemanticEvaluationGenerationV1 {
     prepared_projection: PreparedVectorGenerationV1,
     projection_input_bytes: u64,
     capability_manifest_digest: ManifestDigest,
-    query_factory: DaemonSemanticQueryFactoryV1,
+    query_factory: SemanticEvaluationQueryFactoryV1,
     vectors: PublishedSemanticVectorReadPortV1,
     query_keys: RetrievalCursorKeyringV1,
     resources: ProductionCandidateNativeGenerationResourcesV1,
@@ -2019,7 +2018,10 @@ pub fn semantic_lane_readiness_for_request<'a>(
 #[cfg(any(test, feature = "semantic-fastembed"))]
 pub fn current_query_factory(
     handle: &DaemonSemanticRuntimeHandleV1,
-) -> Option<(SemanticGenerationPointerV1, DaemonSemanticQueryFactoryV1)> {
+) -> Option<(
+    SemanticGenerationPointerV1,
+    SemanticEvaluationQueryFactoryV1,
+)> {
     let pointer = handle.current()?;
     let factory = handle.query_factory(
         &pointer.source_generation,

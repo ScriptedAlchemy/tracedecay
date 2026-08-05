@@ -75,18 +75,12 @@ pub fn bundled_query_authority() -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_search_eval::DirectEvaluationStatusV1;
 
     #[test]
-    fn bundled_profile_is_the_passing_exact_query_fallback() {
-        let (report, accepted_profile, _) =
-            bundled_query_authority().expect("bundled query authority");
-
-        assert_eq!(report.status, DirectEvaluationStatusV1::Pass);
-        assert!(accepted_profile.is_exact_query_fallback());
-        assert_eq!(
-            accepted_profile.evaluation().evaluated_profile_id(),
-            QUERY_PROFILE_ID
-        );
+    fn aggregate_only_bundled_profile_is_rejected() {
+        assert!(matches!(
+            bundled_query_authority(),
+            Err(SemanticActivationCoordinationErrorV1::Rejected)
+        ));
     }
 }

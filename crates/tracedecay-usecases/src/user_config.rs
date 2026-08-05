@@ -147,8 +147,6 @@ impl Default for UserConfig {
             extraction_timeout_secs: default_extraction_timeout_secs(),
             automation: AutomationConfig::default(),
             memory_injection_enabled: true,
-            lcm_sensitive_redaction_enabled: false,
-            lcm_sensitive_redaction_patterns: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
