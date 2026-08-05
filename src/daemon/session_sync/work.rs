@@ -748,6 +748,10 @@ impl SessionSyncProjectContext {
                         .interruption
                         .map(git_history_interruption_reason)
                         .unwrap_or("git_sync_interrupted");
+                    let mut failure_codes = vec![reason_code.to_owned()];
+                    if outcome.unresolved_failures > 0 {
+                        failure_codes.push("git_source_failed".to_owned());
+                    }
                     return requested_interruption.unwrap_or(SessionSyncWorkResult::Finished {
                         committed: false,
                         stats,
@@ -756,13 +760,14 @@ impl SessionSyncProjectContext {
                             coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
                         }],
                         source_frontiers: Vec::new(),
-                        failure_codes: vec![reason_code.to_owned()],
+                        failure_codes,
                     });
                 }
                 let git_errors = saturating_usize_to_u64(outcome.stats.skipped_git_error);
                 let remaining_work = outcome
                     .remaining_sessions
                     .max(git_errors)
+                    .max(outcome.unresolved_failures)
                     .max(u64::from(interrupted));
                 let coverage = if remaining_work > 0 {
                     SessionSyncCoverageV1::Partial {
@@ -790,7 +795,7 @@ impl SessionSyncProjectContext {
                             .to_owned(),
                     });
                 }
-                if git_errors > 0 {
+                if git_errors > 0 || outcome.unresolved_failures > 0 {
                     failure_codes.push("git_source_failed".to_owned());
                 }
                 let source_frontiers = vec![git_history_source_frontier(
