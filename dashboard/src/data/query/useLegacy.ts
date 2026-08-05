@@ -1,7 +1,15 @@
 import { useQuery } from '@tanstack/react-query';
 import { fetchLegacy, type LegacyResult } from './legacy.ts';
+import type { QueryActivityDescriptor } from './activity.ts';
 import type { WireSchema } from './wireSchema.ts';
 import { requestScopeKey, scopedUrl, useScope, type DashboardScope } from '../scope/store.ts';
+
+interface LegacyQueryOptions {
+  readonly refetchInterval?: number | false;
+  readonly staleTime?: number;
+  readonly enabled?: boolean;
+  readonly activity?: QueryActivityDescriptor;
+}
 
 /**
  * The cache entry a legacy read occupies, as one exported authority.
@@ -33,7 +41,7 @@ export function useLegacy<T>(
   key: readonly unknown[],
   url: string,
   schema: WireSchema<T>,
-  options?: { refetchInterval?: number | false; staleTime?: number; enabled?: boolean },
+  options?: LegacyQueryOptions,
 ) {
   const scope = useScope((s) => s.scope);
   const target = scopedUrl(scope, url);
@@ -47,6 +55,10 @@ export function useLegacy<T>(
     // the request ran to completion, so a burst of registry events queued a
     // request per event against a route none of the answers would be read from.
     queryFn: ({ signal }) => fetchLegacy(target, schema, { signal }),
+    meta:
+      options?.activity === undefined
+        ? undefined
+        : { dashboard: { activity: options.activity } },
     // Heavy stores make some legacy queries expensive; default to
     // fetch-on-mount only so stacked refetches never starve the daemon.
     refetchInterval: options?.refetchInterval ?? false,

@@ -62,6 +62,16 @@ export function CodePage() {
     ['graph', 'search', submitted],
     `${BASE}/search?q=${encodeURIComponent(submitted)}&limit=100`,
     GraphSearchPayloadV1Schema,
+    {
+      activity:
+        submitted === ''
+          ? undefined
+          : {
+              id: 'code-symbol-search',
+              label: 'Searching indexed symbols',
+              cancelable: true,
+            },
+    },
   );
   const [selected, setSelected] = useState<TraceFocus | null>(null);
   // The TRACE drill-in (plan 11b). It is a state of THIS page, not a route:

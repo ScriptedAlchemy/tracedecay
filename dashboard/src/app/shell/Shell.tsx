@@ -3,7 +3,7 @@ import { Outlet } from 'react-router';
 import { NavRail } from './NavRail';
 import { ScopeBar } from './ScopeBar';
 import { ScopeUrlSync } from '../../data/scope/UrlSync.tsx';
-import { StatusStrip } from './StatusStrip';
+import { QueryActivityStatus, StatusStrip } from './StatusStrip';
 import { InspectorStack, InspectorUrlSync } from './InspectorStack.tsx';
 
 const CommandPalette = lazy(() =>
@@ -68,7 +68,7 @@ export function Shell() {
           </main>
           <InspectorStack />
         </div>
-        <StatusStrip />
+        <StatusStrip queryActivity={<QueryActivityStatus />} />
       </div>
     </div>
   );
