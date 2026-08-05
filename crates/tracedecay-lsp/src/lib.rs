@@ -36,6 +36,7 @@ mod context;
 mod diagnostics;
 mod dispatch;
 mod gateway;
+mod handoff;
 mod overlay;
 mod protocol;
 mod provider;
@@ -92,6 +93,13 @@ pub use gateway::{
     SemanticProviderAdapter, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
     SemanticResponse, SignatureHelp, TypeHierarchyItem, UnavailableSemanticProvider,
     WorkspaceSymbol, lsp_semantic_request, percent_hex_nibble, project_semantic_outcome,
+};
+pub use handoff::{
+    HandoffAction, HandoffActionDiscoveryOutcome, HandoffActionDiscoveryPort,
+    HandoffActionDiscoveryRequest, HandoffActionIssuerPort, HandoffActionRef, HandoffContractError,
+    HandoffDestinationPort, HandoffIssueOutcome, HandoffIssueRequest, HandoffShowDocumentUri,
+    HandoffUnavailableReason, MAX_HANDOFF_ACTION_REF_BYTES, MAX_HANDOFF_ACTION_TITLE_BYTES,
+    MAX_HANDOFF_ACTIONS, MAX_HANDOFF_SHOW_DOCUMENT_URI_BYTES,
 };
 pub use overlay::{
     CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority, DebouncedDiagnostic,
