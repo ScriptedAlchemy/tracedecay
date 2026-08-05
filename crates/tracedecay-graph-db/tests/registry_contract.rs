@@ -12,9 +12,9 @@ use tracedecay_graph_db::{
     GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
 };
 use tracedecay_store::{
-    BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, StoreAuthorityEpochV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId,
-    VerifiedStoreLocatorV1, WorktreeId, canonical_store_locator_digest,
+    BrainId, CodeShardScopeV1, GRAPH_STORE_PRIVATE_DIRECTORY, LocatorDigest, ProjectId,
+    RepositoryId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
+    UserProfileId, VerifiedStoreLocatorV1, WorktreeId, canonical_store_locator_digest,
 };
 
 #[derive(Debug)]
@@ -104,7 +104,8 @@ fn registration(
     binding: StoreRuntimeBindingV1,
     store_root: &std::path::Path,
 ) -> GraphDbRegistration {
-    let canonical_path = store_root.join("graph.grafeo");
+    create_private_graph_directory(store_root);
+    let canonical_path = graph_path(store_root);
     let verified_locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
         binding.incarnation,
@@ -118,6 +119,39 @@ fn registration(
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: std::time::Instant::now() + Duration::from_secs(30),
     }
+}
+
+fn graph_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(GRAPH_STORE_PRIVATE_DIRECTORY)
+        .join("graph.grafeo")
+}
+
+#[cfg(unix)]
+fn create_private_graph_directory(root: &std::path::Path) {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(root.join(GRAPH_STORE_PRIVATE_DIRECTORY)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("create private graph directory: {error}"),
+    }
+}
+
+#[cfg(windows)]
+fn create_private_graph_directory(root: &std::path::Path) {
+    let path = root.join(GRAPH_STORE_PRIVATE_DIRECTORY);
+    match tracedecay_runtime_core::windows_security::create_private_directory(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("create private graph directory: {error}"),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_private_graph_directory(_root: &std::path::Path) {
+    panic!("private graph storage is unsupported on this platform");
 }
 
 fn entity(value: &str) -> GraphEntity {
@@ -164,7 +198,7 @@ fn exact_project_profile_identity_reuses_one_persistent_handle() {
             .unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
-    assert!(temp.path().join("graph.grafeo").is_file());
+    assert!(graph_path(temp.path()).is_file());
 }
 
 #[test]
@@ -218,7 +252,7 @@ fn broad_profile_scope_is_rejected() {
         )),
         Err(GraphDbError::InvalidRequest { .. })
     ));
-    assert!(!root.path().join("graph.grafeo").exists());
+    assert!(!graph_path(root.path()).exists());
 }
 
 #[test]
@@ -380,7 +414,7 @@ fn symlinked_graph_directory_is_rejected_before_open() {
         registry.resolve(registration(identity("profile-a", "project-a"), &alias,)),
         Err(GraphDbError::InvalidRequest { .. })
     ));
-    assert!(!target.path().join("graph.grafeo").exists());
+    assert!(!graph_path(target.path()).exists());
 }
 
 #[cfg(unix)]
@@ -392,7 +426,8 @@ fn symlinked_graph_file_is_rejected_before_open() {
     let target = TempDir::new().unwrap();
     let target_file = target.path().join("target.grafeo");
     std::fs::write(&target_file, []).unwrap();
-    symlink(&target_file, store.path().join("graph.grafeo")).unwrap();
+    create_private_graph_directory(store.path());
+    symlink(&target_file, graph_path(store.path())).unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
@@ -569,7 +604,7 @@ fn cancelled_open_does_not_create_or_register_a_store() {
             .unwrap(),
         None
     );
-    assert!(!temp.path().join("graph.grafeo").exists());
+    assert!(!graph_path(temp.path()).exists());
 }
 
 #[test]
@@ -583,7 +618,7 @@ fn expired_deadline_does_not_open_or_close_a_registered_store() {
         registry.resolve(expired).unwrap_err(),
         GraphDbError::DeadlineExceeded
     );
-    assert!(!temp.path().join("graph.grafeo").exists());
+    assert!(!graph_path(temp.path()).exists());
 
     let request = registration(store_identity.clone(), temp.path());
     let handle = registry.resolve(request.clone()).unwrap();
@@ -623,7 +658,7 @@ fn waiter_cancellation_after_open_retains_the_shared_registered_store() {
             .unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
-    assert!(temp.path().join("graph.grafeo").is_file());
+    assert!(graph_path(temp.path()).is_file());
     assert!(
         registry
             .resolve(registration(store_identity, temp.path()))
@@ -637,7 +672,8 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
     use grafeo_engine::config::StorageFormat;
 
     let temp = TempDir::new().unwrap();
-    let graph_path = temp.path().join("graph.grafeo");
+    create_private_graph_directory(temp.path());
+    let graph_path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         Config::persistent(&graph_path).with_storage_format(StorageFormat::SingleFile),
     )

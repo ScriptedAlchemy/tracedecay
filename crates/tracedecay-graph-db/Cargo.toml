@@ -13,6 +13,7 @@ grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["
 grafeo-common = { version = "=0.5.42", default-features = false }
 grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
 grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file", "vector-index"] }
+grafeo-storage = { version = "=0.5.42", default-features = false, features = ["grafeo-file"] }
 hex = "0.4"
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 serde = { version = "1", features = ["derive"] }
@@ -21,6 +22,12 @@ sha2 = "0.11"
 same-file = "1"
 thiserror = "2"
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

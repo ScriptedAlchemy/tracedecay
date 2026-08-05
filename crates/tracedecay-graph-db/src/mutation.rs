@@ -6,14 +6,13 @@ use grafeo_engine::{GrafeoDB, Session};
 
 use crate::error::rollback_failure;
 use crate::schema::{
-    ENTITY_KEY_PROPERTY, ENTITY_LABEL, FORMAT_LABEL, PROJECTION_KEY_PROPERTY, PROJECTION_LABEL,
-    PUBLICATION_KEY_PROPERTY, PUBLICATION_LABEL, RELATION_KEY_PROPERTY, RELATION_LABEL,
+    ENTITY_LABEL, FORMAT_LABEL, PROJECTION_LABEL, PUBLICATION_LABEL, RELATION_LABEL,
     SEQUENCE_PROPERTY, edge_properties, entity_key_label, entity_labels, entity_properties,
     projection_properties, projection_state_label, publication_key_label, publication_properties,
     relation_locator_labels, relation_properties, relation_type_for_kind, stable_key,
 };
 use crate::state::{
-    FormatState, StoredEntity, StoredRelation, latest_projection, load_entity, load_relation,
+    ExistingBatchState, FormatState, StoredEntity, StoredRelation, latest_projection,
     relations_for_entity,
 };
 use crate::{
@@ -32,7 +31,8 @@ pub(crate) fn apply(
     publication_record: Option<(GraphIdempotencyKey, String, String)>,
     poisoned: &AtomicBool,
 ) -> Result<GraphCommit, GraphDbError> {
-    validate_references(database, &batch)?;
+    let existing = ExistingBatchState::load(database, &batch)?;
+    validate_references(database, &batch, &existing)?;
     let sequence = state
         .sequence
         .checked_add(1)
@@ -49,7 +49,6 @@ pub(crate) fn apply(
         .begin_transaction()
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
     let result = apply_in_transaction(
-        database,
         &session,
         state,
         &batch,
@@ -58,6 +57,7 @@ pub(crate) fn apply(
             .as_ref()
             .map(|projection| projection.node),
         publication_record.as_ref(),
+        &existing,
     );
     if let Err(error) = result {
         return Err(rollback_or_poison(&mut session, error, poisoned));
@@ -76,52 +76,60 @@ pub(crate) fn apply(
 
 #[allow(clippy::too_many_arguments)]
 fn apply_in_transaction(
-    database: &GrafeoDB,
     session: &Session,
     state: &FormatState,
     batch: &GraphWriteBatch,
     commit: &GraphCommit,
     previous_projection: Option<grafeo_common::types::NodeId>,
     publication_record: Option<&(GraphIdempotencyKey, String, String)>,
+    existing: &ExistingBatchState,
 ) -> Result<(), GraphDbError> {
     let mut entity_nodes = BTreeMap::<String, Option<grafeo_common::types::NodeId>>::new();
     for mutation in &batch.mutations {
         check_cancelled(batch)?;
         match mutation {
             GraphMutation::DeleteRelation(identity) => {
-                if let Some(stored) = load_relation(database, &batch.namespace, identity)? {
-                    delete_relation(session, &stored, batch)?;
+                let key = stable_key(&batch.namespace, identity.as_str());
+                if let Some(stored) = existing.relations.get(&key) {
+                    delete_relation(session, stored, batch)?;
                 }
             }
             GraphMutation::DeleteEntity(identity) => {
-                if let Some(stored) = load_entity(database, &batch.namespace, identity)? {
-                    delete_entity(session, &stored, batch)?;
+                let key = stable_key(&batch.namespace, identity.as_str());
+                if let Some(stored) = existing.entities.get(&key) {
+                    delete_entity(session, stored, batch)?;
                 }
-                entity_nodes.insert(stable_key(&batch.namespace, identity.as_str()), None);
+                entity_nodes.insert(key, None);
             }
             GraphMutation::UpsertEntity(entity) => {
-                let node = if let Some(stored) =
-                    load_entity(database, &batch.namespace, &entity.identity)?
-                {
-                    replace_entity(session, &stored, entity, batch)?;
+                let key = stable_key(&batch.namespace, entity.identity.as_str());
+                let node = if let Some(stored) = existing.entities.get(&key) {
+                    replace_entity(session, stored, entity, batch)?;
                     stored.node
                 } else {
                     create_entity(session, entity, batch)?
                 };
-                entity_nodes.insert(
-                    stable_key(&batch.namespace, entity.identity.as_str()),
-                    Some(node),
-                );
+                entity_nodes.insert(key, Some(node));
             }
             GraphMutation::UpsertRelation(relation) => {
-                if let Some(stored) = load_relation(database, &batch.namespace, &relation.identity)?
-                {
-                    delete_relation(session, &stored, batch)?;
+                let relation_key = stable_key(&batch.namespace, relation.identity.as_str());
+                if let Some(stored) = existing.relations.get(&relation_key) {
+                    delete_relation(session, stored, batch)?;
                 }
-                let from = entity_node(database, &entity_nodes, &batch.namespace, &relation.from)?
-                    .ok_or_else(|| GraphDbError::invalid("relation source disappeared"))?;
-                let to = entity_node(database, &entity_nodes, &batch.namespace, &relation.to)?
-                    .ok_or_else(|| GraphDbError::invalid("relation target disappeared"))?;
+                let from = entity_node(
+                    &entity_nodes,
+                    &existing.entities,
+                    &batch.namespace,
+                    &relation.from,
+                )
+                .ok_or_else(|| GraphDbError::invalid("relation source disappeared"))?;
+                let to = entity_node(
+                    &entity_nodes,
+                    &existing.entities,
+                    &batch.namespace,
+                    &relation.to,
+                )
+                .ok_or_else(|| GraphDbError::invalid("relation target disappeared"))?;
                 let edge_properties =
                     edge_properties(&batch.namespace, &batch.projection, relation);
                 let edge = session
@@ -198,16 +206,16 @@ fn create_entity(
 }
 
 fn entity_node(
-    database: &GrafeoDB,
     changes: &BTreeMap<String, Option<grafeo_common::types::NodeId>>,
+    existing: &BTreeMap<String, StoredEntity>,
     namespace: &GraphNamespace,
     identity: &GraphEntityId,
-) -> Result<Option<grafeo_common::types::NodeId>, GraphDbError> {
+) -> Option<grafeo_common::types::NodeId> {
     let key = stable_key(namespace, identity.as_str());
     if let Some(node) = changes.get(&key) {
-        return Ok(*node);
+        return *node;
     }
-    Ok(load_entity(database, namespace, identity)?.map(|stored| stored.node))
+    existing.get(&key).map(|stored| stored.node)
 }
 
 fn replace_entity(
@@ -415,62 +423,18 @@ fn tracked_create_node(
     properties: &[(String, Value)],
     batch: &GraphWriteBatch,
 ) -> Result<grafeo_common::types::NodeId, GraphDbError> {
-    let mut params = HashMap::new();
-    let assignments = properties
-        .iter()
-        .enumerate()
-        .map(|(index, (name, value))| {
-            let parameter = format!("value_{index}");
-            params.insert(parameter.clone(), value.clone());
-            format!("{name}: ${parameter}")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let query = format!(
-        "INSERT (n:{} {{{assignments}}}) RETURN id(n)",
-        labels.join(":")
-    );
     check_cancelled(batch)?;
-    session
-        .execute_with_params(&query, params)
-        .map_err(map_commit_error)?;
-    check_cancelled(batch)?;
-    let (locator_name, locator_value) = properties
-        .iter()
-        .find(|(name, _)| {
-            matches!(
-                name.as_str(),
-                ENTITY_KEY_PROPERTY
-                    | RELATION_KEY_PROPERTY
-                    | PROJECTION_KEY_PROPERTY
-                    | PUBLICATION_KEY_PROPERTY
-            )
-        })
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "tracked Grafeo node creation has no native locator".to_owned(),
-        })?;
-    let lookup = format!(
-        "MATCH (n:{} {{{locator_name}: $locator}}) RETURN id(n)",
-        labels[0]
-    );
-    let result = session
-        .execute_with_params(
-            &lookup,
-            HashMap::from([("locator".to_owned(), locator_value.clone())]),
+    let labels = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let node = session
+        .create_node_with_props(
+            &labels,
+            properties
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.clone())),
         )
         .map_err(map_commit_error)?;
-    let raw = result
-        .rows()
-        .first()
-        .and_then(|row| row.first())
-        .and_then(Value::as_int64)
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "tracked Grafeo node creation returned no native identity".to_owned(),
-        })?;
-    let raw = u64::try_from(raw).map_err(|_| GraphDbError::Corrupt {
-        message: "tracked Grafeo node creation returned a negative identity".to_owned(),
-    })?;
-    Ok(grafeo_common::types::NodeId::new(raw))
+    check_cancelled(batch)?;
+    Ok(node)
 }
 
 fn execute_tracked(
@@ -486,11 +450,16 @@ fn execute_tracked(
     check_cancelled(batch)
 }
 
-fn validate_references(database: &GrafeoDB, batch: &GraphWriteBatch) -> Result<(), GraphDbError> {
+fn validate_references(
+    database: &GrafeoDB,
+    batch: &GraphWriteBatch,
+    existing: &ExistingBatchState,
+) -> Result<(), GraphDbError> {
     let mut entities = BTreeMap::<String, EntityChange>::new();
     let mut relations = BTreeMap::<String, RelationChange>::new();
     let mut mutation_keys = BTreeSet::new();
     for mutation in &batch.mutations {
+        check_cancelled(batch)?;
         let (kind, identity) = mutation.sort_key();
         if !mutation_keys.insert((kind, identity.to_owned())) {
             return Err(GraphDbError::invalid("batch repeats a graph mutation"));
@@ -499,7 +468,7 @@ fn validate_references(database: &GrafeoDB, batch: &GraphWriteBatch) -> Result<(
             GraphMutation::DeleteRelation(identity) => {
                 let key = stable_key(&batch.namespace, identity.as_str());
                 if let Some(owner) =
-                    relation_owner(database, &relations, &batch.namespace, identity)?
+                    relation_owner(&relations, &existing.relations, &batch.namespace, identity)
                     && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
@@ -508,7 +477,8 @@ fn validate_references(database: &GrafeoDB, batch: &GraphWriteBatch) -> Result<(
             }
             GraphMutation::DeleteEntity(identity) => {
                 let key = stable_key(&batch.namespace, identity.as_str());
-                if let Some(owner) = entity_owner(database, &entities, &batch.namespace, identity)?
+                if let Some(owner) =
+                    entity_owner(&entities, &existing.entities, &batch.namespace, identity)
                     && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
@@ -517,9 +487,12 @@ fn validate_references(database: &GrafeoDB, batch: &GraphWriteBatch) -> Result<(
             }
             GraphMutation::UpsertEntity(entity) => {
                 let key = stable_key(&batch.namespace, entity.identity.as_str());
-                if let Some(owner) =
-                    entity_owner(database, &entities, &batch.namespace, &entity.identity)?
-                    && owner != batch.projection
+                if let Some(owner) = entity_owner(
+                    &entities,
+                    &existing.entities,
+                    &batch.namespace,
+                    &entity.identity,
+                ) && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
                 }
@@ -527,9 +500,12 @@ fn validate_references(database: &GrafeoDB, batch: &GraphWriteBatch) -> Result<(
             }
             GraphMutation::UpsertRelation(relation) => {
                 let key = stable_key(&batch.namespace, relation.identity.as_str());
-                if let Some(owner) =
-                    relation_owner(database, &relations, &batch.namespace, &relation.identity)?
-                    && owner != batch.projection
+                if let Some(owner) = relation_owner(
+                    &relations,
+                    &existing.relations,
+                    &batch.namespace,
+                    &relation.identity,
+                ) && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
                 }
@@ -546,7 +522,7 @@ fn validate_references(database: &GrafeoDB, batch: &GraphWriteBatch) -> Result<(
     }
     for (_, from, to) in relations.values().flatten() {
         for endpoint in [from, to] {
-            if entity_owner(database, &entities, &batch.namespace, endpoint)?.is_none() {
+            if entity_owner(&entities, &existing.entities, &batch.namespace, endpoint).is_none() {
                 return Err(GraphDbError::invalid(format!(
                     "relation endpoint `{endpoint}` does not exist in namespace `{}`",
                     batch.namespace
@@ -560,7 +536,7 @@ fn validate_references(database: &GrafeoDB, batch: &GraphWriteBatch) -> Result<(
         }
         let identity = key_identity(key, "entity")?;
         let identity = GraphEntityId::new(identity)?;
-        let Some(entity) = load_entity(database, &batch.namespace, &identity)? else {
+        let Some(entity) = existing.entities.get(key) else {
             continue;
         };
         for relation in relations_for_entity(database, entity.node)? {
@@ -584,29 +560,29 @@ fn validate_references(database: &GrafeoDB, batch: &GraphWriteBatch) -> Result<(
 }
 
 fn entity_owner(
-    database: &GrafeoDB,
     changes: &BTreeMap<String, EntityChange>,
+    existing: &BTreeMap<String, StoredEntity>,
     namespace: &GraphNamespace,
     identity: &GraphEntityId,
-) -> Result<Option<GraphProjectionId>, GraphDbError> {
+) -> Option<GraphProjectionId> {
     let key = stable_key(namespace, identity.as_str());
     if let Some(owner) = changes.get(&key) {
-        return Ok(owner.clone());
+        return owner.clone();
     }
-    Ok(load_entity(database, namespace, identity)?.map(|stored| stored.projection))
+    existing.get(&key).map(|stored| stored.projection.clone())
 }
 
 fn relation_owner(
-    database: &GrafeoDB,
     changes: &BTreeMap<String, RelationChange>,
+    existing: &BTreeMap<String, StoredRelation>,
     namespace: &GraphNamespace,
     identity: &crate::GraphRelationId,
-) -> Result<Option<GraphProjectionId>, GraphDbError> {
+) -> Option<GraphProjectionId> {
     let key = stable_key(namespace, identity.as_str());
     if let Some(relation) = changes.get(&key) {
-        return Ok(relation.as_ref().map(|(owner, _, _)| owner.clone()));
+        return relation.as_ref().map(|(owner, _, _)| owner.clone());
     }
-    Ok(load_relation(database, namespace, identity)?.map(|stored| stored.projection))
+    existing.get(&key).map(|stored| stored.projection.clone())
 }
 
 fn key_identity(key: &str, description: &str) -> Result<String, GraphDbError> {
