@@ -182,15 +182,13 @@ jobs:
     # This job consumes the dashboard artifact shared by Rust jobs instead of
     # rebuilding it.
     needs: dashboard-assets
-    # Also runs on push so the workflow-contract tests below actually protect
-    # master, which is the branch they exist to protect. `on.push.branches` is
-    # already limited to master and feature/holographic-memory, and the
-    # concurrency group keys pushes by ref and PRs by number, so this adds no
-    # duplicate or competing run.
+    # Run on master pushes so the release workflow contracts protect the
+    # branch they release, while release-please PRs avoid expected version
+    # drift until their GitHub release completes.
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
-       !startsWith(github.head_ref, 'release-plz-'))
+       !startsWith(github.head_ref, 'release-please--'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -221,13 +219,19 @@ jobs:
           python3 scripts/test-resolve-release-source-profile.py
           python3 scripts/test-scoop-manifest-workflows.py
 
+      - name: Test GitHub release installer
+        run: bash tests/install_script_test.sh
+
+      - name: Test release artifact inventory
+        run: |
+          python3 scripts/test-check-release-artifacts.py
+          python3 scripts/test-package-release-archive.py
+          python3 scripts/test-plan-release-recovery.py
+
       - name: Check release version drift
         continue-on-error: true
-        # PR-only, unchanged. This one queries crates.io and fails whenever
-        # Cargo.toml is ahead of the registry, which is the normal transient
-        # state on master between a release-plz merge and the publish
-        # completing. Running it on master push would go red every release for
-        # reasons unrelated to the commit.
+        # A release-please PR is excluded at the job level because its version
+        # is expected to lead the latest GitHub release until the PR merges.
         if: github.event_name == 'pull_request'
         run: scripts/check-release-drift.sh
 
@@ -777,68 +781,6 @@ jobs:
             target/perf-gate/perf-gate-summary.md
           if-no-files-found: warn
           retention-days: 14
-
-  release-compatibility:
-    name: Release compatibility
-    needs: dashboard-assets
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Validate publishable package manifests
-        # Package the workspace as one dependency-ordered batch because the V2
-        # crates do not exist in the registry until release-plz publishes them.
-        run: |
-          set -euo pipefail
-          cargo package --workspace --locked --allow-dirty --no-verify
-
-          version="$(
-            cargo metadata --no-deps --locked --format-version 1 |
-              jq -r '.packages[] | select(.name == "tracedecay") | .version'
-          )"
-          root_archive="target/package/tracedecay-${version}.crate"
-          test -s "$root_archive"
-          tar tzf "$root_archive" > root-archive-contents.txt
-          grep -Fq "/build-support/dashboard_cache.rs" root-archive-contents.txt
-          grep -Fq "/dashboard/app-dist/" root-archive-contents.txt
-
-          package_root="${RUNNER_TEMP}/tracedecay-package"
-          rm -rf "$package_root"
-          mkdir -p "$package_root"
-          tar xzf "$root_archive" -C "$package_root"
-          python3 scripts/check-dashboard-bundle.py \
-            "$package_root/tracedecay-${version}/dashboard/app-dist"
-
-      - name: Check root crate API compatibility
-        # Advisory: with release-type "major" every break is pre-approved, so
-        # a red here is informational at best.
-        continue-on-error: true
-        uses: obi1kenobi/cargo-semver-checks-action@v2
-        env:
-          # semver-checks builds the crate from a synthetic resolver-v1
-          # workspace, so make dependency selection honor this job's toolchain.
-          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
-        with:
-          package: tracedecay
-          rust-toolchain: manual
-          # The V2 storage cutover intentionally breaks the pre-V2 public API.
-          # Release-plz owns the version bump at release time (the drift guard
-          # forbids pre-bumping in the PR). In semver-checks vocabulary,
-          # "major" means "breaking release" — for this 0.0.x crate that IS
-          # the planned 0.1.0 minor-version bump (no 1.0 is implied). Declare
-          # it so the action stops comparing against the unchanged version.
-          release-type: major
 
   clippy:
     name: Clippy

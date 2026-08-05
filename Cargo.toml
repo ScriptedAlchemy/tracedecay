@@ -58,6 +58,7 @@ edition = "2024"
 [package]
 name = "tracedecay"
 version = "0.0.67"
+publish = false
 edition.workspace = true
 description = "Code intelligence tool that builds a semantic knowledge graph from Rust, Go, Java, Scala, TypeScript, Python, C, C++, Kotlin, C#, Swift, and many more codebases"
 license = "MIT"
@@ -66,12 +67,10 @@ homepage = "https://github.com/ScriptedAlchemy/tracedecay"
 readme = "README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "claude"]
 categories = ["development-tools", "command-line-utilities"]
-# Explicit whitelist so `cargo package`/`cargo publish` ship everything the
-# build needs, including the prebuilt canonical dashboard/app-dist. Frontend
-# sources are deliberately not packaged: build.rs detects their absence and
-# embeds app-dist as-is, so a registry install never needs Node. Keep that
-# packaged-asset check in build.rs in sync if the dashboard entries below
-# change.
+# Explicit source-archive whitelist retained for local distribution validation.
+# Frontend sources are deliberately excluded: build.rs embeds the canonical
+# prebuilt dashboard/app-dist. Keep that packaged-asset check in build.rs in
+# sync if the dashboard entries below change.
 include = [
     "/CHANGELOG.md",
     "/LICENSE",

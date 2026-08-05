@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-rusqlite-runtime"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 description = "Bundled SQLite runtime for TraceDecay storage adapters"
 license = "MIT"

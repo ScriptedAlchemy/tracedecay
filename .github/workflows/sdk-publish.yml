@@ -2,9 +2,11 @@
 # conformance job and a minimal, environment-protected npm publish job.
 #
 # The build/test job never holds `id-token: write` or registry credentials.
-# It builds the exact npm tarball once, runs typecheck, unit tests, and
-# real-daemon installed-package conformance against that same artifact, and
-# records its digest. It also stages and digest-verifies the reviewed npm CLI.
+# It first regenerates the client from the canonical SDK executable-binding
+# registry and verifies byte-for-byte codegen parity, then runs typecheck,
+# unit tests, a package dry-run, and real-daemon
+# installed-package conformance against the exact tarball whose digest it
+# records. It also stages and digest-verifies the reviewed npm CLI.
 # Only the publish job gets the protected environment and OIDC authority; it
 # downloads and verifies those exact bytes without installing executable code.
 name: SDK publish
@@ -42,6 +44,9 @@ jobs:
         working-directory: sdks/typescript
         run: npm ci
 
+      - name: Verify canonical SDK registry-client parity
+        run: scripts/check-sdk-codegen.sh
+
       - name: Typecheck
         working-directory: sdks/typescript
         run: npm run typecheck
@@ -53,6 +58,10 @@ jobs:
       - name: Build
         working-directory: sdks/typescript
         run: npm run build
+
+      - name: Verify package dry run
+        working-directory: sdks/typescript
+        run: npm pack --dry-run --json --ignore-scripts
 
       - name: Pack the exact publish artifact once
         id: pack

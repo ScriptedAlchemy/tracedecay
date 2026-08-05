@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-store"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 description = "Store-facing persistence contracts for TraceDecay"
 license = "MIT"

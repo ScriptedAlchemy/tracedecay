@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce crates.io/npm-only, authority-separated SDK publication."""
+"""Enforce the TypeScript SDK workflow's isolated npm OIDC boundary."""
 
 from __future__ import annotations
 
@@ -73,8 +73,10 @@ def assert_build_job(job: dict[str, Any]) -> None:
     for required in (
         "npm install -g npm@12.0.2",
         "npm ci",
+        "scripts/check-sdk-codegen.sh",
         "npm run typecheck",
         "npm test",
+        "npm pack --dry-run --json --ignore-scripts",
         "npm pack --json --ignore-scripts",
         "npm pack npm@12.0.2 --ignore-scripts",
         "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1",
@@ -85,16 +87,29 @@ def assert_build_job(job: dict[str, Any]) -> None:
         if find_step(steps, required) is None:
             fail(f"'{BUILD_JOB}' is missing {required!r}")
 
+    parity_index = find_step(steps, "scripts/check-sdk-codegen.sh")
+    typecheck_index = find_step(steps, "npm run typecheck")
+    tests_index = find_step(steps, "npm test")
+    dry_run_index = find_step(steps, "npm pack --dry-run --json --ignore-scripts")
     pack_index = find_step(steps, "npm pack --json --ignore-scripts")
     conformance_index = find_step(steps, "TRACEDECAY_SDK_TARBALL")
     upload_index = find_step(steps, "actions/upload-artifact@")
     if not (
-        isinstance(pack_index, int)
+        isinstance(parity_index, int)
+        and isinstance(typecheck_index, int)
+        and isinstance(tests_index, int)
+        and isinstance(dry_run_index, int)
+        and isinstance(pack_index, int)
         and isinstance(conformance_index, int)
         and isinstance(upload_index, int)
-        and pack_index < conformance_index < upload_index
+        and parity_index < typecheck_index
+        and parity_index < tests_index
+        and tests_index < dry_run_index < pack_index < conformance_index < upload_index
     ):
-        fail("the exact npm tarball must be packed, conformance-tested, then uploaded")
+        fail(
+            "SDK registry-client parity, SDK tests, package dry-run, exact packing, "
+            "conformance, and upload must run in fail-closed order"
+        )
 
 
 def assert_publish_job(job: dict[str, Any]) -> None:
@@ -179,8 +194,8 @@ def main() -> None:
     assert_publish_job(publish)
 
     print(
-        "sdk-publish.yml satisfies crates.io/npm-only authority separation "
-        "and exact-artifact publication."
+        "sdk-publish.yml isolates npm OIDC authority and exact artifact bytes "
+        "behind the SDK registry-client readiness gate."
     )
 
 

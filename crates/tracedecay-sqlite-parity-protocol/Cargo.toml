@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-sqlite-parity-protocol"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 description = "Driver-free wire DTOs for TraceDecay SQLite parity probes"
 license = "MIT"
