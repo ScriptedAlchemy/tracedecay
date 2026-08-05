@@ -138,6 +138,21 @@ fn truncated_reflog_is_permanent_unsupported_framing() {
 }
 
 #[test]
+fn window_before_repository_creation_emits_no_zero_oid_segment() {
+    let fixture = tempfile::tempdir().unwrap();
+    git(fixture.path(), &["init", "-b", "main"]);
+    std::fs::write(fixture.path().join("tracked"), "content").unwrap();
+    git(fixture.path(), &["add", "tracked"]);
+    git(fixture.path(), &["commit", "-m", "initial"]);
+    let cursor = initialize_reflog_cursor(fixture.path(), 1, &control()).unwrap();
+
+    let chunk = scan_reflog_chunk(fixture.path(), 0, 1, cursor, &control()).unwrap();
+
+    assert!(chunk.complete);
+    assert!(chunk.segments.is_empty());
+}
+
+#[test]
 fn sealed_graph_ignores_later_head_drift_and_keeps_nonmonotonic_parent_time() {
     let fixture = tempfile::tempdir().unwrap();
     git(fixture.path(), &["init", "-b", "main"]);
