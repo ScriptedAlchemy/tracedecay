@@ -33,6 +33,8 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
+pub use tracedecay_application::OperationCancelOutcome;
+
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::ports::{
     BindingDigest, InMemoryCursorAuthenticator, KernelVersions, TemporalExecutionSnapshot,
@@ -218,13 +220,6 @@ impl Default for OperationStreamConfig {
             max_subscribers_per_operation: 32,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OperationCancelOutcome {
-    Requested,
-    AlreadyRequested,
-    AlreadyTerminal,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

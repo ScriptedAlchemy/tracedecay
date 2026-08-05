@@ -32,6 +32,7 @@ pub mod lsp_context_catalog;
 pub mod memory;
 pub mod multi_root;
 pub mod observability;
+pub mod operation_events;
 pub mod policy;
 pub mod remote;
 pub mod result;
@@ -160,6 +161,7 @@ pub use multi_root::{
     MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
 };
 pub use observability::*;
+pub use operation_events::{OperationCancelOutcome, OperationEventSubscription};
 pub use policy::{
     PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
     PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1,
