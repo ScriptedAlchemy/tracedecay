@@ -17,7 +17,7 @@ use tracedecay_sessions::runtime::{
         LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
         LcmStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
         LcmSummarySourceMessage, LcmSummarySourceRange, compression, dag, doctor, gc, payload,
-        query, raw, schema,
+        query, raw,
     },
 };
 

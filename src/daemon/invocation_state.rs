@@ -230,7 +230,6 @@ impl DaemonInvocationState {
                 |((((handle, database), lifecycle), resources), worktree_id)| {
                     crate::application::semantic_runtime::production_saved_generation_schedule_hook(
                         crate::application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
-                            project_id: project_id.clone(),
                             project_root: project_root.to_path_buf(),
                             code_index_store_root: scoped_code_index_store_root.clone(),
                             worktree_id,
@@ -239,7 +238,6 @@ impl DaemonInvocationState {
                             lifecycle,
                             resources,
                             fair_scheduler: self.semantic_projection_scheduler.clone(),
-                            resident_memory: Arc::clone(&self.resident_memory),
                         },
                     )
                 },

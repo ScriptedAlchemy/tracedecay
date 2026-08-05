@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
-use serde_json::{Map, Value as JsonValue, json};
+#[cfg(test)]
+use serde_json::Value as JsonValue;
+use serde_json::{Map, json};
 use tracedecay_domain::HydrationStateV1;
 
 use crate::compatibility::projected_content_hash;

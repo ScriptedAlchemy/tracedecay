@@ -87,7 +87,7 @@ impl ProductionGitHubExternalAcquisitionV1 {
         provider: ProviderId,
         sink_revision: u64,
         sink_digest: ManifestDigest,
-    ) -> Result<Self, GitHubExternalSourceOpenErrorV1> {
+    ) -> std::result::Result<Self, GitHubExternalSourceOpenErrorV1> {
         let github = registration
             .runtime()
             .github_owner()
