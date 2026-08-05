@@ -979,7 +979,7 @@ async fn advisory_publication_cancellation_and_rollback_leave_no_partial_runtime
         )
         .await
         .unwrap();
-    publication.rollback().await;
+    drop(publication);
     assert!(registry.get::<Component>(&project).await.is_none());
     assert!(
         registry

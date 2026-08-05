@@ -16,7 +16,8 @@ use crate::application::feedback::concrete::Pr12FeedbackRuntime;
 use crate::application::primitives::Pr12PrimitiveProjectRuntime;
 
 use super::invocation::{
-    DaemonAdvisoryCycleInvocationOwner, DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner,
+    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
+    DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner,
     RegisteredAdvisoryHookOrchestrationRuntimeV1, RegisteredCallableCodeRuntime,
     RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredWorkRuntime,
     SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
@@ -416,27 +417,54 @@ pub(crate) struct AdvisoryRuntimePublicationV1 {
     registry: ProjectRuntimeRegistryV1,
     project_root: PathBuf,
     advisory: Arc<dyn Any + Send + Sync>,
+    advisory_cycle: Arc<dyn DaemonAdvisoryCycleInvocationPort>,
+    feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
     previous_feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
+    active: bool,
 }
 
 impl AdvisoryRuntimePublicationV1 {
-    pub(crate) async fn rollback(self) {
+    pub(crate) fn commit(mut self) {
+        self.active = false;
+    }
+
+    fn rollback(&mut self) {
         let mut runtimes = self.registry.lock_runtimes();
         let Some(runtime) = runtimes.get_mut(&self.project_root) else {
             return;
         };
-        if !runtime
+        let exact_publication = runtime
             .advisory
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, &self.advisory))
-        {
+            && runtime
+                .advisory_cycle
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(&owner.service, &self.advisory_cycle));
+        if !exact_publication {
             return;
         }
         if let Some(router) = &runtime.feedback_cycle_input {
-            let _ = router.replace(self.previous_feedback_input);
+            let restored = router
+                .replace_if_same(
+                    &self.feedback_input,
+                    Arc::clone(&self.previous_feedback_input),
+                )
+                .is_ok_and(|same| same);
+            if !restored {
+                return;
+            }
         }
         runtime.advisory.take();
         runtime.advisory_cycle.take();
+    }
+}
+
+impl Drop for AdvisoryRuntimePublicationV1 {
+    fn drop(&mut self) {
+        if self.active {
+            self.rollback();
+        }
     }
 }
 
@@ -812,19 +840,24 @@ impl ProjectRuntimeRegistryV1 {
                     if runtime.advisory.is_some() || runtime.advisory_cycle.is_some() {
                         return Err(ProjectRuntimeRegistryError::AlreadyRegistered.into());
                     }
-                    let previous_feedback_input = runtime
+                    let router = runtime
                         .feedback_cycle_input
                         .as_ref()
-                        .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?
-                        .replace(feedback_input)
+                        .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?;
+                    let previous_feedback_input = router
+                        .replace(Arc::clone(&feedback_input))
                         .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
+                    let advisory_cycle_service = Arc::clone(&advisory_cycle.service);
                     runtime.advisory = Some(Arc::clone(&advisory));
                     runtime.advisory_cycle = Some(advisory_cycle);
                     return Ok(AdvisoryRuntimePublicationV1 {
                         registry: self.clone(),
                         project_root: project_root.to_path_buf(),
                         advisory,
+                        advisory_cycle: advisory_cycle_service,
+                        feedback_input,
                         previous_feedback_input,
+                        active: true,
                     });
                 }
             }

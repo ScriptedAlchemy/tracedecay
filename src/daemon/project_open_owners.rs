@@ -1740,7 +1740,7 @@ async fn register_production_advisory_owner(
     root_uri: String,
     indexed_files: Vec<String>,
     setup_cancellation: CancellationToken,
-) -> Result<crate::daemon::project_open_advisory::PostOpenAdvisorySetupV1> {
+) -> Result<crate::daemon::project_open_advisory::PreparedAdvisoryRuntimeV1> {
     if setup_cancellation.is_cancelled() {
         return Err(TraceDecayError::Config {
             message: "advisory runtime setup was cancelled".to_owned(),
@@ -1992,10 +1992,10 @@ async fn register_production_advisory_owner(
     };
     let orchestrator: Arc<dyn AdvisoryHookOrchestrationPortV1> = orchestrator;
     Ok(
-        crate::daemon::project_open_advisory::PostOpenAdvisorySetupV1 {
-            runtime: orchestrator,
-            publication: Some(publication),
-        },
+        crate::daemon::project_open_advisory::PreparedAdvisoryRuntimeV1::new(
+            orchestrator,
+            move || publication.commit(),
+        ),
     )
 }
 
