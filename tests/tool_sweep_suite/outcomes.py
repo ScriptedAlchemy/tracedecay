@@ -69,7 +69,7 @@ def first_value(response: dict[str, Any], names: set[str]) -> str | int | None:
     for text in text_blocks(response):
         for name in names:
             label = re.escape(name).replace("_", "[_ ]")
-            matched = re.search(rf"^\*\*{label}:\*\*\s*`?([^`\n]+?)`?\s*$", text, re.MULTILINE | re.IGNORECASE)
+            matched = re.search(rf"^[ \t]*\*\*{label}:\*\*\s*`?([^`\n]+?)`?\s*$", text, re.MULTILINE | re.IGNORECASE)
             if matched:
                 value = matched.group(1).strip()
                 if value.isdigit():

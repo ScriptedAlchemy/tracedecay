@@ -15,6 +15,7 @@ from outcomes import (
     has_status,
     has_true,
     objects,
+    response_handle,
 )
 
 
@@ -40,6 +41,13 @@ def _source_apply(call: Call, tool: str, arguments: dict[str, Any], deadline: De
     preview_arguments = {**arguments, "dry_run": True}
     preview = call(tool, preview_arguments, deadline(tool))
     observed = expected_state(preview)
+    if observed is None:
+        # Large source previews deliberately return the normal retrieval handle
+        # instead of an abbreviated, invented state. Consume that public handle.
+        handle = response_handle(preview)
+        if handle is not None:
+            preview = call("tracedecay_retrieve", {"handle": handle}, deadline("tracedecay_retrieve"))
+            observed = expected_state(preview)
     if observed is None:
         raise JourneyError(f"{tool} preview did not publish its expected_state")
     return {
@@ -126,9 +134,23 @@ def _source_edit(
         forward = {"symbol": symbol, "content": marker, "position": "after"}
         inverse = {"path": file, "old_str": f"\n{marker}\n", "new_str": "\n"}
     elif name == "tracedecay_move_symbol":
-        forward = {"symbol": symbol, "dest_file": "src/relocated.rs", "dry_run": False, "update_references": False}
+        # This producer's ordinary Markdown preview intentionally summarizes
+        # the move, while its published JSON contract carries expected_state.
+        forward = {
+            "symbol": symbol,
+            "dest_file": "src/relocated.rs",
+            "dry_run": False,
+            "update_references": False,
+            "format": "json",
+        }
         inverse_tool = "tracedecay_move_symbol"
-        inverse = {"symbol": symbol, "dest_file": file, "dry_run": False, "update_references": False}
+        inverse = {
+            "symbol": symbol,
+            "dest_file": file,
+            "dry_run": False,
+            "update_references": False,
+            "format": "json",
+        }
     elif name == "tracedecay_api_migration_apply":
         return _api_migration(fixture, call, deadline, original)
     else:
@@ -140,7 +162,19 @@ def _source_edit(
         current = _source_snapshot(fixture, tuple(original))
         if current == original:
             raise JourneyError(f"{name} apply returned success without changing fixture source")
-        _source_rollback(call, inverse_tool, inverse, deadline)
+        rollback_arguments = inverse
+        if name == "tracedecay_move_symbol":
+            # Moving changes the owning file, so resolve the post-move identity
+            # from the real qualified-name producer before asking it to move back.
+            moved = call(
+                "tracedecay_by_qualified_name", {"qualified_name": fixture["symbol"]},
+                deadline("tracedecay_by_qualified_name"),
+            )
+            moved_symbol = first_value(moved, {"qualified_name"})
+            if not isinstance(moved_symbol, str) or not moved_symbol:
+                raise JourneyError("move consumer did not publish the moved symbol identity")
+            rollback_arguments = {**inverse, "symbol": moved_symbol}
+        _source_rollback(call, inverse_tool, rollback_arguments, deadline)
         _require_snapshot(fixture, original, f"{name} rollback")
         return "preview/apply/consumer/rollback verified"
 
