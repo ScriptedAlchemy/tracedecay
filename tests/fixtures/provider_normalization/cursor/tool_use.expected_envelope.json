@@ -1,5 +1,5 @@
 {
-  "description": "Canonical envelope expected after parsing the native Cursor JSONL tool_use record.",
+  "description": "Canonical envelope expected from the generated Cursor adapter-behavior tool_use input; this is not provider-schema evidence.",
   "version": 1,
   "provider": "cursor",
   "native_record_kind": "message",

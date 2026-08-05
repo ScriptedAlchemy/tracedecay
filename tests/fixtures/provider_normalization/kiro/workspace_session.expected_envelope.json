@@ -1,5 +1,5 @@
 {
-  "description": "Canonical assistant envelope expected after parsing the native Kiro workspace-session snapshot.",
+  "description": "Canonical assistant envelope expected from the generated Kiro adapter-behavior workspace-session sample; this is not provider-schema evidence.",
   "version": 1,
   "provider": "kiro",
   "native_record_kind": "message",

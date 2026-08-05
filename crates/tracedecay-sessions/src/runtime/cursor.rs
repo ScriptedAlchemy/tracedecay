@@ -1975,22 +1975,20 @@ mod tests {
         assert!(relations.get("turn_id").is_none());
     }
 
-    /// Exact assistant+`tool_use` JSONL shape from
+    /// Generated assistant+`tool_use` JSONL adapter input from
     /// `tests/transcript_ingest_suite/cursor.rs`
-    /// (`cursor_tool_use_blocks_populate_tool_event_metadata`). Provider-parser
-    /// evidence is the native `role`/`message.content[]` Cursor transcript
-    /// record; the expected output is the canonical envelope projection with
-    /// explicit Cursor provider provenance — not a generic hand-built record.
+    /// (`cursor_tool_use_blocks_populate_tool_event_metadata`). This exercises
+    /// projection behavior; it does not establish Cursor's transcript schema.
     #[test]
-    fn fixture_backed_cursor_jsonl_tool_use_reaches_canonical_envelope() {
+    fn generated_cursor_jsonl_tool_use_reaches_canonical_envelope() {
         let native: Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/provider_normalization/cursor/tool_use.input.json"
         ))
-        .expect("Cursor golden input");
+        .expect("Cursor generated input");
         let expected: Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/provider_normalization/cursor/tool_use.expected_envelope.json"
         ))
-        .expect("Cursor golden expected envelope");
+        .expect("Cursor behavioral expectation");
         let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 64).unwrap();
         let record_id =
             observation_native_record_id("cursor", "cursor-tool-fixture", &native).unwrap();
@@ -2034,12 +2032,12 @@ mod tests {
             envelope.facts().iter().all(|fact| {
                 !matches!(fact, CanonicalObservationFactV1::WorkflowLifecycle { .. })
             }),
-            "Cursor JSONL fixture must not emit WorkflowLifecycle without native lifecycle evidence"
+            "Cursor generated sample must not emit WorkflowLifecycle without native lifecycle evidence"
         );
     }
 
     #[test]
-    fn fixture_backed_cursor_workflow_lookalike_emits_no_workflow_lifecycle() {
+    fn cursor_workflow_lookalike_emits_no_workflow_lifecycle() {
         let native: Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/provider_normalization/cursor/workflow_lookalike.input.json"
         ))

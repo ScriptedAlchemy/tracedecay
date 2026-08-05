@@ -1,5 +1,5 @@
 {
-  "description": "Canonical envelope for a Cursor composer bubble that co-locates Message text with todos[{id,content,status}].",
+  "description": "Canonical envelope for a generated Cursor composer adapter-behavior bubble that co-locates Message text with todos[{id,content,status}]; this is not provider-schema evidence.",
   "version": 1,
   "provider": "cursor",
   "native_record_kind": "bubble",

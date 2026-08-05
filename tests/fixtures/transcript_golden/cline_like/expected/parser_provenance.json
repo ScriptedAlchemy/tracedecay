@@ -12,16 +12,16 @@
   ],
   "tool_name_source": "content[].type == tool_use -> name (joined into tool_names; arguments not evidenced)",
   "ordering_domain": "snapshot_order",
-  "api_history_filenames_evidenced": [
+  "api_history_filenames_exercised": [
     "api_conversation_history.json",
     "api_messages.json"
   ],
   "usage_source": "ui_messages.json say=api_req_started text JSON tokensIn/tokensOut/cacheReads/cacheWrites",
   "unknown_version": {
     "emitted": false,
-    "reason": "Cline-family task JSON snapshots are unversioned in repository fixtures and adapters; no unsupported versioned schema contract exists to cover."
+    "reason": "Generated adapter inputs contain no provider version. They cannot establish a versioned schema or justify UnknownVersion."
   },
-  "rejected_synthetic_lookalikes": [
+  "rejected_generated_lookalikes": [
     "threadId",
     "turnId",
     "agentId",
@@ -36,6 +36,6 @@
   ],
   "workflow_lifecycle": {
     "emitted": false,
-    "reason": "No checked-in Cline/Roo/Kilo fixture provides native lifecycle records; hostile workflow lookalikes stay absent from canonical facts."
+    "reason": "No checked-in Cline/Roo/Kilo native task capture provides lifecycle records; generated workflow lookalikes stay absent from canonical facts."
   }
 }

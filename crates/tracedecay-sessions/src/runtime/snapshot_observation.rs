@@ -246,6 +246,14 @@ impl SnapshotAdmissionRunner {
         let Some((generation, records)) = load()? else {
             return Ok(());
         };
+        if cancellation.is_cancelled()
+            && let Some(record) = records.first()
+        {
+            return Err(host_admission_error(
+                record.provider(),
+                HostAdmissionOutcome::retained_backpressured("admission_cancelled"),
+            ));
+        }
 
         let mut cursors: BTreeMap<String, Option<ObservationSourceCursorV1>> = BTreeMap::new();
         let mut pending = Vec::new();

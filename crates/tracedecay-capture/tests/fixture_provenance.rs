@@ -5,15 +5,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-const NORMALIZATION_PROVIDERS: [&str; 7] = [
-    "claude",
-    "codex",
-    "cursor",
-    "cursor_composer",
-    "hermes",
-    "kiro",
-    "vibe",
-];
+const NATIVE_NORMALIZATION_PROVIDERS: [&str; 3] = ["claude", "codex", "hermes"];
+const UNAVAILABLE_NORMALIZATION_PROVIDERS: [&str; 4] =
+    ["cursor", "cursor_composer", "kiro", "vibe"];
 const CLINE_FAMILY_PROVIDERS: [&str; 3] = ["cline", "roo-code", "kilo"];
 
 fn fixture_root(relative: &str) -> PathBuf {
@@ -51,39 +45,29 @@ fn input_paths(root: &Path) -> BTreeSet<String> {
 }
 
 #[test]
-fn provider_fixture_manifest_covers_every_accepted_native_input() {
+fn provider_fixture_manifest_separates_native_acceptance_from_behavioral_inputs() {
     let root = fixture_root("provider_normalization");
     let manifest = read_json(&root.join("manifest.json"));
-    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["schema_version"], 2);
     assert_eq!(
-        manifest["supported_providers"]
+        manifest["native_acceptance"]["providers"]
             .as_array()
             .unwrap()
             .iter()
             .map(|provider| provider.as_str().unwrap())
             .collect::<BTreeSet<_>>(),
-        NORMALIZATION_PROVIDERS.into_iter().collect()
+        NATIVE_NORMALIZATION_PROVIDERS.into_iter().collect()
     );
 
     let mut manifested_paths = BTreeSet::new();
     let mut manifested_providers = BTreeSet::new();
-    let mut authoritative_providers = BTreeSet::new();
-    for fixture in manifest["fixtures"].as_array().unwrap() {
+    for fixture in manifest["native_acceptance"]["fixtures"]
+        .as_array()
+        .unwrap()
+    {
         let provider = fixture["provider"].as_str().unwrap();
         let path = fixture["path"].as_str().unwrap();
-        let origin = fixture["origin"].as_str().unwrap();
-        assert!(
-            matches!(
-                origin,
-                "redacted_native_capture" | "synthetic_value_contract"
-            ),
-            "{path}: unknown fixture origin {origin}"
-        );
-        assert_eq!(
-            fixture["provider_version"].as_str(),
-            Some("unversioned"),
-            "{path}: provider version must be explicit without inventing a version"
-        );
+        assert_eq!(fixture["origin"], "redacted_native_capture");
         assert!(
             !fixture["origin_evidence"]
                 .as_str()
@@ -101,26 +85,92 @@ fn provider_fixture_manifest_covers_every_accepted_native_input() {
             "{path}: duplicate"
         );
         manifested_providers.insert(provider);
-        if origin == "redacted_native_capture" {
-            authoritative_providers.insert(provider);
-        }
     }
 
+    for category in ["behavioral_inputs", "negative_inputs"] {
+        for fixture in manifest[category].as_array().unwrap() {
+            let path = fixture["path"].as_str().unwrap();
+            assert_eq!(
+                fixture["sha256"].as_str().unwrap(),
+                sha256(&root.join(path)),
+                "{path}: payload bytes changed without provenance update"
+            );
+            assert!(
+                manifested_paths.insert(path.to_owned()),
+                "{path}: classified more than once"
+            );
+        }
+    }
     assert_eq!(manifested_paths, input_paths(&root));
     assert_eq!(
         manifested_providers,
-        NORMALIZATION_PROVIDERS.into_iter().collect()
+        NATIVE_NORMALIZATION_PROVIDERS.into_iter().collect()
     );
+
+    let unavailable = manifest["unavailable_normalization"].as_array().unwrap();
     assert_eq!(
-        authoritative_providers,
-        ["claude", "codex", "hermes"].into_iter().collect()
+        unavailable
+            .iter()
+            .map(|entry| entry["provider"].as_str().unwrap())
+            .collect::<BTreeSet<_>>(),
+        UNAVAILABLE_NORMALIZATION_PROVIDERS.into_iter().collect()
     );
+    for entry in unavailable {
+        let provider = entry["provider"].as_str().unwrap();
+        assert_eq!(entry["state"], "unavailable", "{provider}");
+        assert_eq!(
+            entry["reason"], "checked_in_native_transcript_missing",
+            "{provider}"
+        );
+        assert!(
+            !entry["native_surface"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "{provider}: missing exact native surface"
+        );
+        assert!(
+            matches!(
+                entry["provider_identity"]["release"]["state"].as_str(),
+                Some("known" | "unavailable")
+            ),
+            "{provider}: provider release provenance must be explicit"
+        );
+        if entry["provider_identity"]["release"]["state"] == "known" {
+            assert!(
+                !entry["provider_identity"]["release"]["value"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty(),
+                "{provider}: known release has no value"
+            );
+            let evidence = entry["provider_identity"]["release"]["evidence"]
+                .as_str()
+                .unwrap();
+            assert!(
+                root.join(evidence).is_file(),
+                "{provider}: release evidence does not exist: {evidence}"
+            );
+        }
+        assert_eq!(
+            entry["schema_provenance"]["state"], "unavailable",
+            "{provider}: schema provenance must not be inferred from generated samples"
+        );
+        assert!(
+            !entry["schema_provenance"]["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "{provider}: missing schema blocker"
+        );
+    }
 }
 
 #[test]
-fn cline_family_manifest_covers_every_snapshot_input() {
+fn cline_family_manifest_reports_unavailable_native_acceptance() {
     let root = fixture_root("transcript_golden/cline_like");
     let manifest = read_json(&root.join("manifest.json"));
+    assert_eq!(manifest["schema_version"], 2);
     assert_eq!(
         manifest["providers"]
             .as_array()
@@ -130,17 +180,33 @@ fn cline_family_manifest_covers_every_snapshot_input() {
             .collect::<BTreeSet<_>>(),
         CLINE_FAMILY_PROVIDERS.into_iter().collect()
     );
-    let provenance = &manifest["fixture_provenance"];
-    assert_eq!(provenance["origin"], "synthetic_value_contract");
-    assert_eq!(provenance["provider_version"], "unversioned");
-    assert!(
-        !provenance["origin_evidence"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty()
-    );
+    for provider in manifest["providers"].as_array().unwrap() {
+        let provider_id = provider["provider"].as_str().unwrap();
+        assert_eq!(
+            provider["normalization_acceptance"]["state"], "unavailable",
+            "{provider_id}"
+        );
+        assert_eq!(
+            provider["normalization_acceptance"]["reason"], "checked_in_native_transcript_missing",
+            "{provider_id}"
+        );
+        assert_eq!(
+            provider["schema_provenance"]["state"], "unavailable",
+            "{provider_id}"
+        );
+        assert!(
+            !provider["provider_identity"]["extension_id"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "{provider_id}: missing exact extension identity"
+        );
+    }
 
-    let manifested = provenance["inputs"]
+    let behavioral = &manifest["behavioral_fixture"];
+    assert_eq!(behavioral["purpose"], "adapter_behavior_only");
+    assert_eq!(behavioral["confers_native_acceptance"], false);
+    let manifested = behavioral["inputs"]
         .as_array()
         .unwrap()
         .iter()

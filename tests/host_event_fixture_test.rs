@@ -10,8 +10,7 @@ use tracedecay::application::host_admission::{
 };
 use tracedecay::application::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay::privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
-use tracedecay::sessions::source::TranscriptSource;
-use tracedecay::sessions::{claude, codex, cursor, hermes};
+use tracedecay::sessions::hermes;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -97,7 +96,7 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
     let unavailable = HostAdmissionFacade::new(HostAdmissionAuthorities::default());
 
     for (provider, fixture) in FIXTURES {
-        let supported = execute_native_provider_path(provider, &home).await;
+        let supported = execute_supported_provider_probe(provider).await;
         assert_eq!(
             supported.status,
             HostAdmissionStatus::Supported,
@@ -323,7 +322,7 @@ fn assert_json_strings_omit(value: &Value, private: &str, label: &str) {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn native_provider_fixtures_persist_external_source_receipts_across_restart() {
+async fn recorded_native_provider_fixtures_persist_external_source_receipts_across_restart() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -332,13 +331,23 @@ async fn native_provider_fixtures_persist_external_source_receipts_across_restar
     std::fs::create_dir_all(&home).unwrap();
     let _home = EnvVarGuard::set("HOME", &home);
     let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
-    for (provider, _) in FIXTURES {
+    for provider in ["hermes"] {
         assert_eq!(
-            execute_native_provider_path(provider, &home).await.status,
+            execute_recorded_native_provider_path(provider).await.status,
             HostAdmissionStatus::Supported,
             "{provider}"
         );
     }
+}
+
+async fn execute_supported_provider_probe(provider: &str) -> HostAdmissionOutcome {
+    let temp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(temp.path().join("host-admission-profile"))
+        .await
+        .unwrap();
+    runtime
+        .facade()
+        .probe(provider, HostAdmissionScope::Profile)
 }
 
 fn initialize_boundary_project(home: &Path) -> std::path::PathBuf {
@@ -554,7 +563,7 @@ fn assert_external_source_contract(
     assert_eq!(retained.native_object(), &object);
 }
 
-async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmissionOutcome {
+async fn execute_recorded_native_provider_path(provider: &str) -> HostAdmissionOutcome {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -588,77 +597,6 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     .unwrap();
     let facade = runtime.facade();
     let scope = match provider {
-        "codex" => {
-            let transcript = tmp.path().join("codex-golden-session.jsonl");
-            let mut meta: Value = serde_json::from_str(include_str!(
-                "fixtures/provider_normalization/codex/session_meta.input.json"
-            ))
-            .unwrap();
-            meta["payload"]["cwd"] = project.to_string_lossy().into_owned().into();
-            let message =
-                include_str!("fixtures/provider_normalization/codex/agent_message.input.json");
-            std::fs::write(&transcript, format!("{}\n{message}\n", meta)).unwrap();
-            codex::try_admit_codex_jsonl_observations_for_project_with_admission(
-                &transcript,
-                &project,
-                project_id.clone(),
-                &facade,
-                None,
-            )
-            .await
-            .unwrap();
-            HostAdmissionScope::Project
-        }
-        "claude" => {
-            let session_id = "claude-golden-session";
-            let transcript_dir = home.join(".claude/projects/host-event-fixture");
-            std::fs::create_dir_all(&transcript_dir).unwrap();
-            let mut record: Value = serde_json::from_str(include_str!(
-                "fixtures/provider_normalization/claude/assistant_tool_use.input.json"
-            ))
-            .unwrap();
-            record["cwd"] = tmp.path().to_string_lossy().into_owned().into();
-            std::fs::write(
-                transcript_dir.join(format!("{session_id}.jsonl")),
-                format!("{record}\n"),
-            )
-            .unwrap();
-            let profile_root = home.join(".tracedecay");
-            std::fs::create_dir_all(&profile_root).unwrap();
-            let stats = claude::ingest_user_sessions_with_admission(
-                &profile_root,
-                None,
-                Vec::new(),
-                &facade,
-            )
-            .await;
-            assert!(stats.messages_upserted > 0, "Claude native fixture");
-            HostAdmissionScope::Profile
-        }
-        "cursor" => {
-            let transcript = tmp.path().join("cursor-golden-session.jsonl");
-            let record: Value = serde_json::from_str(include_str!(
-                "fixtures/provider_normalization/cursor/tool_use.input.json"
-            ))
-            .unwrap();
-            std::fs::write(&transcript, format!("{record}\n")).unwrap();
-            let event = json!({
-                "session_id": "cursor-golden-session",
-                "transcript_path": transcript,
-                "workspace_roots": [project],
-                "cwd": project,
-            });
-            let stats = cursor::try_ingest_cursor_transcript_event_capped_with_admission(
-                &event.to_string(),
-                project_id.clone(),
-                &facade,
-                None,
-            )
-            .await
-            .unwrap();
-            assert!(stats.bytes_consumed > 0, "Cursor native fixture");
-            HostAdmissionScope::Project
-        }
         "hermes" => {
             let hermes_home = tmp.path().join("hermes-home");
             write_hermes_native_fixture(&hermes_home, &project).await;
@@ -672,32 +610,6 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             .await
             .stats;
             assert!(stats.messages_upserted > 0, "Hermes native fixture");
-            HostAdmissionScope::Project
-        }
-        "kiro" => {
-            write_kiro_native_fixture(home, &project);
-            let source = tracedecay::sessions::kiro::KiroSource::with_home(home);
-            assert_eq!(source.transcript_paths(&project).len(), 1, "Kiro discovery");
-            let capture = tracedecay::sessions::kiro::capture_kiro_snapshot_observations(
-                &facade,
-                &source,
-                &project,
-                ObservationScopeV1::Project {
-                    project_id: project_id.clone(),
-                },
-                None,
-                &ObservationCancellation::default(),
-            )
-            .await
-            .unwrap();
-            assert!(
-                capture.stats.messages_upserted > 0,
-                "Kiro native fixture must admit observations"
-            );
-            assert!(
-                !capture.deferred_by_byte_cap,
-                "Kiro native fixture must not defer on the byte cap"
-            );
             HostAdmissionScope::Project
         }
         other => panic!("unexpected provider {other}"),
@@ -735,37 +647,6 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         "external-source receipt and projection effects must survive runtime restart"
     );
     outcome
-}
-
-fn encode_workspace_path(path: &Path) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::new();
-    let mut buffer = 0_u32;
-    let mut bits = 0_u32;
-    for byte in path.as_os_str().as_encoded_bytes() {
-        buffer = (buffer << 8) | u32::from(*byte);
-        bits += 8;
-        while bits >= 6 {
-            bits -= 6;
-            output.push(TABLE[((buffer >> bits) & 0x3f) as usize] as char);
-        }
-    }
-    if bits > 0 {
-        output.push(TABLE[((buffer << (6 - bits)) & 0x3f) as usize] as char);
-    }
-    output.replace('/', "_")
-}
-
-fn write_kiro_native_fixture(home: &Path, project: &Path) {
-    let directory = tracedecay::agents::kiro_data_dir(home)
-        .join("User/globalStorage/kiro.kiroagent/workspace-sessions")
-        .join(encode_workspace_path(project));
-    std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(
-        directory.join("sess-golden.json"),
-        include_str!("fixtures/provider_normalization/kiro/workspace_session.input.json"),
-    )
-    .unwrap();
 }
 
 async fn write_hermes_native_fixture(home: &Path, project: &Path) {

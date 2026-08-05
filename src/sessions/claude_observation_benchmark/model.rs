@@ -215,8 +215,10 @@ pub(super) struct WorkloadIdentity {
     pub(super) manifest_sha256: String,
     pub(super) harness_paths: Vec<String>,
     pub(super) harness_sha256: String,
-    pub(super) native_fixture_paths: Vec<String>,
-    pub(super) native_fixtures_sha256: String,
+    #[serde(alias = "native_fixture_paths")]
+    pub(super) input_paths: Vec<String>,
+    #[serde(alias = "native_fixtures_sha256")]
+    pub(super) inputs_sha256: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -72,7 +72,7 @@ fn codex_checked_in_fixture_preserves_canonical_envelope() {
 }
 
 #[test]
-fn cursor_checked_in_tool_fixture_preserves_projection() {
+fn cursor_generated_tool_sample_preserves_projection_behavior() {
     let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/provider_normalization/cursor");
     let native: Value = serde_json::from_str(
@@ -108,7 +108,7 @@ fn cursor_checked_in_tool_fixture_preserves_projection() {
 }
 
 #[test]
-fn cursor_composer_checked_in_bubble_preserves_projection() {
+fn cursor_composer_generated_bubble_sample_preserves_projection_behavior() {
     let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/provider_normalization/cursor_composer");
     let native: Value = serde_json::from_str(
@@ -150,7 +150,7 @@ fn cursor_composer_checked_in_bubble_preserves_projection() {
 }
 
 #[test]
-fn vibe_checked_in_message_preserves_projection_without_workflow_inference() {
+fn vibe_negative_sample_preserves_projection_without_workflow_inference() {
     let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/provider_normalization/vibe");
     let native: Value = serde_json::from_str(

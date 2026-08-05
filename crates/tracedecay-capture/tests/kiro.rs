@@ -43,7 +43,7 @@ fn derived_message_identity_remains_byte_exact() {
 }
 
 #[test]
-fn checked_in_workspace_fixture_preserves_private_kernel_payload() {
+fn generated_workspace_sample_preserves_private_kernel_payload() {
     let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/provider_normalization/kiro");
     let input: Value = serde_json::from_str(

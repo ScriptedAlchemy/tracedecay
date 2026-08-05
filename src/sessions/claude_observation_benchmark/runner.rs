@@ -37,7 +37,7 @@ use super::model::{
     RawProviderPhaseSample,
 };
 use super::{
-    BENCHMARK_COMMAND, BENCHMARK_SECRET_PREFIX, MEASURED_REPETITIONS, NATIVE_PROVIDER_FIXTURES,
+    BENCHMARK_COMMAND, BENCHMARK_SECRET_PREFIX, MEASURED_REPETITIONS, PROVIDER_BENCHMARK_INPUTS,
     PROVIDER_PIPELINE_SCOPE, RECORDS_PER_REPETITION, RESULT_SCHEMA_VERSION, WARMUP_REPETITIONS,
     WORKLOAD_ID,
 };
@@ -440,7 +440,7 @@ impl ProviderFixture {
             .expect("measure registered provider database storage")
     }
 
-    async fn parse_native_fixture(&self) -> usize {
+    async fn parse_benchmark_input(&self) -> usize {
         match self.kind {
             ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Cursor => {
                 fs::read_to_string(&self.source_path)
@@ -694,7 +694,7 @@ impl ProviderSamples {
     async fn measure_turn(&mut self, repetition: usize, fixture_id: usize) {
         let fixture = ProviderFixture::new(self.kind, fixture_id).await;
         let parse = PhaseSnapshot::start(fixture.database_storage_bytes());
-        let parsed_records = fixture.parse_native_fixture().await;
+        let parsed_records = fixture.parse_benchmark_input().await;
         self.parse.push(parse.finish_provider(
             fixture.database_storage_bytes(),
             repetition,
@@ -902,13 +902,13 @@ fn provider_phase_result(
     }
 }
 
-fn native_fixture(path: &str) -> serde_json::Value {
-    let source = NATIVE_PROVIDER_FIXTURES
+fn benchmark_input(path: &str) -> serde_json::Value {
+    let source = PROVIDER_BENCHMARK_INPUTS
         .iter()
         .find_map(|(candidate, source)| (*candidate == path).then_some(*source))
-        .unwrap_or_else(|| panic!("native provider fixture is not attested: {path}"));
+        .unwrap_or_else(|| panic!("provider benchmark input is not attested: {path}"));
     serde_json::from_str(source)
-        .unwrap_or_else(|error| panic!("parse native fixture {path}: {error}"))
+        .unwrap_or_else(|error| panic!("parse provider benchmark input {path}: {error}"))
 }
 
 fn benchmark_canary(repetition: usize, index: usize) -> String {
@@ -925,13 +925,13 @@ fn inject_canary(content: &mut serde_json::Value, canary: &str) {
     }
     let blocks = content
         .as_array_mut()
-        .expect("native fixture content must be text or blocks");
+        .expect("benchmark input content must be text or blocks");
     let text = blocks
         .iter_mut()
         .find(|block| block["type"] == "text")
         .and_then(|block| block.get_mut("text"))
-        .expect("native fixture content has no text block");
-    let original = text.as_str().expect("native fixture text block");
+        .expect("benchmark input content has no text block");
+    let original = text.as_str().expect("benchmark input text block");
     *text = json!(format!("{original} {canary}"));
 }
 
@@ -961,7 +961,7 @@ fn write_provider_claude(home: &Path, repetition: usize) -> PathBuf {
         .join(format!("{session_id}.jsonl"));
     fs::create_dir_all(path.parent().expect("Claude provider fixture parent"))
         .expect("create Claude provider fixture");
-    let template = native_fixture(
+    let template = benchmark_input(
         "tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
     );
     write_provider_jsonl(&path, |index| {
@@ -985,12 +985,12 @@ fn write_provider_codex(home: &Path, project: &Path, repetition: usize) -> PathB
     fs::create_dir_all(&directory).expect("create Codex provider fixture");
     let path = directory.join(format!("rollout-{session_id}.jsonl"));
     let mut session =
-        native_fixture("tests/fixtures/provider_normalization/codex/session_meta.input.json");
+        benchmark_input("tests/fixtures/provider_normalization/codex/session_meta.input.json");
     session["payload"]["id"] = json!(session_id);
     session["payload"]["cwd"] = json!(project);
     let mut lines = vec![session];
     let message_template =
-        native_fixture("tests/fixtures/provider_normalization/codex/agent_message.input.json");
+        benchmark_input("tests/fixtures/provider_normalization/codex/agent_message.input.json");
     for index in 0..baseline::PROVIDER_RECORDS_PER_REPETITION - 1 {
         let mut record = message_template.clone();
         inject_canary(
@@ -1006,7 +1006,7 @@ fn write_provider_codex(home: &Path, project: &Path, repetition: usize) -> PathB
 fn write_provider_cursor(root: &Path, repetition: usize) -> PathBuf {
     let path = root.join(format!("benchmark-cursor-session-{repetition}.jsonl"));
     let template =
-        native_fixture("tests/fixtures/provider_normalization/cursor/tool_use.input.json");
+        benchmark_input("tests/fixtures/provider_normalization/cursor/tool_use.input.json");
     write_provider_jsonl(&path, |index| {
         let mut record = template.clone();
         inject_canary(
@@ -1019,7 +1019,7 @@ fn write_provider_cursor(root: &Path, repetition: usize) -> PathBuf {
 }
 
 async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -> PathBuf {
-    let template = native_fixture(
+    let template = benchmark_input(
         "tests/fixtures/provider_normalization/hermes/assistant_tool_call.input.json",
     );
     let hermes_home = home.join(".hermes");
@@ -1139,10 +1139,10 @@ fn write_provider_kiro(home: &Path, project: &Path, repetition: usize) -> PathBu
     fs::create_dir_all(&execution_dir).expect("create Kiro execution fixture");
     let path = execution_dir.join(format!("benchmark-kiro-session-{repetition}"));
     let mut template =
-        native_fixture("tests/fixtures/provider_normalization/kiro/workspace_session.input.json");
+        benchmark_input("tests/fixtures/provider_normalization/kiro/workspace_session.input.json");
     let native_messages = template["messages"]
         .as_array()
-        .expect("native Kiro messages")
+        .expect("generated Kiro benchmark messages")
         .clone();
     let messages = (0..baseline::PROVIDER_RECORDS_PER_REPETITION)
         .map(|index| {
@@ -1180,19 +1180,19 @@ fn write_provider_cline_like(
         .join(format!("{task_id}-{repetition}"));
     fs::create_dir_all(&task_dir).expect("create Cline-family provider fixture");
     let mut task_metadata =
-        native_fixture("tests/fixtures/transcript_golden/cline_like/input/task_metadata.json");
+        benchmark_input("tests/fixtures/transcript_golden/cline_like/input/task_metadata.json");
     task_metadata["workspacePath"] = json!(project);
     fs::write(
         task_dir.join("task_metadata.json"),
         task_metadata.to_string(),
     )
     .expect("write Cline-family task metadata");
-    let native_messages = native_fixture(
+    let native_messages = benchmark_input(
         "tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json",
     );
     let native_messages = native_messages
         .as_array()
-        .expect("native Cline-family messages");
+        .expect("generated Cline-family benchmark messages");
     let messages = (0..baseline::PROVIDER_RECORDS_PER_REPETITION)
         .map(|index| {
             let mut message = native_messages[index % native_messages.len()].clone();

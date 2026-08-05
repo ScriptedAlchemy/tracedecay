@@ -173,7 +173,7 @@ pub(super) fn validate(baselines: &[ProviderBaseline]) {
             baseline.provider
         );
         let fixture = &baseline.fixture;
-        assert_eq!(fixture.format, "checked_in_native_bounded_copy_v1");
+        assert_eq!(fixture.format, provider_input_format(&baseline.provider));
         assert!(!fixture.source_paths.is_empty());
         assert!(fixture.redacted_secret.starts_with(REDACTION_MARKER));
         assert!(!fixture.redacted_secret.contains("sk-test-"));
@@ -308,7 +308,7 @@ fn baseline(provider: &str) -> ProviderBaseline {
     ProviderBaseline {
         provider: provider.to_string(),
         fixture: ProviderFixture {
-            format: "checked_in_native_bounded_copy_v1".to_string(),
+            format: provider_input_format(provider).to_string(),
             source_paths: provider_fixture_paths(provider),
             session_id: format!("benchmark-{provider}-session"),
             message_id: format!("benchmark-{provider}-message-0"),
@@ -328,6 +328,16 @@ fn baseline(provider: &str) -> ProviderBaseline {
             result_schema: "provider-observation-performance-result-v1".to_string(),
             required_metrics: strings(PERFORMANCE_METRICS),
         }),
+    }
+}
+
+fn provider_input_format(provider: &str) -> &'static str {
+    match provider {
+        "hermes" => "checked_in_native_bounded_copy_v1",
+        "claude" | "codex" | "cursor" | "kiro" | "cline" | "roo-code" | "kilo" => {
+            "generated_adapter_behavior_v1"
+        }
+        _ => panic!("unsupported provider fixture {provider}"),
     }
 }
 

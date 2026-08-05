@@ -127,8 +127,8 @@ pub fn normalize_cursor_observation_with_message_id(
     append_cursor_usage_fact(native, message, &mut facts);
     append_cursor_git_facts(native, &mut facts);
 
-    // Compaction facts require an exact fixture-backed Cursor JSONL `type`
-    // allowlist. No such native kinds are checked in; do not substring-match
+    // Compaction facts require an exact native-capture-backed Cursor JSONL
+    // `type` allowlist. No such native kinds are checked in; do not substring-match
     // "compact" (that promotes protocol-echo lookalikes). Composer bubbles use
     // the distinct provider bool `isCompacted` instead.
     if facts.len() == 1 {

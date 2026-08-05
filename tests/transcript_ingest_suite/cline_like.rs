@@ -81,7 +81,7 @@ pub(super) fn write_task(
     write_task_with_api_filename(root, project, task_id, "api_conversation_history.json")
 }
 
-/// Write a Cline-family task using checked-in golden fixtures under
+/// Write a Cline-family task using generated adapter-behavior inputs under
 /// `tests/fixtures/transcript_golden/cline_like/`.
 pub(super) fn write_task_with_api_filename(
     root: &std::path::Path,
@@ -1003,24 +1003,25 @@ async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn golden_fixture_ingests_through_each_provider_discriminator() {
+async fn generated_behavioral_input_ingests_through_each_provider_discriminator() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let manifest: serde_json::Value = serde_json::from_str(include_str!(
         "../fixtures/transcript_golden/cline_like/manifest.json"
     ))
-    .expect("cline_like golden manifest");
+    .expect("cline_like provenance manifest");
     assert_eq!(manifest["family"], "cline_like");
+    assert_eq!(
+        manifest["behavioral_fixture"]["confers_native_acceptance"],
+        false
+    );
     assert!(
-        manifest["notes"]
+        manifest["providers"]
             .as_array()
-            .expect("notes")
+            .expect("providers")
             .iter()
-            .any(|note| note
-                .as_str()
-                .is_some_and(|text| text.contains("UnknownVersion"))),
-        "manifest must document the UnknownVersion protocol gap"
+            .all(|provider| provider["normalization_acceptance"]["state"] == "unavailable")
     );
 
     for (provider, extension_id, selected_provider, api_filename) in [

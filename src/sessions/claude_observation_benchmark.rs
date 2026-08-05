@@ -12,7 +12,7 @@ mod runner;
 mod tests;
 
 const RESULT_SCHEMA_VERSION: u32 = 2;
-const WORKLOAD_SCHEMA_VERSION: u32 = 3;
+const WORKLOAD_SCHEMA_VERSION: u32 = 4;
 const WORKLOAD_ID: &str = "pr5-observation-pipeline-v1";
 const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
@@ -27,7 +27,7 @@ const REDACTION_MARKER: &str = "[TraceDecay redacted:";
 const PROVIDER_PIPELINE_SCOPE: &str =
     "production_parse_normalize_sanitize_commit_project_and_replay";
 const WORKLOAD_MANIFEST: &str = include_str!("../../benchmarks/pr5-observation/workload-v1.json");
-const NATIVE_PROVIDER_FIXTURES: &[(&str, &str)] = &[
+const PROVIDER_BENCHMARK_INPUTS: &[(&str, &str)] = &[
     (
         "tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
         include_str!(

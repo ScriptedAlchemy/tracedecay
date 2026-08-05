@@ -1405,7 +1405,7 @@ mod observation_tests {
     fn hostile_lookalike_fields_remain_absent() {
         // The Kiro fixtures in tests/transcript_ingest_suite/kiro.rs contain
         // role/content plus transcript-level identity/model/time only. These
-        // lookalike keys have no fixture-backed Kiro semantics.
+        // lookalike keys have no admitted Kiro semantics.
         let entry = serde_json::json!({
             "role": "assistant",
             "content": "echoed protocol noise",
@@ -1523,19 +1523,19 @@ mod observation_tests {
     }
 
     #[test]
-    fn fixture_backed_workspace_session_message_reaches_canonical_envelope() {
-        // Exact modern workspace-session message shape from
+    fn generated_workspace_session_message_reaches_canonical_envelope() {
+        // Generated modern workspace-session adapter shape from
         // tests/transcript_ingest_suite/kiro.rs::write_workspace_session_json.
         // Provider-parser path: modern_messages → normalize_kiro_snapshot_observations
         // → canonical_snapshot_envelope (not a hand-built canonical record).
         let input: Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/provider_normalization/kiro/workspace_session.input.json"
         ))
-        .expect("Kiro golden input");
+        .expect("Kiro generated input");
         let expected: Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/provider_normalization/kiro/workspace_session.expected_envelope.json"
         ))
-        .expect("Kiro golden expected envelope");
+        .expect("Kiro behavioral expectation");
         let session_id = input["sessionId"].as_str().unwrap();
         let model = input["modelId"].as_str();
         let messages = modern_messages(
@@ -1548,7 +1548,7 @@ mod observation_tests {
         let message = messages
             .into_iter()
             .find(|message| message.role == "assistant")
-            .expect("Kiro golden assistant");
+            .expect("Kiro generated assistant");
         let text = message.text.clone();
         let message_id = message.message_id.clone();
         assert!(
@@ -1573,7 +1573,7 @@ mod observation_tests {
             ObservationOrderingDomainV1::SnapshotOrder,
             |native| canonical_snapshot_envelope(&native, PROVIDER, session_id, &message_id, range),
         )
-        .expect("fixture-backed Kiro canonical envelope");
+        .expect("generated Kiro canonical envelope");
         let canonical = parsed.value();
         assert_eq!(canonical["version"], expected["version"]);
         assert_eq!(canonical["provider"], expected["provider"]);
@@ -1603,7 +1603,7 @@ mod observation_tests {
                 .unwrap()
                 .iter()
                 .all(|fact| fact["kind"] != "workflow_lifecycle"),
-            "Kiro workspace fixture has no native lifecycle evidence for WorkflowLifecycle"
+            "Kiro generated sample has no native lifecycle evidence for WorkflowLifecycle"
         );
     }
 

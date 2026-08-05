@@ -21,7 +21,7 @@ use super::model::{
 };
 use super::runner::{Fixture, exercise_provider_paths_once};
 use super::{
-    BENCHMARK_COMMAND, HARNESS_SOURCES, MEASURED_REPETITIONS, NATIVE_PROVIDER_FIXTURES,
+    BENCHMARK_COMMAND, HARNESS_SOURCES, MEASURED_REPETITIONS, PROVIDER_BENCHMARK_INPUTS,
     PROVIDER_PIPELINE_SCOPE, RECORDS_PER_REPETITION, RESULT_SCHEMA_VERSION, WARMUP_REPETITIONS,
     WORKLOAD_ID, WORKLOAD_MANIFEST,
 };
@@ -36,15 +36,12 @@ fn workload_manifest_matches_executable_contract() {
     assert_eq!(identity.manifest_sha256.len(), 64);
     assert_eq!(identity.harness_sha256.len(), 64);
     assert_eq!(identity.harness_paths.len(), HARNESS_SOURCES.len());
-    assert_eq!(identity.native_fixtures_sha256.len(), 64);
-    assert_eq!(
-        identity.native_fixture_paths.len(),
-        NATIVE_PROVIDER_FIXTURES.len()
-    );
+    assert_eq!(identity.inputs_sha256.len(), 64);
+    assert_eq!(identity.input_paths.len(), PROVIDER_BENCHMARK_INPUTS.len());
 }
 
 #[test]
-fn checked_in_evidence_preserves_providerless_historical_results() {
+fn checked_in_evidence_retires_mislabeled_provider_result() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks/pr5-observation");
     let acceptance = validate_evidence_directory(&directory, false).unwrap();
     let index: serde_json::Value = serde_json::from_slice(
@@ -52,29 +49,28 @@ fn checked_in_evidence_preserves_providerless_historical_results() {
     )
     .expect("parse evidence index");
     assert_eq!(acceptance.as_deref(), index["current_acceptance"].as_str());
-    let mut providerless_results = 0;
-    for name in index["historical_stale"]
+    let historical = index["historical_stale"]
         .as_array()
-        .expect("historical evidence list")
-    {
-        let result: serde_json::Value = serde_json::from_slice(
-            &fs::read(
-                directory.join(
-                    name.as_str()
-                        .expect("historical evidence filename must be a string"),
-                ),
-            )
-            .expect("read historical evidence"),
+        .expect("historical evidence list");
+    assert_eq!(historical.len(), 1);
+    let result: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            directory.join(
+                historical[0]
+                    .as_str()
+                    .expect("historical evidence filename"),
+            ),
         )
-        .expect("parse historical evidence");
-        assert_eq!(result["evidence_status"], "historical_stale");
-        providerless_results +=
-            usize::from(result.get("provider_observation_performance").is_none());
-    }
-    assert!(
-        providerless_results > 0,
-        "providerless historical evidence must exercise compatibility path"
+        .expect("read historical evidence"),
+    )
+    .expect("parse historical evidence");
+    assert_eq!(result["evidence_status"], "historical_stale");
+    assert_eq!(result["superseded_by_workload_schema_version"], 4);
+    assert_eq!(
+        result["stale_reason"],
+        "generated provider adapter inputs were mislabeled as native normalization fixtures"
     );
+    assert!(result["provider_observation_performance"].is_object());
 }
 
 #[test]
@@ -128,7 +124,14 @@ fn provider_baselines_are_versioned_bounded_and_redacted() {
         );
         assert_eq!(baseline["bounds"]["fair_rotation_providers"], 8);
         let fixture = &baseline["fixture"];
-        assert_eq!(fixture["format"], "checked_in_native_bounded_copy_v1");
+        let expected_format = match baseline["provider"].as_str().unwrap() {
+            "hermes" => "checked_in_native_bounded_copy_v1",
+            "claude" | "codex" | "cursor" | "kiro" | "cline" | "roo-code" | "kilo" => {
+                "generated_adapter_behavior_v1"
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(fixture["format"], expected_format);
         assert!(!fixture["source_paths"].as_array().unwrap().is_empty());
         assert!(
             fixture["redacted_secret"]

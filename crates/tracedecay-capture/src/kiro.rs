@@ -19,11 +19,12 @@ pub struct KiroSnapshotMessage<'a> {
     pub model: Option<&'a str>,
 }
 
-/// Shapes only the Kiro fields evidenced by checked-in transcript fixtures.
+/// Shapes the bounded fields currently consumed by the Kiro adapter.
 ///
 /// Discovery metadata and provider-private bags are intentionally absent so
 /// the root adapter can admit this bounded payload through sanitization before
-/// any durable write.
+/// any durable write. The generated adapter sample does not establish the
+/// provider transcript schema.
 pub fn snapshot_native_payload(message: KiroSnapshotMessage<'_>) -> Value {
     let mut fields = Map::new();
     fields.insert("provider".to_string(), Value::String(PROVIDER.to_string()));

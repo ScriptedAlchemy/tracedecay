@@ -902,8 +902,8 @@ fn message_metadata(provider: &str, entry: &Value, location_cwd: &Path) -> Value
 mod observation_tests {
     use super::*;
 
-    fn write_checked_in_native_task(tasks: &Path, project: &Path, api_filename: &str) -> PathBuf {
-        let task = tasks.join("checked-in-native");
+    fn write_generated_behavior_task(tasks: &Path, project: &Path, api_filename: &str) -> PathBuf {
+        let task = tasks.join("generated-behavior");
         std::fs::create_dir_all(&task).unwrap();
         let mut metadata: Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/transcript_golden/cline_like/input/task_metadata.json"
@@ -922,7 +922,7 @@ mod observation_tests {
             "api_conversation_history.json" => include_str!(
                 "../../../../tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json"
             ),
-            other => panic!("unsupported checked-in Cline-family fixture {other}"),
+            other => panic!("unsupported generated Cline-family input {other}"),
         };
         let api = task.join(api_filename);
         std::fs::write(&api, fixture).unwrap();
@@ -937,7 +937,7 @@ mod observation_tests {
     }
 
     #[tokio::test]
-    async fn checked_in_cline_family_snapshots_preserve_receipts_through_failures_and_replay() {
+    async fn generated_cline_family_snapshots_preserve_receipts_through_failures_and_replay() {
         use crate::admission::test_support::MemoryHostAdmission;
 
         for (provider, api_filename) in [
@@ -949,7 +949,7 @@ mod observation_tests {
             let project = temp.path().join("project");
             std::fs::create_dir_all(&project).unwrap();
             let tasks = temp.path().join("tasks");
-            let api = write_checked_in_native_task(&tasks, &project, api_filename);
+            let api = write_generated_behavior_task(&tasks, &project, api_filename);
             let source = ClineLikeSource {
                 provider,
                 storage_roots: vec![tasks],
@@ -1422,35 +1422,35 @@ mod observation_tests {
         assert!(!encoded.contains("Redacted reasoning"));
     }
 
-    const GOLDEN_API_HISTORY: &str = include_str!(
+    const BEHAVIOR_API_HISTORY: &str = include_str!(
         "../../../../tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json"
     );
-    const GOLDEN_API_MESSAGES: &str = include_str!(
+    const BEHAVIOR_API_MESSAGES: &str = include_str!(
         "../../../../tests/fixtures/transcript_golden/cline_like/input/api_messages.json"
     );
-    const GOLDEN_EXPECTED_ASSISTANT: &str = include_str!(
+    const BEHAVIOR_EXPECTED_ASSISTANT: &str = include_str!(
         "../../../../tests/fixtures/transcript_golden/cline_like/expected/assistant_tool_use.canonical.json"
     );
-    const GOLDEN_PARSER_PROVENANCE: &str = include_str!(
+    const BEHAVIOR_PARSER_NOTES: &str = include_str!(
         "../../../../tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json"
     );
 
     #[test]
-    fn fixture_backed_tool_use_name_reaches_canonical_facts() {
-        // Checked-in golden input (same shape as write_task). Roo's api_messages.json
-        // twin must stay byte-equivalent to the shared Cline/Kilo history fixture.
+    fn generated_tool_use_name_reaches_canonical_facts() {
+        // Generated adapter input (same shape as write_task). Roo's
+        // api_messages.json twin stays byte-equivalent to the shared sample.
         let history: Value =
-            serde_json::from_str(GOLDEN_API_HISTORY).expect("golden api history JSON");
+            serde_json::from_str(BEHAVIOR_API_HISTORY).expect("behavioral api history JSON");
         let roo_twin: Value =
-            serde_json::from_str(GOLDEN_API_MESSAGES).expect("golden Roo api_messages JSON");
+            serde_json::from_str(BEHAVIOR_API_MESSAGES).expect("behavioral Roo api_messages JSON");
         assert_eq!(
             history, roo_twin,
             "Roo api_messages.json must mirror the shared Cline-family history shape"
         );
-        let expected: Value =
-            serde_json::from_str(GOLDEN_EXPECTED_ASSISTANT).expect("golden expected envelope");
+        let expected: Value = serde_json::from_str(BEHAVIOR_EXPECTED_ASSISTANT)
+            .expect("behavioral expected envelope");
         let provenance: Value =
-            serde_json::from_str(GOLDEN_PARSER_PROVENANCE).expect("golden parser provenance");
+            serde_json::from_str(BEHAVIOR_PARSER_NOTES).expect("behavioral parser notes");
         assert_eq!(
             provenance["ordering_domain"], "snapshot_order",
             "parser provenance must declare SnapshotOrder"
@@ -1464,7 +1464,7 @@ mod observation_tests {
         let entry = &entries[1];
         assert_eq!(
             entry["content"][1]["type"], "tool_use",
-            "golden must evidence content[].type=tool_use parser path"
+            "generated input must exercise content[].type=tool_use parser path"
         );
 
         for provider in ["cline", "roo-code", "kilo"] {
@@ -1480,7 +1480,7 @@ mod observation_tests {
                 Path::new("/tmp/project"),
                 &mut BTreeMap::new(),
             )
-            .expect("fixture-backed assistant message");
+            .expect("generated assistant message");
             assert_eq!(
                 message.provider, provider,
                 "{provider}: parser must tag provider"
@@ -1520,7 +1520,7 @@ mod observation_tests {
                     )
                 },
             )
-            .expect("fixture-backed tool-name envelope");
+            .expect("generated tool-name envelope");
             let canonical = parsed.value();
             assert_eq!(canonical["provider"], provider);
             assert_eq!(canonical["version"], 1);

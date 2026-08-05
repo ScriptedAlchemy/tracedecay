@@ -1,5 +1,5 @@
 {
-  "description": "Canonical envelope expected after parsing a native Cursor composerData envelope todos array.",
+  "description": "Canonical envelope expected from the generated Cursor composerData adapter-behavior todos array; this is not provider-schema evidence.",
   "version": 1,
   "provider": "cursor",
   "native_record_kind": "envelope",

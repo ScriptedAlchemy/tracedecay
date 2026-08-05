@@ -20,7 +20,7 @@ use super::{
     BENCHMARK_COMMAND, BUILD_CARGO_CONFIG_IDENTITY, BUILD_CARGO_VERSION, BUILD_COMMIT,
     BUILD_PROFILE, BUILD_RUSTC_VERSION, BUILD_RUSTC_WORKSPACE_WRAPPER, BUILD_RUSTC_WRAPPER,
     BUILD_RUSTFLAGS, BUILD_SOURCE_MANIFEST_SHA256, BUILD_SOURCE_MODE, BUILD_TARGET_TRIPLE,
-    BUILD_TREE, HARNESS_SOURCES, MEASURED_REPETITIONS, NATIVE_PROVIDER_FIXTURES,
+    BUILD_TREE, HARNESS_SOURCES, MEASURED_REPETITIONS, PROVIDER_BENCHMARK_INPUTS,
     PROVIDER_PIPELINE_SCOPE, RECORDS_PER_REPETITION, RESULT_SCHEMA_VERSION, WARMUP_REPETITIONS,
     WORKLOAD_ID, WORKLOAD_MANIFEST, WORKLOAD_MANIFEST_PATH, WORKLOAD_SCHEMA_VERSION,
 };
@@ -774,8 +774,8 @@ pub(super) fn workload_identity() -> WorkloadIdentity {
             .iter()
             .map(|(path, source)| (*path, source.as_bytes())),
     );
-    let native_fixtures_sha256 = harness_sources_sha256(
-        NATIVE_PROVIDER_FIXTURES
+    let inputs_sha256 = harness_sources_sha256(
+        PROVIDER_BENCHMARK_INPUTS
             .iter()
             .map(|(path, source)| (*path, source.as_bytes())),
     );
@@ -806,24 +806,25 @@ pub(super) fn workload_identity() -> WorkloadIdentity {
         harness_sha256,
         "compiled benchmark harness differs from checkout"
     );
-    let native_checkout = NATIVE_PROVIDER_FIXTURES
+    let input_checkout = PROVIDER_BENCHMARK_INPUTS
         .iter()
         .map(|(path, _)| {
             (
                 *path,
-                fs::read(repository_root().join(path))
-                    .unwrap_or_else(|error| panic!("read native provider fixture {path}: {error}")),
+                fs::read(repository_root().join(path)).unwrap_or_else(|error| {
+                    panic!("read provider benchmark input {path}: {error}")
+                }),
             )
         })
         .collect::<Vec<_>>();
     assert_eq!(
         harness_sources_sha256(
-            native_checkout
+            input_checkout
                 .iter()
                 .map(|(path, source)| (*path, source.as_slice()))
         ),
-        native_fixtures_sha256,
-        "compiled native provider fixtures differ from checkout"
+        inputs_sha256,
+        "compiled provider benchmark inputs differ from checkout"
     );
     WorkloadIdentity {
         manifest_path: WORKLOAD_MANIFEST_PATH.to_string(),
@@ -833,11 +834,11 @@ pub(super) fn workload_identity() -> WorkloadIdentity {
             .map(|(path, _)| (*path).to_string())
             .collect(),
         harness_sha256,
-        native_fixture_paths: NATIVE_PROVIDER_FIXTURES
+        input_paths: PROVIDER_BENCHMARK_INPUTS
             .iter()
             .map(|(path, _)| (*path).to_string())
             .collect(),
-        native_fixtures_sha256,
+        inputs_sha256,
     }
 }
 

@@ -1,16 +1,73 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "family": "cline_like",
   "shared_adapter": "crates/tracedecay-sessions/src/runtime/cline_like.rs",
-  "notes": [
-    "Cline, Roo Code, and Kilo share one production adapter (ClineLikeSource) with distinct provider ids and storage roots.",
-    "Golden inputs mirror the checked-in write_task / observation_tests shapes — not invented protocol fields.",
-    "Cline-family task JSON is unversioned; ObservationCoverageReason::UnknownVersion is intentionally not emitted (no versioned unsupported schema evidence)."
+  "providers": [
+    {
+      "provider": "cline",
+      "provider_identity": {
+        "product": "Cline",
+        "extension_id": "saoudrizwan.claude-dev",
+        "release": {
+          "state": "unavailable",
+          "reason": "no checked-in native task snapshot records the extension release"
+        }
+      },
+      "native_surface": "Code/User/globalStorage/saoudrizwan.claude-dev/tasks/<task-id>",
+      "schema_provenance": {
+        "state": "unavailable",
+        "reason": "no checked-in Cline-produced task files establish the task schema"
+      },
+      "normalization_acceptance": {
+        "state": "unavailable",
+        "reason": "checked_in_native_transcript_missing"
+      }
+    },
+    {
+      "provider": "roo-code",
+      "provider_identity": {
+        "product": "Roo Code",
+        "extension_id": "rooveterinaryinc.roo-cline",
+        "release": {
+          "state": "unavailable",
+          "reason": "no checked-in native task snapshot records the extension release"
+        }
+      },
+      "native_surface": "Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/<task-id>",
+      "schema_provenance": {
+        "state": "unavailable",
+        "reason": "no checked-in Roo Code-produced task files establish the task schema"
+      },
+      "normalization_acceptance": {
+        "state": "unavailable",
+        "reason": "checked_in_native_transcript_missing"
+      }
+    },
+    {
+      "provider": "kilo",
+      "provider_identity": {
+        "product": "Kilo Code",
+        "extension_id": "kilocode.kilo-code",
+        "release": {
+          "state": "unavailable",
+          "reason": "no checked-in native task snapshot records the extension or CLI release"
+        }
+      },
+      "native_surface": "Code/User/globalStorage/kilocode.kilo-code/tasks/<task-id> or .kilocode/cli/global/tasks/<task-id>",
+      "schema_provenance": {
+        "state": "unavailable",
+        "reason": "no checked-in Kilo Code-produced task files establish either task schema"
+      },
+      "normalization_acceptance": {
+        "state": "unavailable",
+        "reason": "checked_in_native_transcript_missing"
+      }
+    }
   ],
-  "fixture_provenance": {
-    "origin": "synthetic_value_contract",
-    "origin_evidence": "This manifest's notes and tests/transcript_ingest_suite/cline_like.rs::write_task_with_api_filename",
-    "provider_version": "unversioned",
+  "behavioral_fixture": {
+    "purpose": "adapter_behavior_only",
+    "confers_native_acceptance": false,
+    "description": "Generated values exercise the shared adapter and provider discriminators without claiming provider or schema provenance.",
     "inputs": [
       {
         "path": "input/api_conversation_history.json",
@@ -28,49 +85,8 @@
         "path": "input/ui_messages.json",
         "sha256": "bac5d2679a57202b6554440bc77bc6e24ae49e1c3ef9c7e195e731e7c2a74aa3"
       }
-    ]
-  },
-  "providers": [
-    {
-      "provider": "cline",
-      "extension_id": "saoudrizwan.claude-dev",
-      "storage_roots": [
-        "Code/User/globalStorage/saoudrizwan.claude-dev/tasks"
-      ],
-      "api_history_filenames": ["api_conversation_history.json"]
-    },
-    {
-      "provider": "roo-code",
-      "extension_id": "rooveterinaryinc.roo-cline",
-      "storage_roots": [
-        "Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks"
-      ],
-      "api_history_filenames": [
-        "api_conversation_history.json",
-        "api_messages.json"
-      ]
-    },
-    {
-      "provider": "kilo",
-      "extension_id": "kilocode.kilo-code",
-      "storage_roots": [
-        "Code/User/globalStorage/kilocode.kilo-code/tasks",
-        ".kilocode/cli/global/tasks"
-      ],
-      "api_history_filenames": ["api_conversation_history.json"]
-    }
-  ],
-  "cases": [
-    {
-      "id": "assistant_tool_use",
-      "input": {
-        "api_conversation_history": "input/api_conversation_history.json",
-        "api_messages": "input/api_messages.json",
-        "ui_messages": "input/ui_messages.json",
-        "task_metadata": "input/task_metadata.json"
-      },
-      "expected": "expected/assistant_tool_use.canonical.json",
-      "parser_provenance": "expected/parser_provenance.json"
-    }
-  ]
+    ],
+    "expected": "expected/assistant_tool_use.canonical.json",
+    "parser_notes": "expected/parser_provenance.json"
+  }
 }

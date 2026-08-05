@@ -312,22 +312,20 @@ fn composer_bubble_without_turn_field_leaves_turn_unset() {
     assert!(relations.get("parent_agent_id").is_none());
 }
 
-/// Exact assistant bubble fields from
+/// Generated assistant bubble fields matching the bounded adapter input from
 /// `tests/transcript_ingest_suite/cursor_composer.rs`
-/// (`composer_envelope_and_bubbles_ingest_rows`). Provider-parser evidence is
-/// the Cursor composer `bubbleId` payload (`type`/`text`/`toolFormerData`/
-/// `thinking`/`tokenCount`); expected output is the canonical envelope with
-/// Cursor provider + bubble-id native provenance.
+/// (`composer_envelope_and_bubbles_ingest_rows`). This checks projection
+/// behavior; it does not establish Cursor's `bubbleId` schema.
 #[test]
-fn fixture_backed_composer_assistant_bubble_reaches_canonical_envelope() {
+fn generated_composer_assistant_bubble_reaches_canonical_envelope() {
     let native: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble.input.json"
     ))
-    .expect("Cursor composer golden input");
+    .expect("Cursor composer generated input");
     let expected: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble.expected_envelope.json"
     ))
-    .expect("Cursor composer golden expected envelope");
+    .expect("Cursor composer behavioral expectation");
     let range = tracedecay_domain::ObservationSourceRangeV1::new(1, 2).unwrap();
     let record_id = cursor_composer_native_record_id("comp-1", "b-asst").unwrap();
     let envelope =
@@ -377,11 +375,11 @@ fn fixture_backed_composer_assistant_bubble_reaches_canonical_envelope() {
 /// Checked-in `composerData` envelope `todos[{id,content,status}]` map to
 /// `WorkflowLifecycle` `TodoList` + `TodoItem` facts with native order and refs.
 #[test]
-fn fixture_backed_composer_envelope_todos_reach_workflow_lifecycle() {
+fn generated_composer_envelope_todos_reach_workflow_lifecycle() {
     let native: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
     ))
-    .expect("Cursor composer envelope todos golden input");
+    .expect("Cursor composer envelope todos generated input");
     let expected: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.expected_envelope.json"
     ))
@@ -470,11 +468,11 @@ fn fixture_backed_composer_envelope_todos_reach_workflow_lifecycle() {
 }
 
 #[test]
-fn envelope_todo_checkpoint_uses_fixture_backed_content_fingerprint() {
+fn envelope_todo_checkpoint_uses_generated_content_fingerprint() {
     let native: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
     ))
-    .expect("Cursor composer envelope todos golden input");
+    .expect("Cursor composer envelope todos generated input");
     assert!(native.get("lastUpdatedAt").is_some_and(Value::is_null));
     let baseline = composer_envelope_todo_checkpoint(&native).unwrap();
     let mut pending_second = native.clone();
@@ -506,15 +504,15 @@ fn envelope_todo_checkpoint_uses_fixture_backed_content_fingerprint() {
 
 /// Bubble text + todos co-locate `Message` and `WorkflowLifecycle` facts.
 #[test]
-fn fixture_backed_composer_bubble_colocates_message_and_todo_lifecycle() {
+fn generated_composer_bubble_colocates_message_and_todo_lifecycle() {
     let native: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble_with_todos.input.json"
     ))
-    .expect("Cursor composer bubble+todos golden input");
+    .expect("Cursor composer bubble+todos generated input");
     let expected: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble_with_todos.expected_envelope.json"
     ))
-    .expect("Cursor composer bubble+todos expected envelope");
+    .expect("Cursor composer bubble+todos behavioral expectation");
     let range = tracedecay_domain::ObservationSourceRangeV1::new(1, 2).unwrap();
     let record_id = cursor_composer_native_record_id("comp-1", "b-todos").unwrap();
     let envelope =

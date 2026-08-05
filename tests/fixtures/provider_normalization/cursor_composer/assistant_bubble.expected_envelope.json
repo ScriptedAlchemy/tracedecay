@@ -1,5 +1,5 @@
 {
-  "description": "Canonical envelope expected after parsing the native Cursor composer assistant bubble.",
+  "description": "Canonical envelope expected from the generated Cursor composer adapter-behavior bubble; this is not provider-schema evidence.",
   "version": 1,
   "provider": "cursor",
   "native_record_kind": "bubble",

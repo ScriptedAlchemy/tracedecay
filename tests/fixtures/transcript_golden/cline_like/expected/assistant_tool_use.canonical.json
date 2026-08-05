@@ -1,7 +1,7 @@
 {
-  "description": "Canonical-envelope projection expectations after production Cline-family parsing of input/api_conversation_history.json (and Roo api_messages.json twin). Placeholders PROVIDER and SESSION_ID are substituted by the harness.",
+  "description": "Canonical-envelope projection expectations for generated Cline-family adapter inputs. Placeholders PROVIDER and SESSION_ID are substituted by the harness; this fixture does not confer provider-schema acceptance.",
   "must_run_provider_parser": true,
-  "forbid_synthetic_canonical_bypass": true,
+  "forbid_direct_canonical_bypass": true,
   "per_provider": {
     "cline": {
       "provider": "cline",
