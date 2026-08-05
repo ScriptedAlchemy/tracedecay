@@ -246,9 +246,15 @@ impl SharedRetainedParsePool {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.source_bytes.insert(key.clone(), current_size);
-        touch(&mut state.lru, &key);
-        evict_to_limits(&mut state, &key, self.limits);
+        let is_still_retained = state
+            .documents
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, &entry));
+        if is_still_retained {
+            state.source_bytes.insert(key.clone(), current_size);
+            touch(&mut state.lru, &key);
+            evict_to_limits(&mut state, &key, self.limits);
+        }
         record_success(&mut state.stats, &report);
         state.stats.retained_documents = state.documents.len();
         state.stats.retained_source_bytes = state.source_bytes.values().copied().sum();
@@ -294,7 +300,6 @@ fn evict_to_limits(
     protected: &ParseDocumentKey,
     limits: RetainedParsePoolLimits,
 ) {
-    let mut examined_without_eviction = 0usize;
     loop {
         let bytes: usize = state.source_bytes.values().copied().sum();
         if state.documents.len() <= limits.max_documents && bytes <= limits.max_total_source_bytes {
@@ -305,28 +310,17 @@ fn evict_to_limits(
         };
         if &candidate == protected {
             state.lru.push_back(candidate);
-            examined_without_eviction = examined_without_eviction.saturating_add(1);
-            if examined_without_eviction >= state.lru.len() {
+            if state.documents.len() == 1 {
                 break;
             }
             continue;
         }
-        let in_use = state
-            .documents
-            .get(&candidate)
-            .is_some_and(|entry| Arc::strong_count(entry) > 1);
-        if in_use {
-            state.lru.push_back(candidate);
-            examined_without_eviction = examined_without_eviction.saturating_add(1);
-            if examined_without_eviction >= state.lru.len() {
-                break;
-            }
-            continue;
-        }
+        // Removing the map's Arc is safe while another caller owns a clone:
+        // that parse completes atomically but no longer counts as retained and
+        // cannot reinsert itself after this eviction.
         state.documents.remove(&candidate);
         state.source_bytes.remove(&candidate);
         state.stats.evicted_documents = state.stats.evicted_documents.saturating_add(1);
-        examined_without_eviction = 0;
     }
 }
 
