@@ -204,6 +204,10 @@ impl SemanticEvaluationQueryFactoryV1 {
     pub fn resident_cache_bytes(&self) -> u64 {
         self.inner.runtime().stats().resident_bytes
     }
+
+    pub fn cold_load_micros(&self) -> Option<u64> {
+        self.inner.runtime().stats().last_cold_load_micros
+    }
 }
 
 struct QueryCancellationV1<'a, C>(&'a C);

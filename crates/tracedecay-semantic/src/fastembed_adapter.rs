@@ -59,6 +59,9 @@ use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1, Sha256DigestH
 use super::model_catalog::{CatalogMemberPinV1, CatalogedFastEmbedModelV1, catalog_package_digest};
 use crate::SemanticResourceCeilings;
 
+mod pins;
+pub use pins::ProjectionArtifactPinV1;
+
 /// Typed failure of one embedding operation or runtime admission (Plan 31:
 /// load failure, OOM, corruption, revocation, or incompatible pins disables
 /// the affected semantic stage; nothing silently substitutes another model).
@@ -148,29 +151,6 @@ impl fmt::Display for RuntimeFailureV1 {
     }
 }
 
-/// Exact signed-manifest pin that failed projection/artifact admission.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProjectionArtifactPinV1 {
-    ArtifactIdentity,
-    ManifestIdentity,
-    ProfileKind,
-    ArtifactDigest,
-    TokenizerDigest,
-    ConfigDigest,
-    QueryInstructionDigest,
-    DocumentInstructionDigest,
-    Pooling,
-    TruncationSide,
-    TruncationLength,
-    RuntimeBackend,
-    RuntimeBuildRevision,
-    DeviceClass,
-    Dimensions,
-    Metric,
-    Normalization,
-    Precision,
-}
-
 /// Private runtime descriptor created only by successful projection/artifact
 /// admission. It carries the admitted domain projection directly rather than
 /// re-declaring vector-affecting pins in adapter-local types.
@@ -186,6 +166,7 @@ struct VerifiedEmbeddingArtifactV1 {
     max_batch_bytes: u32,
     max_threads: u32,
     resident_byte_ceiling: u64,
+    load_deadline_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,6 +237,10 @@ impl VerifiedEmbeddingArtifactV1 {
 
     pub fn resident_byte_ceiling(&self) -> u64 {
         self.resident_byte_ceiling
+    }
+
+    pub fn load_deadline_ms(&self) -> u64 {
+        self.load_deadline_ms
     }
 
     // Feature-independent implementation, but only the compiled FastEmbed
@@ -412,6 +397,7 @@ impl AdmittedProjectionArtifactV1 {
                     .saturating_mul(4),
                 max_threads: payload.resource_ceiling.max_threads,
                 resident_byte_ceiling: payload.resource_ceiling.max_resident_bytes,
+                load_deadline_ms: payload.resource_ceiling.load_deadline_ms,
             },
         })
     }
@@ -474,6 +460,7 @@ impl AdmittedProjectionArtifactV1 {
                     .saturating_mul(4),
                 max_threads: resources.max_threads,
                 resident_byte_ceiling: resources.max_resident_bytes,
+                load_deadline_ms: resources.load_deadline_ms,
             },
         })
     }
@@ -555,6 +542,10 @@ impl AdmittedProjectionArtifactV1 {
 
     pub fn resident_byte_ceiling(&self) -> u64 {
         self.runtime_artifact.resident_byte_ceiling()
+    }
+
+    pub fn load_deadline_ms(&self) -> u64 {
+        self.runtime_artifact.load_deadline_ms()
     }
 
     pub fn max_batch_bytes(&self) -> u32 {
@@ -1478,6 +1469,7 @@ mod tests {
                 max_batch_bytes: 16 * 1024,
                 max_threads: 4,
                 resident_byte_ceiling: 64 * 1024 * 1024,
+                load_deadline_ms: 30_000,
             },
         }
     }

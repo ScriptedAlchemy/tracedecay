@@ -325,13 +325,19 @@ mod tests {
         .expect("runtime service");
 
         service.warm_query_session().expect("warm query session");
+        let warmed = service.stats();
+        assert!(
+            warmed.last_cold_load_micros.is_some(),
+            "warmup records the cold session load duration"
+        );
         assert_eq!(
-            service.stats(),
+            warmed,
             SessionPoolStats {
                 idle: 1,
                 live_sessions: 1,
                 resident_bytes: 1024,
                 sessions_opened: 1,
+                last_cold_load_micros: warmed.last_cold_load_micros,
                 ..SessionPoolStats::default()
             }
         );

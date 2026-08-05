@@ -195,6 +195,7 @@ fn map_acquire_error(error: SessionAcquireError) -> RetrievalPortError {
         SessionAcquireError::Exhausted { .. }
         | SessionAcquireError::QueueFull { .. }
         | SessionAcquireError::MemoryCeilingExceeded { .. }
+        | SessionAcquireError::LoadDeadlineExceeded { .. }
         | SessionAcquireError::Closed => {
             RetrievalPortError::AuthorityUnavailable("semantic runtime unavailable".to_owned())
         }

@@ -22,9 +22,8 @@ use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracedecay_domain::{AdmittedEmbeddingProjectionKeyV1, PrivacyDomainId, ProjectionKeyV1};
 
@@ -33,58 +32,15 @@ use super::fastembed_adapter::{
     EmbeddingSession,
 };
 
+mod clock;
+#[cfg(test)]
+mod cold_load_tests;
+pub use clock::{ManualClock, MonotonicClock, SystemMonotonicClock};
+
 const WAITER_WAKEUP_INTERVAL: Duration = Duration::from_millis(5);
 
-/// Monotonic time source. Reaping and blocking-acquire deadlines are driven
-/// entirely by this clock, so tests inject [`ManualClock`] and never depend
-/// on wall time.
-pub trait MonotonicClock: Send + Sync {
-    /// Time since an arbitrary, fixed epoch. Must be monotonically
-    /// non-decreasing per clock instance.
-    fn now(&self) -> Duration;
-}
-
-/// Wall-clock driver for production wiring.
-#[derive(Debug)]
-pub struct SystemMonotonicClock {
-    start: Instant,
-}
-
-impl Default for SystemMonotonicClock {
-    fn default() -> Self {
-        Self {
-            start: Instant::now(),
-        }
-    }
-}
-
-impl MonotonicClock for SystemMonotonicClock {
-    fn now(&self) -> Duration {
-        self.start.elapsed()
-    }
-}
-
-/// Deterministic test clock; advances only when told to.
-#[derive(Debug, Default)]
-pub struct ManualClock {
-    micros: AtomicU64,
-}
-
-impl ManualClock {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn advance(&self, delta: Duration) {
-        self.micros
-            .fetch_add(delta.as_micros() as u64, Ordering::SeqCst);
-    }
-}
-
-impl MonotonicClock for ManualClock {
-    fn now(&self) -> Duration {
-        Duration::from_micros(self.micros.load(Ordering::SeqCst))
-    }
+fn duration_micros(duration: Duration) -> Option<u64> {
+    u64::try_from(duration.as_micros()).ok()
 }
 
 /// The complete projection/privacy identity of a warmed session. It can only
@@ -184,6 +140,12 @@ pub enum SessionAcquireError {
     Cancelled,
     /// The caller's wait budget elapsed while waiting.
     DeadlineExceeded { waited: Duration, budget: Duration },
+    /// A cold model session finished opening after the artifact's admitted
+    /// load deadline and was discarded before it could enter the pool.
+    LoadDeadlineExceeded {
+        elapsed: Duration,
+        deadline: Duration,
+    },
     /// The runtime failed to open a new session.
     Open(EmbedError),
     /// The pool has been closed.
@@ -212,6 +174,10 @@ impl fmt::Display for SessionAcquireError {
                 f,
                 "session acquisition deadline exceeded: waited {waited:?} of {budget:?} budget"
             ),
+            Self::LoadDeadlineExceeded { elapsed, deadline } => write!(
+                f,
+                "cold session load deadline exceeded: elapsed {elapsed:?} exceeds {deadline:?}"
+            ),
             Self::Open(err) => write!(f, "failed to open session: {err}"),
             Self::Closed => write!(f, "session pool is closed"),
         }
@@ -231,6 +197,9 @@ pub struct SessionPoolStats {
     pub sessions_opened: usize,
     pub sessions_closed: usize,
     pub sessions_reaped: usize,
+    /// Most recent completed runtime model/session open, including an open
+    /// discarded for exceeding its deadline.
+    pub last_cold_load_micros: Option<u64>,
     pub closed: bool,
 }
 
@@ -250,6 +219,7 @@ struct PoolState<S> {
     sessions_opened: usize,
     sessions_closed: usize,
     sessions_reaped: usize,
+    last_cold_load_micros: Option<u64>,
     closed: bool,
 }
 
@@ -265,6 +235,7 @@ impl<S> Default for PoolState<S> {
             sessions_opened: 0,
             sessions_closed: 0,
             sessions_reaped: 0,
+            last_cold_load_micros: None,
             closed: false,
         }
     }
@@ -449,6 +420,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             projected_resident.unwrap_or_else(|| panic!("resident reservation checked above"));
         drop(state);
 
+        let load_started = self.inner.clock.now();
         let session = match self.inner.runtime.open_session(authority) {
             Ok(session) => session,
             Err(err) => {
@@ -461,6 +433,24 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                 return Err(SessionAcquireError::Open(err));
             }
         };
+        let load_elapsed = self.inner.clock.now().saturating_sub(load_started);
+        let load_deadline = Duration::from_millis(authority.load_deadline_ms());
+        if load_elapsed > load_deadline {
+            let mut state = self.inner.lock_state();
+            state.active -= 1;
+            state.resident_bytes = state.resident_bytes.saturating_sub(reserved_bytes);
+            state.sessions_opened += 1;
+            state.sessions_closed += 1;
+            state.last_cold_load_micros = duration_micros(load_elapsed);
+            state.mark_availability_changed();
+            drop(state);
+            self.inner.wakeups.notify_all();
+            drop(session);
+            return Err(SessionAcquireError::LoadDeadlineExceeded {
+                elapsed: load_elapsed,
+                deadline: load_deadline,
+            });
+        }
         let resident_bytes = session.resident_bytes_estimate();
         let mut state = self.inner.lock_state();
         if state.closed {
@@ -502,6 +492,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         state.resident_bytes =
             projected_resident.unwrap_or_else(|| panic!("resident total checked above"));
         state.sessions_opened += 1;
+        state.last_cold_load_micros = duration_micros(load_elapsed);
         Ok(self.make_guard(identity, session, resident_bytes))
     }
 
@@ -617,6 +608,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             sessions_opened: state.sessions_opened,
             sessions_closed: state.sessions_closed,
             sessions_reaped: state.sessions_reaped,
+            last_cold_load_micros: state.last_cold_load_micros,
             closed: state.closed,
         }
     }
