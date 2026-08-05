@@ -24,9 +24,8 @@ use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
 };
 use crate::runtime::source::{
-    FileDiscoveryReport, HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptIngestResult, bound_path_list, canonical_framed_sha256, jsonl_file_identity,
-    persist_host_provider_coverage,
+    HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult,
+    bound_path_list, canonical_framed_sha256, jsonl_file_identity, persist_host_provider_coverage,
 };
 
 mod discovery;
