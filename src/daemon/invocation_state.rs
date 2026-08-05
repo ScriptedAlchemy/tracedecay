@@ -639,6 +639,63 @@ impl DaemonInvocationState {
         if let Some(response) = invalid_multi_root_invocation_response(&request) {
             return response;
         }
+        if request.is_configuration_reset() {
+            if let Err(problem) = request.validate() {
+                return DaemonInvocationResponse::problem(request.request_id, problem);
+            }
+            let Some(project_path) = project_path else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let service::invocation::DaemonInvocationPayload::Configuration {
+                request:
+                    crate::application_surface::ConfigurationSurfaceRequest::Reset(reset_request),
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } = request.payload
+            else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            };
+            if cancellation.is_cancelled()
+                || deadline.is_elapsed_at(observed_at)
+                || deadline.is_elapsed_at(crate::daemon_client::invocation_now_micros())
+            {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::Unavailable,
+                );
+            }
+            return match store_administration
+                .reset_project_configuration(project_path, reset_request)
+                .await
+            {
+                Ok(outcome) => DaemonInvocationResponse::with_outcome(
+                    request.request_id,
+                    service::invocation::DaemonInvocationOutcome::ConfigurationReset { outcome },
+                ),
+                Err(error) => {
+                    crate::daemon::log_daemon_event(
+                        "configuration_reset",
+                        &[
+                            ("outcome", "refused".to_owned()),
+                            ("project", project_path.display().to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    DaemonInvocationResponse::problem(
+                        request.request_id,
+                        service::invocation::DaemonInvocationProblem::Unavailable,
+                    )
+                }
+            };
+        }
         let request_project_path = request.requires_project().then_some(project_path).flatten();
         if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead {
             request: scope_set_request,

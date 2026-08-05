@@ -55,6 +55,7 @@ pub use tracedecay_application::{
     ConfigurationObservedStateRequestV1 as ConfigurationObservedStateSurfaceRequest,
     ConfigurationProtectedApplyRequestV1 as ConfigurationProtectedApplySurfaceRequest,
     ConfigurationProtectedPreviewRequestV1 as ConfigurationProtectedPreviewSurfaceRequest,
+    ConfigurationResetOutcomeV1, ConfigurationResetRequestV1 as ConfigurationResetSurfaceRequest,
     ConfigurationRollbackApplyRequestV1 as ConfigurationRollbackApplySurfaceRequest,
     ConfigurationRollbackPreviewRequestV1 as ConfigurationRollbackPreviewSurfaceRequest,
     ConfigurationSetRequestV1 as ConfigurationSetSurfaceRequest,
@@ -125,7 +126,7 @@ pub use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 
 /// Compatibility export for existing callers. The array is the canonical
 /// operation authority's list, not a second root-owned registry.
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 66] =
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 67] =
     tracedecay_api::HttpApplicationOperation::ALL;
 
 /// Transport keys every surface adapter accepts but no reviewed application
@@ -2578,6 +2579,10 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::ConfigurationAudit
                 )
                 | (
+                    Self::Configuration(ConfigurationSurfaceRequest::Reset(_)),
+                    ApplicationSurfaceOperation::ConfigurationReset
+                )
+                | (
                     Self::ContextScout(ContextScoutSurfaceRequest::Status(_)),
                     ApplicationSurfaceOperation::ContextScoutStatus
                 )
@@ -3006,6 +3011,10 @@ pub fn parse_application_surface_request(
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationAudit => serde_json::from_value(value)
             .map(ConfigurationSurfaceRequest::Audit)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationReset => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::Reset)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutStatus => serde_json::from_value(value)
@@ -3567,6 +3576,7 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
         | ApplicationSurfaceOperation::ConfigurationRollbackPreview
         | ApplicationSurfaceOperation::ConfigurationRollbackApply
         | ApplicationSurfaceOperation::ConfigurationAudit
+        | ApplicationSurfaceOperation::ConfigurationReset
         | ApplicationSurfaceOperation::ContextScoutStatus
         | ApplicationSurfaceOperation::ContextScoutRecent
         | ApplicationSurfaceOperation::ContextScoutExplain

@@ -67,6 +67,20 @@ pub enum FeedbackRollbackAction {
 }
 
 #[derive(Clone, Debug, Subcommand)]
+pub enum ConfigurationAction {
+    /// Inspect an incompatible project configuration store, or reset it by
+    /// echoing the exact daemon-issued confirmation token.
+    Reset {
+        /// Project path (default: current directory)
+        #[arg(short, long)]
+        path: Option<String>,
+        /// Exact token printed by the preceding reset inspection
+        #[arg(long)]
+        confirmation: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
 pub enum HostBundleAction {
     /// List every host whose component-set lifecycle journal is awaiting recovery
     Status,
@@ -227,6 +241,11 @@ pub enum Commands {
     Workflow {
         #[command(flatten)]
         invocation: WorkflowInvocationArgs,
+    },
+    /// Operate the daemon-owned typed configuration control plane
+    Config {
+        #[command(subcommand)]
+        action: ConfigurationAction,
     },
     /// Inspect language-server support for dashboard code diagnostics
     #[command(long_about = LSP_LONG_ABOUT, after_help = LSP_AFTER_HELP)]
