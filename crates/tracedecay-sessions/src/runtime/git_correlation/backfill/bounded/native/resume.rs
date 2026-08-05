@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::runtime::git_correlation::backfill::history_progress::initial_reflog_content_chain;
 
+use super::seal::{RepositorySeal, capture_repository_seal, verify_repository_identity};
 use super::{
     BoundedBackfillInterruption, BoundedGitControl, Checkout, HeadSeal, HeadState, capture_head,
     classify_checkout_target, exact_ref_tip, parse_checkout, validate_checkout_to,
@@ -51,6 +52,11 @@ impl From<ReflogHeadState> for HeadState {
 #[derive(Clone, Debug)]
 pub(in super::super) struct ReflogCursor {
     pub worktree: PathBuf,
+    pub worktree_identity: Vec<u8>,
+    pub git_dir: PathBuf,
+    pub git_dir_identity: Vec<u8>,
+    pub common_dir: PathBuf,
+    pub common_dir_identity: Vec<u8>,
     pub reflog_path: PathBuf,
     pub source_generation: String,
     pub source_head_referent: Option<Vec<u8>>,
@@ -63,6 +69,19 @@ pub(in super::super) struct ReflogCursor {
     pub next_segment_ordinal: i64,
     pub consulted_refs: BTreeMap<Vec<u8>, Option<String>>,
     pub content_chain: String,
+}
+
+impl ReflogCursor {
+    pub(in super::super) fn repository_seal(&self) -> RepositorySeal {
+        RepositorySeal {
+            worktree: self.worktree.clone(),
+            worktree_identity: self.worktree_identity.clone(),
+            git_dir: self.git_dir.clone(),
+            git_dir_identity: self.git_dir_identity.clone(),
+            common_dir: self.common_dir.clone(),
+            common_dir_identity: self.common_dir_identity.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,11 +138,7 @@ pub(in super::super) fn initialize_reflog_cursor(
     control.check()?;
     let repository =
         gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    let worktree = repository
-        .workdir()
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?
-        .canonicalize()
-        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository_seal = capture_repository_seal(&repository)?;
     let head = capture_head(&repository)?;
     let state = super::head_state(&head)?;
     let source_head_oid = head
@@ -156,7 +171,12 @@ pub(in super::super) fn initialize_reflog_cursor(
         };
     control.check()?;
     Ok(ReflogCursor {
-        worktree,
+        worktree: repository_seal.worktree,
+        worktree_identity: repository_seal.worktree_identity,
+        git_dir: repository_seal.git_dir,
+        git_dir_identity: repository_seal.git_dir_identity,
+        common_dir: repository_seal.common_dir,
+        common_dir_identity: repository_seal.common_dir_identity,
         reflog_path,
         source_generation,
         source_head_referent: head.referent,
@@ -351,7 +371,7 @@ pub(in super::super) fn scan_graph_chunk(
     project_path: &Path,
     window_start: i64,
     window_end: i64,
-    source: &ReflogCursor,
+    repository_seal: &RepositorySeal,
     pending: Vec<GraphPending>,
     remaining_commit_cap: usize,
     control: &BoundedGitControl,
@@ -360,7 +380,7 @@ pub(in super::super) fn scan_graph_chunk(
     let mut repository =
         gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     repository.object_cache_size_if_unset(4 * 1024 * 1024);
-    verify_source(&repository, source)?;
+    verify_repository_identity(&repository, repository_seal)?;
     let mut carry = pending
         .into_iter()
         .map(|pending| (pending.oid.clone(), pending))
@@ -427,7 +447,7 @@ pub(in super::super) fn scan_graph_chunk(
             }
         }
     }
-    verify_source(&repository, source)?;
+    verify_repository_identity(&repository, repository_seal)?;
     control.check()?;
     Ok(GraphChunk {
         pending: carry.into_values().collect(),
@@ -696,12 +716,8 @@ pub(in super::super) fn verify_source(
     repository: &gix::Repository,
     cursor: &ReflogCursor,
 ) -> Result<(), BoundedBackfillInterruption> {
-    let worktree = repository
-        .workdir()
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?
-        .canonicalize()
-        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    if worktree != cursor.worktree || capture_head(repository)? != source_head(cursor)? {
+    verify_repository_identity(repository, &cursor.repository_seal())?;
+    if capture_head(repository)? != source_head(cursor)? {
         return Err(BoundedBackfillInterruption::SourceChanged);
     }
     match std::fs::metadata(&cursor.reflog_path) {

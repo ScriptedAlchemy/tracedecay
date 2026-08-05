@@ -385,7 +385,9 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
                 .await
             }
         };
-        if matches!(result, Err(BoundedBackfillInterruption::SourceChanged)) {
+        if progress.scan_mode != GitHistoryScanMode::Graph
+            && matches!(result, Err(BoundedBackfillInterruption::SourceChanged))
+        {
             reset_exact_progress(session_store, &progress, control, committed).await?;
             return Ok(StreamGitEvidenceOutcome::Progressed);
         }
@@ -422,6 +424,11 @@ fn progress_from_cursor(
         window_start,
         window_end,
         worktree: native::encode_path(&cursor.worktree)?,
+        worktree_identity: cursor.worktree_identity,
+        git_dir: native::encode_path(&cursor.git_dir)?,
+        git_dir_identity: cursor.git_dir_identity,
+        common_dir: native::encode_path(&cursor.common_dir)?,
+        common_dir_identity: cursor.common_dir_identity,
         generation: 0,
         scan_mode: GitHistoryScanMode::ReflogCapture,
         reflog_path: native::encode_path(&cursor.reflog_path)?,
@@ -459,6 +466,11 @@ fn cursor_from_progress(
     };
     Ok(native::ReflogCursor {
         worktree: native::decode_path(&progress.worktree)?,
+        worktree_identity: progress.worktree_identity.clone(),
+        git_dir: native::decode_path(&progress.git_dir)?,
+        git_dir_identity: progress.git_dir_identity.clone(),
+        common_dir: native::decode_path(&progress.common_dir)?,
+        common_dir_identity: progress.common_dir_identity.clone(),
         reflog_path: native::decode_path(&progress.reflog_path)?,
         source_generation: progress.source_generation.clone(),
         source_head_referent: progress.source_head_referent.clone(),
@@ -472,6 +484,19 @@ fn cursor_from_progress(
             .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?,
         consulted_refs: progress.consulted_refs.clone(),
         content_chain: progress.reflog_digest.clone(),
+    })
+}
+
+fn repository_seal_from_progress(
+    progress: &GitHistoryProgressRow,
+) -> Result<native::RepositorySeal, BoundedBackfillInterruption> {
+    Ok(native::RepositorySeal {
+        worktree: native::decode_path(&progress.worktree)?,
+        worktree_identity: progress.worktree_identity.clone(),
+        git_dir: native::decode_path(&progress.git_dir)?,
+        git_dir_identity: progress.git_dir_identity.clone(),
+        common_dir: native::decode_path(&progress.common_dir)?,
+        common_dir_identity: progress.common_dir_identity.clone(),
     })
 }
 
@@ -559,6 +584,7 @@ async fn dry_run_native_history(
         }
     }
     let sealed_source = cursor;
+    let repository_seal = sealed_source.repository_seal();
     let mut replay = initial_cursor;
     let mut emitted = 0_usize;
     let mut spans = 0_usize;
@@ -582,7 +608,7 @@ async fn dry_run_native_history(
                 project_path,
                 segment.start,
                 segment.end,
-                &sealed_source,
+                &repository_seal,
                 segment.tip_oid,
                 max_commits,
                 emitted,
@@ -611,7 +637,7 @@ async fn dry_run_segment(
     project_path: &std::path::Path,
     window_start: i64,
     window_end: i64,
-    source: &native::ReflogCursor,
+    source: &native::RepositorySeal,
     tip_oid: String,
     max_commits: usize,
     mut emitted: usize,

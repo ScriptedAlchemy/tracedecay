@@ -5,11 +5,13 @@ use gix::bstr::ByteSlice;
 use super::{BoundedBackfillInterruption, BoundedGitControl};
 
 mod resume;
+mod seal;
 pub(super) use resume::{
     GraphChunk, GraphPending, ReflogCursor, ReflogHeadState, ReflogVerificationCursor, decode_path,
     encode_path, initialize_reflog_cursor, scan_graph_chunk, scan_reflog_chunk,
     scan_reflog_verification_chunk, verify_reflog_source,
 };
+pub(super) use seal::{RepositorySeal, verify_repository_source};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HeadSeal {

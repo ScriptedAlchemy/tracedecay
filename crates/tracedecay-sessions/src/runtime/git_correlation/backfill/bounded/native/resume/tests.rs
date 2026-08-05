@@ -138,7 +138,7 @@ fn truncated_reflog_is_permanent_unsupported_framing() {
 }
 
 #[test]
-fn graph_walk_does_not_prune_nonmonotonic_parent_time() {
+fn sealed_graph_ignores_later_head_drift_and_keeps_nonmonotonic_parent_time() {
     let fixture = tempfile::tempdir().unwrap();
     git(fixture.path(), &["init", "-b", "main"]);
     std::fs::write(fixture.path().join("tracked"), "parent").unwrap();
@@ -150,12 +150,14 @@ fn graph_walk_does_not_prune_nonmonotonic_parent_time() {
     let repository = gix::discover(fixture.path()).unwrap();
     let tip = repository.head_id().unwrap().detach().to_hex().to_string();
     let source = initialize_reflog_cursor(fixture.path(), 250, &control()).unwrap();
+    std::fs::write(fixture.path().join("tracked"), "later head").unwrap();
+    git(fixture.path(), &["commit", "-am", "later head"]);
 
     let first = scan_graph_chunk(
         fixture.path(),
         150,
         250,
-        &source,
+        &source.repository_seal(),
         vec![GraphPending { oid: tip }],
         10,
         &control(),
@@ -167,7 +169,7 @@ fn graph_walk_does_not_prune_nonmonotonic_parent_time() {
         fixture.path(),
         150,
         250,
-        &source,
+        &source.repository_seal(),
         first.pending,
         10,
         &control(),

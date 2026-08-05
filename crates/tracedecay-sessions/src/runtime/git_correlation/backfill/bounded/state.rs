@@ -168,9 +168,9 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
         Vec::new()
     };
     drop(snapshot);
-    let source = cursor_from_progress(progress)?;
+    let repository_seal = repository_seal_from_progress(progress)?;
     let Some(segment) = segment else {
-        verify_source_without_writer(project_path, &source, control).await?;
+        verify_repository_without_writer(project_path, &repository_seal, control).await?;
         return finalize_session(
             session_store,
             candidate_frontier,
@@ -181,7 +181,7 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
         .await;
     };
     if !segment.applied {
-        verify_source_without_writer(project_path, &source, control).await?;
+        verify_repository_without_writer(project_path, &repository_seal, control).await?;
         return apply_segment(
             session_store,
             row,
@@ -195,7 +195,7 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
         .await;
     }
     if pending.is_empty() {
-        verify_source_without_writer(project_path, &source, control).await?;
+        verify_repository_without_writer(project_path, &repository_seal, control).await?;
         return complete_segment(session_store, progress, segment, control, committed).await;
     }
     let remaining = opts
@@ -212,7 +212,7 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
         })
         .collect();
     let path = project_path.to_owned();
-    let scan_source = source.clone();
+    let scan_source = repository_seal;
     let native_control = control.clone();
     let window_start = segment.start_ts;
     let window_end = segment.end_ts;
@@ -229,7 +229,6 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
     })
     .await
     .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
-    verify_source_without_writer(project_path, &source, control).await?;
     apply_graph_chunk(
         session_store,
         row,
@@ -241,6 +240,21 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
         committed,
     )
     .await
+}
+
+async fn verify_repository_without_writer(
+    project_path: &Path,
+    seal: &native::RepositorySeal,
+    control: &BoundedGitControl,
+) -> Result<(), BoundedBackfillInterruption> {
+    let path = project_path.to_owned();
+    let seal = seal.clone();
+    let native_control = control.clone();
+    tokio::task::spawn_blocking(move || {
+        native::verify_repository_source(&path, &seal, &native_control)
+    })
+    .await
+    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
 }
 
 async fn verify_source_without_writer(
