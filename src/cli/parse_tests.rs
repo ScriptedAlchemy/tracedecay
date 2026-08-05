@@ -210,7 +210,7 @@ fn workflow_command_binds_one_closed_typed_operation() {
     let cli = Cli::try_parse_from([
         "tracedecay",
         "workflow",
-        "execute-fan-out",
+        "register-definition",
         "--request-file",
         "workflow.json",
         "--project",
@@ -224,7 +224,7 @@ fn workflow_command_binds_one_closed_typed_operation() {
     };
     assert_eq!(
         invocation.operation,
-        tracedecay_api::WorkflowOperation::ExecuteFanOut
+        tracedecay_api::WorkflowOperation::RegisterDefinition
     );
     assert_eq!(
         invocation.request_file,
