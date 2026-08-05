@@ -983,7 +983,8 @@ fn extract_patch(
         .arg("--patch")
         .arg("-M")
         .arg("--no-color")
-        .arg("--no-ext-diff");
+        .arg("--no-ext-diff")
+        .arg("--no-textconv");
     if matches!(scope, GitDiffScopeV1::Staged) {
         command.arg("--cached");
     }

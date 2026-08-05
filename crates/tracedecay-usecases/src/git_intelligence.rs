@@ -607,12 +607,20 @@ impl NativeGitIntelligence {
             abbrev,
             "--no-color",
             "--no-ext-diff",
+            "--no-textconv",
         ];
         raw_args.extend(scope_refs.iter().copied());
         raw_args.push("--");
         let raw = self.stdout("diff", &raw_args)?;
 
-        let mut patch_args = vec!["diff", "--patch", "-M", "--no-color", "--no-ext-diff"];
+        let mut patch_args = vec![
+            "diff",
+            "--patch",
+            "-M",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+        ];
         patch_args.extend(scope_refs);
         patch_args.push("--");
         let patch = self.stdout("diff", &patch_args)?;
