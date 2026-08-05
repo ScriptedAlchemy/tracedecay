@@ -29,7 +29,10 @@ use super::graph_structure_api::{
     CallChainMeasurementV1, FactMatchesMeasurementV1, NodeSessionsMeasurementV1,
     StrataMeasurementV1, StructureReadV1, TestMapMeasurementV1, registered_route_contracts,
 };
-use super::lcm_api::{LcmSessionPayloadV1, LcmTimelinePayloadV1};
+use super::lcm_api::{
+    LcmMessagesPayloadV1, LcmOverviewPayloadV1, LcmSearchPayloadV1, LcmSessionPayloadV1,
+    LcmTimelinePayloadV1,
+};
 use super::loom_api::LoomTemporalPayloadV1;
 use super::memory_api::{
     MemoryFactDetailPayloadV1, MemoryOverviewPayloadV1, MemoryStatusPayloadV1,
@@ -72,6 +75,9 @@ struct DashboardContractCatalogV1 {
     savings_sessions: SavingsSessionsPayloadV1,
     lcm_session: DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>,
     lcm_timeline: DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>,
+    lcm_overview: DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>,
+    lcm_search: DashboardEnvelopeV1<Option<LcmSearchPayloadV1>>,
+    lcm_messages: DashboardEnvelopeV1<Option<LcmMessagesPayloadV1>>,
     loom_temporal: LoomTemporalPayloadV1,
     delivery_overview: DeliveryOverviewV1,
     feedback_status: DashboardEnvelopeV1<FeedbackObservationReadModelV1>,
