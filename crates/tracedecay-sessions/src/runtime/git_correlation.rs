@@ -671,9 +671,15 @@ async fn schema_identity(
         .transpose()
 }
 
-async fn validate_git_correlation_schema(
+pub async fn validate_git_correlation_schema(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
+    if schema_identity(conn).await? != Some(GIT_CORRELATION_SCHEMA_IDENTITY) {
+        return Err(GitCorrelationError::Db(
+            "git correlation schema identity is not exact-final; reset the project store"
+                .to_owned(),
+        ));
+    }
     const REQUIRED_OBJECTS: [(&str, &str); 8] = [
         ("table", "session_git_spans"),
         ("table", "commit_sessions"),
@@ -708,10 +714,15 @@ async fn validate_git_correlation_schema(
                 "span_id",
                 "provider",
                 "session_id",
+                "thread_id",
+                "branch",
                 "worktree",
                 "first_ts",
                 "last_ts",
+                "event_count",
                 "source",
+                "created_at",
+                "updated_at",
             ],
         ),
         (
@@ -720,10 +731,16 @@ async fn validate_git_correlation_schema(
                 "commit_sha",
                 "provider",
                 "session_id",
+                "branch",
+                "worktree",
+                "committed_at",
                 "span_overlap_kind",
+                "span_id",
                 "relation",
                 "evidence",
                 "confidence",
+                "evidence_message_id",
+                "created_at",
             ],
         ),
         ("git_correlation_meta", &["key", "value", "updated_at"]),
@@ -735,6 +752,11 @@ async fn validate_git_correlation_schema(
         let mut columns = HashSet::new();
         while let Some(row) = rows.next().await? {
             columns.insert(row.get::<String>(1)?);
+        }
+        if columns.len() != required.len() {
+            return Err(GitCorrelationError::Db(format!(
+                "git correlation table {table} has non-final columns; reset the project store"
+            )));
         }
         if let Some(missing) = required.iter().find(|column| !columns.contains(**column)) {
             return Err(GitCorrelationError::Db(format!(
@@ -1154,178 +1176,6 @@ async fn coalesce_adjacent_spans(
         )
         .await?;
     }
-    Ok(())
-}
-
-/// Assigns every `session_git_spans` row to the minimal set of gap-separated
-/// clusters for its (provider, `session_id`, branch, worktree) key. `?1` is the
-/// merge gap in seconds.
-///
-/// The boundary test is [`observation_extends_span`] lifted from an instant to
-/// a whole span: walking a key's spans in `(first_ts, span_id)` order, a span
-/// opens a new cluster only when its `first_ts` sits more than the gap past the
-/// running maximum `last_ts` of everything before it. Because that running
-/// maximum is exactly the bound the surviving span will carry, the cluster
-/// boundaries are the same ones a single in-order replay through
-/// [`record_span_observation_in_transaction`] would have produced.
-///
-/// `PARTITION BY ... branch ...` groups detached-HEAD rows (`branch IS NULL`)
-/// with each other and never with a named branch, matching the `branch IS ?`
-/// candidate lookup.
-///
-/// Exposes `assigned` (one row per span, tagged with its `survivor_id`: the
-/// first span of its cluster in the same order the merge helper prefers) and
-/// `folded` (one row per cluster, carrying the merged bounds and event total).
-const SPAN_CLUSTER_CTE: &str = "WITH ordered AS (
-        SELECT span_id, provider, session_id, branch, worktree,
-               first_ts, last_ts, event_count,
-               MAX(last_ts) OVER (
-                   PARTITION BY provider, session_id, branch, worktree
-                   ORDER BY first_ts, span_id
-                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-               ) AS prev_last_ts
-        FROM session_git_spans
-     ),
-     bounded AS (
-        SELECT *,
-               CASE WHEN prev_last_ts IS NULL OR first_ts > prev_last_ts + ?1
-                    THEN 1 ELSE 0 END AS starts_cluster
-        FROM ordered
-     ),
-     clustered AS (
-        SELECT *,
-               SUM(starts_cluster) OVER (
-                   PARTITION BY provider, session_id, branch, worktree
-                   ORDER BY first_ts, span_id
-                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-               ) AS cluster_index
-        FROM bounded
-     ),
-     assigned AS (
-        SELECT span_id, provider, session_id, branch, worktree,
-               first_ts, last_ts, event_count, cluster_index,
-               FIRST_VALUE(span_id) OVER (
-                   PARTITION BY provider, session_id, branch, worktree, cluster_index
-                   ORDER BY first_ts, span_id
-               ) AS survivor_id
-        FROM clustered
-     ),
-     folded AS (
-        SELECT MIN(survivor_id) AS survivor_id,
-               COUNT(*) AS member_count,
-               MIN(first_ts) AS cluster_first_ts,
-               MAX(last_ts) AS cluster_last_ts,
-               SUM(event_count) AS cluster_event_count
-        FROM assigned
-        GROUP BY provider, session_id, branch, worktree, cluster_index
-     )";
-
-/// One-shot repair of span history written before span merging became
-/// order-independent (schema v4).
-///
-/// The superseded rule extended only the *newest* matching span, so a replayed
-/// transcript inserted a fresh instant span (`first_ts == last_ts`) per message
-/// and left the vast majority of rows strictly contained inside another span for
-/// the same key. `record_span_observation_in_transaction` now heals the spans it
-/// touches, but untouched history stays fragmented, which inflates the store and
-/// makes `sessions_for` return hundreds of duplicate windows per session.
-///
-/// Folds every key's spans into the minimal set of gap-separated spans: the
-/// survivor takes the widest bounds and the summed `event_count`, commit
-/// attributions pointing at absorbed rows are repointed first, and only then are
-/// the absorbed rows deleted — the same repoint-then-delete order as
-/// [`coalesce_adjacent_spans`], so no attribution is ever left dangling.
-///
-/// Runs inside the caller's schema transaction as a single atomic unit rather
-/// than in committed batches. The whole repair is four set-based statements
-/// over one temporary plan table — no per-row round trips — so even a store
-/// with ~150k redundant rows finishes in seconds, well inside the migration
-/// runtime's transaction budget. Atomicity is worth more than resumability
-/// here: the schema version is only recorded when the caller commits, so an
-/// interrupted run rolls back whole and the next open retries from the original
-/// rows instead of resuming into a half-folded table.
-async fn compact_session_git_spans(
-    conn: &(impl Executor + ?Sized),
-    merge_gap_secs: i64,
-) -> Result<(), GitCorrelationError> {
-    let gap = merge_gap_secs.max(0);
-    // Materialize the fold once. Every later statement reads this plan instead
-    // of re-deriving the clusters from a table the previous statement just
-    // rewrote, and no result set has to cross the engine boundary: the plan can
-    // hold hundreds of thousands of rows, far past what a query may return.
-    conn.execute_batch(
-        "DROP TABLE IF EXISTS temp.span_compaction_plan;
-         CREATE TEMP TABLE span_compaction_plan (
-            span_id INTEGER PRIMARY KEY,
-            survivor_id INTEGER NOT NULL,
-            cluster_first_ts INTEGER NOT NULL,
-            cluster_last_ts INTEGER NOT NULL,
-            cluster_event_count INTEGER NOT NULL
-         );",
-    )
-    .await?;
-    // `folded.survivor_id` is a span id, so it identifies its cluster on its
-    // own — no join back on the nullable branch column.
-    let planned = conn
-        .execute(
-            &format!(
-                "{SPAN_CLUSTER_CTE}
-                 INSERT INTO temp.span_compaction_plan (
-                    span_id, survivor_id, cluster_first_ts, cluster_last_ts, cluster_event_count
-                 )
-                 SELECT assigned.span_id, folded.survivor_id, folded.cluster_first_ts,
-                        folded.cluster_last_ts, folded.cluster_event_count
-                 FROM assigned
-                 JOIN folded ON folded.survivor_id = assigned.survivor_id
-                 WHERE folded.member_count > 1"
-            ),
-            params![gap],
-        )
-        .await?;
-    if planned == 0 {
-        conn.execute_batch("DROP TABLE IF EXISTS temp.span_compaction_plan;")
-            .await?;
-        return Ok(());
-    }
-    conn.execute(
-        "UPDATE session_git_spans SET
-            first_ts = (SELECT plan.cluster_first_ts FROM temp.span_compaction_plan plan
-                        WHERE plan.span_id = session_git_spans.span_id),
-            last_ts = (SELECT plan.cluster_last_ts FROM temp.span_compaction_plan plan
-                       WHERE plan.span_id = session_git_spans.span_id),
-            event_count = (SELECT plan.cluster_event_count FROM temp.span_compaction_plan plan
-                           WHERE plan.span_id = session_git_spans.span_id),
-            updated_at = unixepoch()
-         WHERE span_id IN (SELECT survivor_id FROM temp.span_compaction_plan)",
-        (),
-    )
-    .await?;
-    // Keep commit attributions addressable: repoint before the claimed rows go.
-    let repointed = conn
-        .execute(
-            "UPDATE commit_sessions SET
-                span_id = (SELECT plan.survivor_id FROM temp.span_compaction_plan plan
-                           WHERE plan.span_id = commit_sessions.span_id)
-             WHERE span_id IN (SELECT span_id FROM temp.span_compaction_plan
-                               WHERE span_id != survivor_id)",
-            (),
-        )
-        .await?;
-    let folded = conn
-        .execute(
-            "DELETE FROM session_git_spans
-             WHERE span_id IN (SELECT span_id FROM temp.span_compaction_plan
-                               WHERE span_id != survivor_id)",
-            (),
-        )
-        .await?;
-    conn.execute_batch("DROP TABLE IF EXISTS temp.span_compaction_plan;")
-        .await?;
-    tracing::info!(
-        folded_spans = folded,
-        repointed_attributions = repointed,
-        "compacted redundant session git spans"
-    );
     Ok(())
 }
 
