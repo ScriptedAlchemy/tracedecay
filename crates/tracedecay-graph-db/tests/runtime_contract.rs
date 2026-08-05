@@ -283,6 +283,60 @@ fn apply_rechecks_cancellation_immediately_before_commit() {
 }
 
 #[test]
+fn native_created_identity_commits_rolls_back_and_survives_reopen() {
+    let temp = TempDir::new().unwrap();
+    let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
+    assert_eq!(
+        db.apply(batch(
+            "code",
+            "g1",
+            "w1",
+            vec![GraphMutation::UpsertEntity(entity("committed"))],
+        ))
+        .unwrap()
+        .sequence,
+        1
+    );
+    let cancelled = GraphWriteBatch::new(
+        namespace(),
+        projection("code"),
+        generation("g2"),
+        watermark("w2"),
+        vec![GraphMutation::UpsertEntity(entity("rolled-back"))],
+        Arc::new(CancelOnPoll::new(4)),
+    )
+    .unwrap();
+    assert_eq!(db.apply(cancelled), Err(GraphDbError::Cancelled));
+    assert_eq!(
+        db.entity(&namespace(), &entity_id("rolled-back"), live())
+            .unwrap(),
+        None
+    );
+    drop(db);
+    assert!(registered.close().unwrap());
+
+    let reopened = registered.reopen().unwrap();
+    assert_eq!(
+        reopened
+            .entity(&namespace(), &entity_id("committed"), live())
+            .unwrap(),
+        Some(entity("committed"))
+    );
+    assert_eq!(
+        reopened
+            .apply(batch(
+                "code",
+                "g3",
+                "w3",
+                vec![GraphMutation::UpsertEntity(entity("after-reopen"))],
+            ))
+            .unwrap()
+            .sequence,
+        2
+    );
+}
+
+#[test]
 fn invalid_late_mutation_rolls_back_whole_batch_and_sequence() {
     let db = memory_db();
     let error = db
