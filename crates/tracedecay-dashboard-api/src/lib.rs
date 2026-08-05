@@ -1310,6 +1310,10 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/plugins/hermes-lcm/session/{session_id}",
             get(lcm_api::session),
         )
+        .route(
+            "/api/plugins/hermes-lcm/session/{session_id}/messages",
+            get(lcm_api::messages),
+        )
         .route("/api/plugins/hermes-lcm/node/{node_id}", get(lcm_api::node))
         .route("/api/plugins/hermes-lcm/timeline", get(lcm_api::timeline))
         .route(
@@ -2299,6 +2303,38 @@ mod authority_tests {
             value["coverage"]["omission_reasons"],
             serde_json::json!(["lcm_store_unavailable"])
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_lcm_browse_reads_are_enveloped_unknown_states() {
+        let fixture = DashboardStateFixture::open("project.dashboard-lcm-browse-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        for uri in [
+            "/api/plugins/hermes-lcm/overview",
+            "/api/plugins/hermes-lcm/search?q=needle",
+            "/api/plugins/hermes-lcm/session/session-missing/messages",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("LCM browse request"),
+                )
+                .await
+                .expect("LCM browse response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("LCM browse body");
+            let value: Value = serde_json::from_slice(&body).expect("LCM browse json");
+
+            assert_eq!(value["schema_revision"], 1, "{uri}");
+            assert_eq!(value["domain_state"], "unknown", "{uri}");
+            assert_eq!(value["payload"]["exists"], false, "{uri}");
+        }
     }
 
     #[tokio::test]
