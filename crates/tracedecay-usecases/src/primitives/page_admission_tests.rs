@@ -7,8 +7,9 @@ use tracedecay_application::{
     PageRequest, RequestContext, RequestId, ResolvedScope, application_catalog_contributions,
 };
 use tracedecay_domain::{
-    ActorId, CodeGenerationId, FileOccurrenceId, ManifestDigest, ProjectId, RepositoryId,
-    SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1, UtcMicros, WorktreeId,
+    ActorId, CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
+    ProjectId, RepositoryId, SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1,
+    UtcMicros, WorktreeId,
 };
 use tracedecay_temporal_query::ports::{InMemoryCursorAuthenticator, SessionCursorAuthenticator};
 use tracedecay_tool_catalog::{
@@ -22,6 +23,22 @@ use super::page_admission::{
 };
 use super::{AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorPort};
 use crate::diagnostics_query::DiagnosticQueryCursor;
+use crate::lsp_runtime::{LspCodeIndexProjectionIdentity, LspCodeIndexProjectionIdentityPort};
+
+struct StaticCodeIndexIdentity(LspCodeIndexProjectionIdentity);
+
+impl LspCodeIndexProjectionIdentityPort for StaticCodeIndexIdentity {
+    fn current_identity(
+        &self,
+        _project_root: std::path::PathBuf,
+        _document_relative_path: Option<String>,
+    ) -> tracedecay_lsp::LspRuntimeFuture<
+        Result<LspCodeIndexProjectionIdentity, tracedecay_lsp::LspRuntimeFailure>,
+    > {
+        let identity = self.0.clone();
+        Box::pin(async move { Ok(identity) })
+    }
+}
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
@@ -107,6 +124,36 @@ fn key() -> SignedCursorKeyRefV1 {
     }
 }
 
+fn symbol_graph_cursors(
+    context: &RequestContext,
+    key: &SignedCursorKeyRefV1,
+) -> Arc<dyn SymbolGraphCursorPort> {
+    let scope = context.scope().clone();
+    let identity = LspCodeIndexProjectionIdentity {
+        repository: scope.repository_id.clone(),
+        worktree: Some(scope.worktree_id.clone()),
+        reference: scope.reference.clone(),
+        source_revision: Some(CommitId::new("commit.page-admission").expect("commit")),
+        code_generation_id: CodeGenerationId::new("generation.page-admission.graph.11")
+            .expect("generation"),
+        snapshot_digest: digest('b'),
+        invalidation_digest: digest('f'),
+        snapshot_content_digest: ContentDigest::new(format!("sha256:{}", "1".repeat(64)))
+            .expect("content"),
+        document_content_digest: None,
+    };
+    Arc::new(AuthenticatedSymbolGraphCursorAdapter::new(
+        Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
+            key.clone(),
+            digest('c'),
+            std::path::PathBuf::from("/project/page-admission"),
+            scope,
+            Arc::new(StaticCodeIndexIdentity(identity)),
+        )),
+        authenticator(key),
+    ))
+}
+
 #[test]
 fn every_catalog_declared_primitive_page_operation_has_an_authentic_owner() {
     let catalog = catalog();
@@ -150,20 +197,26 @@ async fn symbol_page_admission_uses_the_existing_authenticated_cursor_verifier()
     let (binding_id, capability, use_case) = declared_binding(&catalog, operation);
     let context = context(capability, use_case);
     let key = key();
-    let cursors: Arc<dyn SymbolGraphCursorPort> =
-        Arc::new(AuthenticatedSymbolGraphCursorAdapter::new(
-            Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
-                key.clone(),
-                digest('c'),
-                digest('b'),
-                11,
-            )),
-            authenticator(&key),
-        ));
+    let cursors = symbol_graph_cursors(&context, &key);
     let observed_at = UtcMicros(2);
     let body_digest = digest('d');
+    let claim = cursors
+        .claim_page(&context, "callers", &body_digest, None, observed_at)
+        .await
+        .expect("claim page");
     let cursor = cursors
-        .issue_cursor(&context, "callers", &body_digest, 3, 8, observed_at)
+        .finish_page(
+            &context,
+            "callers",
+            &body_digest,
+            &claim,
+            3,
+            8,
+            true,
+            observed_at,
+        )
+        .await
+        .expect("finish page")
         .expect("authentic cursor");
     let scope_digest = context.scope().scope_digest.clone();
     let cross_body = PageAdmissionRequest::new(
@@ -272,16 +325,7 @@ async fn binding_operation_mismatch_is_rejected_before_cursor_admission() {
     )
     .expect("admission request");
     let key = key();
-    let cursors: Arc<dyn SymbolGraphCursorPort> =
-        Arc::new(AuthenticatedSymbolGraphCursorAdapter::new(
-            Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
-                key.clone(),
-                digest('c'),
-                digest('b'),
-                11,
-            )),
-            authenticator(&key),
-        ));
+    let cursors = symbol_graph_cursors(&context, &key);
     let result =
         PageAdmissionService::new(SymbolGraphPageAdmissionAdapterV1::new(catalog, cursors))
             .admit(request)

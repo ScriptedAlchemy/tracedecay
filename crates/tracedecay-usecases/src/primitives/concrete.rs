@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_application::retrieval::{
@@ -122,14 +124,17 @@ fn source_read_failed(observed_at: UtcMicros) -> SourceReadPortOutcome {
 /// Supplies the existing query snapshot identity used by the authenticated
 /// temporal cursor codec. Implementations must derive the snapshot from the
 /// current request scope, grant/access binding, lane, and graph watermark.
+pub type SymbolGraphCursorSnapshotFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<TemporalExecutionSnapshot, PrimitiveFailure>> + Send + 'a>>;
+
 pub trait SymbolGraphCursorSnapshotAuthority: Send + Sync {
-    fn snapshot(
-        &self,
-        context: &RequestContext,
-        lane: &str,
-        body_digest: &ManifestDigest,
+    fn snapshot<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
+        body_digest: &'a ManifestDigest,
         observed_at: UtcMicros,
-    ) -> Result<TemporalExecutionSnapshot, PrimitiveFailure>;
+    ) -> SymbolGraphCursorSnapshotFuture<'a>;
 }
 
 /// Bridges symbol-graph paging to the existing authenticated query cursor.
@@ -156,60 +161,90 @@ where
     S: SymbolGraphCursorSnapshotAuthority + ?Sized,
     A: SessionCursorAuthenticator + Send + Sync + ?Sized,
 {
-    fn resume_offset(
-        &self,
-        context: &RequestContext,
-        lane: &str,
-        body_digest: &ManifestDigest,
-        cursor: &OpaqueCursor,
+    fn claim_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
+        body_digest: &'a ManifestDigest,
+        cursor: Option<&'a OpaqueCursor>,
         observed_at: UtcMicros,
-    ) -> Result<usize, PrimitiveFailure> {
-        reauthorize_cursor_context(context, observed_at)?;
-        let snapshot = self
-            .snapshots
-            .snapshot(context, lane, body_digest, observed_at)?;
-        validate_cursor_snapshot(context, &snapshot)?;
-        let sort_key = verify_cursor(cursor.as_str(), &snapshot, self.authenticator.as_ref())
-            .map_err(cursor_verification_failure)?;
-        if sort_key.stable_id != lane
-            || sort_key.normalized_score_micros
-                > u64::try_from(sort_key.knowledge_at_micros).unwrap_or_default()
-        {
-            return Err(invalid_cursor());
-        }
-        usize::try_from(sort_key.normalized_score_micros).map_err(|_| invalid_cursor())
+    ) -> super::symbol_graph::SymbolGraphCursorFuture<'a, super::symbol_graph::SymbolGraphCursorClaim>
+    {
+        Box::pin(async move {
+            reauthorize_cursor_context(context, observed_at)?;
+            let snapshot = self
+                .snapshots
+                .snapshot(context, lane, body_digest, observed_at)
+                .await?;
+            validate_cursor_snapshot(context, &snapshot)?;
+            let offset = match cursor {
+                Some(cursor) => {
+                    let sort_key =
+                        verify_cursor(cursor.as_str(), &snapshot, self.authenticator.as_ref())
+                            .map_err(cursor_verification_failure)?;
+                    if sort_key.stable_id != lane
+                        || sort_key.normalized_score_micros
+                            > u64::try_from(sort_key.knowledge_at_micros).unwrap_or_default()
+                    {
+                        return Err(invalid_cursor());
+                    }
+                    usize::try_from(sort_key.normalized_score_micros)
+                        .map_err(|_| invalid_cursor())?
+                }
+                None => 0,
+            };
+            Ok(super::symbol_graph::SymbolGraphCursorClaim { snapshot, offset })
+        })
     }
 
-    fn issue_cursor(
-        &self,
-        context: &RequestContext,
-        lane: &str,
-        body_digest: &ManifestDigest,
+    fn finish_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
+        body_digest: &'a ManifestDigest,
+        claim: &'a super::symbol_graph::SymbolGraphCursorClaim,
         next_offset: usize,
         total: usize,
+        has_more: bool,
         observed_at: UtcMicros,
-    ) -> Result<OpaqueCursor, PrimitiveFailure> {
-        reauthorize_cursor_context(context, observed_at)?;
-        if next_offset > total || lane.is_empty() || lane.chars().any(char::is_control) {
-            return Err(invalid_cursor());
-        }
-        let snapshot = self
-            .snapshots
-            .snapshot(context, lane, body_digest, observed_at)?;
-        validate_cursor_snapshot(context, &snapshot)?;
-        let sort_key = StableSortKey {
-            normalized_score_micros: u64::try_from(next_offset).map_err(|_| invalid_cursor())?,
-            knowledge_at_micros: i64::try_from(total).map_err(|_| invalid_cursor())?,
-            stable_id: lane.to_owned(),
-        };
-        let encoded = encode_cursor(&snapshot, &sort_key, self.authenticator.as_ref())
-            .map_err(cursor_issue_failure)?;
-        OpaqueCursor::new(encoded).map_err(|_| {
-            primitive_failure(
-                PrimitiveFailureKind::Unavailable,
-                "application.symbol-graph.cursor-too-large",
-                "the authenticated cursor exceeded the application cursor bound",
-            )
+    ) -> super::symbol_graph::SymbolGraphCursorFuture<'a, Option<OpaqueCursor>> {
+        Box::pin(async move {
+            reauthorize_cursor_context(context, observed_at)?;
+            if next_offset > total || lane.is_empty() || lane.chars().any(char::is_control) {
+                return Err(invalid_cursor());
+            }
+            let snapshot = self
+                .snapshots
+                .snapshot(context, lane, body_digest, observed_at)
+                .await?;
+            validate_cursor_snapshot(context, &snapshot)?;
+            if snapshot != claim.snapshot {
+                return Err(primitive_failure(
+                    PrimitiveFailureKind::Stale,
+                    "application.symbol-graph.generation-changed",
+                    "the symbol-graph generation changed while the page was read",
+                ));
+            }
+            if !has_more {
+                return Ok(None);
+            }
+            let sort_key = StableSortKey {
+                normalized_score_micros: u64::try_from(next_offset)
+                    .map_err(|_| invalid_cursor())?,
+                knowledge_at_micros: i64::try_from(total).map_err(|_| invalid_cursor())?,
+                stable_id: lane.to_owned(),
+            };
+            let encoded = encode_cursor(&claim.snapshot, &sort_key, self.authenticator.as_ref())
+                .map_err(cursor_issue_failure)?;
+            OpaqueCursor::new(encoded)
+                .map_err(|_| {
+                    primitive_failure(
+                        PrimitiveFailureKind::Unavailable,
+                        "application.symbol-graph.cursor-too-large",
+                        "the authenticated cursor exceeded the application cursor bound",
+                    )
+                })
+                .map(Some)
         })
     }
 }
@@ -342,20 +377,20 @@ mod tests {
     }
 
     impl SymbolGraphCursorSnapshotAuthority for FixedSnapshotAuthority {
-        fn snapshot(
-            &self,
-            _context: &RequestContext,
-            _lane: &str,
-            _body_digest: &ManifestDigest,
+        fn snapshot<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _lane: &'a str,
+            _body_digest: &'a ManifestDigest,
             _observed_at: UtcMicros,
-        ) -> Result<TemporalExecutionSnapshot, tracedecay_application::retrieval::PrimitiveFailure>
-        {
-            Ok(self.snapshot.clone())
+        ) -> super::SymbolGraphCursorSnapshotFuture<'a> {
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move { Ok(snapshot) })
         }
     }
 
-    #[test]
-    fn authenticated_cursor_rechecks_query_snapshot_bindings() {
+    #[tokio::test]
+    async fn authenticated_cursor_rechecks_query_snapshot_bindings() {
         let (scope, context, _) = application_context("symbol-graph");
         let key = SignedCursorKeyRefV1 {
             key_id: SessionCursorKeyIdV1::new("cursor.pr12").expect("key id"),
@@ -375,13 +410,21 @@ mod tests {
         let body_digest =
             ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("digest");
 
+        let claim = adapter
+            .claim_page(&context, "search", &body_digest, None, NOW)
+            .await
+            .expect("claim page");
         let cursor = adapter
-            .issue_cursor(&context, "search", &body_digest, 3, 8, NOW)
-            .expect("issue cursor");
+            .finish_page(&context, "search", &body_digest, &claim, 3, 8, true, NOW)
+            .await
+            .expect("finish page")
+            .expect("next cursor");
         assert_eq!(
             adapter
-                .resume_offset(&context, "search", &body_digest, &cursor, NOW)
-                .expect("resume cursor"),
+                .claim_page(&context, "search", &body_digest, Some(&cursor), NOW)
+                .await
+                .expect("resume cursor")
+                .offset(),
             3
         );
 
@@ -402,14 +445,16 @@ mod tests {
         );
         assert!(
             changed
-                .resume_offset(&context, "search", &body_digest, &cursor, NOW)
+                .claim_page(&context, "search", &body_digest, Some(&cursor), NOW)
+                .await
                 .is_err()
         );
         let (_, other_context, _) =
             application_context_for_project("symbol-graph", "project.pr12.other");
         assert!(
             adapter
-                .resume_offset(&other_context, "search", &body_digest, &cursor, NOW)
+                .claim_page(&other_context, "search", &body_digest, Some(&cursor), NOW,)
+                .await
                 .is_err()
         );
     }

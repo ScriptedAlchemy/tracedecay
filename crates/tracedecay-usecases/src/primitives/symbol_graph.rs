@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_application::retrieval::{
@@ -13,6 +15,7 @@ use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::types::{EdgeKind, Node, NodeKind};
+use tracedecay_temporal_query::ports::TemporalExecutionSnapshot;
 
 use super::page_body_digest::{
     callees_page_body_digest, callers_page_body_digest, exact_symbol_page_body_digest,
@@ -25,52 +28,80 @@ const MAX_IMPLEMENTATION_RESULTS: usize = 200;
 
 /// Adapter into the existing authenticated opaque-cursor authority. This
 /// module owns no cursor encoding, keyring, expiry, or resume logic.
-pub trait SymbolGraphCursorPort: Send + Sync {
-    fn resume_offset(
-        &self,
-        context: &RequestContext,
-        lane: &str,
-        body_digest: &ManifestDigest,
-        cursor: &OpaqueCursor,
-        observed_at: UtcMicros,
-    ) -> Result<usize, PrimitiveFailure>;
+pub type SymbolGraphCursorFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, PrimitiveFailure>> + Send + 'a>>;
 
-    fn issue_cursor(
-        &self,
-        context: &RequestContext,
-        lane: &str,
-        body_digest: &ManifestDigest,
+pub struct SymbolGraphCursorClaim {
+    pub(super) snapshot: TemporalExecutionSnapshot,
+    pub(super) offset: usize,
+}
+
+impl SymbolGraphCursorClaim {
+    pub const fn offset(&self) -> usize {
+        self.offset
+    }
+}
+
+pub trait SymbolGraphCursorPort: Send + Sync {
+    fn claim_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
+        body_digest: &'a ManifestDigest,
+        cursor: Option<&'a OpaqueCursor>,
+        observed_at: UtcMicros,
+    ) -> SymbolGraphCursorFuture<'a, SymbolGraphCursorClaim>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
+        body_digest: &'a ManifestDigest,
+        claim: &'a SymbolGraphCursorClaim,
         next_offset: usize,
         total: usize,
+        has_more: bool,
         observed_at: UtcMicros,
-    ) -> Result<OpaqueCursor, PrimitiveFailure>;
+    ) -> SymbolGraphCursorFuture<'a, Option<OpaqueCursor>>;
 }
 
 impl<T> SymbolGraphCursorPort for Arc<T>
 where
     T: SymbolGraphCursorPort + ?Sized,
 {
-    fn resume_offset(
-        &self,
-        context: &RequestContext,
-        lane: &str,
-        body_digest: &ManifestDigest,
-        cursor: &OpaqueCursor,
+    fn claim_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
+        body_digest: &'a ManifestDigest,
+        cursor: Option<&'a OpaqueCursor>,
         observed_at: UtcMicros,
-    ) -> Result<usize, PrimitiveFailure> {
-        (**self).resume_offset(context, lane, body_digest, cursor, observed_at)
+    ) -> SymbolGraphCursorFuture<'a, SymbolGraphCursorClaim> {
+        (**self).claim_page(context, lane, body_digest, cursor, observed_at)
     }
 
-    fn issue_cursor(
-        &self,
-        context: &RequestContext,
-        lane: &str,
-        body_digest: &ManifestDigest,
+    fn finish_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
+        body_digest: &'a ManifestDigest,
+        claim: &'a SymbolGraphCursorClaim,
         next_offset: usize,
         total: usize,
+        has_more: bool,
         observed_at: UtcMicros,
-    ) -> Result<OpaqueCursor, PrimitiveFailure> {
-        (**self).issue_cursor(context, lane, body_digest, next_offset, total, observed_at)
+    ) -> SymbolGraphCursorFuture<'a, Option<OpaqueCursor>> {
+        (**self).finish_page(
+            context,
+            lane,
+            body_digest,
+            claim,
+            next_offset,
+            total,
+            has_more,
+            observed_at,
+        )
     }
 }
 
@@ -97,6 +128,18 @@ where
         request: &'a SymbolSearchPrimitiveRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
+            let binding = match claim_page(
+                &self.cursors,
+                context,
+                &request.meta.page,
+                "search",
+                symbol_search_page_body_digest(request),
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(failure) => return failed_with(context, failure),
+            };
             let Ok(results) = self
                 .graph
                 .search(request.query.as_str(), MAX_COMPATIBILITY_RESULTS)
@@ -125,11 +168,12 @@ where
                 context,
                 &request.meta.page,
                 "search",
-                symbol_search_page_body_digest(request),
+                &binding,
                 records,
                 gaps,
                 None,
             )
+            .await
         })
     }
 
@@ -139,6 +183,18 @@ where
         request: &'a ExactSymbolRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
+            let binding = match claim_page(
+                &self.cursors,
+                context,
+                &request.meta.page,
+                "exact",
+                exact_symbol_page_body_digest(request),
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(failure) => return failed_with(context, failure),
+            };
             let Ok(nodes) = self.graph.get_nodes_by_name(&request.name).await else {
                 return failed(context, "exact symbol lookup failed");
             };
@@ -163,11 +219,12 @@ where
                 context,
                 &request.meta.page,
                 "exact",
-                exact_symbol_page_body_digest(request),
+                &binding,
                 records,
                 gaps,
                 None,
             )
+            .await
         })
     }
 
@@ -177,6 +234,18 @@ where
         request: &'a SignatureSearchRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
+            let binding = match claim_page(
+                &self.cursors,
+                context,
+                &request.meta.page,
+                "signature",
+                signature_search_page_body_digest(request),
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(failure) => return failed_with(context, failure),
+            };
             let Ok(functions) = self.graph.db().get_nodes_by_kind(NodeKind::Function).await else {
                 return failed(context, "signature function lookup failed");
             };
@@ -199,11 +268,12 @@ where
                 context,
                 &request.meta.page,
                 "signature",
-                signature_search_page_body_digest(request),
+                &binding,
                 records,
                 Vec::new(),
                 None,
             )
+            .await
         })
     }
 
@@ -213,6 +283,18 @@ where
         request: &'a ImplementationsRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
+            let binding = match claim_page(
+                &self.cursors,
+                context,
+                &request.meta.page,
+                "implementations",
+                implementations_page_body_digest(request),
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(failure) => return failed_with(context, failure),
+            };
             let records = match &request.selector {
                 ImplementationSelector::Trait { name } => {
                     match trait_implementations(self.graph.as_ref(), name, &request.scope).await {
@@ -246,11 +328,12 @@ where
                 context,
                 &request.meta.page,
                 "implementations",
-                implementations_page_body_digest(request),
+                &binding,
                 records,
                 Vec::new(),
                 None,
             )
+            .await
         })
     }
 
@@ -260,6 +343,18 @@ where
         request: &'a TypeHierarchyRequest,
     ) -> SymbolGraphPortFuture<'a, TypeHierarchyRecord> {
         Box::pin(async move {
+            let binding = match claim_page(
+                &self.cursors,
+                context,
+                &request.meta.page,
+                "hierarchy",
+                type_hierarchy_page_body_digest(request),
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(failure) => return failed_with(context, failure),
+            };
             let root = match self.graph.get_node(&request.node_id).await {
                 Ok(Some(node)) if in_scope(&node, &request.scope) => node,
                 Ok(_) => {
@@ -268,11 +363,12 @@ where
                         context,
                         &request.meta.page,
                         "hierarchy",
-                        type_hierarchy_page_body_digest(request),
+                        &binding,
                         Vec::new(),
                         Vec::new(),
                         None,
-                    );
+                    )
+                    .await;
                 }
                 Err(_) => return failed(context, "type hierarchy root lookup failed"),
             };
@@ -322,11 +418,12 @@ where
                 context,
                 &request.meta.page,
                 "hierarchy",
-                type_hierarchy_page_body_digest(request),
+                &binding,
                 records,
                 Vec::new(),
                 None,
             )
+            .await
         })
     }
 
@@ -336,6 +433,18 @@ where
         request: &'a GraphRelationRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
+            let binding = match claim_page(
+                &self.cursors,
+                context,
+                &request.meta.page,
+                "callers",
+                callers_page_body_digest(request),
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(failure) => return failed_with(context, failure),
+            };
             let Ok(values) = self
                 .graph
                 .get_callers(&request.node_id, request.maximum_depth as usize)
@@ -354,11 +463,12 @@ where
                 context,
                 &request.meta.page,
                 "callers",
-                callers_page_body_digest(request),
+                &binding,
                 records,
                 Vec::new(),
                 None,
             )
+            .await
         })
     }
 
@@ -368,6 +478,18 @@ where
         request: &'a GraphRelationRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
+            let binding = match claim_page(
+                &self.cursors,
+                context,
+                &request.meta.page,
+                "callees",
+                callees_page_body_digest(request),
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(failure) => return failed_with(context, failure),
+            };
             let Ok(values) = self
                 .graph
                 .get_callees(&request.node_id, request.maximum_depth as usize)
@@ -419,11 +541,12 @@ where
                 context,
                 &request.meta.page,
                 "callees",
-                callees_page_body_digest(request),
+                &binding,
                 records,
                 Vec::new(),
                 None,
             )
+            .await
         })
     }
 
@@ -433,6 +556,18 @@ where
         request: &'a GraphImpactPrimitiveRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
+            let binding = match claim_page(
+                &self.cursors,
+                context,
+                &request.meta.page,
+                "impact",
+                impact_page_body_digest(request),
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(failure) => return failed_with(context, failure),
+            };
             let Ok(subgraph) = self
                 .graph
                 .get_impact_radius(&request.node_id, request.maximum_depth as usize)
@@ -453,11 +588,12 @@ where
                 context,
                 &request.meta.page,
                 "impact",
-                impact_page_body_digest(request),
+                &binding,
                 records,
                 Vec::new(),
                 Some(edge_count),
             )
+            .await
         })
     }
 }
@@ -582,23 +718,48 @@ fn in_scope(node: &Node, scope: &SymbolGraphScope) -> bool {
     })
 }
 
-fn complete_or_failed<T>(
+struct SymbolGraphPageBinding {
+    body_digest: ManifestDigest,
+    claim: SymbolGraphCursorClaim,
+}
+
+async fn claim_page(
     cursors: &dyn SymbolGraphCursorPort,
     context: SymbolGraphPortContext<'_>,
     request: &PageRequest,
     lane: &str,
     body_digest: Result<ManifestDigest, tracedecay_application::ApplicationContractError>,
+) -> Result<SymbolGraphPageBinding, PrimitiveFailure> {
+    let body_digest = body_digest.map_err(|_| {
+        primitive_failure(
+            PrimitiveFailureKind::Unavailable,
+            "application.symbol-graph.page-binding",
+            "symbol graph page binding failed",
+        )
+    })?;
+    let claim = cursors
+        .claim_page(
+            context.request,
+            lane,
+            &body_digest,
+            request.cursor.as_ref(),
+            context.observed_at,
+        )
+        .await?;
+    Ok(SymbolGraphPageBinding { body_digest, claim })
+}
+
+async fn complete_or_failed<T: Send>(
+    cursors: &dyn SymbolGraphCursorPort,
+    context: SymbolGraphPortContext<'_>,
+    request: &PageRequest,
+    lane: &str,
+    binding: &SymbolGraphPageBinding,
     items: Vec<T>,
     gaps: Vec<PrimitiveSupportGap>,
     related_edge_count: Option<u64>,
 ) -> SymbolGraphPortOutcome<T> {
-    let body_digest = match body_digest {
-        Ok(body_digest) => body_digest,
-        Err(_) => {
-            return failed(context, "symbol graph page binding failed");
-        }
-    };
-    let mut page = match paginate(cursors, context, request, lane, &body_digest, items) {
+    let mut page = match paginate(cursors, context, request, lane, binding, items).await {
         Ok(page) => page,
         Err(failure) => {
             return SymbolGraphPortOutcome::Failed {
@@ -625,24 +786,15 @@ fn complete_or_failed<T>(
     }
 }
 
-fn paginate<T>(
+async fn paginate<T: Send>(
     cursors: &dyn SymbolGraphCursorPort,
     context: SymbolGraphPortContext<'_>,
     request: &PageRequest,
     lane: &str,
-    body_digest: &ManifestDigest,
+    binding: &SymbolGraphPageBinding,
     items: Vec<T>,
 ) -> Result<SymbolGraphPage<T>, PrimitiveFailure> {
-    let offset = match request.cursor.as_ref() {
-        Some(cursor) => cursors.resume_offset(
-            context.request,
-            lane,
-            body_digest,
-            cursor,
-            context.observed_at,
-        )?,
-        None => 0,
-    };
+    let offset = binding.claim.offset();
     let total = items.len();
     if offset > total {
         return Err(primitive_failure(
@@ -655,18 +807,18 @@ fn paginate<T>(
     let end = offset.saturating_add(page_size).min(total);
     let has_more = end < total;
     let page_items = items.into_iter().skip(offset).take(page_size).collect();
-    let next_cursor = if has_more {
-        Some(cursors.issue_cursor(
+    let next_cursor = cursors
+        .finish_page(
             context.request,
             lane,
-            body_digest,
+            &binding.body_digest,
+            &binding.claim,
             end,
             total,
+            has_more,
             context.observed_at,
-        )?)
-    } else {
-        None
-    };
+        )
+        .await?;
     Ok(SymbolGraphPage::complete(
         page_items,
         Some(total as u64),
@@ -678,12 +830,22 @@ fn failed<T>(
     context: SymbolGraphPortContext<'_>,
     reason: &'static str,
 ) -> SymbolGraphPortOutcome<T> {
-    SymbolGraphPortOutcome::Failed {
-        failure: primitive_failure(
+    failed_with(
+        context,
+        primitive_failure(
             PrimitiveFailureKind::Unavailable,
             "application.symbol-graph.query-unavailable",
             reason,
         ),
+    )
+}
+
+fn failed_with<T>(
+    context: SymbolGraphPortContext<'_>,
+    failure: PrimitiveFailure,
+) -> SymbolGraphPortOutcome<T> {
+    SymbolGraphPortOutcome::Failed {
+        failure,
         finished_at: context.observed_at,
         budget: OperationBudgetUsage::default(),
     }

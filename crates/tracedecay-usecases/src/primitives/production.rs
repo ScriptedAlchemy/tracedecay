@@ -2021,35 +2021,12 @@ pub async fn open_pr12_production_primitive_runtime(
                 field: "PR12 primitive session cursor authenticator",
             })?,
     );
-    // Bind every cursor to the daemon-owned sealed code-index identity. Counts
-    // are not snapshot identities: a graph mutation can replace nodes without
-    // changing cardinality.
-    let graph_identity = code_index
-        .current_identity(project_root.clone(), None)
-        .await
-        .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 primitive symbol-graph sealed identity",
-        })?
-        .admit_for_scope(&scope)
-        .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 primitive symbol-graph sealed scope",
-        })?;
-    let graph_snapshot_digest = canonical_sha256(&(
-        "tracedecay.symbol-graph.snapshot.v1",
-        graph_identity.head_commit_id.as_str(),
-        graph_identity.code_generation_id.as_str(),
-        graph_identity.snapshot_digest.as_str(),
-        graph_identity.invalidation_digest.as_str(),
-        graph_identity.snapshot_content_digest.as_str(),
-    ))
-    .map_err(|_| ApplicationContractError::Inconsistent {
-        field: "PR12 primitive symbol-graph snapshot digest",
-    })?;
     let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
         key.clone(),
         configuration_digest.clone(),
-        graph_snapshot_digest,
-        graph_identity.generation.max(1),
+        project_root.clone(),
+        scope.clone(),
+        Arc::clone(&code_index),
     ));
     let cursors: Arc<dyn SymbolGraphCursorPort> = Arc::new(
         AuthenticatedSymbolGraphCursorAdapter::new(snapshots, Arc::clone(&authenticator)),
@@ -2337,6 +2314,8 @@ mod storage_table_detail_tests {
 #[cfg(test)]
 mod affected_tests_tests {
     use std::collections::BTreeSet;
+    use std::path::PathBuf;
+    use std::sync::RwLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tracedecay_application::retrieval::{
@@ -2348,7 +2327,7 @@ mod affected_tests_tests {
         Deadline, DisclosureClass, RequestContext, RequestId, ResultContractRef,
     };
     use tracedecay_domain::{
-        ActorId, CodeGenerationId, ComponentVersion, ContentDigest, FileOccurrenceId,
+        ActorId, CodeGenerationId, CommitId, ComponentVersion, ContentDigest, FileOccurrenceId,
         GenerationTestAttributionV1, ProjectId, ProviderEvaluationStateV1, RefId, RepositoryId,
         SessionCursorKeyIdV1, SessionCursorVersionV1, SymbolOccurrenceId,
         TestAttributionEvidenceClassV1, WorktreeId,
@@ -2357,6 +2336,7 @@ mod affected_tests_tests {
 
     use super::*;
     use crate::diagnostics_query::DiagnosticQueryCursor;
+    use crate::lsp_runtime::LspCodeIndexProjectionIdentity;
     use tracedecay_code_index::provider::{
         GenerationProviderCoverageV1, GenerationProviderReadV1,
         GenerationTestAttributionJoinReadPort,
@@ -2387,6 +2367,29 @@ mod affected_tests_tests {
     struct GenerationSwitchingFixture {
         current: CodeGenerationId,
         read: GenerationProviderReadV1<GenerationTestJoinV1>,
+    }
+
+    struct MutableSymbolGraphIdentity {
+        current: RwLock<LspCodeIndexProjectionIdentity>,
+    }
+
+    impl MutableSymbolGraphIdentity {
+        fn replace(&self, identity: LspCodeIndexProjectionIdentity) {
+            *self.current.write().expect("identity lock") = identity;
+        }
+    }
+
+    impl LspCodeIndexProjectionIdentityPort for MutableSymbolGraphIdentity {
+        fn current_identity(
+            &self,
+            _project_root: PathBuf,
+            _document_relative_path: Option<String>,
+        ) -> tracedecay_lsp::LspRuntimeFuture<
+            Result<LspCodeIndexProjectionIdentity, tracedecay_lsp::LspRuntimeFailure>,
+        > {
+            let identity = self.current.read().expect("identity lock").clone();
+            Box::pin(async move { Ok(identity) })
+        }
     }
 
     impl GenerationTestAttributionJoinReadPort for GenerationSwitchingFixture {
@@ -2625,12 +2628,37 @@ mod affected_tests_tests {
         .expect("context")
     }
 
+    fn symbol_graph_identity(
+        context: &RequestContext,
+        generation: u64,
+        snapshot_byte: char,
+    ) -> LspCodeIndexProjectionIdentity {
+        LspCodeIndexProjectionIdentity {
+            repository: context.scope().repository_id.clone(),
+            worktree: Some(context.scope().worktree_id.clone()),
+            reference: context.scope().reference.clone(),
+            source_revision: Some(CommitId::new("commit.symbol-graph").expect("commit")),
+            code_generation_id: CodeGenerationId::new(format!(
+                "generation.symbol-graph.current.{generation}"
+            ))
+            .expect("generation"),
+            snapshot_digest: digest(snapshot_byte),
+            invalidation_digest: digest('e'),
+            snapshot_content_digest: ContentDigest::new(format!(
+                "sha256:{}",
+                snapshot_byte.to_string().repeat(64)
+            ))
+            .expect("snapshot content"),
+            document_content_digest: None,
+        }
+    }
+
     /// Production never mints a `sha256:`-prefixed request id, so a snapshot
     /// bound to one could not be built, and a snapshot bound to the
     /// correlation id could never be resumed by the next request. Both
     /// contexts here carry ids minted by the real production surfaces.
-    #[test]
-    fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
+    #[tokio::test]
+    async fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
         let key = SignedCursorKeyRefV1 {
             key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key"),
             version: SessionCursorVersionV1::new(1).expect("version"),
@@ -2638,16 +2666,6 @@ mod affected_tests_tests {
         let authenticator = Arc::new(
             InMemoryCursorAuthenticator::new(key.clone(), vec![9_u8; 32]).expect("authenticator"),
         );
-        let adapter = AuthenticatedSymbolGraphCursorAdapter::new(
-            Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
-                key.clone(),
-                digest('c'),
-                digest('b'),
-                11,
-            )),
-            Arc::clone(&authenticator),
-        );
-
         let issuing = symbol_graph_context(
             crate::request_identity::mcp_connection_request_id(
                 &serde_json::json!(1),
@@ -2666,44 +2684,114 @@ mod affected_tests_tests {
             resuming.request_id().as_str(),
             "each request carries its own correlation id"
         );
+        let identity = Arc::new(MutableSymbolGraphIdentity {
+            current: RwLock::new(symbol_graph_identity(&issuing, 11, 'b')),
+        });
+        let identity_port: Arc<dyn LspCodeIndexProjectionIdentityPort> = identity.clone();
+        let adapter = AuthenticatedSymbolGraphCursorAdapter::new(
+            Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
+                key,
+                digest('c'),
+                PathBuf::from("/project/symbol-graph"),
+                issuing.scope().clone(),
+                identity_port,
+            )),
+            authenticator,
+        );
 
         let observed_at = now_observed();
         let body_digest = digest('d');
+        let claim = adapter
+            .claim_page(&issuing, "search", &body_digest, None, observed_at)
+            .await
+            .expect("the production request must claim the current graph page");
         let cursor = adapter
-            .issue_cursor(&issuing, "search", &body_digest, 3, 8, observed_at)
+            .finish_page(
+                &issuing,
+                "search",
+                &body_digest,
+                &claim,
+                3,
+                8,
+                true,
+                observed_at,
+            )
+            .await
+            .expect("a production request must finish the current graph page")
             .expect("a production request must be able to issue a page cursor");
         assert_eq!(
             adapter
-                .resume_offset(&resuming, "search", &body_digest, &cursor, observed_at)
-                .expect("the next production request must resume the page"),
+                .claim_page(
+                    &resuming,
+                    "search",
+                    &body_digest,
+                    Some(&cursor),
+                    observed_at,
+                )
+                .await
+                .expect("the next production request must resume the page")
+                .offset(),
             3
         );
         assert!(
             adapter
-                .resume_offset(&resuming, "callers", &body_digest, &cursor, observed_at)
+                .claim_page(
+                    &resuming,
+                    "callers",
+                    &body_digest,
+                    Some(&cursor),
+                    observed_at,
+                )
+                .await
                 .is_err(),
             "a cursor must not resume into another lane"
         );
         assert!(
             adapter
-                .resume_offset(&resuming, "search", &digest('e'), &cursor, observed_at)
+                .claim_page(
+                    &resuming,
+                    "search",
+                    &digest('e'),
+                    Some(&cursor),
+                    observed_at,
+                )
+                .await
                 .is_err(),
             "a cursor must not resume for another query body"
         );
-        let changed_snapshot = AuthenticatedSymbolGraphCursorAdapter::new(
-            Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
-                key,
-                digest('c'),
-                digest('f'),
-                11,
-            )),
-            authenticator,
+        let in_flight = adapter
+            .claim_page(&resuming, "search", &body_digest, None, observed_at)
+            .await
+            .expect("claim current graph before query");
+        identity.replace(symbol_graph_identity(&issuing, 12, 'f'));
+        assert!(
+            adapter
+                .finish_page(
+                    &resuming,
+                    "search",
+                    &body_digest,
+                    &in_flight,
+                    3,
+                    8,
+                    true,
+                    observed_at,
+                )
+                .await
+                .is_err(),
+            "a page must fail stale when its graph generation changes during the query"
         );
         assert!(
-            changed_snapshot
-                .resume_offset(&resuming, "search", &body_digest, &cursor, observed_at)
+            adapter
+                .claim_page(
+                    &resuming,
+                    "search",
+                    &body_digest,
+                    Some(&cursor),
+                    observed_at,
+                )
+                .await
                 .is_err(),
-            "a cursor must not resume after a same-cardinality graph mutation"
+            "the retained runtime must reject a cursor after its live graph generation changes"
         );
     }
 

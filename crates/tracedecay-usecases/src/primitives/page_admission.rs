@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -6,6 +7,7 @@ use tracedecay_application::retrieval::{PrimitiveFailure, PrimitiveFailureKind};
 use tracedecay_application::{
     ApplicationWireOperation, OpaqueCursor, PageAdmissionError, PageAdmissionFuture,
     PageAdmissionPort, PageAdmissionRequest, PageAdmissionSeal, RequestAdmission, RequestContext,
+    ResolvedScope,
 };
 use tracedecay_domain::{
     CodeGenerationId, CommitId, FileOccurrenceId, ManifestDigest, RetrievalGrainV1, SessionId,
@@ -96,22 +98,25 @@ pub struct SymbolGraphPageAdmissionAdapterV1<C> {
 pub struct ProjectSymbolGraphCursorSnapshotAuthority {
     key: SignedCursorKeyRefV1,
     configuration_digest: ManifestDigest,
-    graph_snapshot_digest: ManifestDigest,
-    watermark: u64,
+    project_root: PathBuf,
+    scope: ResolvedScope,
+    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
 }
 
 impl ProjectSymbolGraphCursorSnapshotAuthority {
     pub(super) fn new(
         key: SignedCursorKeyRefV1,
         configuration_digest: ManifestDigest,
-        graph_snapshot_digest: ManifestDigest,
-        watermark: u64,
+        project_root: PathBuf,
+        scope: ResolvedScope,
+        code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     ) -> Self {
         Self {
             key,
             configuration_digest,
-            graph_snapshot_digest,
-            watermark,
+            project_root,
+            scope,
+            code_index,
         }
     }
 }
@@ -125,93 +130,127 @@ fn symbol_graph_snapshot_failure(code: &'static str, message: &'static str) -> P
 }
 
 impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuthority {
-    fn snapshot(
-        &self,
-        context: &RequestContext,
-        lane: &str,
-        body_digest: &ManifestDigest,
+    fn snapshot<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
+        body_digest: &'a ManifestDigest,
         _observed_at: UtcMicros,
-    ) -> Result<TemporalExecutionSnapshot, PrimitiveFailure> {
-        let request_digest = canonical_sha256(&(
-            "tracedecay.symbol-graph.cursor.v1",
-            context.actor(),
-            context.grant().revision,
-            &context.grant().digest,
-            &context.grant().issuer,
-            &context.grant().allowed_capabilities,
-            &context.grant().allowed_use_cases,
-            context.grant().disclosure,
-            lane,
-            body_digest.as_str(),
-            self.graph_snapshot_digest.as_str(),
-        ))
-        .map_err(|_| {
-            symbol_graph_snapshot_failure(
-                "application.symbol-graph.request",
-                "could not derive the symbol-graph cursor request digest",
-            )
-        })?;
-        let request = TemporalSnapshotRequest::new(
-            SessionId::new("session.daemon.primitive").map_err(|_| {
+    ) -> super::concrete::SymbolGraphCursorSnapshotFuture<'a> {
+        Box::pin(async move {
+            let graph_identity = self
+                .code_index
+                .current_identity(self.project_root.clone(), None)
+                .await
+                .map_err(|_| {
+                    symbol_graph_snapshot_failure(
+                        "application.symbol-graph.identity",
+                        "could not read the current symbol-graph identity",
+                    )
+                })?
+                .admit_for_scope(&self.scope)
+                .map_err(|_| {
+                    symbol_graph_snapshot_failure(
+                        "application.symbol-graph.scope",
+                        "the current symbol-graph identity did not match the admitted scope",
+                    )
+                })?;
+            let graph_snapshot_digest = canonical_sha256(&(
+                "tracedecay.symbol-graph.snapshot.v1",
+                graph_identity.head_commit_id.as_str(),
+                graph_identity.code_generation_id.as_str(),
+                graph_identity.snapshot_digest.as_str(),
+                graph_identity.invalidation_digest.as_str(),
+                graph_identity.snapshot_content_digest.as_str(),
+            ))
+            .map_err(|_| {
                 symbol_graph_snapshot_failure(
-                    "application.symbol-graph.session",
-                    "could not mint primitive session id",
+                    "application.symbol-graph.identity",
+                    "could not derive the current symbol-graph snapshot digest",
                 )
-            })?,
-            context.scope().scope_digest.as_str(),
-            request_digest.as_str(),
-            context.grant().digest.as_str(),
-            TemporalModeV1::Current,
-            RetrievalGrainV1::Occurrence,
-        )
-        .map_err(|_| {
-            symbol_graph_snapshot_failure(
-                "application.symbol-graph.snapshot",
-                "could not build temporal snapshot request",
+            })?;
+            let request_digest = canonical_sha256(&(
+                "tracedecay.symbol-graph.cursor.v1",
+                context.actor(),
+                context.grant().revision,
+                &context.grant().digest,
+                &context.grant().issuer,
+                &context.grant().allowed_capabilities,
+                &context.grant().allowed_use_cases,
+                context.grant().disclosure,
+                lane,
+                body_digest.as_str(),
+                graph_snapshot_digest.as_str(),
+            ))
+            .map_err(|_| {
+                symbol_graph_snapshot_failure(
+                    "application.symbol-graph.request",
+                    "could not derive the symbol-graph cursor request digest",
+                )
+            })?;
+            let request = TemporalSnapshotRequest::new(
+                SessionId::new("session.daemon.primitive").map_err(|_| {
+                    symbol_graph_snapshot_failure(
+                        "application.symbol-graph.session",
+                        "could not mint primitive session id",
+                    )
+                })?,
+                context.scope().scope_digest.as_str(),
+                request_digest.as_str(),
+                context.grant().digest.as_str(),
+                TemporalModeV1::Current,
+                RetrievalGrainV1::Occurrence,
             )
-        })?;
-        TemporalExecutionSnapshot::new_authorized(
-            request,
-            TemporalWatermarks {
-                generation: 1,
-                source: self.watermark,
-                projection: self.watermark,
-                index: self.watermark,
-                summary: self.watermark,
-            },
-            KernelVersions {
-                schema: 1,
-                ranking: 1,
-                configuration_digest: BindingDigest::new(
-                    "configuration_digest",
-                    canonical_sha256(&(
-                        "tracedecay.symbol-graph.cursor-configuration.v1",
-                        self.configuration_digest.as_str(),
-                        self.graph_snapshot_digest.as_str(),
-                    ))
+            .map_err(|_| {
+                symbol_graph_snapshot_failure(
+                    "application.symbol-graph.snapshot",
+                    "could not build temporal snapshot request",
+                )
+            })?;
+            let watermark = graph_identity.generation.max(1);
+            TemporalExecutionSnapshot::new_authorized(
+                request,
+                TemporalWatermarks {
+                    generation: 1,
+                    source: watermark,
+                    projection: watermark,
+                    index: watermark,
+                    summary: watermark,
+                },
+                KernelVersions {
+                    schema: 1,
+                    ranking: 1,
+                    configuration_digest: BindingDigest::new(
+                        "configuration_digest",
+                        canonical_sha256(&(
+                            "tracedecay.symbol-graph.cursor-configuration.v1",
+                            self.configuration_digest.as_str(),
+                            graph_snapshot_digest.as_str(),
+                        ))
+                        .map_err(|_| {
+                            symbol_graph_snapshot_failure(
+                                "application.symbol-graph.configuration",
+                                "could not bind the symbol-graph snapshot configuration",
+                            )
+                        })?
+                        .as_str(),
+                    )
                     .map_err(|_| {
                         symbol_graph_snapshot_failure(
                             "application.symbol-graph.configuration",
-                            "could not bind the symbol-graph snapshot configuration",
+                            "invalid configuration digest",
                         )
-                    })?
-                    .as_str(),
-                )
-                .map_err(|_| {
-                    symbol_graph_snapshot_failure(
-                        "application.symbol-graph.configuration",
-                        "invalid configuration digest",
-                    )
-                })?,
-            },
-            Some(self.key.clone()),
-            ValidatedAuthorization::Authorized,
-        )
-        .map_err(|_| {
-            symbol_graph_snapshot_failure(
-                "application.symbol-graph.snapshot",
-                "could not authorize temporal snapshot",
+                    })?,
+                },
+                Some(self.key.clone()),
+                ValidatedAuthorization::Authorized,
             )
+            .map_err(|_| {
+                symbol_graph_snapshot_failure(
+                    "application.symbol-graph.snapshot",
+                    "could not authorize temporal snapshot",
+                )
+            })
         })
     }
 }
@@ -242,13 +281,14 @@ where
             validate_catalog_page_request(&self.catalog, &request, observed_at)?;
             if let Some(cursor) = &request.page().cursor {
                 self.cursors
-                    .resume_offset(
+                    .claim_page(
                         request.context(),
                         lane,
                         request.body_digest(),
-                        cursor,
+                        Some(cursor),
                         observed_at,
                     )
+                    .await
                     .map_err(|failure| match failure.kind {
                         PrimitiveFailureKind::InvalidRequest => PageAdmissionError::InvalidRequest,
                         PrimitiveFailureKind::NotFoundOrNotAuthorized => PageAdmissionError::Denied,
