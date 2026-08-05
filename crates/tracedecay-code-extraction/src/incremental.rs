@@ -878,11 +878,18 @@ fn extraction_ranges(
                 }
                 region_start = previous;
             }
+            let mut region_end = node;
+            while let Some(next) = region_end.next_named_sibling() {
+                if next.start_position().row != region_end.end_position().row {
+                    break;
+                }
+                region_end = next;
+            }
             Some(ParseChangedRange {
                 start_byte: region_start.start_byte(),
-                end_byte: node.end_byte(),
+                end_byte: region_end.end_byte(),
                 start_position: region_start.start_position().into(),
-                end_position: node.end_position().into(),
+                end_position: region_end.end_position().into(),
             })
         })
         .collect::<Vec<_>>();

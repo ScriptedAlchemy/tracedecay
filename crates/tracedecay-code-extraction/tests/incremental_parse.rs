@@ -330,3 +330,41 @@ fn canonical_reextraction_visits_only_changed_top_level_syntax() {
         Err(ParseError::StaleReport)
     ));
 }
+
+#[test]
+fn same_line_column_shifts_reextract_following_top_level_syntax() {
+    let before = "fn a() -> u32 { 1 } fn b() -> u32 { 2 }\n";
+    let after = "fn longer() -> u32 { 1 } fn b() -> u32 { 2 }\n";
+    let (mut document, opened) = RetainedParseDocument::open(
+        identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "rust",
+        before,
+        ParseLimits::default(),
+    )
+    .expect("initial parse");
+    let initial = document
+        .extract_canonical(&RustExtractor, &opened, None)
+        .expect("initial canonical extraction");
+
+    let report = document
+        .reparse(
+            identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            after,
+        )
+        .expect("same-line incremental parse");
+    let incremental = document
+        .extract_canonical(&RustExtractor, &report, Some(&initial.result))
+        .expect("same-line canonical extraction");
+    let following = incremental
+        .result
+        .nodes
+        .iter()
+        .find(|node| node.name == "b")
+        .expect("following function");
+
+    assert_eq!(incremental.metrics.visited_top_level_nodes, 2);
+    assert_eq!(
+        following.start_column as usize,
+        after.find("fn b").expect("b")
+    );
+}
