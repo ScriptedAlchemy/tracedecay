@@ -38,8 +38,6 @@ pub(super) struct DaemonEngine {
     #[cfg(test)]
     pub(super) project_open_attempts: Arc<AtomicUsize>,
     #[cfg(test)]
-    pub(super) memory_repair_start_attempts: Arc<AtomicUsize>,
-    #[cfg(test)]
     pub(super) automation_config_probe_attempts: Arc<AtomicUsize>,
     #[cfg(test)]
     pub(super) automation_configured_override: Arc<AtomicBool>,
@@ -572,15 +570,6 @@ impl DaemonEngine {
         handshake: DaemonHandshake,
         server: Arc<crate::mcp::McpServer>,
     ) {
-        let repair_key = key.clone();
-        let repair_project_path = project_path.clone();
-        let repair_handshake = handshake.clone();
-        let engine = self.clone();
-        spawn_lifecycle_automation_scheduler_activation(self.lifecycle.clone(), async move {
-            engine
-                .activate_project_maintenance(repair_key, repair_project_path, repair_handshake)
-                .await;
-        });
         let engine = self.clone();
         spawn_lifecycle_automation_scheduler_activation(self.lifecycle.clone(), async move {
             let cg = server.cg().await;
@@ -588,37 +577,6 @@ impl DaemonEngine {
                 .activate_automation_scheduler_for_open_project(key, project_path, handshake, cg)
                 .await;
         });
-    }
-
-    async fn activate_project_maintenance(
-        &self,
-        key: ProjectServerKey,
-        project_path: PathBuf,
-        handshake: DaemonHandshake,
-    ) {
-        let transition = self.maintenance_transition_gate(&key).await;
-        let _transition = transition.lock().await;
-        let scope = crate::daemon::branch_admin::owner_writer_scope(&key);
-        self.store_administration
-            .with_writer_in(scope, || async move {
-                if self
-                    .store_administration
-                    .project_servers()
-                    .lock()
-                    .await
-                    .get(&key)
-                    .is_none()
-                {
-                    return;
-                }
-                self.start_memory_repair_scheduler(
-                    key.clone(),
-                    project_path.clone(),
-                    handshake.clone(),
-                )
-                .await;
-            })
-            .await;
     }
 
     pub(super) async fn rekey_project_maintenance(
@@ -631,12 +589,8 @@ impl DaemonEngine {
     ) -> MaintenanceRekeyOutcome {
         let transition = self.maintenance_transition_gate(old_key).await;
         let _transition = transition.lock().await;
-        let repair_retirement = self.retire_memory_repair_scheduler_locked(old_key).await;
         let automation_retirement = self.retire_automation_scheduler_locked(old_key).await;
         let retired = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-            if let Some(retirement) = repair_retirement {
-                retirement.wait().await;
-            }
             if let Some(retirement) = automation_retirement {
                 retirement.wait().await;
             }
@@ -656,20 +610,10 @@ impl DaemonEngine {
         if !acquire_new || !self.lifecycle.accepting() {
             return MaintenanceRekeyOutcome::Completed;
         }
-        let repair_outcome = self
-            .reconcile_memory_repair_scheduler_locked(
-                new_key.clone(),
-                project_path.clone(),
-                handshake.clone(),
-            )
-            .await;
         let automation_outcome = self
             .reconcile_automation_scheduler_locked(new_key, project_path, handshake)
             .await;
         if matches!(
-            repair_outcome,
-            memory_repair_scheduler::MemoryRepairSchedulerReconcileOutcome::Retiring
-        ) || matches!(
             automation_outcome,
             crate::dashboard::AutomationSchedulerReconcileOutcome::Retiring
         ) {
@@ -796,7 +740,6 @@ impl DaemonEngine {
             .shutdown()
             .await;
         self.shutdown_automation_schedulers().await;
-        self.shutdown_memory_repair_schedulers().await;
         self.store_administration
             .shutdown_retirement_reapers()
             .await;

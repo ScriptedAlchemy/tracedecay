@@ -208,24 +208,6 @@ impl TraceDecay {
             .await
             .map_err(memory_application_error)
     }
-
-    /// Runs one bounded, authoritative compatibility-memory repair batch for
-    /// the active project. Daemon maintenance owns scheduling and retries;
-    /// callers receive the exact batch progress and must not infer completion.
-    ///
-    /// Public because status reads are pure (they report backlog without
-    /// repairing); this is the explicit repair entry point that owns the
-    /// side effect.
-    pub async fn repair_project_memory_once(
-        &self,
-    ) -> Result<tracedecay_store::CompatibilityMemoryRepairStatsV1> {
-        let context = self.generated_memory_operation("daemon memory repair")?;
-        self.project_memory_application()
-            .await?
-            .dashboard_repair_v1(context)
-            .await
-            .map_err(memory_application_error)
-    }
 }
 
 #[cfg(test)]

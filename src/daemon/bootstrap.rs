@@ -328,19 +328,13 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         // Stop automation before announcing shutdown or waiting for clients.
         // Scheduler tasks may be inside a synchronous auxiliary-agent call, so
         // shutdown also terminates their tracked process trees before joining.
-        let (automation_stopped, memory_repair_stopped) = tokio::join!(
-            timeout(
-                DAEMON_TASK_ABORT_DEADLINE,
-                engine.shutdown_automation_schedulers(),
-            ),
-            timeout(
-                DAEMON_TASK_ABORT_DEADLINE,
-                engine.shutdown_memory_repair_schedulers(),
-            )
-        );
-        let automation_stopped = automation_stopped.is_ok();
-        let memory_repair_stopped = memory_repair_stopped.is_ok();
-        if !automation_stopped || !memory_repair_stopped {
+        let automation_stopped = timeout(
+            DAEMON_TASK_ABORT_DEADLINE,
+            engine.shutdown_automation_schedulers(),
+        )
+        .await
+        .is_ok();
+        if !automation_stopped {
             log_daemon_event(
                 "daemon_shutdown",
                 &[("outcome", "scheduler_lock_timeout".to_string())],
