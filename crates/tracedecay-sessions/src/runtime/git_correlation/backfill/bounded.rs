@@ -1,24 +1,39 @@
-use std::process::Stdio;
-use std::time::Duration;
+use std::io::BufRead;
+use std::time::{Duration, Instant};
 
 use crate::observation::ObservationCancellation;
 
 use super::*;
 
-const GIT_OUTPUT_PAGE_SIZE: usize = 256;
+mod native;
+
+use native::PreparedGitEvent;
 
 #[derive(Clone)]
 pub struct BoundedGitControl {
     cancellation: ObservationCancellation,
-    command_timeout: Duration,
+    deadline: Option<Instant>,
 }
 
 impl BoundedGitControl {
     pub fn new(cancellation: ObservationCancellation, command_timeout: Duration) -> Self {
         Self {
             cancellation,
-            command_timeout,
+            deadline: Instant::now().checked_add(command_timeout),
         }
+    }
+
+    fn check(&self) -> Result<(), BoundedBackfillInterruption> {
+        if self.cancellation.is_cancelled() {
+            return Err(BoundedBackfillInterruption::Cancelled);
+        }
+        if match self.deadline {
+            Some(deadline) => Instant::now() >= deadline,
+            None => true,
+        } {
+            return Err(BoundedBackfillInterruption::CommandTimedOut);
+        }
+        Ok(())
     }
 }
 
@@ -26,6 +41,7 @@ impl BoundedGitControl {
 pub enum BoundedBackfillInterruption {
     Cancelled,
     CommandTimedOut,
+    HistoryLimitReached,
     SourceUnavailable,
 }
 
@@ -68,6 +84,15 @@ where
             0
         },
     };
+    if let Err(interruption) = control.check() {
+        drop(snapshot);
+        return Ok(interrupted_outcome(
+            BackfillStats::default(),
+            false,
+            frontier,
+            interruption,
+        ));
+    }
     let requested = opts.limit_sessions.saturating_add(1);
     let mut rows = session_activity_page_after(
         &snapshot,
@@ -78,28 +103,52 @@ where
     .await
     .map_err(GitCorrelationError::Db)?;
     drop(snapshot);
+    if let Err(interruption) = control.check() {
+        return Ok(interrupted_outcome(
+            BackfillStats::default(),
+            false,
+            frontier,
+            interruption,
+        ));
+    }
     let has_more = bounded_page_has_more(rows.len(), opts.limit_sessions);
     rows.truncate(opts.limit_sessions);
-    let analytics_ts = std::collections::HashMap::new();
 
     let mut stats = BackfillStats::default();
     let mut committed = false;
     for row in &rows {
-        if control.cancellation.is_cancelled() {
-            return Ok(BoundedBackfillOutcome {
+        if let Err(interruption) = control.check() {
+            return Ok(interrupted_outcome(
                 stats,
                 committed,
                 frontier,
-                remaining_sessions: 1,
-                interruption: Some(BoundedBackfillInterruption::Cancelled),
-            });
+                interruption,
+            ));
         }
         stats.sessions_scanned = stats.sessions_scanned.saturating_add(1);
-        let git = match prepare_git_evidence(&row.session, opts, control).await {
-            Ok(PreparedGitEvidenceOutcome::Ready(git)) => Some(git),
-            Ok(PreparedGitEvidenceOutcome::Skip(reason)) => {
+        let candidate_frontier = GitHistoryIndexFrontier {
+            activity_timestamp: row.activity_timestamp,
+            source_rowid: row.source_rowid,
+        };
+        let mut frontier_pending = false;
+        match stream_git_evidence(
+            session_store,
+            &row.session,
+            candidate_frontier,
+            opts,
+            control,
+            &mut stats,
+            &mut committed,
+        )
+        .await
+        {
+            Ok(StreamGitEvidenceOutcome::Applied(Some(persisted))) => {
+                frontier = persisted;
+            }
+            Ok(StreamGitEvidenceOutcome::Applied(None)) => {}
+            Ok(StreamGitEvidenceOutcome::Skip(reason)) => {
                 stats.record_skip(reason);
-                None
+                frontier_pending = true;
             }
             Err(BoundedBackfillInterruption::SourceUnavailable) => {
                 stats.record_skip(BackfillSkipReason::GitError);
@@ -120,60 +169,37 @@ where
                     interruption: Some(interruption),
                 });
             }
-        };
-        if let Some(git) = git {
-            match super::backfill_one_session(
-                session_store,
-                &git,
-                opts,
-                &row.session,
-                &analytics_ts,
-                &mut stats,
-                &mut committed,
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(BackfillSkipReason::GitError) => {
-                    stats.record_skip(BackfillSkipReason::GitError);
-                    return Ok(BoundedBackfillOutcome {
-                        stats,
-                        committed,
-                        frontier,
-                        remaining_sessions: 1,
-                        interruption: Some(BoundedBackfillInterruption::SourceUnavailable),
-                    });
-                }
-                Err(reason) => stats.record_skip(reason),
-            }
         }
-        let candidate_frontier = GitHistoryIndexFrontier {
-            activity_timestamp: row.activity_timestamp,
-            source_rowid: row.source_rowid,
-        };
-        if !opts.dry_run {
-            let persisted = async {
-                let transaction = session_store.open_write_transaction().await?;
-                let persisted_frontier =
-                    super::advance_history_frontier(&transaction, candidate_frontier).await?;
-                GitCorrelationWriteTxn::commit(transaction).await?;
-                Ok::<_, GitCorrelationError>(persisted_frontier)
+        if frontier_pending && !opts.dry_run {
+            if let Err(interruption) = control.check() {
+                return Ok(interrupted_outcome(
+                    stats,
+                    committed,
+                    frontier,
+                    interruption,
+                ));
             }
-            .await;
-            frontier = match persisted {
+            frontier = match persist_frontier(session_store, candidate_frontier, control).await {
                 Ok(frontier) => frontier,
-                Err(_) => {
-                    return Ok(BoundedBackfillOutcome {
+                Err(interruption) => {
+                    return Ok(interrupted_outcome(
                         stats,
                         committed,
                         frontier,
-                        remaining_sessions: 1,
-                        interruption: Some(BoundedBackfillInterruption::SourceUnavailable),
-                    });
+                        interruption,
+                    ));
                 }
             };
             committed = true;
         }
+    }
+    if let Err(interruption) = control.check() {
+        return Ok(interrupted_outcome(
+            stats,
+            committed,
+            frontier,
+            interruption,
+        ));
     }
     Ok(BoundedBackfillOutcome {
         stats,
@@ -184,279 +210,359 @@ where
     })
 }
 
+fn interrupted_outcome(
+    stats: BackfillStats,
+    committed: bool,
+    frontier: GitHistoryIndexFrontier,
+    interruption: BoundedBackfillInterruption,
+) -> BoundedBackfillOutcome {
+    BoundedBackfillOutcome {
+        stats,
+        committed,
+        frontier,
+        remaining_sessions: 1,
+        interruption: Some(interruption),
+    }
+}
+
 const fn bounded_page_has_more(row_count: usize, page_size: usize) -> bool {
     row_count > page_size
 }
 
-enum PreparedGitEvidenceOutcome {
-    Ready(PreparedGitEvidence),
+enum StreamGitEvidenceOutcome {
+    Applied(Option<GitHistoryIndexFrontier>),
     Skip(BackfillSkipReason),
 }
 
-struct PreparedGitEvidence {
-    worktree: std::path::PathBuf,
-    reflog: String,
-    current_branch: Option<String>,
-    commit_logs: std::collections::HashMap<(String, i64), String>,
-}
-
-impl GitReflogSource for PreparedGitEvidence {
-    fn reflog(&self, worktree: &std::path::Path) -> Option<String> {
-        (worktree == self.worktree).then(|| self.reflog.clone())
-    }
-
-    fn current_branch(&self, worktree: &std::path::Path) -> Option<String> {
-        (worktree == self.worktree)
-            .then(|| self.current_branch.clone())
-            .flatten()
-    }
-
-    fn commit_log(&self, worktree: &std::path::Path, branch: &str, since: i64) -> Option<String> {
-        if worktree != self.worktree {
-            return None;
-        }
-        self.commit_logs.get(&(branch.to_owned(), since)).cloned()
-    }
-}
-
-async fn prepare_git_evidence(
+async fn stream_git_evidence<S: GitCorrelationSessionStore>(
+    session_store: &S,
     row: &SessionActivityRow,
+    candidate_frontier: GitHistoryIndexFrontier,
     opts: &BackfillOptions,
     control: &BoundedGitControl,
-) -> Result<PreparedGitEvidenceOutcome, BoundedBackfillInterruption> {
+    stats: &mut BackfillStats,
+    committed: &mut bool,
+) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
     let Some((mut window_start, window_end)) = row.window() else {
-        return Ok(PreparedGitEvidenceOutcome::Skip(
+        return Ok(StreamGitEvidenceOutcome::Skip(
             BackfillSkipReason::NoActivityWindow,
         ));
     };
     if window_end < opts.since {
-        return Ok(PreparedGitEvidenceOutcome::Skip(
+        return Ok(StreamGitEvidenceOutcome::Skip(
             BackfillSkipReason::NoActivityWindow,
         ));
     }
     window_start = window_start.max(opts.since);
     if window_start > window_end {
-        return Ok(PreparedGitEvidenceOutcome::Skip(
+        return Ok(StreamGitEvidenceOutcome::Skip(
             BackfillSkipReason::NoActivityWindow,
         ));
     }
     if row.project_path.trim().is_empty() {
-        return Ok(PreparedGitEvidenceOutcome::Skip(
+        return Ok(StreamGitEvidenceOutcome::Skip(
             BackfillSkipReason::NotAWorktree,
         ));
     }
-    let Some(worktree) = tracedecay_runtime_core::worktree::discover_git_worktree_root(
-        std::path::Path::new(row.project_path.trim()),
-    ) else {
+    control.check()?;
+    let project_path = std::path::PathBuf::from(row.project_path.trim());
+    let producer_control = control.clone();
+    let max_commits = opts.max_commits_per_repo;
+    let spool = tokio::task::spawn_blocking(move || {
+        native::produce(
+            &project_path,
+            window_start,
+            window_end,
+            max_commits,
+            &producer_control,
+        )
+    })
+    .await
+    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+    control.check()?;
+    let mut lines = std::io::BufReader::new(spool).lines();
+    let first = lines
+        .next()
+        .transpose()
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+    let PreparedGitEvent::Begin { worktree } =
+        serde_json::from_str(&first).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+    else {
         return Err(BoundedBackfillInterruption::SourceUnavailable);
     };
-    let reflog = bounded_git_paged_output(
-        &worktree,
-        &[
-            "reflog".to_owned(),
-            "show".to_owned(),
-            "--date=unix".to_owned(),
-            "HEAD".to_owned(),
-        ],
-        control,
-    )
-    .await?
-    .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
-    let current_branch = bounded_git_output(
-        &worktree,
-        &[
-            "rev-parse".to_owned(),
-            "--abbrev-ref".to_owned(),
-            "HEAD".to_owned(),
-        ],
-        control,
-    )
-    .await?
-    .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
-    let branch = current_branch.trim();
-    let current_branch = (!branch.is_empty() && branch != "HEAD").then(|| branch.to_owned());
-    let timeline = branch_timeline_from_reflog(&reflog);
-    let segments = window_branch_segments(
-        window_start,
-        window_end,
-        &timeline,
-        current_branch.as_deref(),
-    );
-    let mut commit_logs = std::collections::HashMap::new();
-    for segment in segments {
-        if control.cancellation.is_cancelled() {
-            return Err(BoundedBackfillInterruption::Cancelled);
-        }
-        let Some(branch) = segment.branch else {
-            continue;
-        };
-        let log = bounded_git_paged_output(
-            &worktree,
-            &[
-                "log".to_owned(),
-                branch.clone(),
-                "--pretty=%H %ct".to_owned(),
-                format!("--since={}", segment.start),
-            ],
-            control,
-        )
-        .await?
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
-        commit_logs.insert((branch, segment.start), log);
-    }
-    Ok(PreparedGitEvidenceOutcome::Ready(PreparedGitEvidence {
-        worktree,
-        reflog,
-        current_branch,
-        commit_logs,
-    }))
-}
-
-async fn bounded_git_paged_output(
-    worktree: &std::path::Path,
-    base_args: &[String],
-    control: &BoundedGitControl,
-) -> Result<Option<String>, BoundedBackfillInterruption> {
-    let mut output = String::new();
-    let mut skip = 0_usize;
-    loop {
-        let mut args = base_args.to_vec();
-        args.push(format!("-n{}", GIT_OUTPUT_PAGE_SIZE.saturating_add(1)));
-        args.push(format!("--skip={skip}"));
-        let Some(page) = bounded_git_output(worktree, &args, control).await? else {
-            return Ok(None);
-        };
-        if !append_git_output_page(&mut output, &page) {
-            return Ok(Some(output));
-        }
-        skip = skip.saturating_add(GIT_OUTPUT_PAGE_SIZE);
-    }
-}
-
-fn append_git_output_page(output: &mut String, page: &str) -> bool {
-    let mut lines = page.lines();
-    for line in lines.by_ref().take(GIT_OUTPUT_PAGE_SIZE) {
-        output.push_str(line);
-        output.push('\n');
-    }
-    lines.next().is_some()
-}
-
-async fn bounded_git_output(
-    worktree: &std::path::Path,
-    args: &[String],
-    control: &BoundedGitControl,
-) -> Result<Option<String>, BoundedBackfillInterruption> {
-    if control.cancellation.is_cancelled() {
-        return Err(BoundedBackfillInterruption::Cancelled);
-    }
-    let mut command = tokio::process::Command::new(tracedecay_runtime_core::git::git_program());
-    command
-        .args(args)
-        .current_dir(worktree)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    let child = match command.spawn() {
-        Ok(child) => child,
-        Err(_) => return Ok(None),
+    let worktree = normalize_worktree(&worktree.to_string_lossy());
+    control.check()?;
+    let transaction = if opts.dry_run {
+        None
+    } else {
+        let transaction = session_store
+            .open_write_transaction()
+            .await
+            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+        control.check()?;
+        Some(transaction)
     };
-    let output = child.wait_with_output();
-    tokio::pin!(output);
-    let deadline = tokio::time::Instant::now() + control.command_timeout;
-    loop {
-        tokio::select! {
-            result = &mut output => {
-                let output = match result {
-                    Ok(output) if output.status.success() => output,
-                    _ => return Ok(None),
-                };
-                return Ok(String::from_utf8(output.stdout).ok());
-            }
-            () = tokio::time::sleep(Duration::from_millis(10)) => {
-                if control.cancellation.is_cancelled() {
-                    return Err(BoundedBackfillInterruption::Cancelled);
+    let mut row_stats = BackfillStats::default();
+    for line in lines {
+        control.check()?;
+        let line = line.map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+        let event = serde_json::from_str(&line)
+            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+        apply_git_event(
+            event,
+            row,
+            opts,
+            control,
+            Some(&worktree),
+            transaction.as_ref(),
+            &mut row_stats,
+        )
+        .await?;
+    }
+    control.check()?;
+    let persisted_frontier = if let Some(transaction) = transaction {
+        control.check()?;
+        let persisted = super::advance_history_frontier(&transaction, candidate_frontier)
+            .await
+            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+        control.check()?;
+        GitCorrelationWriteTxn::commit(transaction)
+            .await
+            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+        *committed = true;
+        Some(persisted)
+    } else {
+        None
+    };
+    stats.spans_written = stats.spans_written.saturating_add(row_stats.spans_written);
+    stats.commits_attributed = stats
+        .commits_attributed
+        .saturating_add(row_stats.commits_attributed);
+    Ok(StreamGitEvidenceOutcome::Applied(persisted_frontier))
+}
+
+async fn apply_git_event<T: GitCorrelationWriteTxn>(
+    event: PreparedGitEvent,
+    row: &SessionActivityRow,
+    opts: &BackfillOptions,
+    control: &BoundedGitControl,
+    worktree: Option<&str>,
+    transaction: Option<&T>,
+    stats: &mut BackfillStats,
+) -> Result<(), BoundedBackfillInterruption> {
+    control.check()?;
+    match event {
+        PreparedGitEvent::Begin { .. } => {
+            return Err(BoundedBackfillInterruption::SourceUnavailable);
+        }
+        PreparedGitEvent::Segment { branch, start, end } => {
+            let worktree = worktree.ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+            for timestamp in [start, end] {
+                if !opts.dry_run {
+                    record_span_in_transaction(
+                        transaction.ok_or(BoundedBackfillInterruption::SourceUnavailable)?,
+                        branch.as_deref(),
+                        row,
+                        worktree,
+                        timestamp,
+                        opts.merge_gap_secs,
+                        control,
+                    )
+                    .await?;
                 }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(BoundedBackfillInterruption::CommandTimedOut);
+            }
+            stats.spans_written = stats.spans_written.saturating_add(1);
+        }
+        PreparedGitEvent::Commit {
+            branch,
+            sha,
+            committed_at,
+        } => {
+            let worktree = worktree.ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+            if opts.dry_run {
+                stats.commits_attributed = stats.commits_attributed.saturating_add(1);
+            } else {
+                if record_commit_in_transaction(
+                    transaction.ok_or(BoundedBackfillInterruption::SourceUnavailable)?,
+                    row,
+                    &branch,
+                    worktree,
+                    &sha,
+                    committed_at,
+                    control,
+                )
+                .await?
+                {
+                    stats.commits_attributed = stats.commits_attributed.saturating_add(1);
                 }
             }
         }
     }
+    control.check()
+}
+
+async fn record_span_in_transaction<T: GitCorrelationWriteTxn>(
+    transaction: &T,
+    branch: Option<&str>,
+    row: &SessionActivityRow,
+    worktree: &str,
+    timestamp: i64,
+    merge_gap_secs: i64,
+    control: &BoundedGitControl,
+) -> Result<(), BoundedBackfillInterruption> {
+    control.check()?;
+    super::record_span_observation_in_transaction(
+        transaction,
+        &SpanObservation {
+            provider: row.provider.clone(),
+            session_id: row.session_id.clone(),
+            thread_id: None,
+            branch: branch.map(str::to_owned),
+            worktree: worktree.to_owned(),
+            ts: timestamp,
+            source: SpanSource::Backfill,
+        },
+        merge_gap_secs,
+    )
+    .await
+    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    control.check()
+}
+
+async fn record_commit_in_transaction<T: GitCorrelationWriteTxn>(
+    transaction: &T,
+    row: &SessionActivityRow,
+    branch: &str,
+    worktree: &str,
+    sha: &str,
+    committed_at: i64,
+    control: &BoundedGitControl,
+) -> Result<bool, BoundedBackfillInterruption> {
+    control.check()?;
+    let inserted = super::upsert_commit_session(
+        transaction,
+        &CommitSessionRecord {
+            commit_sha: sha.to_owned(),
+            provider: row.provider.clone(),
+            session_id: row.session_id.clone(),
+            branch: Some(branch.to_owned()),
+            worktree: Some(worktree.to_owned()),
+            committed_at,
+            span_overlap_kind: SpanOverlapKind::WithinSpan,
+            span_id: None,
+            relation: CommitRelation::Observed,
+            evidence: CommitEvidence::ReflogOverlap,
+            confidence: 30,
+            evidence_message_id: None,
+        },
+    )
+    .await
+    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    control.check()?;
+    Ok(inserted)
+}
+
+async fn persist_frontier<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    candidate: GitHistoryIndexFrontier,
+    control: &BoundedGitControl,
+) -> Result<GitHistoryIndexFrontier, BoundedBackfillInterruption> {
+    control.check()?;
+    let transaction = session_store
+        .open_write_transaction()
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    control.check()?;
+    let persisted = super::advance_history_frontier(&transaction, candidate)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    control.check()?;
+    GitCorrelationWriteTxn::commit(transaction)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    Ok(persisted)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BackfillOptions, BoundedBackfillInterruption, BoundedGitControl, GIT_OUTPUT_PAGE_SIZE,
-        SessionActivityRow, append_git_output_page, bounded_page_has_more, prepare_git_evidence,
+        BackfillStats, BoundedBackfillInterruption, BoundedGitControl, GitHistoryIndexFrontier,
+        bounded_page_has_more, interrupted_outcome,
     };
 
     #[test]
-    fn full_git_output_page_reports_that_another_page_remains() {
-        let page = (0..=GIT_OUTPUT_PAGE_SIZE)
-            .map(|index| format!("line-{index}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut output = String::new();
+    fn cancellation_precedes_deadline() {
+        let cancellation = crate::observation::ObservationCancellation::default();
+        cancellation.cancel();
+        let control = BoundedGitControl::new(cancellation, std::time::Duration::ZERO);
 
-        assert!(append_git_output_page(&mut output, &page));
-        assert_eq!(output.lines().count(), GIT_OUTPUT_PAGE_SIZE);
-        assert!(!output.contains(&format!("line-{GIT_OUTPUT_PAGE_SIZE}\n")));
+        assert_eq!(
+            control.check().unwrap_err(),
+            BoundedBackfillInterruption::Cancelled
+        );
     }
 
     #[test]
-    fn paged_git_output_preserves_history_beyond_ten_thousand_rows() {
-        let mut output = String::new();
-        for page_index in 0..40 {
-            let page = (0..=GIT_OUTPUT_PAGE_SIZE)
-                .map(|line_index| {
-                    format!("line-{}", page_index * GIT_OUTPUT_PAGE_SIZE + line_index)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(append_git_output_page(&mut output, &page));
-        }
-        assert_eq!(output.lines().count(), 10_240);
+    fn one_absolute_deadline_expires_all_later_checks() {
+        let control = BoundedGitControl::new(
+            crate::observation::ObservationCancellation::default(),
+            std::time::Duration::ZERO,
+        );
 
-        let terminal_page = "line-10240\nline-10241";
-        assert!(!append_git_output_page(&mut output, terminal_page));
-        assert_eq!(output.lines().count(), 10_242);
-        assert!(output.ends_with("line-10241\n"));
+        assert_eq!(
+            control.check().unwrap_err(),
+            BoundedBackfillInterruption::CommandTimedOut
+        );
+        assert_eq!(
+            control.check().unwrap_err(),
+            BoundedBackfillInterruption::CommandTimedOut
+        );
+    }
+
+    #[test]
+    fn interrupted_evidence_keeps_the_completed_row_frontier() {
+        let frontier = GitHistoryIndexFrontier {
+            activity_timestamp: 100,
+            source_rowid: 7,
+        };
+
+        let outcome = interrupted_outcome(
+            BackfillStats::default(),
+            false,
+            frontier,
+            BoundedBackfillInterruption::CommandTimedOut,
+        );
+
+        assert_eq!(outcome.frontier, frontier);
+        assert_eq!(outcome.remaining_sessions, 1);
+    }
+
+    #[test]
+    fn history_limit_keeps_the_completed_row_frontier() {
+        let frontier = GitHistoryIndexFrontier {
+            activity_timestamp: 100,
+            source_rowid: 7,
+        };
+
+        let outcome = interrupted_outcome(
+            BackfillStats::default(),
+            false,
+            frontier,
+            BoundedBackfillInterruption::HistoryLimitReached,
+        );
+
+        assert_eq!(outcome.frontier, frontier);
+        assert_eq!(
+            outcome.interruption,
+            Some(BoundedBackfillInterruption::HistoryLimitReached)
+        );
+        assert_eq!(outcome.remaining_sessions, 1);
     }
 
     #[test]
     fn bounded_history_page_reports_unconsumed_session_suffix() {
         assert!(bounded_page_has_more(51, 50));
         assert!(!bounded_page_has_more(50, 50));
-    }
-
-    #[tokio::test]
-    async fn missing_worktree_is_retryable_and_does_not_become_a_skip() {
-        let missing = std::env::temp_dir().join(format!(
-            "tracedecay-missing-git-history-worktree-{}",
-            std::process::id()
-        ));
-        assert!(!missing.exists());
-        let row = SessionActivityRow {
-            provider: "codex".to_owned(),
-            session_id: "session.fixture".to_owned(),
-            project_path: missing.to_string_lossy().into_owned(),
-            started_at: Some(100),
-            ended_at: Some(200),
-            message_min_ts: None,
-            message_max_ts: None,
-        };
-        let control = BoundedGitControl::new(
-            crate::observation::ObservationCancellation::default(),
-            std::time::Duration::from_secs(1),
-        );
-
-        assert!(matches!(
-            prepare_git_evidence(&row, &BackfillOptions::default(), &control).await,
-            Err(BoundedBackfillInterruption::SourceUnavailable)
-        ));
     }
 }
