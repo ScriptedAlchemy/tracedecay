@@ -51,13 +51,15 @@ generic execution.
 
 ## PR14/PR17 implementation defaults
 
-- Use `petgraph` for task/workflow DAG traversal, topological order, and SCC
-  rejection; `tokio-util` for cancellation; Serde plus `schemars` and
-  `jsonschema` for immutable definition validation; rusqlite transactions for
-  atomic claims, effects, and publication; `process-wrap` for admitted
-  provider process-tree containment; and `d3-dag` for dashboard layout. These
-  replace bespoke graph algorithms, cancellation tokens, schema walkers,
-  transaction choreography, child-process cleanup, and DAG layout.
+- Persist and query task/workflow relationships through the canonical embedded
+  Grafeo authority in `tracedecay-graph-db`. Use small standard-library
+  collections only to validate one immutable definition before publication.
+  Use `tokio-util` for cancellation; Serde plus `schemars` and `jsonschema` for
+  immutable definition validation; rusqlite transactions for atomic claims,
+  effects, and publication; `process-wrap` for admitted provider process-tree
+  containment; and `d3-dag` for dashboard layout. These replace a second graph
+  model, cancellation tokens, schema walkers, transaction choreography,
+  child-process cleanup, and DAG layout.
 - Use existing Tokio timers and `DelayQueue` only for mechanical waiting.
   TraceDecay owns retry eligibility, attempt creation, caps, jitter, exact
   retry directives, cumulative deadline/budget, cancellation, attempt

@@ -17,6 +17,10 @@ import { describe, expect, it } from 'vitest';
 
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import {
+  DashboardEnvelopeV1Schema,
+  GraphNeighborsPayloadV1Schema,
+} from '../../contracts/generated.ts';
+import {
   DEFAULT_PARAMS,
   bloomStep,
   createSimulation,
@@ -30,7 +34,9 @@ import type { TraceModel } from './types.ts';
 const DT = 1 / 60;
 
 function neighbors(id: string): NeighborsPayload {
-  return resolveFixture(`/api/plugins/graph/node/${id}/neighbors`) as NeighborsPayload;
+  return DashboardEnvelopeV1Schema(GraphNeighborsPayloadV1Schema).parse(
+    resolveFixture(`/api/plugins/graph/node/${id}/neighbors`),
+  ).payload;
 }
 
 /** The field the drill-in actually draws for `sym-0`, hop 2, from fixtures. */

@@ -361,3 +361,19 @@ export const UNSCOPED_CACHE_KEY = 'unscoped';
 export function requestScopeKey(scope: DashboardScope, url: string): string {
   return unscopedRoute(url) ? UNSCOPED_CACHE_KEY : scopeKey(scope);
 }
+
+/**
+ * The canonical React Query key for a request made under a dashboard scope.
+ *
+ * A scope is part of a key only when the request carries that scope. Registry
+ * and chrome routes deliberately do not, so they retain one cache entry while
+ * a project is selected instead of becoming stale copies that no registry
+ * invalidation can enumerate.
+ */
+export function scopedQueryKey(
+  scope: DashboardScope,
+  key: readonly unknown[],
+  url: string,
+): readonly unknown[] {
+  return [...key, requestScopeKey(scope, url)];
+}

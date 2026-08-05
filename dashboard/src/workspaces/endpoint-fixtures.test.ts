@@ -4,10 +4,9 @@
  * Every `/api` route the 12 workspaces consume is served from
  * `stories/fixtures/data.ts` during the visual audit and MSW/DOM tests. This
  * suite asserts that each fixture payload parses against the exact zod schema
- * its consuming workspace validates it with — either a generated wire schema
- * from `contracts/generated.ts`, or (for the few routes Rust still answers with a
- * bare `Value`, whose pages read them through a module-local const) a faithful
- * mirror of that page's schema with a source citation. If a fixture drifts
+ * its consuming workspace validates it with — a generated wire schema from
+ * `contracts/generated.ts`, or a temporary faithful inner mirror while a
+ * hand-written backend schema awaits contract generation. If a fixture drifts
  * from a contract, this fails.
  *
  * A route read by two workspaces gets ONE test against ONE schema. It used to
@@ -39,7 +38,6 @@ import {
   GraphOverviewPayloadV1Schema,
   GraphSearchPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
-  LcmSessionPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   MemoryStatusPayloadV1Schema,
   ObservatoryReadModelV1Schema,
@@ -61,7 +59,7 @@ import {
 } from './agents/usage.ts';
 import { columnIndexFor, indexedMass } from './brain/field.ts';
 import { composeDeliveryField } from './delivery/field.ts';
-import { composeWeave, summarizeChain } from './loom/weave.ts';
+import { composeWeave } from './loom/weave.ts';
 import { composeTrustDistribution } from './knowledge/trust.ts';
 
 /** Parse a resolved fixture, surfacing zod issues on failure. */
@@ -105,8 +103,6 @@ const CapabilitiesSchema = z
       .object({
         memory: z.boolean(),
         lcm: z.boolean(),
-        lcm_gc: z.boolean(),
-        lcm_payload_health: z.boolean(),
         graph: z.boolean(),
         analytics: z.boolean(),
         code_diagnostics: z.boolean(),
@@ -145,18 +141,6 @@ const CapabilitiesSchema = z
     multi_root: MultiRootCapabilityV1Schema,
   })
   .strict();
-
-// SessionsPage.tsx: OverviewPayload. (LoomPage no longer reads this route —
-// `/api/plugins/hermes-lcm/overview` 500s on the real profile, so the weave
-// draws from `/api/plugins/savings/sessions` instead.)
-const OverviewPayload = z
-  .object({ latest_sessions: z.array(AnyObject).optional() })
-  .passthrough();
-
-// SessionsPage.tsx: TimelinePayload.
-const TimelinePayload = z
-  .object({ buckets: z.array(AnyObject).optional() })
-  .passthrough();
 
 // ExplorerPage.tsx: ListPayload.
 const ListPayload = z
@@ -290,7 +274,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   // apart without anything noticing. Both surfaces' density requirements now
   // sit on the one generated `ProjectsPayloadV1Schema`.
   it('GET /api/projects — brain + delivery registry (ProjectsPayloadV1Schema)', () => {
-    const data = parse(ProjectsPayloadV1Schema, '/api/projects');
+    const env = parse(DashboardEnvelopeV1Schema(ProjectsPayloadV1Schema), '/api/projects');
+    const data = env.payload;
     const tree = data.project_tree ?? [];
     expect(tree.length).toBeGreaterThanOrEqual(2);
 
@@ -324,7 +309,11 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/projects/{id} — scoped brain backbone (ProjectContextPayloadV1Schema)', () => {
-    const data = parse(ProjectContextPayloadV1Schema, '/api/projects/tracedecay');
+    const env = parse(
+      DashboardEnvelopeV1Schema(ProjectContextPayloadV1Schema),
+      '/api/projects/tracedecay',
+    );
+    const data = env.payload;
     expect(data.project?.project_id).toBe('tracedecay');
     const stores = data.stores ?? [];
     expect(stores.length).toBeGreaterThanOrEqual(1);
@@ -352,23 +341,32 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/plugins/graph/subgraph — scoped brain field (GraphSubgraphPayloadV1Schema)', () => {
-    const data = parse(
-      GraphSubgraphPayloadV1Schema,
+    const env = parse(
+      DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema),
       '/api/projects/tracedecay/plugins/graph/subgraph',
     );
+    const data = env.payload;
     expect((data.nodes ?? []).length).toBeGreaterThanOrEqual(20);
     expect((data.edges ?? []).length).toBeGreaterThanOrEqual(20);
   });
 
   it('GET /api/plugins/holographic/status — scoped brain (MemoryStatusPayloadV1Schema)', () => {
-    const data = parse(MemoryStatusPayloadV1Schema, '/api/plugins/holographic/status');
+    const env = parse(
+      DashboardEnvelopeV1Schema(MemoryStatusPayloadV1Schema),
+      '/api/plugins/holographic/status',
+    );
+    const data = env.payload;
     expect(data.exists).toBe(true);
     expect(data.memory?.fact_count).toBeGreaterThan(0);
     expect(data.memory?.entity_count).toBeGreaterThan(0);
   });
 
   it('GET /api/plugins/holographic/status — knowledge trust fallback (MemoryStatusPayloadV1Schema)', () => {
-    const data = parse(MemoryStatusPayloadV1Schema, '/api/plugins/holographic/status');
+    const env = parse(
+      DashboardEnvelopeV1Schema(MemoryStatusPayloadV1Schema),
+      '/api/plugins/holographic/status',
+    );
+    const data = env.payload;
     // These four bands are the ONLY trust distribution a real store serves
     // correctly, and KnowledgePage falls back to them when the overview's
     // ten-bucket histogram comes back all-zero (which it always does live).
@@ -382,13 +380,21 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/plugins/analytics/overview — scoped brain (AnalyticsOverviewPayloadV1Schema)', () => {
-    const data = parse(AnalyticsOverviewPayloadV1Schema, '/api/plugins/analytics/overview');
+    const env = parse(
+      DashboardEnvelopeV1Schema(AnalyticsOverviewPayloadV1Schema),
+      '/api/plugins/analytics/overview',
+    );
+    const data = env.payload;
     expect(data.usage?.event_count).toBeGreaterThan(0);
     expect((data.usage?.by_category ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
   it('GET /api/plugins/holographic/ — knowledge (MemoryOverviewPayloadV1Schema)', () => {
-    const data = parse(MemoryOverviewPayloadV1Schema, '/api/plugins/holographic/');
+    const env = parse(
+      DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
+      '/api/plugins/holographic/',
+    );
+    const data = env.payload;
     const facts = data.holographic.facts ?? [];
     expect(facts.length).toBeGreaterThanOrEqual(25);
     // Trust spread: facts land in more than one histogram bucket.
@@ -414,21 +420,25 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/plugins/holographic/ — explorer (MemoryListPayload)', () => {
-    const data = parse(MemoryListPayload, '/api/plugins/holographic/');
+    const env = parse(
+      DashboardEnvelopeV1Schema(MemoryListPayload),
+      '/api/plugins/holographic/',
+    );
+    const data = env.payload;
     expect((data.holographic?.facts ?? []).length).toBeGreaterThanOrEqual(25);
   });
 
-  it('GET /api/plugins/hermes-lcm/overview — sessions/loom (OverviewPayload)', () => {
-    const data = parse(OverviewPayload, '/api/plugins/hermes-lcm/overview');
-    const sessions = data.latest_sessions ?? [];
-    expect(sessions.length).toBeGreaterThanOrEqual(30);
-    const providers = new Set(sessions.map((s) => String(s['provider'])));
-    expect(providers.size).toBe(3);
-    for (const s of sessions) {
-      expect(typeof s['first_timestamp']).toBe('number');
-      expect(typeof s['last_timestamp']).toBe('number');
-      expect(typeof s['message_count']).toBe('number');
-      expect(Number(s['first_timestamp'])).toBeLessThan(Number(s['last_timestamp']));
+  it('GET LCM browse routes — temporal retrieval unavailable', () => {
+    for (const route of [
+      '/api/plugins/hermes-lcm/overview',
+      '/api/plugins/hermes-lcm/timeline',
+      '/api/plugins/hermes-lcm/search',
+      '/api/plugins/hermes-lcm/session/session-fixture',
+    ]) {
+      const env = parse(DashboardEnvelopeV1Schema(z.null()), route);
+      expect(env.domain_state).toBe('unknown');
+      expect(env.payload).toBeNull();
+      expect(env.coverage.omission_reasons).toEqual(['lcm_temporal_retrieval_not_mounted']);
     }
   });
 
@@ -472,36 +482,10 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(weave.extent).not.toBeNull();
   });
 
-  it('GET /api/plugins/hermes-lcm/session/{id} — loom chain (LcmSessionPayloadV1Schema)', () => {
-    const data = parse(
-      LcmSessionPayloadV1Schema,
-      '/api/plugins/hermes-lcm/session/035c8f3c-d4e6-4176-afea-6f52e770501e',
-    );
-    expect(data.exists).toBe(true);
-    const summary = summarizeChain(data.messages ?? [], data.counts, false);
-    expect(summary.steps.length).toBeGreaterThanOrEqual(20);
-    // Roles and tools both populate, so the composition and tool-histogram
-    // sections of the rail render rather than falling to their zero states.
-    expect(summary.roles.length).toBeGreaterThanOrEqual(2);
-    expect(summary.tools.length).toBeGreaterThanOrEqual(3);
-    // The daemon serves no per-message timestamp. The fixture must not invent
-    // one, or the audit never shoots the "ordinal order" caption that the real
-    // surface always shows.
-    expect(summary.timestamped).toBe(false);
-  });
-
-  it('GET /api/plugins/hermes-lcm/timeline — sessions (TimelinePayload)', () => {
-    const data = parse(TimelinePayload, '/api/plugins/hermes-lcm/timeline');
-    expect((data.buckets ?? []).length).toBe(46);
-  });
-
-  it('GET /api/plugins/hermes-lcm/search — explorer (ListPayload)', () => {
-    const data = parse(ListPayload, '/api/plugins/hermes-lcm/search', '?q=lynx');
-    expect((data.results ?? []).length).toBeGreaterThan(0);
-  });
 
   it('GET /api/plugins/graph/overview — code (GraphOverviewPayloadV1Schema)', () => {
-    const data = parse(GraphOverviewPayloadV1Schema, '/api/plugins/graph/overview');
+    const env = parse(DashboardEnvelopeV1Schema(GraphOverviewPayloadV1Schema), '/api/plugins/graph/overview');
+    const data = env.payload;
     const hubs = (data.top_connected ?? []) as Array<Record<string, unknown>>;
     // `graph_queries::top_connected_rows` is a `LIMIT 12` subquery selecting
     // exactly five columns, so the fixture must serve twelve rows and no more.
@@ -527,17 +511,28 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/plugins/graph/search — code (GraphSearchPayloadV1Schema)', () => {
-    const data = parse(GraphSearchPayloadV1Schema, '/api/plugins/graph/search', '?q=service');
+    const env = parse(
+      DashboardEnvelopeV1Schema(GraphSearchPayloadV1Schema),
+      '/api/plugins/graph/search',
+      '?q=service',
+    );
+    const data = env.payload;
     expect((data.results ?? []).length).toBeGreaterThanOrEqual(250);
   });
 
   it('GET /api/plugins/graph/search — explorer (ListPayload)', () => {
-    const data = parse(ListPayload, '/api/plugins/graph/search', '?q=service');
+    const env = parse(
+      DashboardEnvelopeV1Schema(GraphSearchPayloadV1Schema),
+      '/api/plugins/graph/search',
+      '?q=service',
+    );
+    const data = env.payload;
     expect((data.results ?? []).length).toBeGreaterThanOrEqual(250);
   });
 
   it('GET /api/plugins/graph/subgraph — code unseeded (GraphSubgraphPayloadV1Schema)', () => {
-    const data = parse(GraphSubgraphPayloadV1Schema, '/api/plugins/graph/subgraph');
+    const env = parse(DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema), '/api/plugins/graph/subgraph');
+    const data = env.payload;
     expect(data.seed_id).toBeNull();
     expect(data.mode).toBe('default');
     expect(data.nodes.length).toBeGreaterThanOrEqual(30);
@@ -545,7 +540,12 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/plugins/graph/subgraph?node_id= — code seeded (GraphSubgraphPayloadV1Schema)', () => {
-    const data = parse(GraphSubgraphPayloadV1Schema, '/api/plugins/graph/subgraph', '?node_id=sym-0');
+    const env = parse(
+      DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema),
+      '/api/plugins/graph/subgraph',
+      '?node_id=sym-0',
+    );
+    const data = env.payload;
     expect(data.seed_id).toBe('sym-0');
     expect(data.mode).toBe('seeded');
     expect(data.nodes.some((n) => n.id === 'sym-0')).toBe(true);
@@ -553,7 +553,11 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/plugins/savings/overview — costs (SavingsOverviewPayloadV1Schema)', () => {
-    const data = parse(SavingsOverviewPayloadV1Schema, '/api/plugins/savings/overview');
+    const env = parse(
+      DashboardEnvelopeV1Schema(SavingsOverviewPayloadV1Schema),
+      '/api/plugins/savings/overview',
+    );
+    const data = env.payload;
     expect(data.savings.available).toBe(true);
     expect(data.savings.ledger?.today.saved_tokens).toBeGreaterThan(0);
     expect(data.savings.ledger?.all_time.saved_tokens).toBeGreaterThan(0);
@@ -562,7 +566,11 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/plugins/analytics/usage — agents (AnalyticsUsageSummaryV1Schema)', () => {
-    const data = parse(AnalyticsUsageSummaryV1Schema, '/api/plugins/analytics/usage');
+    const env = parse(
+      DashboardEnvelopeV1Schema(AnalyticsUsageSummaryV1Schema),
+      '/api/plugins/analytics/usage',
+    );
+    const data = env.payload;
     expect(data.available).toBe(true);
     const rows = data.by_category ?? [];
     expect(rows.length).toBeGreaterThanOrEqual(3);
@@ -581,12 +589,20 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/plugins/analytics/hints — agents (HintsPayload)', () => {
-    const data = parse(HintsPayload, '/api/plugins/analytics/hints');
+    const env = parse(
+      DashboardEnvelopeV1Schema(HintsPayload),
+      '/api/plugins/analytics/hints',
+    );
+    const data = env.payload;
     expect(data.available).toBe(true);
   });
 
   it('GET /api/plugins/analytics/underused — agents (HintsPayload)', () => {
-    const data = parse(HintsPayload, '/api/plugins/analytics/underused');
+    const env = parse(
+      DashboardEnvelopeV1Schema(HintsPayload),
+      '/api/plugins/analytics/underused',
+    );
+    const data = env.payload;
     const families = (data.families ?? []) as unknown as FamilyRow[];
     expect(families.length).toBe(4);
     // One shot has to exercise the row vocabulary, so the fixture carries a
@@ -601,7 +617,11 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/plugins/analytics/diagnostics — agents (DiagnosticsPayload)', () => {
-    const data = parse(DiagnosticsPayload, '/api/plugins/analytics/diagnostics');
+    const env = parse(
+      DashboardEnvelopeV1Schema(DiagnosticsPayload),
+      '/api/plugins/analytics/diagnostics',
+    );
+    const data = env.payload;
     expect(data.available).toBe(true);
     const window = describeWindow(data.event_count, data.events_per_hour);
     expect(window.capped).toBe(true);

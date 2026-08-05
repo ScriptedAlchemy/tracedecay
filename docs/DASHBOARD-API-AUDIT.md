@@ -120,20 +120,19 @@ in several handlers and omitted from the table for brevity.
 | 7 | POST | `/api/plugins/holographic/curate/apply` | `curate_apply` | body `{ops:[{op:"delete"\|"merge", ...}]}` | `{results, counts:{deleted, merged, errors}}` | Generic ops endpoint. `delete`→`MemoryStore::remove_fact`; `merge`→`MemoryStore::merge_facts` (optional content rewrite + hard-delete losers). Per-op failures reported inline (HTTP 200). |
 | 10 | GET | `/api/plugins/holographic/oplog` | `oplog` | `limit`(50/300) | `{events, count, limit, error}` | `SELECT … FROM memory_oplog ORDER BY id DESC`. Parses `detail_json`. |
 
-### 3b. `lcm_api.rs` — `/api/plugins/hermes-lcm/*` (6 routes)
+### 3b. `lcm_api.rs` — `/api/plugins/hermes-lcm/*` (4 routes)
 
-Every payload reports `path`, `storage_scope`, `exists` additively (UIs
-feature-detect the active store). Handlers return `LcmResult` (`Result<(Status,
-Json), _>`); query errors propagate as HTTP 500 via `query_error`.
+The archived raw-store routes were removed. Until the canonical temporal
+retrieval and redaction-hydration authority mounts, every remaining route
+answers `DashboardEnvelopeV1<Option<T>>` with `domain_state: "unknown"`, a
+null payload, and the omission reason `lcm_temporal_retrieval_not_mounted`.
 
 | # | Method | Path | Handler | Params | Response | Notable SQL / behavior |
 |---|---|---|---|---|---|---|
-| 1 | GET | `/api/plugins/hermes-lcm/overview` | `overview` | `q`, `limit`(25/200) | `{…, overview:{messages_total, sessions_total, summary_nodes_total, …, role_counts, source_counts, depth_counts, compression}, latest_sessions, latest_summary_nodes, matches:{messages, summary_nodes}}` | ~12 count/aggregate queries; `ensure_valid_summary_metadata` gate. `q` adds LIKE matches. |
-| 2 | GET | `/api/plugins/hermes-lcm/search` | `search` | `q`, `limit`, `offset`, `role`, `source`, `session_id`, `since`, `until` | `{…, engine, engine_detail:{messages, summary_nodes}, total:{messages, summary_nodes}, filters, matches}` | **FTS-then-LIKE fallback** for both messages and summary nodes. Reports `engine:"fts"` only if *both* sections used FTS. |
-| 3 | GET | `/api/plugins/hermes-lcm/session/{session_id}` | `session` | path `session_id`, `limit`(200/1000), `offset`, `order`(asc\|desc) | `{…, counts, messages, summary_nodes, has_more, has_more_messages, has_more_summary_nodes}` | **404** if both message & summary-node counts are 0. Orders by `ordinal` (ingest order), timestamp as tiebreak. |
-| 4 | GET | `/api/plugins/hermes-lcm/node/{node_id}` | `node` | path `node_id` | `{node, sources:{type, ids, messages, nodes}}` | Lossless expand of a summary node; resolves `lcm_summary_sources` rows to raw messages or child nodes. **404** if missing. |
-| 5 | GET | `/api/plugins/hermes-lcm/timeline` | `timeline` | `bucket`(hour\|day), `session_id`, `limit`(400/2000) | `{buckets, node_buckets, undated:{count, token_estimate}}` | `strftime` buckets; NULL timestamps excluded from dated buckets and reported via `undated`. |
-| 6 | GET | `/api/plugins/hermes-lcm/compression` | `compression` | `by`(node\|session), `limit`(50/500) | `{overall:{source_token_count, token_count, ratio, node_count}, groups}` | Per-group `ratio` computed in Rust. |
+| 1 | GET | `/api/plugins/hermes-lcm/overview` | `overview` | `q`, `limit` | typed unavailable envelope | No raw-store browse path is mounted. |
+| 2 | GET | `/api/plugins/hermes-lcm/search` | `search` | `q`, filters, paging | typed unavailable envelope | No raw transcript search is mounted. |
+| 3 | GET | `/api/plugins/hermes-lcm/session/{session_id}` | `session` | path, paging, order | typed unavailable envelope | No raw transcript content is mounted. |
+| 4 | GET | `/api/plugins/hermes-lcm/timeline` | `timeline` | bucket, session, limit | typed unavailable envelope | No raw timeline aggregation is mounted. |
 
 ### 3c. `graph_api.rs` — `/api/plugins/graph/*` (6 routes)
 

@@ -27,7 +27,7 @@ use that hierarchy as acceptance authority:
 |---|---|---|
 | [`LCM-PAYLOAD-LIFECYCLE.md`](LCM-PAYLOAD-LIFECYCLE.md) | **contract (what/why)** | ownership model OM-1/2, lifecycle state machine, deletion contract D-1..D-4 + SD-1/2, grace GP-1..4, idempotency, missing/dangling/corrupted handling, security §13 |
 | [`LCM-PAYLOAD-GC.md`](LCM-PAYLOAD-GC.md) | **design (how)** | `delete_external_payload`, 4-phase reaper, schema-v5 marker store, config knobs, dry-run report, consolidated safety checklist |
-| [`LCM-PAYLOAD-VISIBILITY.md`](LCM-PAYLOAD-VISIBILITY.md) | **spec (what operators see)** | canonical `payload_health` data model, healthy/warning/error classifier, dashboard/doctor/MCP/CLI surfaces, dry-run gate |
+| Retired payload-visibility spec | retired | Dashboard payload-health, repair, and GC routes were removed; daemon-owned Doctor diagnostics remain the read authority. |
 | Historical GC test matrix | retired | Current coverage follows the V2 product plans and direct behavior; the archived named-case inventory is not an acceptance authority. |
 
 Plus the storage/deletion audit in Kanban `t_c2443a7f` (comment 34) which is the

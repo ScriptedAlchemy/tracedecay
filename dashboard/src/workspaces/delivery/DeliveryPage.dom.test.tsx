@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { DeliveryPage } from './DeliveryPage.tsx';
 
 /**
@@ -283,10 +284,14 @@ function renderDelivery(
   status = 200,
   overview: unknown = DELIVERY_OVERVIEW,
 ) {
+  const projectsBody =
+    status === 200 && body !== null && typeof body === 'object' && 'status' in body
+      ? fixtureEnvelope(body)
+      : body;
   vi.stubGlobal(
     'fetch',
     serve({
-      '/api/projects': { status, body },
+      '/api/projects': { status, body: projectsBody },
       '/api/delivery/overview': { status: 200, body: overview },
     }),
   );
@@ -448,7 +453,7 @@ describe('DeliveryPage', () => {
     renderDelivery({ error: 'boom' }, 500);
     await waitFor(() => {
       expect(
-        screen.getByText(/nothing is being invented in its place/),
+        screen.getByText(/shape this build does not understand/),
       ).toBeTruthy();
     });
   });

@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Waypoints } from 'lucide-react';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import type { DashboardEnvelopeV1 } from '../../contracts/generated.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
@@ -16,7 +17,6 @@ import {
 import { cn } from '../../ui/cn';
 import { formatCount } from '../../ui/format.ts';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
 import { MARK_PITCH_PX, PLOT_HEIGHT, WeaveCanvas } from './WeaveCanvas.tsx';
 import { ThreadChain } from './ThreadChain.tsx';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
@@ -63,7 +63,7 @@ export function LoomPage() {
         LoomTemporalPayloadV1Schema,
       ),
   });
-  const timeline = useLegacy(
+  const timeline = useEnvelope(
     ['loom', 'timeline'],
     '/api/plugins/hermes-lcm/timeline',
     LcmTimelinePayloadV1Schema,
@@ -71,8 +71,7 @@ export function LoomPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const busiestDay = useMemo(() => {
-    const buckets =
-      timeline.data?.outcome === 'ok' ? (timeline.data.data.buckets ?? []) : [];
+    const buckets = envelopePayload(timeline.data)?.buckets ?? [];
     return buckets.reduce<{ bucket: string; count: number } | null>(
       (max, bucket) => (max == null || bucket.count > max.count ? bucket : max),
       null,

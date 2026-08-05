@@ -70,40 +70,6 @@ const SUMMARY_ROW = {
   summary: 'Graph route investigation',
 };
 
-/** The read-context route returns whole `LcmMessageV1` / `LcmSummaryNodeV1`
- * rows, not the trimmed search hits above: the inspector reads a session's
- * actual content, so nothing is projected away. */
-const CONTEXT_MESSAGE_ROW = {
-  message_id: 'message-1',
-  session_id: 'session-1',
-  role: 'assistant',
-  content: 'Using graph search',
-  ordinal: 0,
-  timestamp: 1_784_000_000,
-  tool_name: null,
-  token_estimate: 30,
-  pinned: 0,
-  source: 'cursor',
-  storage_kind: 'message',
-  store_id: 1,
-  summary_node_ids: [],
-  metadata_json: null,
-};
-
-const CONTEXT_SUMMARY_ROW = {
-  node_id: 'summary-1',
-  session_id: 'session-1',
-  summary: 'Graph route investigation',
-  category: 'investigation',
-  source_type: 'message',
-  depth: 0,
-  token_count: 30,
-  source_token_count: 90,
-  created_at: 1_784_000_100,
-  latest_at: 1_784_000_100,
-  expand_hint: 'lcm_expand --node summary-1',
-};
-
 const FACT_ROW = {
   fact_id: 11,
   content: 'Graph search is bounded',
@@ -211,49 +177,35 @@ function plannerEnvelope(
   };
 }
 
+function temporalRetrievalUnavailableEnvelope() {
+  return {
+    ...plannerEnvelope(),
+    coverage: {
+      completeness: 'unknown',
+      eligible: null,
+      examined: null,
+      matched: null,
+      excluded: null,
+      omitted: null,
+      unknown: null,
+      denominator: null,
+      unit: 'records',
+      omission_reasons: ['lcm_temporal_retrieval_not_mounted'],
+    },
+    freshness: { state: 'unknown', observed_at_micros: null, watermark: null },
+    domain_state: 'unknown',
+    payload: null,
+  };
+}
+
 const SEARCH_ROUTES = {
   '/api/explorer/sessions/session-1/size': {
     status: 200,
-    body: {
-      ...plannerEnvelope(),
-      domain_state: 'ready',
-      payload: {
-        session_id: 'session-1',
-        storage_scope: 'profile_sharded',
-        counts: {
-          message_count: 4,
-          summary_node_count: 1,
-          token_estimate_total: 120,
-          summary_token_count: 30,
-          source_token_count: 90,
-        },
-      },
-    },
+    body: temporalRetrievalUnavailableEnvelope(),
   },
   '/api/explorer/sessions/session-1/read-context': {
     status: 200,
-    body: {
-      ...plannerEnvelope(),
-      payload: {
-        session_id: 'session-1',
-        storage_scope: 'profile_sharded',
-        limit: 25,
-        offset: 0,
-        order: 'asc',
-        counts: {
-          message_count: 4,
-          summary_node_count: 1,
-          token_estimate_total: 120,
-          summary_token_count: 30,
-          source_token_count: 90,
-        },
-        messages: [CONTEXT_MESSAGE_ROW],
-        summary_nodes: [CONTEXT_SUMMARY_ROW],
-        has_more: true,
-        has_more_messages: true,
-        has_more_summary_nodes: false,
-      },
-    },
+    body: temporalRetrievalUnavailableEnvelope(),
   },
   '/api/explorer/queries': {
     status: 200,
@@ -905,7 +857,7 @@ describe('ExplorerPage', () => {
     expect(screen.queryByText(/genuinely absent from/)).toBeNull();
   });
 
-  it('binds LCM session size and read context into the session inspector', async () => {
+  it('reports unavailable temporal retrieval in the session inspector', async () => {
     renderExplorer(SEARCH_ROUTES);
     const user = userEvent.setup();
     await user.type(screen.getByRole('searchbox'), 'graph');
@@ -913,23 +865,9 @@ describe('ExplorerPage', () => {
     await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
 
     expect(await screen.findByText('Session context')).toBeTruthy();
-    // `120` also appears in the raw read-context payload table further down, so
-    // `getAllByText('120').length > 0` passed whether or not the token estimate
-    // row rendered at all, and passed if that row showed one of the other
-    // counts from the same payload. Each figure is pinned to the term it is
-    // labelled with instead, so a transposed or unread count fails here.
-    const counts = within(
-      screen.getByText('Raw token estimate').closest('dl') as HTMLElement,
-    );
-    const valueFor = (term: string): string | null =>
-      counts.getByText(term).nextElementSibling?.textContent ?? null;
-    expect(valueFor('Messages')).toBe('4');
-    expect(valueFor('Summary nodes')).toBe('1');
-    expect(valueFor('Raw token estimate')).toBe('120');
-    expect(
-      screen.getByText(/Loaded 1 raw messages and 1 summary nodes in asc order; more rows remain/),
-    ).toBeTruthy();
-    expect(screen.getByText('Session read context returned by the daemon')).toBeTruthy();
+    expect(await screen.findByText(/lcm_temporal_retrieval_not_mounted/)).toBeTruthy();
+    expect(screen.queryByText('Raw token estimate')).toBeNull();
+    expect(screen.queryByText('Session read context returned by the daemon')).toBeNull();
   });
 
   it('shows the exact payload fields behind an inspected row', async () => {

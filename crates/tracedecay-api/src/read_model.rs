@@ -441,6 +441,34 @@ impl<T> DashboardEnvelopeV1<T> {
         )
     }
 
+    /// A mounted read whose source failed. The reason is carried as coverage
+    /// evidence and coverage/freshness remain unknown; callers must not replace
+    /// the unavailable payload with an empty success.
+    #[must_use]
+    pub fn error(scope: DashboardScopeV1, payload: T, reason: impl Into<String>) -> Self {
+        let mut coverage = DashboardCoverageV1::unknown();
+        coverage.omission_reasons.push(reason.into());
+        Self::new(
+            scope,
+            DashboardDomainStateV1::Error,
+            coverage,
+            DashboardFreshnessV1::unknown(),
+            payload,
+        )
+    }
+
+    /// A successful observation that is behind its source watermark.
+    #[must_use]
+    pub fn stale(scope: DashboardScopeV1, coverage: DashboardCoverageV1, payload: T) -> Self {
+        Self::new(
+            scope,
+            DashboardDomainStateV1::Stale,
+            coverage,
+            DashboardFreshnessV1::stale_now(),
+            payload,
+        )
+    }
+
     /// A partial observation with a known eligible population.
     #[must_use]
     pub fn partial(
@@ -472,6 +500,20 @@ impl<T> DashboardEnvelopeV1<T> {
             payload,
         );
         envelope.authorization = DashboardAuthorizationV1::Denied;
+        envelope
+    }
+
+    /// A caller for whom no valid identity was admitted.
+    #[must_use]
+    pub fn unauthorized(scope: DashboardScopeV1, payload: T) -> Self {
+        let mut envelope = Self::new(
+            scope,
+            DashboardDomainStateV1::Unauthorized,
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1::unknown(),
+            payload,
+        );
+        envelope.authorization = DashboardAuthorizationV1::Unauthorized;
         envelope
     }
 
@@ -597,6 +639,46 @@ mod tests {
         assert_eq!(denied.domain_state, DashboardDomainStateV1::Denied);
         assert_eq!(denied.authorization, DashboardAuthorizationV1::Denied);
         assert!(!denied.coverage.is_complete());
+    }
+
+    #[test]
+    fn unavailable_error_keeps_the_reason_and_carries_no_fabricated_payload() {
+        let envelope =
+            DashboardEnvelopeV1::<Option<u64>>::error(scope(), None, "graph_projection_failed");
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Error);
+        assert_eq!(
+            envelope.coverage.omission_reasons,
+            ["graph_projection_failed"]
+        );
+        assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Unknown);
+        assert_eq!(envelope.payload, None);
+    }
+
+    #[test]
+    fn stale_read_is_never_reported_as_ready_or_fresh() {
+        let envelope = DashboardEnvelopeV1::stale(
+            scope(),
+            DashboardCoverageV1::complete(3, "records"),
+            Some(7_u64),
+        );
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Stale);
+        assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Stale);
+        assert_eq!(envelope.payload, Some(7));
+    }
+
+    #[test]
+    fn unauthorized_read_is_distinct_from_a_known_denial() {
+        let envelope = DashboardEnvelopeV1::<Option<u64>>::unauthorized(scope(), None);
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unauthorized);
+        assert_eq!(
+            envelope.authorization,
+            DashboardAuthorizationV1::Unauthorized
+        );
+        assert!(!envelope.coverage.is_complete());
+        assert_eq!(envelope.payload, None);
     }
 
     #[test]

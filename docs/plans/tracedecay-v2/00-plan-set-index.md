@@ -1,17 +1,15 @@
 # TraceDecay V2 roadmap
 
-Status: active product rewrite. PR8 is complete. PR9/PR10 retrieval delivery
-and PR12/PR13 production integration are active. PR14 has a substantial
-implemented and focused-suite-verified checkpoint, but acceptance remains
-blocked on the open Plan 11 journeys and on stable PR12/PR13 product contracts,
-direct tests, and normal CI. The repository is not green.
+Status: active product rewrite. Temporal capture is complete. Retrieval,
+production integration, dashboard journeys, stable product contracts, direct
+tests, and normal CI remain active delivery work. The repository is not green.
 
 This file is the sole authority for V2 precedence, rejected mechanisms,
 delivery order, and acceptance. Numbered plans own semantic product behavior,
 failure semantics, fresh-store cutover, and direct acceptance; they are not independent
-queues and do not require one crate-first pull request per document. `NEXT.md`
-tracks current outcomes and blockers only. `GAP-LEDGER-PR8-PR14.md` and
-`pr9/00-contract-spine.md` are historical records, not parallel authorities.
+queues and do not require one delivery branch per document. `NEXT.md` tracks
+current outcomes and blockers only. Historical gap ledgers and contract-spine
+artifacts are records, not parallel authorities.
 
 The `TraceDecay V2` roadmap name is independent of contract/schema versioning.
 Only an actually independently released public wire/API protocol may retain an
@@ -20,11 +18,11 @@ cutover: the exact final schema/shape is the only accepted TraceDecay database,
 store, spool, file, or projection. Any other persisted shape returns typed
 `ResetRequired` and requires explicit reset or recreation. There is no storage
 compatibility reader, migration, backfill, dual write, or census path, even for
-data written by an older installed binary. PR sequence, branch history, tests,
+data written by an older installed binary. Delivery sequence, branch history, tests,
 historical plans, and a `V1` suffix alone do not establish a public release.
 
-Core Work and the minimal Plan 24/32 runtime ship in PR14; PR17 retains
-residual advanced workflow capability.
+Core Work and the complete callable Plan 24/32 runtime ship as one product;
+advanced workflow behavior is not deferred to a later delivery stage.
 Dashboard acceptance is desktop-first, not desktop-only: desktop visual
 baselines lead review while responsive, zoom, keyboard, forced-colors, and
 accessibility function remain mandatory.
@@ -34,7 +32,7 @@ accessibility function remain mandatory.
 TraceDecay V2 converges capture, sessions, memory, code intelligence, search,
 policy, automation, tools, APIs, integrations, observability, and the dashboard
 into one local-first Brain. Before remote delivery, one local daemon is the
-physical database authority; PR16 generalizes this to exactly one fenced daemon
+physical database authority; remote delivery generalizes this to exactly one fenced daemon
 authority per mutable shard. Clients, hooks, MCP servers, dashboard handlers,
 workers, and remote nodes use typed daemon/application operations; none opens a
 fallback writable database.
@@ -229,24 +227,18 @@ records the rejected mechanism, the reason, and the retained replacement:
    authority. Actual remote/network boundaries still authenticate, native Git
    signing policy remains native Git's concern, and content digests may detect
    corruption without becoming signatures or attestations.
-5. **The PR14/PR17 Work allocation is plan authority, not a user rejection.**
-   The user did not enumerate the twelve PR14 workspaces and asked "ahat about
-   kanban/task graph etc" on 2026-07-25 without a recorded answer accepting
-   deferral. The written plan currently assigns Brain, Explorer, Loom, Sessions,
-   Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, and
-   Settings to PR14, while Plan 24 owns the persistent task/work graph and PR17
-   adds Work. That allocation remains binding plan authority pending the open
-   scheduling decision recorded in Plans 11/11c; it must never be attributed to
-   the user. An independent or session-derived Kanban authority remains
-   architecturally rejected regardless of delivery timing.
+5. **Work is part of the flagship product.** Brain, Explorer, Loom, Sessions,
+   Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, Settings,
+   and Work ship as one coherent dashboard. Plan 24 owns the persistent
+   task/work graph and Plan 32 owns its runtime. An independent or
+   session-derived Kanban authority remains architecturally rejected.
 6. **The Cargo shim and `cargo-slot` are rejected.** The earlier local build
    shim was removed by explicit direction and is not product, contributor, CI,
    or release architecture. Stock Cargo behavior and portable repository
    configuration supersede it.
-7. **Six separate GitHub pull requests for PR8–PR13 are superseded.** Draft PR
-   #421 is the consolidated delivery vehicle. PR8–PR13 names remain useful
-   product-slice and ownership labels, but they are not instructions to split
-   the work back into six branches or pull requests.
+7. **Delivery choreography is not product authority.** Capability plans,
+   production callers, direct behavior, and ordinary CI define completion;
+   branch, worktree, or pull-request layouts do not.
 8. **Synthetic or lookalike provider/observation fixtures are rejected as
    acceptance evidence.** Invented protocol fields can agree with invented
    adapters while proving no provider behavior. Only checked-in real native
@@ -405,20 +397,20 @@ delivery phases:
   cancellation, artifacts, and runtime receipts; and Plan 36 alone owns native
   Git preflight/apply/receipt mechanics.
 
-## Authoritative PR sequence through PR12
+## Authoritative capability sequence
 
-| PR | Product delivery |
+| Capability | Product delivery |
 |---|---|
-| PR5 (complete) | Sanitized observation vertical: one real provider from parse through sanitizer, daemon-owned persistence, replay, and restart. |
-| PR6 (complete) | Provider coverage and event normalization: remaining hosts/sources, daemon host-admission spool for non-replayable events, identities, dedupe, partial input, backpressure, and canonical event relations. |
-| PR7 (complete) | Memory, facts, and provenance: project/profile ownership, evidence, corrections, trust, curation, migration, deletion lineage, and generation-bound repository provenance anchors. |
-| PR8 (complete) | Session/LCM temporal retrieval: occurrences, copies, summaries, supersession, current/as-of/evolution retrieval, stable context assembly, and explicit daemon-owned refresh. |
-| PR9 (delivery active) | Code intelligence and lexical retrieval: deterministic extraction with typed edge authority and coverage, exact occurrence identity plus evidenced/abstaining lineage, generation-bound managed diagnostics/tests, a non-demotable exact/phrase/BM25 tier, typed quantifier inputs, V1 parity, and typed read-only Git status/diff/history/blame/hunk intelligence enriched by graph impact. Worktree-aware incremental indexing reuses content-addressed parse/chunk artifacts while retaining exact worktree and generation identity. |
-| PR10 (delivery active) | Native semantic retrieval and ranking: local FastEmbed artifacts, immutable vector generations, exact flat-vector baseline/oracle, measured hybrid/reranking candidates, calibrated abstention, redundancy augmentation, and byte-stable lexical fallback. Semantic projection is asynchronous and batches only changed eligible chunks; ordinary search never waits for it. ANN, late interaction, and quantization remain optional measured candidates. |
-| PR11 (integration active) | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, analyzer policy/settings, one runtime configuration authority, daemon-serialized `stage_hunks`/`unstage_hunks`/`commit_index` transactions with `HunkRef` compare-and-swap and receipts, and the typed branch-aware feedback-cycle request/result and orchestration ([Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)) — first pillar of the PR11–PR13 read-only/advisory milestone (post-edit diagnostics and impact). |
-| PR12 (integration active) | CLI, MCP, HTTP API, LSP gateway, and output convergence: one revisioned schema authority, dispatcher, binding taxonomy, semantic problem model, capability intersection, and executable lifecycle/stream/cancellation contract; stable errors/cursors, compact Markdown, canonical JSON, managed diagnostics, semantic surface parity, shared Git preview/apply bindings, callable canonical feedback diagnostics/impact reads with HTTP parity, and [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s PR12 slice — [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)'s standard projections plus a negotiated, versioned TraceDecay LSP context extension for diagnostics, impact, affected tests, and test results, and the explicit diagnostics-call trigger/surface bound once through [Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) — completing the post-edit diagnostics-and-impact pillar for LSP/MCP/CLI/HTTP surfaces. Dashboard binding starts in PR14. |
+| Sanitized capture (complete) | One real provider from parse through sanitizer, daemon-owned persistence, replay, and restart. |
+| Provider capture (complete) | Supported hosts/sources, daemon host-admission for non-replayable events, identities, dedupe, partial input, backpressure, and canonical event relations. |
+| Project memory and facts (active) | Project/profile ownership, evidence, corrections, trust, curation, deletion lineage, and generation-bound repository provenance anchors. |
+| Session and LCM retrieval (active) | Occurrences, copies, authentic summaries, supersession, current/as-of/evolution retrieval, stable context assembly, and daemon-owned refresh. |
+| Code intelligence and lexical retrieval (active) | Deterministic extraction with typed edge authority and coverage, exact occurrence identity plus evidenced/abstaining lineage, generation-bound managed diagnostics/tests, a non-demotable exact/phrase/BM25 tier, typed quantifier inputs, legacy-behavior parity, and typed read-only Git status/diff/history/blame/hunk intelligence enriched by graph impact. Worktree-aware incremental indexing reuses content-addressed parse/chunk artifacts while retaining exact worktree and generation identity. |
+| Native semantic retrieval and ranking (active) | Local FastEmbed artifacts, immutable vector generations, exact flat-vector baseline/oracle, measured hybrid/reranking candidates, calibrated abstention, redundancy augmentation, and byte-stable lexical fallback. Semantic projection is asynchronous and batches only changed eligible chunks; ordinary search never waits for it. ANN, late interaction, and quantization remain optional measured candidates. |
+| Policy, application, catalog, and configuration (active) | Typed use cases, grants, routing, replay, operations, capabilities, analyzer policy/settings, one runtime configuration authority, daemon-serialized Git index transactions with compare-and-swap and receipts, and typed branch-aware feedback-cycle orchestration. |
+| CLI, MCP, HTTP, LSP, and SDK delivery (active) | One revisioned schema authority, dispatcher, binding taxonomy, semantic problem model, capability intersection, executable lifecycle/stream/cancellation contract, stable errors/cursors, canonical output, managed diagnostics, semantic parity, Git preview/apply bindings, and negotiated context and handoff operations. |
 
-PR9 and later code consumers share one incremental-indexing rule: host
+All code consumers share one incremental-indexing rule: host
 after-file-edit hooks are the primary change hint (with an off-by-default
 opt-in filesystem watcher as a non-agent-driven fallback) and only wake bounded
 work; native `gix` status/index/tree reconciliation, driven lazily by a
@@ -431,7 +423,7 @@ dependency closures reach lexical or FastEmbed projection. Partial generations
 never publish, and exact/lexical/graph search remains available while semantic
 projection is indexing.
 
-## PR13 — feedback in every supported host
+## Feedback in every supported host
 
 **User outcome.** After an edit or stop event, a user receives TraceDecay
 diagnostics and impact plus read-only CI failure localization, GitHub review
@@ -447,7 +439,7 @@ Cursor desktop native diagnostics without duplicate analyzers, OpenCode's
 custom LSP configuration without starting a second analyzer for the same
 language, or the supported hook/MCP/CLI capability path for Cursor cloud,
 Codex, Hermes, Kiro, Kimi Code, OpenCode, Cline-family, and other admitted
-hosts. PR13 adds producer contributions to the PR12 feedback readers without
+hosts. Producers contribute to the canonical feedback readers without
 changing their transport.
 
 **Implementation and deletion.**
@@ -462,7 +454,7 @@ changing their transport.
 - Remove provider-local feedback logic and duplicate diagnostic/suggestion
   routes once each host delegates to the production cycle.
 
-**Library-first implementation defaults.** Keep the shipped PR12 LSP gateway
+**Library-first implementation defaults.** Keep the shipped LSP gateway
 and protocol structs; add no otherwise-unused `lsp-types` dependency.
 `async-lsp` remains a later candidate only if a measured conversion deletes
 gateway code and leaves one `lsp-types` version. GitHub/CI acquisition uses
@@ -496,10 +488,10 @@ Code and OpenCode; prove competing-extension, interrupted-lifecycle,
 host-by-host rollback, and the direct feedback rollback switch. Normal
 Linux/macOS/Windows CI covers supported-host default-feature compatibility.
 
-**Not in this PR.** Dashboard investigation belongs to PR14; multi-root scope to
-PR15; remote delivery to PR16; workflow composition to PR17.
+Dashboard investigation, multi-root scope, remote delivery, and workflow
+composition are required dependent capabilities described below.
 
-## PR14 — an operable flagship product
+## An operable flagship product
 
 **User outcome.** From one dashboard, a user can inspect the Brain, move from a
 finding to exact evidence, understand Doctor status, change supported settings,
@@ -514,12 +506,12 @@ authorized configuration or remediation commands back through the daemon.
 
 - Ship exactly the original twelve dashboard workspaces — Brain, Explorer,
   Loom, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory,
-  Costs, and Settings — plus Work as the thirteenth PR14 workspace, with
+  Costs, and Settings — plus Work as the thirteenth workspace, with
   renderer-neutral semantics, a permissive default
   renderer, keyboard/accessibility parity, typed SLOs, and denominator-safe
   measurements with provenance, coverage, cohort, temporal delta, uncertainty,
-  and calibration validity. Work renders the PR14 core Plan 24 graph and
-  minimal Plan 32 runtime; advanced workflow capability remains PR17.
+  and calibration validity. Work renders the canonical Plan 24 graph and the
+  complete callable Plan 32 runtime.
 - Plan 09 remains the sole Doctor use-case implementation/composition
   authority, Plan 14 its historical regression/behavior contract, and Plan 26
   the measurement authority; the Plan 11 UI renders supplied results and never
@@ -568,19 +560,18 @@ usability study. The Plan 11 performance and payload budgets and the
 sustained-update rates were withdrawn by owner decision 2026-07-31; Plan 11
 records the withdrawal.
 
-**Direct acceptance.** Starting from a real PR13 finding, navigate to retained
+**Direct acceptance.** Starting from a real host feedback finding, navigate to retained
 evidence, diagnose an injected operational fault, apply an authorized
 remediation or setting change, observe the resulting state, and verify
 accessibility, cancellation, restart, denied-action, partial-data, and
 unavailable-provider behavior. Run those direct tests and normal repository CI;
 do not create a separate dashboard/Doctor acceptance gate.
 
-**Not in this PR.** Multi-root operation belongs to PR15. Workflow definition
-lifecycle, advanced placement, fan-out/synthesis/recovery, expertise and
-calibration, automation execution controls, and host/LSP task handoff belong
-to PR17.
+Multi-root operation, workflow definition lifecycle, placement,
+fan-out/synthesis/recovery, calibration, automation execution controls, and
+host/LSP task handoff are required dependent capabilities described below.
 
-## PR15 — authorized multi-root local work
+## Authorized multi-root local work
 
 **User outcome.** A user can query, inspect diagnostics, and act across an
 authorized set of repositories and worktrees without losing scope, evidence,
@@ -608,13 +599,14 @@ preflight/preview/apply/receipt through the same authorized scope.
 
 **Library-first implementation defaults.** Retain existing `gix`, `notify`,
 and Tokio for Git object/ref intelligence, filesystem observation, and bounded
-async work; use `petgraph` only for branch-stack DAG/SCC mechanics. This
-replaces new Git parsers, watcher loops, async coordination, and bespoke
-topological/SCC code while retaining TraceDecay's stable identities, frozen
-scope, exact native snapshots, preflight/apply separation, compare-and-swap,
-journaling, and receipts. If `gix` or the fixed native plumbing cannot prove a
-state, keep it read-only or block apply; do not add `git2`, and do not let
-`petgraph` become Git or authorization authority.
+async work. Persist and query branch-stack relationships through the canonical
+embedded Grafeo authority in `tracedecay-graph-db`; use small standard-library
+collections only to validate one bounded admitted snapshot. This replaces new
+Git parsers, watcher loops, async coordination, and a second graph model while
+retaining TraceDecay's stable identities, frozen scope, exact native snapshots,
+preflight/apply separation, compare-and-swap, journaling, and receipts. If
+`gix` or the fixed native plumbing cannot prove a state, keep it read-only or
+block apply; do not add `git2` or another graph authority.
 
 **Direct acceptance.** Query and diagnose across multiple authorized roots,
 resume against frozen state, follow evidence to its owning root, reject scope
@@ -623,10 +615,10 @@ Verify unauthorized roots, conflicts, partial shards, unavailable private
 preview, restart, and receipt recovery through direct multi-root and Git-safety
 tests plus normal repository CI, without a separate acceptance gate.
 
-**Not in this PR.** Remote authority belongs to PR16; task execution topology
-belongs to PR17.
+Remote authority and task execution topology are required dependent
+capabilities described below.
 
-## PR16 — a remote shared Brain
+## A remote shared Brain
 
 **User outcome.** Enrolled machines can capture while offline, reconnect and
 sync, query shared state, back up and restore it, and fail over without creating
@@ -671,12 +663,12 @@ partition/restart recovery, revoked enrollment, authenticated manifests,
 deletion replay, and unavailable authority through direct remote durability
 journeys and normal repository checks.
 
-**Not in this PR.** Multi-primary mutation and automatic conflict convergence
-are not product paths. Executable work orchestration belongs to PR17.
+Multi-primary mutation and automatic conflict convergence are not product
+paths. Executable work orchestration is a required dependent capability.
 
-## PR17 — residual advanced workflows
+## Complete workflow execution
 
-**User outcome.** Building on PR14's canonical work graph, core projections,
+**User outcome.** Building on the canonical work graph, core projections,
 and minimal real provider runtime, a user can define and activate advanced
 workflows, execute bounded fan-out/review/synthesis/recovery, inspect advanced
 placement and calibration, control execution from Automations, and hand tasks
@@ -711,7 +703,7 @@ retry, review, outcome, and calibration, and returns a non-auto-applied replan.
 - Claude-designated work uses native Claude Code CLI, never Hermes Anthropic.
   Codex app-server is preferred; an explicit policy/configuration-bounded Codex
   CLI fallback is reported rather than hidden.
-- Workflow steps may consume PR13–PR16 advisory and Git operations, but do not
+- Workflow steps may consume canonical advisory, remote, and Git operations, but do not
   reacquire first availability, native Git authority, or GitHub review-content
   writes. Runtime effect/audit receipts orchestrate admitted Git effects without
   replacing Plan 36 preflight/apply/receipt semantics.
@@ -720,13 +712,15 @@ retry, review, outcome, and calibration, and returns a non-auto-applied replan.
   task-specific databases/projector runtimes, board query DSLs, and universal
   query ASTs.
 
-**Library-first implementation defaults.** Use `petgraph` for task/workflow
-DAG and SCC mechanics, `tokio-util` for cancellation, existing Tokio timers
-and `DelayQueue` only for mechanical waiting, Serde plus
+**Library-first implementation defaults.** Persist and query task/workflow DAGs
+through the canonical embedded Grafeo authority in `tracedecay-graph-db`; use
+small standard-library collections only to validate one immutable definition.
+Use `tokio-util` for cancellation, existing Tokio timers and `DelayQueue` only
+for mechanical waiting, Serde plus
 `schemars`/`jsonschema` for definition validation, rusqlite transactions for
 atomic claims/effects/publication, `process-wrap` for admitted child-process
-containment, and `d3-dag` for dashboard layout. These replace bespoke graph
-algorithms, cancellation tokens, waiting queues, schema walkers, transaction
+containment, and `d3-dag` for dashboard layout. These replace a second graph
+model, cancellation tokens, waiting queues, schema walkers, transaction
 choreography, process-tree handling, and DAG layout while retaining Plan 24
 task semantics, explicit admission, one runtime clock, cumulative budgets,
 leases/fences, exact provider identity, effect receipts, and non-auto-applied
@@ -744,22 +738,22 @@ replan. Cover no-Git and Git-backed placements, provider unavailable/fallback,
 lease loss, restart/replay, and exact project scope through direct task/runtime
 journeys and normal repository checks.
 
-**Not in this PR.** Public SDK commitments belong to PR18. Suggestions never
-silently choose a model, mutate the graph, or execute an unadmitted step.
+Public SDK coverage is required for the complete workflow surface. Suggestions
+never silently choose a model, mutate the graph, or execute an unadmitted step.
 
-## PR18 — supported external development
+## Supported external development
 
 **User outcome.** Rust and TypeScript users can perform every
-supported public TraceDecay operation—not only PR17 graph,
+supported public TraceDecay operation—including graph,
 task-intelligence, and workflow additions—through first-party SDKs with the
 same behavior and lifecycle as built-in surfaces.
 
 **End-to-end production path.** Revisioned published names, schemas, and
 OpenAPI bind each SDK to the production API; clients exercise representative
-operations from every supported public family plus the complete PR17 work
+operations from every supported public family plus the complete work
 loop, handle paging/streams/cancellation/problems/receipts and resume after
 disconnect through the same application/runtime behavior as built-in
-surfaces. Negotiated Plan 35 actions may consume either PR18 single-use public
+surfaces. Negotiated Plan 35 actions may consume either single-use public
 handoff token: feedback/diagnostic cues open the owning investigation
 operation, while ready-commit/cross-worktree/task cues open the owning Plan 24
 task operation. Both delegate through their owning application operation,
@@ -789,7 +783,7 @@ weakening conformance.
 
 **Direct acceptance.** Run behavioral/lifecycle conformance for every
 supported public operation through both published SDKs against local and
-PR16-enrolled remote authority, including representative complete journeys for
+an enrolled remote authority, including representative complete journeys for
 each capability family, the create/evidence/admit/monitor/cancel/resume loop,
 version negotiation, paging, streaming interruption, typed failure and retry
 directive, unavailable capability, receipts, and cross-version compatibility.
@@ -800,9 +794,10 @@ unauthorized behavior, and local/remote semantic parity. LSP only opens the
 owning surface; it retrieves no task body and mutates no work. Compilation,
 generated declaration coverage, or schema equality alone is not acceptance.
 
-**Not in this PR.** Final-schema enforcement and V1 deletion belong to PR19.
+Final-schema enforcement and deletion of old-store compatibility are required
+for the same final product.
 
-## PR19 — final V2 fresh-store reset
+## Final V2 fresh-store reset
 
 **User outcome.** TraceDecay opens only the exact final V2 persisted shape.
 An existing database, store, spool, file, or projection with any other shape
@@ -837,11 +832,11 @@ every incompatible persisted shape, explicit reset/recreation, and no legacy
 read/write/conversion path. Verify independently released public wire/API
 compatibility separately from storage admission.
 
-**Not in this PR.** V1 persisted state is not a recovery input or read path.
+Old TraceDecay persisted state is not a recovery input or read path.
 
-## PR20 — measured product speed
+## Measured product speed
 
-**User outcome.** The production journeys delivered by PR13–PR19 are
+**User outcome.** The complete production journeys are
 demonstrably faster or cheaper without changing their results, safety, or
 recovery behavior.
 
@@ -849,7 +844,7 @@ recovery behavior.
 bottleneck in database access, synchronization, projection, indexing,
 cache/generation handling, host feedback, dashboard investigation, multi-root
 query/Git, remote sync/recovery, task-intelligence evidence/calibration/
-proposal, workflow execution, SDK lifecycle, migration, or repository-controlled
+proposal, workflow execution, SDK lifecycle, final-store admission, or repository-controlled
 developer builds. A focused implementation changes that path, recomputes the
 same observable result, and is retained only when repeated comparisons show a
 practical gain.
@@ -879,24 +874,23 @@ protocol, or new measurement authority.
 
 **Direct acceptance.** Re-run representative shipped journeys before and after
 each retained change on Linux, reproduce the gain and equivalent result, and
-pass direct migration, recovery, deletion, and cross-platform default-feature
+pass direct final-shape admission, recovery, deletion, and cross-platform default-feature
 CI tests. No universal score, public benchmark rank, or paper threshold
 substitutes for product evidence.
 
-**Not in this PR.** Unmeasured speculative optimizations and placeholder
-benchmarks do not ship.
+Unmeasured speculative optimizations and placeholder benchmarks do not ship.
 
 ## Compact owner reference
 
-- PR5–PR7: [Plans 01](01-domain-crate.md), [02](02-store-crate.md),
+- Capture, storage, and memory: [Plans 01](01-domain-crate.md), [02](02-store-crate.md),
   [03](03-capture-crate.md), [04](04-projectors-crate.md), and
   [18](18-secret-detection-redaction-and-private-data-safety.md).
-- PR8–PR10: [Plans 05](05-query-crate.md),
+- Temporal, lexical, and semantic retrieval: [Plans 05](05-query-crate.md),
   [15](15-search-quality-evaluation-and-retrieval-research.md),
   [23](23-session-lcm-temporal-retrieval-and-evaluation.md),
   [25](25-code-intelligence-indexing-crate.md), and
   [31](31-native-fastembed-semantic-code-search.md).
-- PR11–PR12: [Plans 06](06-policy-crate.md), [08](08-tool-catalog-crate.md),
+- Policy and delivery surfaces: [Plans 06](06-policy-crate.md), [08](08-tool-catalog-crate.md),
   [09](09-application-crate.md), [10](10-api-crate.md),
   [17](17-official-public-api-and-sdks.md),
   [20](20-configuration-control-plane.md),
@@ -905,24 +899,24 @@ benchmarks do not ship.
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md),
   [36](36-git-aware-change-context-and-index-transactions.md), and
   [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
-- PR13: [Plans 07](07-hooks-crate.md), [22](22-incremental-context-scout-and-suggestion-envelopes.md),
+- Host feedback: [Plans 07](07-hooks-crate.md), [22](22-incremental-context-scout-and-suggestion-envelopes.md),
   [27](27-cross-host-agent-plugin-bundles.md), [35](35-daemon-lsp-gateway-and-universal-diagnostics.md),
   and [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
-- PR14: [Plans 11](11-dashboard-frontend.md),
+- Dashboard and Work: [Plans 11](11-dashboard-frontend.md),
   [11c](11c-work-workspace-design.md),
   [14](14-historical-failure-regression-matrix.md),
   [24](24-canonical-task-plan-graph-and-multi-agent-executor.md),
   [26](26-observability-accounting-and-usage.md),
   [32](32-dynamic-workflow-runtime-and-sdk.md), and
   [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
-- PR15: [Plans 05](05-query-crate.md), [16](16-cross-project-repository-worktree-scope.md),
+- Multi-root local operation: [Plans 05](05-query-crate.md), [16](16-cross-project-repository-worktree-scope.md),
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md),
   [36](36-git-aware-change-context-and-index-transactions.md), and
   [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
-- PR16: [Plans 28](28-remote-multi-machine-shared-brain.md),
+- Remote shared authority: [Plans 28](28-remote-multi-machine-shared-brain.md),
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md), and
   [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
-- PR17 residual capability: [Plans 01](01-domain-crate.md), [02](02-store-crate.md),
+- Workflow execution: [Plans 01](01-domain-crate.md), [02](02-store-crate.md),
   [03](03-capture-crate.md), [04](04-projectors-crate.md),
   [05](05-query-crate.md), [06](06-policy-crate.md),
   [09](09-application-crate.md),
@@ -941,12 +935,12 @@ benchmarks do not ship.
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md),
   [36](36-git-aware-change-context-and-index-transactions.md), and
   [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
-- PR18: [Plans 08](08-tool-catalog-crate.md),
+- Public SDKs: [Plans 08](08-tool-catalog-crate.md),
   [12](12-root-compatibility-migration.md),
   [13](13-research-provenance-and-context-anchors.md),
   [17](17-official-public-api-and-sdks.md), and
   [19](19-system-defragmentation-convergence-and-extensibility.md).
-- PR19: [Plans 08](08-tool-catalog-crate.md),
+- Final-shape admission: [Plans 08](08-tool-catalog-crate.md),
   [12](12-root-compatibility-migration.md),
   [13](13-research-provenance-and-context-anchors.md),
   [17](17-official-public-api-and-sdks.md),
@@ -954,7 +948,7 @@ benchmarks do not ship.
   [34](34-workspace-refactoring-and-api-migration.md), and every component
   section whose independently released public API protocol crosses the
   fresh-store boundary.
-- PR20: [Plan 33](33-end-to-end-performance-optimization.md) and
+- Measured performance: [Plan 33](33-end-to-end-performance-optimization.md) and
   [Plan 38](38-storage-retention-size-and-efficiency.md)'s compaction and
   size-telemetry budgets, plus
   [Plan 39](39-embedded-grafeo-graph-database.md)'s embedded graph/vector
@@ -973,10 +967,10 @@ fresh-profile, embedded, in-process, and single-authority: no sidecar,
 
 Storage retention, size, and efficiency
 ([Plan 38](38-storage-retention-size-and-efficiency.md)) threads through the
-remaining slices rather than owning one PR: the Doctor storage finding
-family lands with PR14 (plan 09 over plan 26 read models); automatic
+remaining capabilities rather than owning a separate delivery stage: the Doctor storage finding
+family uses Plan 09 over Plan 26 read models; automatic
 branch-DB lifecycle and registry orphan detection/collection land with the
-storage-runtime S11 window; session retention with raw/projected dedup
+storage-runtime authority; session retention with raw/projected dedup
 extends the staged LCM GC cards. Measured driver: one isolated validation profile
 reached 256 GB and was reduced to ~75 GB purely by removing data the
 product should never have retained. All plan 38 sections (§1–§7) have now

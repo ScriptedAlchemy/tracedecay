@@ -156,15 +156,19 @@ describe('TraceView', () => {
     mockFetch((url) => {
       if (!url.includes('/neighbors')) return undefined;
       const { pathname, search } = new URL(url, 'http://localhost');
-      const payload = resolveFixture(pathname, search) as {
+      const fixture = resolveFixture(pathname, search) as Record<string, unknown>;
+      const payload = fixture.payload as {
         edges?: Array<{ kind?: string }>;
         edges_by_kind?: Array<{ kind?: string }>;
       };
       return new Response(
         JSON.stringify({
-          ...payload,
-          edges: (payload.edges ?? []).filter((edge) => edge.kind !== 'contains'),
-          edges_by_kind: (payload.edges_by_kind ?? []).filter((e) => e.kind !== 'contains'),
+          ...fixture,
+          payload: {
+            ...payload,
+            edges: (payload.edges ?? []).filter((edge) => edge.kind !== 'contains'),
+            edges_by_kind: (payload.edges_by_kind ?? []).filter((e) => e.kind !== 'contains'),
+          },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
@@ -272,23 +276,25 @@ describe('TraceView', () => {
     expect(container.querySelector('canvas')).toBeNull();
   });
 
-  it('does not treat an empty legacy neighbor payload as a measured zero', async () => {
-    mockFetch((url) =>
-      url.includes('/neighbors')
-        ? new Response(
-            JSON.stringify({
-              node_id: 'sym-0',
-              depth: 1,
-              limit: 200,
-              callers: [],
-              callees: [],
-              edges: [],
-              edges_by_kind: [],
-            }),
-            { status: 200, headers: { 'content-type': 'application/json' } },
-          )
-        : undefined,
-    );
+  it('does not treat an empty neighbor envelope as a measured zero', async () => {
+    mockFetch((url) => {
+      if (!url.includes('/neighbors')) return undefined;
+      const { pathname, search } = new URL(url, 'http://localhost');
+      const fixture = resolveFixture(pathname, search) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          ...fixture,
+          payload: {
+            ...(fixture.payload as Record<string, unknown>),
+            callers: [],
+            callees: [],
+            edges: [],
+            edges_by_kind: [],
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
     const { container } = renderTrace();
     await waitFor(() => {
       expect(container.querySelector('[data-state="partial"]')).toBeTruthy();

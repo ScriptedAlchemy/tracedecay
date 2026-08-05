@@ -201,7 +201,7 @@ struct SavingsPricingSummaryV1 {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub(super) struct SavingsOverviewPayloadV1 {
+pub struct SavingsOverviewPayloadV1 {
     savings: SavingsAccountingSummaryV1,
     sessions: SavingsSessionSummaryV1,
     turns: TurnsSummaryV1,
@@ -407,7 +407,9 @@ fn merge(base: Value, extra: Value) -> Value {
 }
 
 /// GET `/api/plugins/savings/overview`
-pub async fn overview(State(state): State<DashboardState>) -> Response {
+pub async fn overview(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<SavingsOverviewPayloadV1>>> {
     savings_pricing::ensure_background_refresh();
 
     let savings = match state.savings_db.as_deref() {
@@ -461,12 +463,43 @@ pub async fn overview(State(state): State<DashboardState>) -> Response {
         })
     })();
     match payload {
-        Ok(payload) => Json(payload).into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"status": "contract_invalid", "error": error})),
-        )
-            .into_response(),
+        Ok(payload) => {
+            let available = [
+                payload.savings.available,
+                payload.sessions.available,
+                payload.turns.available,
+            ]
+            .into_iter()
+            .filter(|available| *available)
+            .count() as u64;
+            if available == 0 {
+                Json(DashboardEnvelopeV1::unavailable(
+                    scope_from_state(&state),
+                    Some(payload),
+                    "savings_sources_unavailable",
+                ))
+            } else if available < 3 {
+                Json(DashboardEnvelopeV1::partial(
+                    scope_from_state(&state),
+                    3,
+                    available,
+                    "savings_sources",
+                    vec!["one_or_more_savings_sources_unavailable".to_owned()],
+                    Some(payload),
+                ))
+            } else {
+                Json(DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(3, "savings_sources"),
+                    Some(payload),
+                ))
+            }
+        }
+        Err(error) => Json(DashboardEnvelopeV1::error(
+            scope_from_state(&state),
+            None,
+            error,
+        )),
     }
 }
 
