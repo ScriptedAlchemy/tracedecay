@@ -18,6 +18,7 @@ const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitRepositoryIdentity {
     pub worktree_root: PathBuf,
+    pub git_dir: PathBuf,
     pub common_dir: PathBuf,
 }
 
@@ -141,7 +142,12 @@ fn repository_identity_command(directory: &Path) -> Command {
         .env_remove("GIT_COMMON_DIR")
         .arg("-C")
         .arg(directory)
-        .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
+        .args([
+            "rev-parse",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -155,8 +161,12 @@ fn parse_repository_identity(
     let text = std::str::from_utf8(stdout).ok()?;
     let mut lines = text.lines();
     let raw_worktree = PathBuf::from(lines.next()?.trim());
+    let raw_git_dir = PathBuf::from(lines.next()?.trim());
     let raw_common = PathBuf::from(lines.next()?.trim());
-    if raw_worktree.as_os_str().is_empty() || raw_common.as_os_str().is_empty() {
+    if raw_worktree.as_os_str().is_empty()
+        || raw_git_dir.as_os_str().is_empty()
+        || raw_common.as_os_str().is_empty()
+    {
         return None;
     }
     let worktree_root = if raw_worktree.is_absolute() {
@@ -165,6 +175,12 @@ fn parse_repository_identity(
         directory.join(raw_worktree)
     };
     let worktree_root = worktree_root.canonicalize().ok()?;
+    let git_dir = if raw_git_dir.is_absolute() {
+        raw_git_dir
+    } else {
+        directory.join(raw_git_dir)
+    };
+    let git_dir = git_dir.canonicalize().ok()?;
     let common_dir = if raw_common.is_absolute() {
         raw_common
     } else {
@@ -174,6 +190,7 @@ fn parse_repository_identity(
     Some(GitRepositoryIdentityOutcome::Resolved(
         GitRepositoryIdentity {
             worktree_root,
+            git_dir,
             common_dir,
         },
     ))
