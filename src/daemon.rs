@@ -220,6 +220,7 @@ use invocation_executor::{
 };
 mod invocation_state;
 use invocation_state::DaemonInvocationState;
+pub(crate) mod lcm_authority;
 mod lsp_sessions;
 use lsp_sessions::{
     admitted_lsp_root_for_project_path, admitted_lsp_workspace_for_request,
