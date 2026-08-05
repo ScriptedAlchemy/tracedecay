@@ -307,7 +307,7 @@ fn validate_setting_key(value: &str) -> Result<(), DomainError> {
 
 /// Typed configuration key. Keys are lowercase, dotted product identifiers;
 /// untyped host/adapter keys are not representable.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct SettingKey(String);
 
@@ -374,7 +374,9 @@ impl ConfigurationLayerKindV1 {
 
 /// A typed configuration layer identity. The default layer intentionally has
 /// no caller-controlled identifier.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConfigurationLayerIdV1 {
     Default,
@@ -403,7 +405,9 @@ impl ConfigurationLayerIdV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SettingSensitivityV1 {
     Public,
@@ -419,7 +423,9 @@ pub enum SettingScopeV1 {
     Collection,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RestartRequirementV1 {
     None,
@@ -445,7 +451,9 @@ impl DeprecationStateV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationValueKindV1 {
     Boolean,
@@ -462,7 +470,7 @@ pub enum ConfigurationValueKindV1 {
     CredentialReference,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutConfigurationStateV1 {
     Active,
@@ -470,20 +478,20 @@ pub enum ContextScoutConfigurationStateV1 {
     Disabled,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutConfigurationModeV1 {
     Deterministic,
     ConfiguredModel,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutConfiguredModelPathV1 {
     CodexAppServer,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutConfigurationLimitsV1 {
     pub max_candidates: u32,
@@ -528,7 +536,7 @@ impl ContextScoutConfigurationLimitsV1 {
 /// Canonical Context Scout control-plane value. Disabled is the only stock
 /// state; deterministic or configured-model execution requires an explicit
 /// configuration revision.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutSettingsV1 {
     pub schema_version: u16,
@@ -569,7 +577,7 @@ impl ContextScoutSettingsV1 {
 
 /// A reference-only selector. It is convenience input, never collection
 /// authority or membership evidence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum CollectionSelectorV1 {
     Query(QueryCollectionId),
@@ -587,7 +595,7 @@ impl CollectionSelectorV1 {
 
 /// A structured analyzer option value. This deliberately excludes raw
 /// environment values, commands, credential material, and transport blobs.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum AnalyzerStructuredValueV1 {
     Boolean(bool),
@@ -619,7 +627,7 @@ impl AnalyzerStructuredValueV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AnalyzerExecutableReferenceV1 {
     BuiltIn { executable_id: AnalyzerExecutableId },
@@ -635,7 +643,9 @@ impl AnalyzerExecutableReferenceV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalyzerPrivacyClassV1 {
     NonSensitive,
@@ -643,7 +653,7 @@ pub enum AnalyzerPrivacyClassV1 {
     Restricted,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyzerResourceLimitsV1 {
     pub maximum_memory_mib: u32,
@@ -665,7 +675,9 @@ impl AnalyzerResourceLimitsV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalyzerRestartPolicyV1 {
     RestartOnConfigurationChange,
@@ -675,7 +687,7 @@ pub enum AnalyzerRestartPolicyV1 {
 /// One language's analyzer selection. Host registration may project only the
 /// non-sensitive `language_id`/`enabled` pair; all other fields remain in the
 /// configuration authority.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyzerLanguageSelectionV1 {
     pub language_id: AnalyzerLanguageId,
@@ -723,7 +735,7 @@ impl AnalyzerLanguageSelectionV1 {
 
 /// Canonical analyzer settings. A changed selection produces a new
 /// configuration revision/digest; cache invalidation remains owned elsewhere.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyzerSettingsV1 {
     pub schema_version: u16,
@@ -770,7 +782,7 @@ impl AnalyzerSettingsV1 {
 /// Credential metadata contains only a reference and an integrity digest. No
 /// constructor, field, serializer, audit record, or error type accepts a
 /// plaintext credential.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialKindV1 {
     ApiToken,
@@ -779,7 +791,7 @@ pub enum CredentialKindV1 {
     Other,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialReferenceMetadataV1 {
     pub reference_id: CredentialReferenceId,
@@ -815,7 +827,7 @@ impl CredentialReferenceMetadataV1 {
 }
 
 /// Values that the typed registry can accept. Credentials are references only.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum ConfigurationValueV1 {
     Boolean(bool),
@@ -1244,7 +1256,7 @@ pub enum ProtectedChangeSnapshotError {
     IncompatibleValue(&'static str),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RedactedConfigurationChangeV1 {
     pub setting_key: SettingKey,
@@ -1273,7 +1285,7 @@ impl RedactedConfigurationChangeV1 {
 
 /// Immutable dry-run result. It contains no raw locator, secret, target
 /// identity, or plaintext configuration value.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProtectedChangePlan {
     pub plan_id: ChangePlanId,
@@ -1354,14 +1366,18 @@ impl ProtectedApplyRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RollbackModeV1 {
     AllOrNothing,
     Partial,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationAuditEventKindV1 {
     DryRunCreated,
@@ -1377,7 +1393,7 @@ pub enum ConfigurationAuditEventKindV1 {
 /// Append-only audit record. `target_commitment` is event-scoped and cannot be
 /// joined across audit events; a caller must be separately authorized before
 /// any canonical target is resolved by the store/application layer.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationAuditEvent {
     pub event_id: ConfigurationAuditEventId,
@@ -1415,7 +1431,9 @@ impl ConfigurationAuditEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateDispositionV1 {
     Winning,
@@ -1427,7 +1445,7 @@ pub enum CandidateDispositionV1 {
 /// Resolution provenance is intentionally distinct from behavior. Moving the
 /// same winner between layers can change this material without changing the
 /// effective behavior digest.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationCandidateV1 {
     pub layer: ConfigurationLayerIdV1,
