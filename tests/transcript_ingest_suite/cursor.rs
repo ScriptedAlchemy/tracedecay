@@ -392,7 +392,7 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
             provider: "cursor".to_string(),
             session_id: "cursor-session".to_string(),
             target: LcmDescribeTarget::SummaryNode {
-                node_id: node_id.clone(),
+                node_id: node_id.to_owned(),
             },
         })
         .await
