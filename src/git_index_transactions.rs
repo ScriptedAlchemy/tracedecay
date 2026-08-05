@@ -634,10 +634,11 @@ impl FixedGitIndexRunner {
             || snapshot.adapter_revision.as_deref() != Some(GIT_INDEX_ADAPTER_REVISION)
             || self.head_state().ok().as_ref() != Some(&snapshot.head)
             || current_operation_state(&self.git_dir) != snapshot.operation_state
+            || self.configuration_digest().ok().as_ref() != snapshot.configuration_digest.as_ref()
             || self.attributes_digest().ok().as_ref() != snapshot.attributes_digest.as_ref()
             || self.sparse_digest().ok().as_ref() != snapshot.sparse_digest.as_ref()
             || self.submodule_digest().ok().as_ref() != snapshot.submodule_digest.as_ref()
-            || self.configuration_digest().ok().as_ref()
+            || self.filesystem_capabilities_digest().ok().as_ref()
                 != snapshot.filesystem_capabilities_digest.as_ref()
         {
             return Err(NativeGitIndexError::StaleRepositoryState);

@@ -192,6 +192,28 @@ impl FixedGitIndexRunner {
         canonical_sha256(&output.stdout).map_err(Into::into)
     }
 
+    pub(crate) fn filesystem_capabilities_digest(
+        &self,
+    ) -> Result<ManifestDigest, NativeGitIndexError> {
+        let output = self.run_git_output(&[
+            "config",
+            "--null",
+            "--get-regexp",
+            r"^core\.(filemode|symlinks|ignorecase|precomposeunicode|protecthfs|protectntfs)$",
+        ])?;
+        let capabilities = if output.status.success() {
+            output.stdout
+        } else if output.status.code() == Some(1) {
+            Vec::new()
+        } else {
+            return Err(NativeGitIndexError::GitFailed {
+                operation: "config",
+                status: output.status.to_string(),
+            });
+        };
+        canonical_sha256(&capabilities).map_err(Into::into)
+    }
+
     pub(crate) fn attributes_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let paths = self.run_git("ls-files", &["ls-files", "-z"])?;
         let mut command = self.command();

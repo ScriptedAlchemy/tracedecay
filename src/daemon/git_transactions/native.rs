@@ -235,10 +235,15 @@ impl NativeGitIndexPreviewAssembler {
                 ignored_collision_digest,
             },
             status.operation,
+            Some(configuration_digest),
             Some(attributes_digest),
             Some(runner.sparse_digest().map_err(map_native_error)?),
             Some(runner.submodule_digest().map_err(map_native_error)?),
-            Some(configuration_digest),
+            Some(
+                runner
+                    .filesystem_capabilities_digest()
+                    .map_err(map_native_error)?,
+            ),
             // Observation metadata belongs to the caller's read snapshot. All
             // repository facts above are independently recaptured; retaining
             // its timestamp permits exact byte-for-byte CAS equality.
@@ -1210,6 +1215,7 @@ fn same_stable_native_evidence(
         && current.git_version == old.git_version
         && current.adapter_revision == old.adapter_revision
         && current.operation_state == old.operation_state
+        && current.configuration_digest == old.configuration_digest
         && current.attributes_digest == old.attributes_digest
         && current.sparse_digest == old.sparse_digest
         && current.filesystem_capabilities_digest == old.filesystem_capabilities_digest
@@ -1585,6 +1591,7 @@ pub(crate) fn capture_exact_snapshot_for_test(
         None,
         None,
         None,
+        None,
         captured_at,
         tracedecay_domain::GitCoverageV1::complete(),
     )
@@ -1694,6 +1701,7 @@ mod tests {
                 ignored_collision_digest: None,
             },
             GitOperationStateV1::None,
+            None,
             None,
             None,
             None,
