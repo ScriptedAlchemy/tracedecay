@@ -571,9 +571,7 @@ async fn test_prompt_integrations_export_active_managed_skill_indexes() {
     VibeIntegration.uninstall(&ctx).unwrap();
 
     // Kimi's project AGENTS.md is intentionally absent here: the project-local
-    // index has no global uninstall surface. Removal of pre-plugin `~/.kimi`
-    // prompt indexes is covered by the migration-shim uninstall test in
-    // agent_install_test.rs.
+    // index has no global uninstall surface.
     for prompt_path in [
         home.join(".claude/CLAUDE.md"),
         home.join(".config/opencode/AGENTS.md"),

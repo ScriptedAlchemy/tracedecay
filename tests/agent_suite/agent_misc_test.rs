@@ -893,67 +893,7 @@ fn test_home_dir_returns_some() {
 }
 
 // ---------------------------------------------------------------------------
-// 14. migrate_installed_agents
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_migrate_installed_agents_skips_when_already_populated() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-    let mut config = tracedecay::user_config::UserConfig {
-        installed_agents: vec!["claude".to_string()],
-        ..Default::default()
-    };
-
-    // Should return immediately since installed_agents is non-empty
-    migrate_installed_agents(home, &mut config);
-
-    // The existing list should be unchanged
-    assert_eq!(config.installed_agents, vec!["claude".to_string()]);
-}
-
-#[test]
-fn test_migrate_installed_agents_detects_installed_agents() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-    let _agent_env = crate::common::AgentEnvLock::pin(home);
-
-    // Install copilot so it can be detected
-    let ctx = make_install_ctx(home);
-    CopilotIntegration.install(&ctx).unwrap();
-
-    let mut config = tracedecay::user_config::UserConfig::default();
-    assert!(config.installed_agents.is_empty());
-
-    // migrate will scan and detect copilot is installed
-    // Note: save() will try to write to ~/.tracedecay/config.toml which may fail
-    // in CI, but the function still populates installed_agents in memory.
-    migrate_installed_agents(home, &mut config);
-
-    assert!(
-        config.installed_agents.contains(&"copilot".to_string()),
-        "copilot should be detected, got: {:?}",
-        config.installed_agents
-    );
-}
-
-#[test]
-fn test_migrate_installed_agents_empty_home_no_change() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-    let mut config = tracedecay::user_config::UserConfig::default();
-
-    migrate_installed_agents(home, &mut config);
-
-    // No agents installed in empty home, list should remain empty
-    assert!(
-        config.installed_agents.is_empty(),
-        "installed_agents should remain empty when no agents detected"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 15. pick_integrations_interactive (no-agent-detected error path)
+// 14. pick_integrations_interactive (no-agent-detected error path)
 // ---------------------------------------------------------------------------
 
 #[test]

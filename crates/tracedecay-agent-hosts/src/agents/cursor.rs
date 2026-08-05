@@ -53,7 +53,6 @@ impl AgentIntegration for CursorIntegration {
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         install_cursor_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -75,9 +74,8 @@ impl AgentIntegration for CursorIntegration {
         true
     }
 
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+    fn install_local(&self, ctx: &InstallContext, _project_path: &Path) -> Result<()> {
         install_cursor_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        sweep_legacy_project_artifacts(project_path)?;
 
         eprintln!();
         eprintln!("Cursor local setup uses the tracedecay Cursor plugin.");
@@ -111,7 +109,6 @@ impl AgentIntegration for CursorIntegration {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
         install_cursor_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
         Ok(UpdatePluginOutcome::Refreshed(vec![
             cursor_plugin_install_dir(&ctx.home),
         ]))
@@ -144,9 +141,6 @@ impl AgentIntegration for CursorIntegration {
         )?;
         remove_cursor_plugin_install(&install_dir)?;
         remove_cursor_native_extension_registration(&ctx.home)?;
-        let mcp_path = ctx.home.join(".cursor/mcp.json");
-        uninstall_mcp_server(&mcp_path);
-        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
 
         eprintln!();
         eprintln!("Uninstall complete. TraceDecay has been removed from Cursor.");
@@ -156,15 +150,7 @@ impl AgentIntegration for CursorIntegration {
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCursor integration\x1b[0m");
-        let project_cursor = ctx.project_path.join(".cursor");
         doctor_check_plugin(dc, &ctx.home);
-        if legacy_project_cursor_has_tracedecay(&project_cursor) {
-            dc.warn(
-                "legacy project Cursor MCP/hooks/rule files are present; rerun \
-                 `tracedecay install --agent cursor` from this project to remove \
-                 tracedecay-owned entries",
-            );
-        }
         super::cursor_diagnostics::report_cursor_mcp_log_findings(dc, &ctx.home);
     }
 
@@ -242,26 +228,11 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
-        let mut paths = vec![
-            cursor_plugin_manifest_path(home),
-            home.join(".cursor/mcp.json"),
-        ];
-        if let Some(project_path) = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| cwd_sweep_target(cwd, home))
-        {
-            paths.extend([
-                project_path.join(".cursor/mcp.json"),
-                project_path.join(".cursor/hooks.json"),
-                project_path.join(".cursor/rules/tracedecay.mdc"),
-            ]);
-        }
-        paths
+        vec![cursor_plugin_manifest_path(home)]
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
         cursor_plugin_manifest_path(home).exists()
-            || legacy_mcp_has_tracedecay(&home.join(".cursor/mcp.json"))
     }
 }
 
@@ -619,7 +590,6 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
 }
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
-    super::sweep_superseded_plugin_siblings(install_dir, &[".cursor-plugin/plugin.json"])?;
     let Ok(metadata) = std::fs::symlink_metadata(install_dir) else {
         return Ok(());
     };
@@ -645,13 +615,8 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
             ),
         });
     }
-    // The directory is tracedecay-owned. Sweep every skill dir the *current*
-    // bundle no longer ships (retired dispatcher/workflow/memory skills), then
-    // remove the managed skill overlay. Deriving the keep-set from the live
-    // bundle means a newly retired skill is swept automatically — no
-    // hand-maintained legacy list to fall out of date. User-added files
-    // outside `skills/` (and any non-tracedecay skill dir) are preserved.
-    sweep_retired_bundle_skill_dirs(install_dir);
+    // The directory is tracedecay-owned. Remove only its explicit managed
+    // overlay; V2 lifecycle never sweeps historical plugin siblings or skills.
     remove_cursor_managed_skill_overlay(install_dir);
     if cursor_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
@@ -667,55 +632,6 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
 
 fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
-}
-
-/// Remove every `skills/<dir>` under the tracedecay plugin dir that the current
-/// bundle does not ship. The keep-set is derived from the live embedded bundle,
-/// so any retired skill (dispatcher, workflow, or merged-away memory skill) is
-/// swept on upgrade without a hand-maintained legacy list. The `agent-managed`
-/// overlay is preserved here (removed separately) and never counted as retired.
-///
-/// Only tracedecay-owned skill dirs are swept: a same-name user-authored skill
-/// whose `SKILL.md` carries no tracedecay marker is left untouched, so an
-/// upgrade never deletes a user's private workflow that happens to collide with
-/// a retired bundle slug.
-fn sweep_retired_bundle_skill_dirs(install_dir: &Path) {
-    let skills_root = install_dir.join("skills");
-    let Ok(entries) = std::fs::read_dir(&skills_root) else {
-        return;
-    };
-    let shipped: std::collections::BTreeSet<String> = embedded_plugin_files()
-        .into_iter()
-        .filter_map(|(relative, _)| {
-            relative
-                .strip_prefix("skills/")
-                .and_then(|rest| rest.split('/').next())
-                .map(str::to_string)
-        })
-        .collect();
-    for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        // The managed overlay is handled separately; never treat it as retired.
-        if name == "agent-managed" || shipped.contains(&name) {
-            continue;
-        }
-        // Preserve user-authored skills that reuse a retired slug: only sweep a
-        // non-shipped dir that is demonstrably tracedecay-owned.
-        if !skill_file_has_tracedecay_marker(&entry.path().join("SKILL.md")) {
-            continue;
-        }
-        std::fs::remove_dir_all(entry.path()).ok();
-    }
-}
-
-/// True when a Cursor `SKILL.md` carries a tracedecay authorship marker, marking
-/// the skill dir as tracedecay-owned (and therefore safe to sweep when retired).
-fn skill_file_has_tracedecay_marker(skill_file: &Path) -> bool {
-    std::fs::read_to_string(skill_file)
-        .is_ok_and(|contents| super::skill_contents_have_tracedecay_marker(&contents))
 }
 
 fn cursor_plugin_dir_is_tracedecay(install_dir: &Path) -> bool {
@@ -747,16 +663,11 @@ fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
+#[cfg(test)]
 fn legacy_mcp_has_tracedecay(mcp_path: &Path) -> bool {
     load_json_file(mcp_path)
         .get("mcpServers")
         .is_some_and(|servers| servers.get("tracedecay").is_some())
-}
-
-fn legacy_project_cursor_has_tracedecay(cursor_dir: &Path) -> bool {
-    legacy_mcp_has_tracedecay(&cursor_dir.join("mcp.json"))
-        || legacy_hooks_have_tracedecay(&cursor_dir.join("hooks.json"))
-        || legacy_rule_has_tracedecay(&cursor_dir.join("rules/tracedecay.mdc"))
 }
 
 /// Removes legacy PROJECT-local tracedecay artifacts. Pre-plugin versions of
@@ -768,6 +679,7 @@ fn legacy_project_cursor_has_tracedecay(cursor_dir: &Path) -> bool {
 /// user-authored config (other MCP servers, custom hooks and rules, and
 /// `permissions.json` allowlists, which the plugin README still recommends
 /// per-repo) is preserved.
+#[cfg(test)]
 fn sweep_legacy_project_artifacts(project_path: &Path) -> Result<()> {
     let cursor_dir = project_path.join(".cursor");
     let mcp_path = cursor_dir.join("mcp.json");
@@ -804,33 +716,15 @@ fn sweep_legacy_project_artifacts(project_path: &Path) -> Result<()> {
 /// The project directory a cwd-based legacy sweep should target, or `None`
 /// when the cwd *is* the home directory — there `.cursor/` is Cursor's
 /// user-level config tree, not a project workspace.
+#[cfg(test)]
 fn cwd_sweep_target(cwd: PathBuf, home: &Path) -> Option<PathBuf> {
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     (canonical(&cwd) != canonical(home)).then_some(cwd)
 }
 
-/// Best-effort [`sweep_legacy_project_artifacts`] for global install /
-/// update-plugin / uninstall flows, which have no explicit project path: the
-/// current working directory is treated as the project. Failures only warn so
-/// a malformed `.cursor/` in an unrelated cwd can never block plugin
-/// management.
-fn sweep_legacy_project_artifacts_at_cwd(home: &Path) {
-    let Some(project_path) = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| cwd_sweep_target(cwd, home))
-    else {
-        return;
-    };
-    if let Err(err) = sweep_legacy_project_artifacts(&project_path) {
-        eprintln!(
-            "\x1b[33mwarning:\x1b[0m could not remove legacy project Cursor artifacts in {}: {err}",
-            project_path.display()
-        );
-    }
-}
-
 /// A Cursor hook entry is tracedecay-owned when its `command` runs a
 /// `hook-cursor-*` subcommand.
+#[cfg(test)]
 fn is_legacy_tracedecay_hook(entry: &serde_json::Value) -> bool {
     entry
         .get("command")
@@ -838,6 +732,7 @@ fn is_legacy_tracedecay_hook(entry: &serde_json::Value) -> bool {
         .is_some_and(|command| command.contains("hook-cursor-"))
 }
 
+#[cfg(test)]
 fn legacy_hooks_have_tracedecay(hooks_path: &Path) -> bool {
     load_json_file(hooks_path)
         .get("hooks")
@@ -851,6 +746,7 @@ fn legacy_hooks_have_tracedecay(hooks_path: &Path) -> bool {
         })
 }
 
+#[cfg(test)]
 fn legacy_rule_has_tracedecay(rule_path: &Path) -> bool {
     std::fs::read_to_string(rule_path)
         .is_ok_and(|contents| contents.contains("tracedecay MCP tools"))
@@ -858,6 +754,7 @@ fn legacy_rule_has_tracedecay(rule_path: &Path) -> bool {
 
 /// Remove the tracedecay MCP server entry from a Cursor `mcp.json`, deleting the
 /// file when it becomes empty and otherwise backing up before rewriting.
+#[cfg(test)]
 fn uninstall_mcp_server(mcp_path: &Path) {
     if !mcp_path.exists() {
         eprintln!("  {} not found, skipping", mcp_path.display());
@@ -910,6 +807,7 @@ fn uninstall_mcp_server(mcp_path: &Path) {
     }
 }
 
+#[cfg(test)]
 fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
     if !hooks_path.exists() {
         return Ok(());
@@ -953,6 +851,7 @@ fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn remove_legacy_project_rule(rule_path: &Path) -> Result<()> {
     if !rule_path.exists() {
         return Ok(());
@@ -984,11 +883,6 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             "{} not found — run `tracedecay install --agent cursor` if you use Cursor",
             manifest_path.display()
         ));
-        if legacy_mcp_has_tracedecay(&home.join(".cursor/mcp.json")) {
-            dc.warn(
-                "legacy Cursor MCP config is installed; rerun install to use the Cursor plugin",
-            );
-        }
         return;
     }
 
@@ -1821,33 +1715,6 @@ mod tests {
             "install must remove the memory rule retired from the plugin inventory"
         );
         assert!(install_dir.join("rules/tracedecay.mdc").exists());
-    }
-
-    #[test]
-    fn install_sweeps_owned_superseded_plugin_siblings_only() {
-        let home = TempDir::new().unwrap();
-        let plugins = home.path().join(".cursor/plugins/local");
-        let retired = plugins.join("tracedecay.pre-v2-adopt");
-        let foreign = plugins.join("tracedecay.personal");
-        for dir in [&retired, &foreign] {
-            std::fs::create_dir_all(dir.join(".cursor-plugin")).unwrap();
-            std::fs::write(
-                dir.join(".cursor-plugin/plugin.json"),
-                serde_json::to_vec(&json!({ "name": "tracedecay" })).unwrap(),
-            )
-            .unwrap();
-        }
-
-        install_cursor_plugin(home.path(), "tracedecay").expect("install should succeed");
-
-        assert!(
-            !retired.exists(),
-            "a manifest-owned superseded tracedecay sibling must be swept"
-        );
-        assert!(
-            foreign.exists(),
-            "an owned-looking sibling without an explicitly retired suffix must be preserved"
-        );
     }
 
     /// Upgrading over an install that shipped the `tracedecay-*` dispatcher

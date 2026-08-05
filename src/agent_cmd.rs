@@ -58,7 +58,6 @@ pub(crate) async fn handle_host_bundle_component_command(
             message: format!("could not resolve host lifecycle root: {error}"),
         })?;
     let mut user_config = tracedecay::user_config::UserConfig::load();
-    tracedecay::agents::migrate_installed_agents(&home, &mut user_config);
     let explicitly_scoped = agent.is_some();
     let agent_ids = match agent {
         Some(agent) => vec![agent],
@@ -797,6 +796,14 @@ fn apply_default_canonical_component_set(
         &lifecycle_root,
     )?;
     Ok(true)
+}
+
+/// `update-plugin` uses the component transaction only when that transaction
+/// owns every deployed asset without taking over a host-native plugin cache.
+/// Claude and Codex stage their source packages and defer the cache refresh to
+/// each host's CLI; Kimi's global plugin is interactive for the same reason.
+fn update_uses_component_transaction(agent_id: &str) -> bool {
+    matches!(agent_id, "cursor" | "opencode")
 }
 
 fn apply_project_local_component_set(
@@ -2736,16 +2743,10 @@ fn validate_codex_automation_project_path() -> tracedecay::errors::Result<PathBu
 
 async fn install_codex_daemon_automation(
     project_path: &Path,
-    home: &Path,
+    _home: &Path,
     options: CodexAutomationInstall,
 ) -> tracedecay::errors::Result<PathBuf> {
     let auto_apply = options.auto_apply;
-    if tracedecay::agents::codex::remove_legacy_codex_native_automation(home)? {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed the legacy Codex-native scheduled automation; the TraceDecay daemon loop replaces it."
-        );
-    }
-
     let dashboard_root = open_or_init_codex_daemon_automation_project(project_path).await?;
     let patch = AutomationConfigPatch {
         enabled: Some(true),
@@ -2841,63 +2842,6 @@ fn codex_daemon_interval_task(interval_secs: u64) -> AutomationTaskPatch {
         cooldown_secs: Some(Some(5 * 60)),
         ..AutomationTaskPatch::default()
     }
-}
-
-/// Moves provable historical Hermes-local session data before any install can
-/// remove its legacy project pin. Unresolved sources remain untouched and are
-/// reported without blocking the projectless user-profile integration. Read,
-/// integrity, or copy failures still block the cutover.
-pub(crate) async fn migrate_legacy_hermes_data(home: &Path) -> tracedecay::errors::Result<()> {
-    let report = tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await;
-    finish_legacy_hermes_migration(report)
-}
-
-/// Upgrade reinstalls share the same preservation policy while reusing any
-/// lifecycle authority already held by post-update maintenance.
-async fn migrate_legacy_hermes_data_for_reinstall(
-    home: &Path,
-    lifecycle: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
-) -> tracedecay::errors::Result<()> {
-    let report = if let Some(lifecycle) = lifecycle {
-        tracedecay::migrate::hermes::migrate_legacy_hermes_stores_under_lease(home, lifecycle).await
-    } else {
-        tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await
-    };
-    finish_legacy_hermes_migration(report)
-}
-
-fn finish_legacy_hermes_migration(
-    report: tracedecay::migrate::hermes::LegacyHermesMigrationReport,
-) -> tracedecay::errors::Result<()> {
-    for migration in report.migrated {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Migrated legacy Hermes session store {} -> {} ({} rows)",
-            migration.source_db.display(),
-            migration.target_project.display(),
-            migration.rows_copied
-        );
-    }
-    for issue in report.unresolved {
-        eprintln!(
-            "  \x1b[33mwarning:\x1b[0m preserving unresolved legacy Hermes session store {}: {}",
-            issue.source_db.display(),
-            issue.reason
-        );
-    }
-    if report.failed.is_empty() {
-        return Ok(());
-    }
-    let issues = report
-        .failed
-        .into_iter()
-        .map(|issue| format!("{}: {}", issue.source_db.display(), issue.reason))
-        .collect::<Vec<_>>()
-        .join("; ");
-    Err(tracedecay::errors::TraceDecayError::Config {
-        message: format!(
-            "legacy Hermes session data migration failed; source data and project pins were preserved: {issues}"
-        ),
-    })
 }
 
 fn print_legacy_install_guidance(agent_id: &str) {
@@ -3008,12 +2952,7 @@ pub(crate) async fn handle_install_command(
         return Ok(());
     }
 
-    if agent.as_deref() == Some("hermes") {
-        migrate_legacy_hermes_data(&home).await?;
-    }
-
     let mut user_cfg = tracedecay::user_config::UserConfig::load();
-    tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
 
     let mut installed_names: Vec<String> = Vec::new();
     let mut removed_names: Vec<String> = Vec::new();
@@ -3066,10 +3005,6 @@ pub(crate) async fn handle_install_command(
     } else {
         let (to_install, to_uninstall) =
             tracedecay::agents::pick_integrations_interactive(&home, &user_cfg.installed_agents)?;
-
-        if to_install.iter().any(|id| id == "hermes") {
-            migrate_legacy_hermes_data(&home).await?;
-        }
 
         for id in &to_uninstall {
             let ag = tracedecay::agents::get_integration(id)?;
@@ -3169,15 +3104,14 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
         }
     })?;
     let mut user_cfg = tracedecay::user_config::UserConfig::load();
-    tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
 
     if user_cfg.installed_agents.is_empty() {
         eprintln!("No installed agents found. Run `tracedecay install` first.");
     } else {
         // Drop tracked ids that no longer resolve to an integration (a release
         // renamed or removed one, or a typo landed in `installed_agents`).
-        // `migrate_installed_agents` only ADDS ids, so without this the stale
-        // id is retried forever. Mirrors `run_post_update_mutations`.
+        // Without this the stale id is retried forever. Mirrors
+        // `run_post_update_mutations`.
         let before = user_cfg.installed_agents.len();
         user_cfg
             .installed_agents
@@ -3233,12 +3167,13 @@ pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result
             message: "tracedecay not found on PATH".to_string(),
         }
     })?;
-    let mut user_cfg = tracedecay::user_config::UserConfig::load();
-    tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
+    let user_cfg = tracedecay::user_config::UserConfig::load();
     let project_path = std::env::current_dir().ok();
 
     for id in &user_cfg.installed_agents {
-        if apply_default_canonical_component_set(id, HostBundleCliOperation::Update, &home)? {
+        if update_uses_component_transaction(id)
+            && apply_default_canonical_component_set(id, HostBundleCliOperation::Update, &home)?
+        {
             continue;
         }
         let integration = tracedecay::agents::get_integration(id)?;
@@ -3299,9 +3234,7 @@ pub(crate) fn handle_reinstall_preflight_command() -> tracedecay::errors::Result
         .to_string_lossy()
         .into_owned();
     let user_config = tracedecay::user_config::UserConfig::load();
-    let mut agent_ids = user_config.installed_agents;
-    let additions = tracedecay::agents::detect_missing_installed_agents(&home, &agent_ids);
-    agent_ids.extend(additions);
+    let agent_ids = user_config.installed_agents;
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let health_context = tracedecay::agents::HealthcheckContext {
         home: home.clone(),
@@ -3461,18 +3394,14 @@ fn registration_state_label(
 /// removed it, or a typo landed in `installed_agents`) is SKIPPED, not failed:
 /// it is logged as a warning and left out of the returned results entirely.
 /// Gating version-marker advancement on such an id would wedge the reinstall
-/// loop forever — `migrate_installed_agents` only ever adds ids, never prunes,
-/// so a stale id would never resolve and the markers would never advance. Only
-/// genuine `install()` failures are reported as `Err` so they still gate
-/// markers. Unresolved legacy Hermes project evidence is preserved and warned
-/// during automated reinstall; actual source-integrity or copy failures still
-/// gate Hermes so corrupted or partially copied data cannot be hidden.
+/// loop forever. Only genuine `install()` failures are reported as `Err` so
+/// they still gate markers.
 pub(crate) async fn reinstall_agent_integrations(
     agent_ids: &[String],
     home: &Path,
     tracedecay_bin: &str,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
-    reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin, None).await
+    reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin).await
 }
 
 /// Reinstalls tracked integrations while reusing lifecycle authority already
@@ -3483,37 +3412,18 @@ pub(crate) async fn reinstall_agent_integrations_under_lease(
     tracedecay_bin: &str,
     lifecycle: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
-    reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin, Some(lifecycle)).await
+    let _ = lifecycle;
+    reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin).await
 }
 
 async fn reinstall_agent_integrations_with_lease(
     agent_ids: &[String],
     home: &Path,
     tracedecay_bin: &str,
-    lifecycle: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
     let project_path = std::env::current_dir().ok();
     let mut results = Vec::new();
-    let hermes_migration_error = if agent_ids.iter().any(|id| id == "hermes") {
-        migrate_legacy_hermes_data_for_reinstall(home, lifecycle)
-            .await
-            .err()
-            .map(|error| error.to_string())
-    } else {
-        None
-    };
     for id in agent_ids {
-        if id == "hermes"
-            && let Some(message) = hermes_migration_error.as_ref()
-        {
-            results.push((
-                id.clone(),
-                Err(tracedecay::errors::TraceDecayError::Config {
-                    message: message.clone(),
-                }),
-            ));
-            continue;
-        }
         let ag = match tracedecay::agents::get_integration(id) {
             Ok(ag) => ag,
             Err(_) => {
@@ -3578,13 +3488,6 @@ pub(crate) async fn handle_uninstall_command(
         }
     })?;
     let mut user_cfg = tracedecay::user_config::UserConfig::load();
-    tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
-
-    if agent.as_deref() == Some("hermes")
-        || (agent.is_none() && user_cfg.installed_agents.iter().any(|id| id == "hermes"))
-    {
-        migrate_legacy_hermes_data(&home).await?;
-    }
 
     if let Some(id) = agent {
         if !apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)? {
@@ -3642,18 +3545,16 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use tracedecay::agents::host_bundle_v2::{
-        CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
-        HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
-    };
-    use tracedecay::migrate::hermes::{LegacyHermesMigrationIssue, LegacyHermesMigrationReport};
-
     use super::{
         AgentReinstallOutcome, CompatibilityAgentRegistrationDelegate, HostBundleCliOperation,
         apply_canonical_component_set, apply_canonical_component_set_with_tracedecay_bin,
         broker_codex_daemon_automation_project, canonical_host_component_set,
         canonical_host_component_set_with_tracedecay_bin, component_set_request,
-        finish_legacy_hermes_migration, reinstall_agent_integrations,
+        reinstall_agent_integrations,
+    };
+    use tracedecay::agents::host_bundle_v2::{
+        CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
+        HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
     };
 
     const OPENCODE_UNRELATED_CONFIG: &[u8] = br#"{"lsp":{"other":{"command":["tracedecay","lsp","bridge","--stdio"]}},"unrelated":{"keep":true}}
@@ -4152,35 +4053,6 @@ mod tests {
         assert!(error.to_string().contains("daemon unavailable"));
         assert!(!resolved.load(Ordering::SeqCst));
         assert!(std::fs::read_dir(project.path()).unwrap().next().is_none());
-    }
-
-    #[test]
-    fn unresolved_legacy_store_is_preserved_without_gating_cutover() {
-        let report = LegacyHermesMigrationReport {
-            unresolved: vec![LegacyHermesMigrationIssue {
-                source_db: PathBuf::from("legacy-sessions.db"),
-                reason: "project evidence is unresolved".to_string(),
-            }],
-            ..LegacyHermesMigrationReport::default()
-        };
-
-        assert!(finish_legacy_hermes_migration(report).is_ok());
-    }
-
-    #[test]
-    fn legacy_store_failures_gate_cutover() {
-        let report = LegacyHermesMigrationReport {
-            failed: vec![LegacyHermesMigrationIssue {
-                source_db: PathBuf::from("legacy-sessions.db"),
-                reason: "integrity check failed".to_string(),
-            }],
-            ..LegacyHermesMigrationReport::default()
-        };
-
-        let error = finish_legacy_hermes_migration(report)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("integrity check failed"));
     }
 
     #[test]

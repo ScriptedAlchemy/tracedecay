@@ -378,33 +378,6 @@ fn deploy_refuses_to_replace_non_tracedecay_dir() {
     );
 }
 
-#[test]
-fn deploy_sweeps_owned_superseded_marketplace_siblings_only() {
-    let home = tempfile::tempdir().unwrap();
-    let marketplaces = home.path().join(".claude/plugins/marketplaces");
-    let retired = marketplaces.join("tracedecay.pre-v2-adopt");
-    let foreign = marketplaces.join("tracedecay.personal");
-    for dir in [&retired, &foreign] {
-        std::fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
-        std::fs::write(
-            dir.join(".claude-plugin/marketplace.json"),
-            serde_json::to_vec(&json!({ "name": "tracedecay" })).unwrap(),
-        )
-        .unwrap();
-    }
-
-    deploy_plugin_bundle(home.path(), "/bin/tracedecay").expect("deploy should succeed");
-
-    assert!(
-        !retired.exists(),
-        "a manifest-owned superseded marketplace must be swept"
-    );
-    assert!(
-        foreign.exists(),
-        "an owned-looking sibling without an explicitly retired suffix must be preserved"
-    );
-}
-
 /// Running install twice must yield byte-identical config files.
 #[test]
 fn install_is_idempotent() {

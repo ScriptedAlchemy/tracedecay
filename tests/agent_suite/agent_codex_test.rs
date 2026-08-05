@@ -9,10 +9,16 @@ use tracedecay::automation::managed_skills::{approve_managed_skill, create_manag
 use tracedecay::config::USER_DATA_DIR_ENV;
 
 #[test]
-fn test_codex_install_creates_plugin_bundle_and_marketplace() {
+fn test_codex_install_stages_source_and_preserves_host_native_state() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let config_path = home.join(".codex/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, "model = \"user-choice\"\n").unwrap();
+    let cache_path = home.join(".codex/plugins/cache/personal/tracedecay/1/user-cache.txt");
+    std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+    std::fs::write(&cache_path, "native cache bytes\n").unwrap();
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
 
@@ -25,19 +31,13 @@ fn test_codex_install_creates_plugin_bundle_and_marketplace() {
     );
     assert_codex_personal_marketplace_entry(home);
 
-    // Global Codex install auto-trusts the bundled lifecycle hooks by writing
-    // their content hashes into ~/.codex/config.toml, so Codex runs them without
-    // a manual /hooks approval. The MCP server itself still comes from the
-    // plugin bundle, not config.toml.
-    let config = std::fs::read_to_string(home.join(".codex/config.toml"))
-        .expect("global Codex install should record hook trust in config.toml");
-    assert!(
-        config.contains("tracedecay@personal:hooks/hooks.json:") && config.contains("trusted_hash"),
-        "global Codex install should record tracedecay hook trust entries, got:\n{config}"
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        "model = \"user-choice\"\n"
     );
-    assert!(
-        !config.contains("[mcp_servers.tracedecay]"),
-        "global Codex install should not register the MCP server in config.toml"
+    assert_eq!(
+        std::fs::read_to_string(&cache_path).unwrap(),
+        "native cache bytes\n"
     );
     assert!(
         !home.join(".codex/hooks.json").exists(),
@@ -76,12 +76,6 @@ async fn test_codex_install_exports_active_managed_skills() {
     assert!(skill.contains("description:"));
     assert!(!skill.contains("id: repo-hygiene"));
     assert!(skill.contains("Use Repo Hygiene for repeated workflows."));
-    assert!(
-        home.join(".codex/agents/tracedecay-code-explorer.toml")
-            .is_file(),
-        "Codex install should write TraceDecay custom agents to ~/.codex/agents"
-    );
-
     let digest_skill_path =
         codex_plugin_install_dir(home).join("skills/agent-managed-memory/SKILL.md");
     assert!(
@@ -140,72 +134,6 @@ async fn test_codex_shareable_plugin_artifact_exports_bundle_and_managed_skills(
 }
 
 #[test]
-fn test_codex_install_refreshes_existing_cache_and_keeps_bootstrap_source_listable() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-    let _agent_env = crate::common::AgentEnvLock::pin(home);
-    let ctx = make_install_ctx(home);
-    let stale_plugin_dir = codex_stale_cached_plugin_install_dir(home);
-    write_codex_plugin_manifest(&stale_plugin_dir, "0.0.0");
-
-    let bootstrap_dir = codex_plugin_install_dir(home);
-    write_codex_plugin_manifest(&bootstrap_dir, "0.0.0");
-    write_stale_codex_skill(&bootstrap_dir);
-    write_codex_personal_marketplace(home, "personal", "Personal");
-
-    CodexIntegration.install(&ctx).unwrap();
-
-    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
-    assert_codex_plugin_bundle(
-        &cached_plugin_dir,
-        &ctx.tracedecay_bin,
-        serde_json::json!(["serve"]),
-        true,
-    );
-    assert_codex_plugin_bundle(
-        &bootstrap_dir,
-        &ctx.tracedecay_bin,
-        serde_json::json!(["serve"]),
-        true,
-    );
-    assert!(
-        !bootstrap_dir.join("skills/stale-skill/SKILL.md").exists(),
-        "global Codex install should refresh the bootstrap source so plugin list/add sees current skills"
-    );
-    assert!(
-        !stale_plugin_dir.exists(),
-        "global Codex install should migrate managed cache installs to the current plugin version"
-    );
-    assert_codex_personal_marketplace_entry(home);
-}
-
-#[test]
-fn test_codex_install_migrates_legacy_caveman_home_cache_and_marketplace() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-    let ctx = make_install_ctx(home);
-    let legacy_plugin_dir = codex_legacy_cached_plugin_install_dir(home);
-    write_codex_plugin_manifest(&legacy_plugin_dir, "0.0.0");
-    write_stale_codex_skill(&legacy_plugin_dir);
-    write_codex_personal_marketplace(home, "caveman-home", "Caveman Home");
-
-    CodexIntegration.install(&ctx).unwrap();
-
-    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
-    assert_codex_plugin_bundle(
-        &cached_plugin_dir,
-        &ctx.tracedecay_bin,
-        serde_json::json!(["serve"]),
-        true,
-    );
-    assert!(
-        !legacy_plugin_dir.exists(),
-        "global Codex install should migrate legacy caveman-home cache installs to personal"
-    );
-    assert_codex_personal_marketplace_entry(home);
-}
-
-#[test]
 fn test_codex_install_preserves_existing_marketplace_identity() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
@@ -223,98 +151,28 @@ fn test_codex_install_preserves_existing_marketplace_identity() {
 }
 
 #[test]
-fn test_codex_install_refreshes_existing_cache_and_prunes_stale_skills() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-    let _agent_env = crate::common::AgentEnvLock::pin(home);
-    let ctx = make_install_ctx(home);
-    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
-    let bootstrap_dir = codex_plugin_install_dir(home);
-    write_codex_plugin_manifest(&cached_plugin_dir, "0.0.0");
-    write_stale_codex_skill(&cached_plugin_dir);
-    std::fs::write(cached_plugin_dir.join("user-note.txt"), "mine\n").unwrap();
-
-    CodexIntegration.install(&ctx).unwrap();
-
-    assert_codex_plugin_bundle(
-        &cached_plugin_dir,
-        &ctx.tracedecay_bin,
-        serde_json::json!(["serve"]),
-        true,
-    );
-    assert_codex_plugin_bundle(
-        &bootstrap_dir,
-        &ctx.tracedecay_bin,
-        serde_json::json!(["serve"]),
-        true,
-    );
-    assert!(
-        !cached_plugin_dir
-            .join("skills/stale-skill/SKILL.md")
-            .exists(),
-        "refreshing an installed Codex plugin cache must prune obsolete managed skills"
-    );
-    assert_eq!(
-        std::fs::read_to_string(cached_plugin_dir.join("user-note.txt")).unwrap(),
-        "mine\n",
-        "refresh should preserve unmanaged root-level user files"
-    );
-    assert_codex_personal_marketplace_entry(home);
-}
-
-#[test]
-fn test_codex_install_sweeps_legacy_global_config() {
+fn test_codex_install_preserves_existing_global_codex_files() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let _agent_env = crate::common::AgentEnvLock::pin(home);
     let codex_dir = home.join(".codex");
     std::fs::create_dir_all(&codex_dir).unwrap();
-    std::fs::write(
-        codex_dir.join("config.toml"),
-        "[mcp_servers.tracedecay]\ncommand = \"/old/tracedecay\"\nargs = [\"serve\"]\n",
-    )
-    .unwrap();
-    std::fs::write(
-        codex_dir.join("hooks.json"),
-        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/old/tracedecay hook-codex-session-start","timeout":5}]}]}}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        codex_dir.join("AGENTS.md"),
-        "## Prefer tracedecay MCP tools\n\nUse tracedecay.\n",
-    )
-    .unwrap();
+    let config_path = codex_dir.join("config.toml");
+    let hooks_path = codex_dir.join("hooks.json");
+    let agents_path = codex_dir.join("AGENTS.md");
+    let config = "[mcp_servers.tracedecay]\ncommand = \"/old/tracedecay\"\nargs = [\"serve\"]\n";
+    let hooks = r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/old/tracedecay hook-codex-session-start","timeout":5}]}]}}"#;
+    let agents = "## Prefer tracedecay MCP tools\n\nUse tracedecay.\n";
+    std::fs::write(&config_path, config).unwrap();
+    std::fs::write(&hooks_path, hooks).unwrap();
+    std::fs::write(&agents_path, agents).unwrap();
 
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
 
-    // The legacy MCP registration is swept, and the installer records hook
-    // trust in its place — so config.toml survives with only [hooks.state].
-    let migrated: toml::Value =
-        toml::from_str(&std::fs::read_to_string(codex_dir.join("config.toml")).unwrap()).unwrap();
-    assert!(
-        migrated
-            .get("mcp_servers")
-            .and_then(|servers| servers.get("tracedecay"))
-            .is_none(),
-        "legacy global Codex MCP config should be removed when it only contained tracedecay"
-    );
-    assert!(
-        migrated["hooks"]["state"]
-            .as_table()
-            .unwrap()
-            .keys()
-            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
-        "install should record tracedecay hook trust in config.toml"
-    );
-    assert!(
-        !codex_dir.join("hooks.json").exists(),
-        "legacy global Codex hooks should be removed when they only contained tracedecay"
-    );
-    assert!(
-        !codex_dir.join("AGENTS.md").exists(),
-        "legacy global Codex prompt rules should be removed when they only contained tracedecay"
-    );
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), config);
+    assert_eq!(std::fs::read_to_string(hooks_path).unwrap(), hooks);
+    assert_eq!(std::fs::read_to_string(agents_path).unwrap(), agents);
     assert_codex_plugin_bundle(
         &codex_plugin_install_dir(home),
         &ctx.tracedecay_bin,
@@ -357,10 +215,11 @@ fn test_codex_local_install_creates_repo_plugin_bundle_and_marketplace() {
         "local Codex install should use plugin skills, not write project AGENTS.md"
     );
     assert!(
-        home.path()
+        !home
+            .path()
             .join(".codex/agents/tracedecay-code-explorer.toml")
-            .is_file(),
-        "local Codex install must materialize managed agents in the user profile"
+            .exists(),
+        "local Codex install must not write native Codex agent configuration"
     );
     assert!(
         home.path().join(".codex/agents/user-agent.toml").is_file(),
@@ -395,32 +254,22 @@ fn test_codex_local_install_does_not_export_personal_memory_digest_into_repo() {
 }
 
 #[test]
-fn test_codex_local_install_sweeps_legacy_project_config() {
+fn test_codex_local_install_preserves_existing_project_codex_files() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let codex_dir = project.path().join(".codex");
     std::fs::create_dir_all(&codex_dir).unwrap();
-    std::fs::write(
-        codex_dir.join("config.toml"),
-        "[mcp_servers.tracedecay]\ncommand = \"/old/tracedecay\"\nargs = [\"serve\", \"--path\", \".\"]\n",
-    )
-    .unwrap();
-    std::fs::write(
-        codex_dir.join("hooks.json"),
-        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-pre-tool-use","timeout":5}]}],"PostToolUse":[{"matcher":"Bash|apply_patch","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-post-tool-use","timeout":60}]}]}}"#,
-    )
-    .unwrap();
+    let config_path = codex_dir.join("config.toml");
+    let hooks_path = codex_dir.join("hooks.json");
+    let config = "[mcp_servers.tracedecay]\ncommand = \"/old/tracedecay\"\nargs = [\"serve\", \"--path\", \".\"]\n";
+    let hooks = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-pre-tool-use","timeout":5}]}],"PostToolUse":[{"matcher":"Bash|apply_patch","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-post-tool-use","timeout":60}]}]}}"#;
+    std::fs::write(&config_path, config).unwrap();
+    std::fs::write(&hooks_path, hooks).unwrap();
 
     assert_local_install_success("codex", project.path(), home.path());
 
-    assert!(
-        !codex_dir.join("config.toml").exists(),
-        "legacy project Codex MCP config should be removed when it only contained tracedecay"
-    );
-    assert!(
-        !codex_dir.join("hooks.json").exists(),
-        "legacy project Codex hooks should be removed when they only contained tracedecay"
-    );
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), config);
+    assert_eq!(std::fs::read_to_string(hooks_path).unwrap(), hooks);
     assert_codex_plugin_bundle(
         &codex_project_plugin_install_dir(project.path()),
         &expected_tracedecay_bin(),
@@ -506,7 +355,7 @@ fn test_codex_install_reconciles_hooks_idempotently() {
 }
 
 #[test]
-fn test_codex_uninstall_removes_plugin_hooks() {
+fn test_codex_global_uninstall_defers_to_native_cli_without_tearing_down_source() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let _agent_env = crate::common::AgentEnvLock::pin(home);
@@ -516,115 +365,16 @@ fn test_codex_uninstall_removes_plugin_hooks() {
     let hooks_path = codex_plugin_install_dir(home).join("hooks/hooks.json");
     assert!(hooks_path.exists());
 
-    CodexIntegration.uninstall(&ctx).unwrap();
-
+    let error = CodexIntegration.uninstall(&ctx).unwrap_err().to_string();
+    assert!(error.contains("codex plugin remove tracedecay@personal"));
     assert!(
-        !hooks_path.exists(),
-        "uninstall should remove tracedecay Codex plugin hooks with the plugin bundle"
-    );
-}
-
-#[test]
-fn test_codex_install_then_uninstall() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-    let _agent_env = crate::common::AgentEnvLock::pin(home);
-    let ctx = make_install_ctx(home);
-
-    CodexIntegration.install(&ctx).unwrap();
-    let plugin_dir = codex_plugin_install_dir(home);
-    assert!(plugin_dir.exists());
-    assert_codex_personal_marketplace_entry(home);
-    let legacy_digest = plugin_dir.join("skills/agent-managed-memory/SKILL.md");
-    std::fs::create_dir_all(legacy_digest.parent().unwrap()).unwrap();
-    std::fs::write(&legacy_digest, "legacy digest").unwrap();
-    seed_memory_digest_target(
-        &home.join(".tracedecay"),
-        tracedecay::automation::skill_targets::SkillInstallTarget::Codex,
-        &plugin_dir,
-    );
-
-    CodexIntegration.uninstall(&ctx).unwrap();
-
-    assert!(
-        !plugin_dir.exists(),
-        "Codex plugin bundle should be removed on uninstall"
-    );
-    let marketplace = read_json(&codex_personal_marketplace_path(home));
-    assert!(
-        marketplace["plugins"]
-            .as_array()
-            .is_none_or(|plugins| plugins.iter().all(|entry| entry["name"] != "tracedecay")),
-        "Codex marketplace entry should be removed on uninstall"
-    );
-
-    let agents_md = home.join(".codex/AGENTS.md");
-    if agents_md.exists() {
-        let content = std::fs::read_to_string(&agents_md).unwrap();
-        assert!(
-            !content.contains("## Prefer tracedecay MCP tools"),
-            "AGENTS.md should not have tracedecay rules after uninstall"
-        );
-    }
-
-    std::fs::create_dir_all(&plugin_dir).unwrap();
-    tracedecay::automation::memory_digest::export_memory_digest_to_recorded_targets(
-        &home.join(".tracedecay"),
-    )
-    .unwrap();
-    assert!(
-        !plugin_dir
-            .join("skills/agent-managed-memory/SKILL.md")
-            .exists(),
-        "Codex uninstall must unrecord memory digest targets so refresh cannot recreate them"
-    );
-}
-
-#[test]
-fn test_codex_local_uninstall_unrecords_legacy_repo_memory_digest_target() {
-    let _env_lock = AGENT_ENV_LOCK.blocking_lock();
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let mut ctx = make_install_ctx(home.path());
-    ctx.project_root = Some(project.path().to_path_buf());
-    let profile_root = home.path().join(".tracedecay");
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-
-    CodexIntegration
-        .install_local(&ctx, project.path())
-        .unwrap();
-
-    let plugin_dir = codex_project_plugin_install_dir(project.path());
-    let legacy_digest = plugin_dir.join("skills/agent-managed-memory/SKILL.md");
-    std::fs::create_dir_all(legacy_digest.parent().unwrap()).unwrap();
-    std::fs::write(&legacy_digest, "legacy digest").unwrap();
-    seed_memory_digest_target(
-        &profile_root,
-        tracedecay::automation::skill_targets::SkillInstallTarget::Codex,
-        &plugin_dir,
-    );
-    assert!(legacy_digest.exists());
-
-    CodexIntegration.uninstall(&ctx).unwrap();
-
-    std::fs::create_dir_all(&plugin_dir).unwrap();
-    tracedecay::automation::memory_digest::export_memory_digest_to_recorded_targets(&profile_root)
-        .unwrap();
-    assert!(
-        !plugin_dir
-            .join("skills/agent-managed-memory/SKILL.md")
-            .exists(),
-        "project-local Codex uninstall must unrecord legacy repo-tree memory digest targets"
+        hooks_path.exists(),
+        "global uninstall must not remove source until Codex has removed its native plugin"
     );
 }
 
 #[test]
 fn test_codex_install_preserves_existing_config() {
-    // Regression test for issue #63: installing tracedecay used to wipe out the
-    // entire ~/.codex/config.toml. The installer now records hook trust in
-    // config.toml, so it must add only its [hooks.state] entries while
-    // preserving every unrelated key the user already had, and back the file up
-    // first (issue #63) before rewriting it.
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let _agent_env = crate::common::AgentEnvLock::pin(home);
@@ -643,30 +393,8 @@ args = [\"--flag\"]
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
 
-    let updated: toml::Value =
-        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    // Unrelated user content survives untouched.
-    assert_eq!(updated["model"].as_str().unwrap(), "o4-mini");
-    assert_eq!(updated["approval_policy"].as_str().unwrap(), "on-failure");
-    assert_eq!(
-        updated["mcp_servers"]["other"]["command"].as_str().unwrap(),
-        "other-bin"
-    );
-    // Hook trust entries were added for the personal plugin bundle.
-    assert!(
-        updated["hooks"]["state"]
-            .as_table()
-            .unwrap()
-            .keys()
-            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
-        "install should record tracedecay hook trust entries"
-    );
-    // Issue #63: the pre-existing config is backed up before the rewrite.
-    assert_eq!(
-        std::fs::read_to_string(home.join(".codex/config.toml.bak")).unwrap(),
-        original,
-        "install should back up the original config before rewriting it"
-    );
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+    assert!(!home.join(".codex/config.toml.bak").exists());
     assert_codex_plugin_bundle(
         &codex_plugin_install_dir(home),
         &ctx.tracedecay_bin,
