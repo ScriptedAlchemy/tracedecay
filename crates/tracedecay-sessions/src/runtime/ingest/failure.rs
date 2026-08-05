@@ -5,6 +5,7 @@ use crate::{
 use serde::Serialize;
 use tracedecay_domain::ObservationSourceRangeV1;
 
+use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{claude_observation, source};
 
@@ -92,6 +93,32 @@ impl ProviderRunFailure for TranscriptCatchUpFailure {
 
 pub(super) type ProviderRunOutcome = GenericProviderRunOutcome<TranscriptCatchUpFailure>;
 pub(super) type ProviderRunFold = GenericProviderRunFold<TranscriptCatchUpFailure>;
+
+/// Converts operation cancellation into provider-loop control termination.
+///
+/// Callers must branch on this before warning, recording a source failure, or
+/// publishing provider coverage.
+pub(super) fn cancelled_provider_outcome(
+    error: Option<&source::TranscriptIngestError>,
+    cancellation: &ObservationCancellation,
+) -> Option<ProviderRunOutcome> {
+    (cancellation.is_cancelled() || error.is_some_and(source::TranscriptIngestError::is_cancelled))
+        .then(ProviderRunOutcome::skipped)
+}
+
+pub(super) fn cancelled_claude_provider_outcome(
+    error: &claude_observation::ClaudeObservationIngestError,
+    cancellation: &ObservationCancellation,
+) -> Option<ProviderRunOutcome> {
+    use claude_observation::ClaudeObservationIngestError as Ingest;
+
+    let typed_cancellation = match error {
+        Ingest::Application(crate::observation::ObservationApplicationError::Cancelled) => true,
+        Ingest::Transcript(error) => error.is_cancelled(),
+        _ => false,
+    };
+    (cancellation.is_cancelled() || typed_cancellation).then(ProviderRunOutcome::skipped)
+}
 
 /// Hard limits for one multi-source ingest pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,6 +296,7 @@ pub fn classify_transcript_ingest_failure(
     }
 
     let (reason_code, retryable) = match error {
+        source::TranscriptIngestError::Cancelled { .. } => ("ingest_pass_cancelled", true),
         source::TranscriptIngestError::Store(TranscriptStoreError::Conflict { .. }) => {
             ("transcript_cursor_conflict", true)
         }
@@ -307,6 +335,67 @@ pub fn classify_transcript_ingest_failure(
         }
     };
     TranscriptCatchUpFailure::new(provider, source, reason_code, retryable)
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use tracedecay_store::TranscriptStoreError;
+
+    use super::*;
+
+    #[test]
+    fn typed_cancellation_is_control_termination_without_source_failure() {
+        let cancellation = ObservationCancellation::default();
+        let error = source::TranscriptIngestError::Cancelled { provider: "test" };
+
+        let outcome = cancelled_provider_outcome(Some(&error), &cancellation)
+            .expect("typed cancellation must terminate provider control flow");
+
+        assert!(outcome.failures.is_empty());
+        assert_eq!(outcome.stats, TranscriptIngestStats::default());
+        assert_eq!(outcome.bytes_consumed, 0);
+        assert_eq!(outcome.deferred_units, 0);
+    }
+
+    #[test]
+    fn typed_claude_cancellation_is_control_termination_without_source_failure() {
+        let cancellation = ObservationCancellation::default();
+        let error = claude_observation::ClaudeObservationIngestError::Application(
+            crate::observation::ObservationApplicationError::Cancelled,
+        );
+
+        let outcome = cancelled_claude_provider_outcome(&error, &cancellation)
+            .expect("typed Claude cancellation must terminate provider control flow");
+
+        assert!(outcome.failures.is_empty());
+        assert_eq!(outcome.stats, TranscriptIngestStats::default());
+    }
+
+    #[test]
+    fn cancellation_token_supersedes_concurrent_storage_failure() {
+        let cancellation = ObservationCancellation::default();
+        cancellation.cancel();
+        let error = source::TranscriptIngestError::Store(TranscriptStoreError::Storage {
+            operation: "test",
+            source: Box::new(std::io::Error::other("test storage failure")),
+        });
+
+        let outcome = cancelled_provider_outcome(Some(&error), &cancellation)
+            .expect("active cancellation must terminate provider control flow");
+
+        assert!(outcome.failures.is_empty());
+    }
+
+    #[test]
+    fn storage_failure_without_cancellation_remains_a_source_failure() {
+        let cancellation = ObservationCancellation::default();
+        let error = source::TranscriptIngestError::Store(TranscriptStoreError::Storage {
+            operation: "test",
+            source: Box::new(std::io::Error::other("test storage failure")),
+        });
+
+        assert!(cancelled_provider_outcome(Some(&error), &cancellation).is_none());
+    }
 }
 
 fn non_durable_reason_code(reason: &'static str) -> &'static str {

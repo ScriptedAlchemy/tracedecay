@@ -12,8 +12,9 @@ use crate::runtime::{
 };
 
 use super::failure::{
-    ProviderRunOutcome, TranscriptCatchUpFailure, classify_transcript_ingest_failure,
-    claude_catch_up_failure, warn_transcript_catch_up_failure,
+    ProviderRunOutcome, TranscriptCatchUpFailure, cancelled_claude_provider_outcome,
+    cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
+    warn_transcript_catch_up_failure,
 };
 use super::user::{
     try_ingest_user_codex_sessions_with_db_bounded, try_ingest_user_cursor_sessions_with_db_bounded,
@@ -53,6 +54,9 @@ struct UserProviderUnit<'a, S> {
 
 impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
     async fn run(self) -> ProviderRunOutcome {
+        if self.cancellation.is_cancelled() {
+            return ProviderRunOutcome::skipped();
+        }
         match self.candidate {
             SessionProvider::Codex => self.run_codex().await,
             SessionProvider::Cursor => self.run_cursor().await,
@@ -84,15 +88,21 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap,
             ),
-            Err(error) => ProviderRunOutcome::failed(
-                warn_transcript_catch_up_failure(
-                    "codex",
-                    "observation",
-                    &error,
-                    "Codex transcript catch-up failed",
-                ),
-                self.max_new_bytes,
-            ),
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
+                ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "codex",
+                        "observation",
+                        &error,
+                        "Codex transcript catch-up failed",
+                    ),
+                    self.max_new_bytes,
+                )
+            }
         }
     }
 
@@ -110,15 +120,21 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap,
             ),
-            Err(error) => ProviderRunOutcome::failed(
-                warn_transcript_catch_up_failure(
-                    "cursor",
-                    "observation",
-                    &error,
-                    "Cursor transcript catch-up failed",
-                ),
-                self.max_new_bytes,
-            ),
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
+                ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "cursor",
+                        "observation",
+                        &error,
+                        "Cursor transcript catch-up failed",
+                    ),
+                    self.max_new_bytes,
+                )
+            }
         }
     }
 
@@ -155,6 +171,11 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                     || observation_stats.source_bytes_scanned > self.max_new_bytes,
             ),
             Err(error) => {
+                if let Some(cancelled) =
+                    cancelled_claude_provider_outcome(&error, self.cancellation)
+                {
+                    return cancelled;
+                }
                 let failure = claude_catch_up_failure("observation", &error);
                 tracing::warn!(
                     reason_code = failure.reason_code,
@@ -186,15 +207,21 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap,
             ),
-            Err(error) => ProviderRunOutcome::failed(
-                warn_transcript_catch_up_failure(
-                    "kiro",
-                    "observation",
-                    &error,
-                    "user Kiro observation catch-up failed",
-                ),
-                self.max_new_bytes,
-            ),
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
+                ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "kiro",
+                        "observation",
+                        &error,
+                        "user Kiro observation catch-up failed",
+                    ),
+                    self.max_new_bytes,
+                )
+            }
         }
     }
 
@@ -225,6 +252,10 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 run
             }
             Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
                 let mut run = ProviderRunOutcome::failed(
                     warn_transcript_catch_up_failure(
                         "kimi",
@@ -285,6 +316,10 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 run
             }
             Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
                 let mut run = ProviderRunOutcome::failed(
                     warn_transcript_catch_up_failure(
                         "opencode",
@@ -342,6 +377,10 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.deferred_by_byte_cap,
             ),
             Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
                 let failure =
                     classify_transcript_ingest_failure(self.candidate.id(), "observation", &error);
                 tracing::warn!(
@@ -375,15 +414,21 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.bytes_consumed,
                 outcome.deferred,
             ),
-            Err(error) => ProviderRunOutcome::failed(
-                warn_transcript_catch_up_failure(
-                    "vibe",
-                    "observation",
-                    &error,
-                    "user Vibe observation catch-up failed",
-                ),
-                self.max_new_bytes,
-            ),
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
+                ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "vibe",
+                        "observation",
+                        &error,
+                        "user Vibe observation catch-up failed",
+                    ),
+                    self.max_new_bytes,
+                )
+            }
         }
     }
 }

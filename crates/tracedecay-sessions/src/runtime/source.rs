@@ -102,6 +102,8 @@ pub(super) async fn persist_host_provider_coverage(
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TranscriptIngestError {
+    #[error("{provider} transcript ingestion was cancelled")]
+    Cancelled { provider: &'static str },
     #[error(transparent)]
     Store(#[from] TranscriptStoreError),
     #[error("transcript scan failed to {operation} {path}")]
@@ -140,6 +142,10 @@ pub enum TranscriptIngestError {
 }
 
 impl TranscriptIngestError {
+    pub const fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled { .. })
+    }
+
     fn scan_io(operation: &'static str, path: &Path, source: std::io::Error) -> Self {
         Self::ScanIo {
             operation,
