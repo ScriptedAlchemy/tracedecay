@@ -513,14 +513,16 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         message_id: &str,
     ) -> crate::errors::Result<Option<crate::sessions::lcm::LcmRawMessage>> {
-        Ok(self
-            .project_database_for_test()?
-            .lcm_load_raw_message(provider, message_id)
-            .await
-            .map_err(|error| crate::errors::TraceDecayError::Database {
-                operation: "read project LCM raw message fixture".to_owned(),
-                message: error.to_string(),
-            })?)
+        let database = self.project_database_for_test()?;
+        let snapshot = database.read_snapshot().await?;
+        Ok(
+            crate::sessions::lcm::schema::load_raw_message(&snapshot, provider, message_id)
+                .await
+                .map_err(|error| crate::errors::TraceDecayError::Database {
+                    operation: "read project LCM raw message fixture".to_owned(),
+                    message: error.to_string(),
+                })?,
+        )
     }
 
     /// Live `lcm_raw_messages` store ids for one provider session, in store order.

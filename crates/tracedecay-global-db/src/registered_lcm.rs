@@ -13,11 +13,11 @@ use tracedecay_sessions::runtime::{
         LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
         LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
         LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-        LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRecentSession,
-        LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
-        LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmSummaryExpansion, LcmSummaryNode,
-        LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
-        compression, dag, doctor, gc, payload, query, raw, schema,
+        LcmPreflightRequest, LcmPreflightResponse, LcmRecentSession, LcmSessionBoundaryRequest,
+        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
+        LcmStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
+        LcmSummarySourceMessage, LcmSummarySourceRange, compression, dag, doctor, gc, payload,
+        query, raw, schema,
     },
 };
 
@@ -260,15 +260,6 @@ impl RegisteredGlobalDb {
     ) -> Result<LcmSessionReplaySlice, LcmError> {
         let snapshot = self.read_snapshot().await?;
         query::session_replay_slice(&snapshot, request).await
-    }
-
-    pub async fn lcm_load_raw_message(
-        &self,
-        provider: &str,
-        message_id: &str,
-    ) -> Result<Option<LcmRawMessage>, LcmError> {
-        let snapshot = self.read_snapshot().await?;
-        schema::load_raw_message(&snapshot, provider, message_id).await
     }
 
     /// Resolves only the persisted locator for admission and readiness checks.
