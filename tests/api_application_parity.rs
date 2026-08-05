@@ -484,8 +484,8 @@ fn git_requests() -> (ApplicationSurfaceRequest, ApplicationSurfaceRequest) {
     )
     .expect("native repository snapshot");
     let identity = GitCommitIdentityV1 {
-        name: "PR12 Fixture".to_owned(),
-        email: "pr12-fixture@example.com".to_owned(),
+        name: "Application Fixture".to_owned(),
+        email: "application-fixture@example.com".to_owned(),
         at: UtcMicros(1_000_000),
     };
     let commit_intent = GitIndexCommitIntentV1::new(

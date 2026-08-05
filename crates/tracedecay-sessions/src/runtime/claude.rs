@@ -486,7 +486,13 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
     let sanitize = tracedecay_runtime_core::privacy::sanitize_provider_metadata_text;
     let retain_identifier = |value: Option<String>| {
         value.and_then(|value| {
-            (sanitize(&value).as_deref() == Some(value.as_str())).then_some(value)
+            // The structural pass may already have replaced a credential
+            // before this identifier-specific check. A redaction marker is
+            // safe display text, but it is not authoritative provider
+            // identity and must not become a durable relationship key.
+            (sanitize(&value).as_deref() == Some(value.as_str())
+                && !value.contains("[TraceDecay redacted:"))
+            .then_some(value)
         })
     };
 
@@ -516,7 +522,10 @@ fn read_subagent_meta(transcript_path: &Path) -> ClaudeSubagentMeta {
     else {
         return ClaudeSubagentMeta::default();
     };
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+    let Some(value) = tracedecay_runtime_core::privacy::sanitize_provider_metadata_json(
+        &text,
+        MAX_SNAPSHOT_METADATA_BYTES,
+    ) else {
         return ClaudeSubagentMeta::default();
     };
     let string_field = |key: &str| {

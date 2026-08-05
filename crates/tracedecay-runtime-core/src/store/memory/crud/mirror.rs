@@ -30,7 +30,9 @@ use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use crate::memory::encoding::HolographicEncoder;
 use crate::memory::entities::normalize_entity;
-use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
+use crate::privacy::{
+    MemoryFactSanitizationV1, sanitize_memory_fact_payload, verify_memory_fact_sanitization,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -38,7 +40,7 @@ use tracedecay_domain::{
     ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactId,
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1,
     FactOwnerV1, FactPayloadV1, LegacyFactMappingV1, LocatorDigest, PayloadAccessState,
-    RetentionClass, SanitizerDispositionV1, UtcMicros,
+    RetentionClass, SanitizationReceiptV1, SanitizerDispositionV1, UtcMicros,
 };
 use tracedecay_store::{
     CompatibilityFactContentDigestQueryV1, CompatibilityFactHistoryQueryV1,
@@ -329,17 +331,52 @@ pub(in crate::store::memory) fn compatibility_sanitize_payload(
     metadata: &Value,
 ) -> FactStoreResult<Option<CompatibilitySanitizedPayload>> {
     let metadata = compatibility_payload_metadata(metadata);
-    let sanitized = sanitize_memory_fact_payload(json!({
+    let sanitized = sanitize_memory_fact_payload(compatibility_payload_material(
+        content, category, tags, entities, &metadata,
+    ))
+    .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+    let MemoryFactSanitizationV1::Durable { payload, receipt } = sanitized else {
+        return Ok(None);
+    };
+    compatibility_payload_from_parts(payload, category, receipt).map(Some)
+}
+
+pub(in crate::store::memory) fn compatibility_verified_payload(
+    content: &str,
+    category: FactCategoryV1,
+    tags: &[String],
+    entities: &[String],
+    metadata: &Value,
+    receipt: SanitizationReceiptV1,
+) -> FactStoreResult<CompatibilitySanitizedPayload> {
+    let metadata = compatibility_payload_metadata(metadata);
+    let payload = compatibility_payload_material(content, category, tags, entities, &metadata);
+    verify_memory_fact_sanitization(&payload, &receipt)
+        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+    compatibility_payload_from_parts(payload, category, receipt)
+}
+
+fn compatibility_payload_material(
+    content: &str,
+    category: FactCategoryV1,
+    tags: &[String],
+    entities: &[String],
+    metadata: &Value,
+) -> Value {
+    json!({
         "content": content,
         "category": compatibility_category_label(category),
         "tags": tags,
         "entities": entities,
         "metadata": metadata,
-    }))
-    .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-    let MemoryFactSanitizationV1::Durable { payload, receipt } = sanitized else {
-        return Ok(None);
-    };
+    })
+}
+
+fn compatibility_payload_from_parts(
+    payload: Value,
+    category: FactCategoryV1,
+    receipt: SanitizationReceiptV1,
+) -> FactStoreResult<CompatibilitySanitizedPayload> {
     let content = payload
         .get("content")
         .and_then(Value::as_str)
@@ -390,10 +427,10 @@ pub(in crate::store::memory) fn compatibility_sanitize_payload(
             ));
         }
     };
-    Ok(Some(CompatibilitySanitizedPayload {
+    Ok(CompatibilitySanitizedPayload {
         payload: fact_payload,
         access,
-    }))
+    })
 }
 
 pub(in crate::store::memory) fn compatibility_mirror_vector(

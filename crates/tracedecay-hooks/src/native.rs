@@ -164,6 +164,8 @@ pub enum NativeHookDecodeError {
     PayloadTooLarge,
     #[error("native hook payload is malformed")]
     MalformedPayload,
+    #[error("native hook payload exceeds structural limits")]
+    StructureLimit,
     #[error("native hook event is not a checked-in supported event")]
     UnsupportedNativeEvent,
     #[error("native hook event is missing a required typed identity")]
@@ -233,6 +235,9 @@ pub fn decode_opencode_lsp_event(
 }
 
 fn parse_native_payload(payload: &[u8]) -> Result<Value, NativeHookDecodeError> {
+    const MAX_NATIVE_DEPTH: usize = 32;
+    const MAX_NATIVE_VALUES: usize = 2_048;
+
     if payload.len() > MAX_HOOK_PAYLOAD_BYTES {
         return Err(NativeHookDecodeError::PayloadTooLarge);
     }
@@ -240,6 +245,27 @@ fn parse_native_payload(payload: &[u8]) -> Result<Value, NativeHookDecodeError> 
         serde_json::from_slice(payload).map_err(|_| NativeHookDecodeError::MalformedPayload)?;
     if !raw.is_object() {
         return Err(NativeHookDecodeError::MalformedPayload);
+    }
+    let mut values = 0usize;
+    let mut pending = vec![(&raw, 0usize)];
+    while let Some((value, depth)) = pending.pop() {
+        values = values.saturating_add(1);
+        if values > MAX_NATIVE_VALUES || depth > MAX_NATIVE_DEPTH {
+            return Err(NativeHookDecodeError::StructureLimit);
+        }
+        match value {
+            Value::Array(items) => {
+                pending.extend(items.iter().map(|item| (item, depth.saturating_add(1))));
+            }
+            Value::Object(fields) => {
+                pending.extend(
+                    fields
+                        .values()
+                        .map(|field| (field, depth.saturating_add(1))),
+                );
+            }
+            _ => {}
+        }
     }
     Ok(raw)
 }
@@ -849,6 +875,30 @@ mod tests {
                 .ordering,
             HookOrderingV1::Unknown
         );
+    }
+
+    #[test]
+    fn kimi_and_opencode_reject_deep_or_oversized_payloads_before_typed_decode() {
+        for (host, discriminator) in [
+            (
+                NativeHostIdentityV1::KimiCode,
+                r#""hook_event_name":"Stop""#,
+            ),
+            (NativeHostIdentityV1::OpenCode, r#""type":"session.idle""#),
+        ] {
+            let nested = format!("{}null{}", "[".repeat(33), "]".repeat(33));
+            let deep = format!(r#"{{{discriminator},"nested":{nested}}}"#);
+            assert_eq!(
+                decode_native_hook_event(host, deep.as_bytes()),
+                Err(NativeHookDecodeError::StructureLimit)
+            );
+
+            let oversized = vec![b' '; MAX_HOOK_PAYLOAD_BYTES + 1];
+            assert_eq!(
+                decode_native_hook_event(host, &oversized),
+                Err(NativeHookDecodeError::PayloadTooLarge)
+            );
+        }
     }
 
     #[test]

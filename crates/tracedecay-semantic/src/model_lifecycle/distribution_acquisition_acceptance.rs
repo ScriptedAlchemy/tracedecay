@@ -4,8 +4,9 @@ use std::sync::PoisonError;
 
 use super::{
     SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1, catalog_package_digest,
-    verify_member_file,
+    open_local_semantic_evaluation_lifecycle, verify_member_file,
 };
+use crate::SemanticResourceCeilings;
 
 const HF_HUB_CACHE_DIRECTORY_V1: &str = "hf-hub-cache";
 
@@ -82,11 +83,13 @@ fn distribution_background_acquisition_installs_verified_jina_model() {
         .worker
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
+        .handle
         .take()
         .expect("background acquisition worker must be retained");
     worker
         .join()
-        .expect("background acquisition worker must not panic");
+        .expect("background acquisition worker must not panic")
+        .expect("background acquisition must complete successfully");
 
     let status = owner.status();
     let Some(SemanticModelLifecycleStateV1::Installed {
@@ -119,4 +122,29 @@ fn distribution_background_acquisition_installs_verified_jina_model() {
         status.semantics_omitted,
         "an installed model must remain omitted until vector indexing publishes readiness"
     );
+}
+
+#[test]
+fn distribution_local_evaluation_import_admits_verified_jina_without_network_or_profile() {
+    let profile_parent = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_PROFILE_PARENT")
+        .map(std::path::PathBuf::from)
+        .expect("distribution gate must provide its isolated runtime parent");
+    let fixture = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
+        .map(std::path::PathBuf::from)
+        .expect("local evaluation gate must provide its verified Jina fixture");
+    fs::create_dir_all(&profile_parent).expect("create isolated runtime parent");
+    let root = tempfile::tempdir_in(profile_parent).expect("create isolated lifecycle root");
+
+    let owner = open_local_semantic_evaluation_lifecycle(
+        root.path(),
+        &fixture,
+        SemanticResourceCeilings::default(),
+        1,
+    )
+    .expect("import exact catalog members through the production verifier");
+
+    assert!(matches!(
+        owner.status().state,
+        Some(SemanticModelLifecycleStateV1::Installed { .. })
+    ));
 }

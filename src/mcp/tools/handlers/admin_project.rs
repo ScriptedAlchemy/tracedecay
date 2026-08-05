@@ -609,6 +609,22 @@ mod tests {
         let db = cg.open_project_store_db().await.unwrap();
         let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
         let actor = ActorId::new("automation.session-reflector".to_owned()).unwrap();
+        let receipt = match tracedecay_runtime_core::privacy::sanitize_memory_fact_payload(json!({
+            "content": content,
+            "category": "decision",
+            "tags": [],
+            "entities": [],
+            "metadata": {},
+        }))
+        .unwrap()
+        {
+            tracedecay_runtime_core::privacy::MemoryFactSanitizationV1::Durable {
+                receipt, ..
+            } => receipt,
+            tracedecay_runtime_core::privacy::MemoryFactSanitizationV1::Quarantined => {
+                panic!("fixture proposal should sanitize")
+            }
+        };
         let request = CompatibilityFactAddCommandV1::new(
             owner,
             ProvenanceId::new(format!("automation.operation.{proposal_id}")).unwrap(),
@@ -618,6 +634,7 @@ mod tests {
             vec![],
             vec![],
             json!({}),
+            receipt,
             Confidence::new(0.9).unwrap(),
             Some(actor.clone()),
         )

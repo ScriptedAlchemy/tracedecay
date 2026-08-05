@@ -41,6 +41,16 @@ pub enum TraceDecayError {
     #[error("config error: {message}")]
     Config { message: String },
 
+    #[error(
+        "{component} profile schema {found_version:?} is incompatible with required schema \
+         {required_version}; reset the profile"
+    )]
+    ProfileResetRequired {
+        component: &'static str,
+        found_version: Option<i64>,
+        required_version: i64,
+    },
+
     #[error("project route error ({reason_code}): {detail}")]
     ProjectRoute {
         reason_code: String,
