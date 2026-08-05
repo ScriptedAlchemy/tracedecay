@@ -440,7 +440,7 @@ impl WorkflowEffectJournalRecordV1 {
         }
     }
 
-    pub fn terminal(
+    pub fn with_terminal(
         state: WorkflowEffectJournalStateV1,
         terminal: WorkflowEffectTerminalV1,
     ) -> Result<Self, WorkflowEffectAuthorityErrorV1> {
