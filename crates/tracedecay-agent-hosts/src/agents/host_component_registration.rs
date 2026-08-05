@@ -1114,18 +1114,7 @@ impl CatalogHostComponentRegistrationAuthority {
                         let applied_marker =
                             self.directory_applied_metadata_marker(operation_id, index);
                         if !applied_marker.is_file() {
-                            // No applied-state marker means the directory came
-                            // back before `prepare_missing_registration_directories`
-                            // could claim it -- typically because the transaction's
-                            // own artifact write created it and then a later step
-                            // failed. Refusing here left the journal on disk with
-                            // no convergence path, so every later lifecycle command
-                            // reported stale preview forever. Claim it instead and
-                            // assert nothing about its exact state: the removal pass
-                            // below is empty-guarded, so a directory that anyone else
-                            // is using survives untouched.
-                            recovery_owned_directories.push(path);
-                            continue;
+                            return Err(host_bundle_stale_preview!());
                         }
                         let applied: RegistrationDirectoryAppliedStateV2 =
                             serde_json::from_slice(&fs::read(applied_marker).map_err(|_| {
