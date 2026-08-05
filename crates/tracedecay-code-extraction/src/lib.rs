@@ -27,6 +27,7 @@ pub(crate) mod basic_common;
 pub(crate) mod common;
 pub mod complexity;
 pub mod incremental;
+pub mod parsed_extraction;
 pub mod source_mask;
 pub(crate) mod traversal;
 pub mod ts_provider;
@@ -208,6 +209,8 @@ pub use wgsl_extractor::WgslExtractor;
 pub use zig_extractor::ZigExtractor;
 
 use crate::types::ExtractionResult;
+use parsed_extraction::{ParsedExtraction, ParsedExtractionResetReason, ParsedExtractionScope};
+use tree_sitter::Tree;
 
 /// Trait for language-specific source code extractors.
 ///
@@ -225,6 +228,26 @@ pub trait LanguageExtractor: Send + Sync {
     /// `file_path` is the relative path used for qualified names and node IDs.
     /// `source` is the source code to parse.
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult;
+
+    /// Extract from the shared retained tree. Implementations traverse only
+    /// the requested complete top-level regions and never acquire a parser.
+    ///
+    /// The default is a truthful typed reset while adapters are migrated. It
+    /// remains correct, but callers can distinguish it from retained-tree
+    /// extraction and must never count it as incremental work.
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        _tree: &Tree,
+        _scope: ParsedExtractionScope<'_>,
+    ) -> ParsedExtraction {
+        ParsedExtraction::reset(
+            self.extract(file_path, source),
+            ParsedExtractionResetReason::AdapterColdParserFallback,
+            source.len(),
+        )
+    }
 }
 
 /// Registry of all available language extractors.
