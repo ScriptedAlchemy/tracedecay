@@ -236,6 +236,7 @@ pub(crate) async fn execute_canonical_workflow(
                     "injected crash after Work settlement before Workflow checkpoint",
                 ));
             }
+            terminal_attempts.push(attempt);
         }
         if fail_fast {
             break;
