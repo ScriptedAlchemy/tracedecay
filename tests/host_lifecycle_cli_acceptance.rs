@@ -203,6 +203,59 @@ fn seed_host(case: HostCase, cli: &IsolatedCli) -> BTreeMap<PathBuf, Vec<u8>> {
     originals
 }
 
+fn set_claude_native_activation(cli: &IsolatedCli, active: bool) {
+    let settings_path = cli.home.path().join(".claude/settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    let enabled_plugins = settings
+        .get_mut("enabledPlugins")
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap();
+    if active {
+        enabled_plugins.insert("tracedecay@tracedecay".to_string(), true.into());
+    } else {
+        enabled_plugins.remove("tracedecay@tracedecay");
+    }
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let marketplaces_path = cli
+        .home
+        .path()
+        .join(".claude/plugins/known_marketplaces.json");
+    let mut marketplaces: serde_json::Value =
+        serde_json::from_slice(&fs::read(&marketplaces_path).unwrap()).unwrap();
+    let marketplaces = marketplaces.as_object_mut().unwrap();
+    if active {
+        marketplaces.insert(
+            "tracedecay".to_string(),
+            serde_json::json!({
+                "source": {
+                    "source": "directory",
+                    "path": cli
+                        .home
+                        .path()
+                        .join(".claude/plugins/marketplaces/tracedecay")
+                },
+                "installLocation": cli
+                    .home
+                    .path()
+                    .join(".claude/plugins/marketplaces/tracedecay")
+            }),
+        );
+    } else {
+        marketplaces.remove("tracedecay");
+    }
+    fs::write(
+        &marketplaces_path,
+        serde_json::to_vec_pretty(&marketplaces).unwrap(),
+    )
+    .unwrap();
+}
+
 fn assert_seeded_bytes(cli: &IsolatedCli, originals: &BTreeMap<PathBuf, Vec<u8>>) {
     for (relative, expected) in originals {
         assert_eq!(
@@ -389,9 +442,12 @@ fn native_feedback(case: HostCase) -> Option<[(&'static str, Vec<u8>); 2]> {
 
 #[test]
 fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
-    for case in supported_host_cases()
-        .filter(|case| !matches!(case.host, HostKindV1::Codex | HostKindV1::KimiCode))
-    {
+    for case in supported_host_cases().filter(|case| {
+        !matches!(
+            case.host,
+            HostKindV1::ClaudeCode | HostKindV1::Codex | HostKindV1::KimiCode
+        )
+    }) {
         let cli = IsolatedCli::new();
         let originals = seed_host(case, &cli);
 
@@ -402,19 +458,6 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         );
         let install_receipt = latest_receipt(&cli, case.host);
         assert_receipt_digests(&cli, &install_receipt);
-        if case.host == HostKindV1::ClaudeCode {
-            let settings: serde_json::Value = serde_json::from_slice(
-                &fs::read(cli.home.path().join(".claude/settings.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                settings
-                    .pointer("/env/FOREIGN_SETTING")
-                    .and_then(serde_json::Value::as_str),
-                Some("preserved"),
-                "Claude install dropped an unrelated native setting"
-            );
-        }
 
         assert_success(case.id, "update", cli.run(&["update-plugin"]));
         let update_receipt = latest_receipt(&cli, case.host);
@@ -613,6 +656,123 @@ fn codex_lifecycle_refuses_unavailable_noninteractive_activation() {
         latest_host_component_set_receipt_at(&cli.lifecycle_root(), HostKindV1::Codex)
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn claude_lifecycle_tracks_assets_only_after_native_activation() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::ClaudeCode);
+    let originals = seed_host(case, &cli);
+
+    let deferred = cli.run(&["install", "--agent", case.id]);
+    assert!(!deferred.status.success());
+    let stderr = String::from_utf8_lossy(&deferred.stderr);
+    assert!(
+        stderr.contains("Claude Code owns marketplace registration"),
+        "Claude deferral omitted its native activation boundary: {stderr}"
+    );
+    assert!(
+        cli.home
+            .path()
+            .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json")
+            .is_file(),
+        "Claude deferral did not stage the verified marketplace source"
+    );
+    assert_seeded_bytes(&cli, &originals);
+    assert!(
+        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
+            .unwrap()
+            .is_none(),
+        "staging native activation published a lifecycle receipt"
+    );
+
+    set_claude_native_activation(&cli, true);
+    let settings_path = cli.home.path().join(".claude/settings.json");
+    let marketplaces_path = cli
+        .home
+        .path()
+        .join(".claude/plugins/known_marketplaces.json");
+    let active_native_state = [
+        fs::read(&settings_path).unwrap(),
+        fs::read(&marketplaces_path).unwrap(),
+    ];
+    assert_success(
+        case.id,
+        "receipt-backed install after native activation",
+        cli.run(&["install", "--agent", case.id]),
+    );
+    let install_receipt = latest_receipt(&cli, case.host);
+    assert_receipt_digests(&cli, &install_receipt);
+    assert_eq!(
+        [
+            fs::read(&settings_path).unwrap(),
+            fs::read(&marketplaces_path).unwrap(),
+        ],
+        active_native_state,
+        "catalog install rewrote Claude-owned activation state"
+    );
+
+    assert_success(case.id, "catalog update", cli.run(&["update-plugin"]));
+    assert_success(case.id, "catalog repair", cli.run(&["reinstall"]));
+    for (phase, (entrypoint, fixture)) in ["edit", "stop"]
+        .into_iter()
+        .zip(native_feedback(case).unwrap())
+    {
+        assert_success(case.id, phase, cli.run_with_stdin(&[entrypoint], &fixture));
+    }
+    assert_eq!(
+        [
+            fs::read(&settings_path).unwrap(),
+            fs::read(&marketplaces_path).unwrap(),
+        ],
+        active_native_state,
+        "catalog maintenance rewrote Claude-owned activation state"
+    );
+
+    let before_refusal = serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
+    let refused = cli.run(&["uninstall", "--agent", case.id]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("unsupported"),
+        "Claude native-removal boundary was not reported truthfully: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(
+        serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
+        before_refusal,
+        "native-removal deferral changed the lifecycle receipt"
+    );
+
+    set_claude_native_activation(&cli, false);
+    let removed_native_state = [
+        fs::read(&settings_path).unwrap(),
+        fs::read(&marketplaces_path).unwrap(),
+    ];
+    assert_success(
+        case.id,
+        "receipt-backed uninstall after native removal",
+        cli.run(&["uninstall", "--agent", case.id]),
+    );
+    assert_eq!(
+        [
+            fs::read(&settings_path).unwrap(),
+            fs::read(&marketplaces_path).unwrap(),
+        ],
+        removed_native_state,
+        "catalog uninstall rewrote Claude-owned activation state"
+    );
+    let uninstall_receipt = latest_receipt(&cli, case.host);
+    assert!(
+        uninstall_receipt
+            .component_receipts
+            .iter()
+            .all(|component| {
+                component
+                    .artifacts
+                    .iter()
+                    .all(|artifact| !cli.home.path().join(&artifact.relative_path).exists())
+            })
     );
 }
 
@@ -901,382 +1061,6 @@ fn successful_atomic_replacement_preserves_mode_and_extended_acl() {
     );
 }
 
-#[test]
-fn claude_nonempty_rewrite_recovers_after_real_write_kill() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::ClaudeCode);
-    seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    let claude_md = cli.home.path().join(".claude/CLAUDE.md");
-    let installed = fs::read(&claude_md).unwrap();
-    let mut with_foreign = b"# Operator preface\n\n".to_vec();
-    with_foreign.extend_from_slice(&installed);
-    with_foreign.extend_from_slice(b"\n# Operator suffix\n");
-    fs::write(&claude_md, &with_foreign).unwrap();
-
-    let mut command = cli.command(&["uninstall", "--agent", case.id]);
-    let killed = command
-        .env(
-            "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-            &claude_md,
-        )
-        .output()
-        .unwrap();
-    assert!(
-        !killed.status.success(),
-        "Claude rewrite fault did not abort"
-    );
-    let after_kill = fs::read(&claude_md).unwrap();
-    assert_ne!(after_kill, with_foreign);
-    assert!(
-        !after_kill.is_empty(),
-        "fault crossed a removal, not rewrite"
-    );
-
-    assert_success(
-        case.id,
-        "Claude rewrite recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(fs::read(&claude_md).unwrap(), with_foreign);
-}
-
-#[test]
-fn claude_global_install_recovers_project_config_mutations() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::ClaudeCode);
-    seed_host(case, &cli);
-    let mcp_path = cli.project.path().join(".mcp.json");
-    let settings_path = cli.project.path().join(".claude/settings.local.json");
-    let mcp_original =
-        br#"{"mcpServers":{"tracedecay":{"command":"old"},"foreign":{"command":"keep"}}}
-"#;
-    let settings_original =
-        br#"{"enabledMcpjsonServers":["tracedecay","foreign"],"operator":"keep"}
-"#;
-    fs::write(&mcp_path, mcp_original).unwrap();
-    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    fs::write(&settings_path, settings_original).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(
-            cli.home.path().join(".claude"),
-            fs::Permissions::from_mode(0o710),
-        )
-        .unwrap();
-        fs::set_permissions(
-            settings_path.parent().unwrap(),
-            fs::Permissions::from_mode(0o750),
-        )
-        .unwrap();
-    }
-
-    let mut command = cli.command(&["install", "--agent", case.id]);
-    let killed = command
-        .env(
-            "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-            &settings_path,
-        )
-        .output()
-        .unwrap();
-    assert!(!killed.status.success());
-    assert_ne!(
-        fs::read(&mcp_path).unwrap(),
-        mcp_original,
-        "install stopped before project MCP mutation\nstderr:\n{}",
-        String::from_utf8_lossy(&killed.stderr)
-    );
-    assert_ne!(fs::read(&settings_path).unwrap(), settings_original);
-
-    let mut recovery = cli.command(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    let interrupted = recovery
-        .env(
-            "TRACEDECAY_TEST_ABORT_AFTER_REGISTRATION_ROLLBACK_WRITE_PATH",
-            &settings_path,
-        )
-        .output()
-        .unwrap();
-    assert!(!interrupted.status.success());
-    assert_success(
-        case.id,
-        "Claude interrupted rollback restart",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(fs::read(&mcp_path).unwrap(), mcp_original);
-    assert_eq!(fs::read(&settings_path).unwrap(), settings_original);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        assert_eq!(
-            fs::metadata(cli.home.path().join(".claude"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o710
-        );
-        assert_eq!(
-            fs::metadata(settings_path.parent().unwrap())
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o750
-        );
-    }
-    assert_success(
-        case.id,
-        "Claude idempotent rollback restart",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(fs::read(&mcp_path).unwrap(), mcp_original);
-    assert_eq!(fs::read(&settings_path).unwrap(), settings_original);
-}
-
-#[test]
-fn claude_recovery_recreates_vanished_directory_with_modified_config() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::ClaudeCode);
-    let originals = seed_host(case, &cli);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-        settings_path.to_str().unwrap(),
-    );
-    assert!(!killed.status.success());
-    assert_ne!(
-        fs::read(&settings_path).unwrap(),
-        originals[&PathBuf::from(".claude/settings.json")]
-    );
-    fs::remove_dir_all(cli.home.path().join(".claude")).unwrap();
-
-    assert_success(
-        case.id,
-        "vanished modified directory recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(
-        fs::read(&settings_path).unwrap(),
-        originals[&PathBuf::from(".claude/settings.json")]
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn claude_recovery_refuses_foreign_directory_metadata_drift() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::ClaudeCode);
-    seed_host(case, &cli);
-    let claude_dir = cli.home.path().join(".claude");
-    fs::set_permissions(&claude_dir, fs::Permissions::from_mode(0o710)).unwrap();
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
-        "1",
-    );
-    assert!(!killed.status.success());
-    fs::set_permissions(&claude_dir, fs::Permissions::from_mode(0o777)).unwrap();
-
-    let refused = cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    assert!(!refused.status.success());
-    assert_eq!(
-        fs::metadata(&claude_dir).unwrap().permissions().mode() & 0o777,
-        0o777,
-        "recovery must preserve foreign directory metadata drift"
-    );
-}
-
-#[test]
-fn claude_tracedecay_only_project_mcp_removal_recovers() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::ClaudeCode);
-    seed_host(case, &cli);
-    let mcp_path = cli.project.path().join(".mcp.json");
-    let original = br#"{"mcpServers":{"tracedecay":{"command":"old"}}}
-"#;
-    fs::write(&mcp_path, original).unwrap();
-
-    let mut command = cli.command(&["install", "--agent", case.id]);
-    let killed = command
-        .env(
-            "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_REMOVE_PATH",
-            &mcp_path,
-        )
-        .output()
-        .unwrap();
-    assert!(!killed.status.success());
-    assert!(
-        !mcp_path.exists(),
-        "install stopped before tracedecay-only MCP removal\nstderr:\n{}",
-        String::from_utf8_lossy(&killed.stderr)
-    );
-
-    assert_success(
-        case.id,
-        "tracedecay-only project MCP recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(fs::read(&mcp_path).unwrap(), original);
-}
-
-#[test]
-fn claude_old_directory_missing_backup_layout_recovers() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::ClaudeCode);
-    seed_host(case, &cli);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-        settings_path.to_str().unwrap(),
-    );
-    assert!(!killed.status.success());
-
-    let backup = pending_registration_backup(&cli, case.id);
-    let identity_path = backup.join("identity.v1.json");
-    let mut identity: serde_json::Value =
-        serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();
-    assert_eq!(identity["schema_version"], 2);
-    identity["schema_version"] = 1.into();
-    fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
-
-    let plan_path = backup.join("mutation-plan.v1.json");
-    let mut plan: serde_json::Value =
-        serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
-    assert_eq!(plan["schema_version"], 2);
-    plan["schema_version"] = 1.into();
-    let directories = plan["directories"].as_array_mut().unwrap();
-    let absent_directory = cli.project.path().join(".claude");
-    let index = directories
-        .iter()
-        .position(|path| path == &serde_json::to_value(&absent_directory).unwrap())
-        .expect("project Claude directory must be journaled");
-    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
-    assert!(
-        absent_directory.is_dir(),
-        "current apply must have created the originally absent directory"
-    );
-    fs::remove_file(backup.join(format!("directory-{index}.applied.metadata.json"))).unwrap();
-
-    assert_success(
-        case.id,
-        "old directory backup recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert!(!absent_directory.exists());
-}
-
-#[test]
-fn claude_base_v1_plan_without_directories_key_recovers() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::ClaudeCode);
-    seed_host(case, &cli);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-        settings_path.to_str().unwrap(),
-    );
-    assert!(!killed.status.success());
-
-    let backup = pending_registration_backup(&cli, case.id);
-    let identity_path = backup.join("identity.v1.json");
-    let mut identity: serde_json::Value =
-        serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();
-    identity["schema_version"] = 1.into();
-    fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
-    let plan_path = backup.join("mutation-plan.v1.json");
-    let mut plan: serde_json::Value =
-        serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
-    plan["schema_version"] = 1.into();
-    plan.as_object_mut().unwrap().remove("directories");
-    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
-    for entry in fs::read_dir(&backup).unwrap() {
-        let path = entry.unwrap().path();
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("directory-"))
-        {
-            fs::remove_file(path).unwrap();
-        }
-    }
-
-    assert_success(
-        case.id,
-        "base v1 registration recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-}
-
-#[test]
-fn claude_future_registration_backup_version_fails_truthfully() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::ClaudeCode);
-    seed_host(case, &cli);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-        settings_path.to_str().unwrap(),
-    );
-    assert!(!killed.status.success());
-
-    let backup = pending_registration_backup(&cli, case.id);
-    let identity: serde_json::Value =
-        serde_json::from_slice(&fs::read(backup.join("identity.v1.json")).unwrap()).unwrap();
-    assert_eq!(identity["schema_version"], 2);
-    let plan_path = backup.join("mutation-plan.v1.json");
-    let mut plan: serde_json::Value =
-        serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
-    assert_eq!(plan["schema_version"], 2);
-    plan["schema_version"] = 99.into();
-    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
-
-    let refused = cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    assert!(!refused.status.success());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("host recovery backup format is unsupported"));
-    assert!(stderr.contains("use the TraceDecay version that created it"));
-}
-
-#[test]
-fn claude_future_identity_version_fails_truthfully() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::ClaudeCode);
-    seed_host(case, &cli);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-        settings_path.to_str().unwrap(),
-    );
-    assert!(!killed.status.success());
-
-    let identity_path = pending_registration_backup(&cli, case.id).join("identity.v1.json");
-    let mut identity: serde_json::Value =
-        serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();
-    assert_eq!(identity["schema_version"], 2);
-    identity["schema_version"] = 99.into();
-    fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
-
-    let refused = cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    assert!(!refused.status.success());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("host recovery backup format is unsupported"));
-    assert!(stderr.contains("use the TraceDecay version that created it"));
-}
-
 #[cfg(unix)]
 #[test]
 fn claude_install_rejects_empty_symlinked_config_directory() {
@@ -1296,59 +1080,6 @@ fn claude_install_rejects_empty_symlinked_config_directory() {
     assert!(stderr.contains("Claude home configuration path ~/.claude is a symlink"));
     assert!(stderr.contains("replace it with a real directory"));
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
-}
-
-#[test]
-fn claude_global_uninstall_removes_current_project_legacy_registration() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::ClaudeCode);
-    seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    let mcp_path = cli.project.path().join(".mcp.json");
-    let settings_path = cli.project.path().join(".claude/settings.local.json");
-    fs::write(
-        &mcp_path,
-        br#"{"mcpServers":{"tracedecay":{"command":"old"},"foreign":{"command":"keep"}}}"#,
-    )
-    .unwrap();
-    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    fs::write(
-        &settings_path,
-        br#"{"enabledMcpjsonServers":["tracedecay","foreign"],"hooks":{"Stop":[{"hooks":[{"type":"command","command":"tracedecay hook"}]}]},"operator":"keep"}"#,
-    )
-    .unwrap();
-
-    assert_success(
-        case.id,
-        "global uninstall",
-        cli.run(&["uninstall", "--agent", case.id]),
-    );
-    assert!(
-        !fs::read_to_string(&mcp_path)
-            .unwrap()
-            .contains("tracedecay")
-    );
-    assert!(
-        !fs::read_to_string(&settings_path)
-            .unwrap()
-            .contains("tracedecay")
-    );
-    let mcp: serde_json::Value = serde_json::from_slice(&fs::read(&mcp_path).unwrap()).unwrap();
-    assert_eq!(mcp["mcpServers"]["foreign"]["command"], "keep");
-    let settings: serde_json::Value =
-        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
-    assert_eq!(settings["operator"], "keep");
-    assert!(
-        settings["enabledMcpjsonServers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "foreign")
-    );
 }
 
 #[test]
