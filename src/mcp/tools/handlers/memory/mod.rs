@@ -8,7 +8,7 @@ use tracedecay_domain::{FactOwnerV1, ProjectId};
 use crate::application::memory::{
     MemoryApplication, MemoryApplicationError, MemoryOperationContext,
 };
-use crate::automation::memory_digest::refresh_memory_digest_after_memory_change;
+use crate::automation::memory_digest::refresh_memory_digest_after_memory_change_for_profile;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
@@ -32,7 +32,9 @@ mod status;
 
 use registered_target::open_registered_project_memory_read_only;
 
+#[cfg(test)]
 pub(super) use fact_store::handle_fact_store;
+pub(super) use fact_store::handle_fact_store_controlled;
 pub(super) use feedback::handle_fact_feedback;
 pub(super) use status::handle_memory_status;
 pub(crate) use status::handle_user_memory_tool;
@@ -148,32 +150,6 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-/// Typed "operation exceeded deadline" problem for a bounded memory operation.
-///
-/// Reuses the retryable [`TraceDecayError::ProjectRoute`] problem shape (a
-/// stable `reason_code`, a `retryable` flag, and a human `detail`) so the MCP
-/// boundary surfaces a structured, retryable error rather than a transport
-/// hang. The deadline is a backstop, so retry is safe (writes are receipt
-/// idempotent).
-///
-/// The bound itself is applied once, centrally, at the retained memory dispatch
-/// (`dispatch_groups::dispatch_memory_operation`) off the admission-carried
-/// client deadline — mirroring the git dispatcher — so every memory operation
-/// (add/search/feedback/status) is covered uniformly rather than per handler.
-pub(super) fn memory_deadline_error(
-    operation: &str,
-    deadline: std::time::Duration,
-) -> TraceDecayError {
-    TraceDecayError::project_route(
-        "memory_operation_deadline_exceeded",
-        true,
-        format!(
-            "memory {operation} operation exceeded the {}s deadline",
-            deadline.as_secs()
-        ),
-    )
-}
-
 fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     TraceDecayError::database_operation("memory application", error)
 }
@@ -186,6 +162,26 @@ pub(super) fn memory_application<'a>(
         DatabaseFactStore::new(target_memory.db()),
     )
     .map_err(memory_application_error)
+}
+
+pub(super) fn controlled_memory_application<'a>(
+    target_memory: &'a TargetMemoryDb<'_>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<MemoryApplication<DatabaseFactStore<'a>>> {
+    let store = match cancellation {
+        Some(cancellation) => {
+            let interruption = cancellation.clone();
+            DatabaseFactStore::new_controlled(
+                target_memory.db(),
+                crate::store::memory::FactWriteControl::new(
+                    std::sync::Arc::new(move || interruption.is_cancelled()),
+                    std::sync::Arc::new(move || cancellation.try_begin_commit()),
+                ),
+            )
+        }
+        None => DatabaseFactStore::new(target_memory.db()),
+    };
+    MemoryApplication::new(target_memory.owner().clone(), store).map_err(memory_application_error)
 }
 
 fn memory_operation_context(
@@ -221,8 +217,17 @@ fn memory_operation_context(
 async fn refresh_target_memory_digest(
     memory: &MemoryApplication<DatabaseFactStore<'_>>,
     target_memory: &TargetMemoryDb<'_>,
-) {
-    refresh_memory_digest_after_memory_change(memory, &target_memory.project_root).await;
+) -> Result<()> {
+    let home = crate::agents::home_dir()
+        .ok_or_else(|| config_error("agent home is unavailable for memory digest refresh"))?;
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&home);
+    refresh_memory_digest_after_memory_change_for_profile(
+        &profile_root,
+        memory,
+        &target_memory.project_root,
+    )
+    .await
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -398,23 +403,6 @@ mod tests {
             .unwrap()
             .fact_id;
         (tmp, cg, fact_id)
-    }
-
-    /// The typed problem the central memory-dispatch deadline raises on elapse
-    /// (see `dispatch_groups::dispatch_memory_operation`) must stay a stable,
-    /// retryable project-route problem naming the operation and its budget.
-    #[test]
-    fn memory_deadline_error_is_a_typed_retryable_problem() {
-        let err = memory_deadline_error("fact_store add", std::time::Duration::from_secs(30));
-        let (reason_code, retryable, detail) = err
-            .project_route_context()
-            .expect("an elapsed memory deadline must surface a typed project-route problem");
-        assert_eq!(reason_code, "memory_operation_deadline_exceeded");
-        assert!(retryable, "a deadline backstop is safe to retry");
-        assert!(
-            detail.contains("fact_store add") && detail.contains("deadline"),
-            "detail must name the operation and the deadline: {detail}"
-        );
     }
 
     /// The add path (holographic encode + serialized write) completes in a clean

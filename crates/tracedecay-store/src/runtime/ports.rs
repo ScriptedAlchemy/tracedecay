@@ -36,6 +36,18 @@ pub trait RuntimeRequestProbeV1: Send + Sync {
     fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1;
     fn deadline_identity(&self) -> &RuntimeDeadlineV1;
     fn interruption(&self) -> Option<RuntimeInterruptionV1>;
+
+    /// Atomically arbitrates cancellation against the first irreversible
+    /// durable commit.
+    fn try_begin_commit(&self) -> bool {
+        self.interruption().is_none()
+    }
+
+    /// An externally arbitrated request cannot share its commit transaction
+    /// with unrelated work.
+    fn requires_isolated_commit(&self) -> bool {
+        false
+    }
 }
 
 /// A validated, closed write request for the daemon-owned runtime.

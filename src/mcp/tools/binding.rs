@@ -321,6 +321,7 @@ pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
 pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
         || tool_dispatches_source_edit_effect(tool_name)
+        || tool_name == "tracedecay_fact_store"
         || matches!(
             tool_name,
             "tracedecay_search" | "tracedecay_run_affected_tests"
@@ -328,13 +329,7 @@ pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
 }
 
 fn verified_effect_journey(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "tracedecay_dashboard"
-            | "tracedecay_fact_store"
-            | "tracedecay_session_start"
-            | "tracedecay_session_end"
-    )
+    tool_name == "tracedecay_fact_store"
 }
 
 fn executable_handler_is_available(

@@ -160,9 +160,7 @@ impl McpServer {
     }
 
     /// Re-read the file-to-token-count map from the DB and swap it into the
-    /// cached `file_token_map`. Called after each lazy sync triggered by
-    /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale) so the accounting
-    /// tracks newly indexed / removed files.
+    /// cached `file_token_map` for explicit lifecycle callers.
     pub async fn refresh_file_token_map(&self) {
         // best-effort; leave stale map in place if the DB read fails
         let Ok(fresh) = self.cg_snapshot().await.get_file_token_map().await else {
@@ -231,7 +229,7 @@ impl McpServer {
         }
     }
 
-    pub(crate) fn record_mcp_tool_error_analytics(
+    pub(crate) async fn record_mcp_tool_error_analytics(
         &self,
         request: McpToolErrorAnalyticsRequest<'_>,
     ) {
@@ -270,11 +268,9 @@ impl McpServer {
             mcp_instance_id: self.connection_identity.instance_id(),
             failure_reason: Some(&failure_reason),
         });
-        self.spawn_observed_ledger_write(async move {
-            if let Err(e) = gdb.append_analytics_event(&event).await {
-                tracing::warn!(error = %e, "MCP error analytics event insert failed");
-            }
-        });
+        if let Err(e) = gdb.append_analytics_event(&event).await {
+            tracing::warn!(error = %e, "MCP error analytics event insert failed");
+        }
     }
 
     /// Best-effort hook-route analytics after authoritative admission commit.

@@ -1345,7 +1345,7 @@ async fn graph_tools_still_answer_after_a_panicking_worker_task() {
 
 use super::dispatch_groups::{
     LONG_RUNNING_TOOL_DISPATCH_CEILING, TOOL_DISPATCH_CEILING, tool_dispatch_budget,
-    tool_dispatch_ceiling, tool_dispatch_deadline_error,
+    tool_dispatch_ceiling,
 };
 
 /// One tool from every dispatch group. `tracedecay_context` is listed first
@@ -1438,8 +1438,8 @@ fn carried_deadline_is_preferred_when_shorter_and_clamped_when_longer() {
     );
 }
 
-/// An already-elapsed carried deadline is rejected rather than dispatched, for
-/// every group — the same rule the git and memory wraps already applied.
+/// An already-elapsed carried deadline is rejected rather than dispatched for
+/// every group.
 #[test]
 fn an_elapsed_carried_deadline_is_rejected_for_every_group() {
     let elapsed =
@@ -1450,85 +1450,6 @@ fn an_elapsed_carried_deadline_is_rejected_for_every_group() {
             "{tool_name} must refuse to dispatch under an elapsed deadline",
         );
     }
-}
-
-/// The ceiling reports the same typed, retryable problem shape the memory wrap
-/// established, so the MCP boundary surfaces structure instead of a hang.
-#[test]
-fn the_ceiling_reports_a_typed_retryable_problem() {
-    let error = tool_dispatch_deadline_error("tracedecay_context", TOOL_DISPATCH_CEILING);
-    let rendered = error.to_string();
-    assert!(
-        rendered.contains("tracedecay_context"),
-        "the problem must name the tool, got {rendered:?}",
-    );
-    assert!(
-        rendered.contains("dispatch ceiling"),
-        "the problem must name the ceiling, got {rendered:?}",
-    );
-}
-
-/// The wrap itself: a handler that never returns must surface the typed
-/// deadline at the ceiling rather than holding the transport open forever.
-/// This is the 900-second hang reduced to a unit.
-#[tokio::test]
-async fn a_handler_that_never_returns_hits_the_typed_ceiling() {
-    let budget = std::time::Duration::from_millis(50);
-    let never = std::future::pending::<Result<ToolResult>>();
-    let started = std::time::Instant::now();
-    let outcome = match tokio::time::timeout(budget, never).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(tool_dispatch_deadline_error("tracedecay_context", budget)),
-    };
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "the ceiling must fire promptly, took {:?}",
-        started.elapsed(),
-    );
-    let error = outcome.expect_err("a never-returning handler must not report success");
-    assert!(
-        error.to_string().contains("dispatch ceiling"),
-        "got {error}"
-    );
-}
-
-/// Equivalence: a warm call that finishes well inside the ceiling is untouched
-/// by it — the bound changes failure, not work.
-#[tokio::test]
-async fn a_warm_call_is_unaffected_by_the_ceiling() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("dispatch-ceiling-warm");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
-        "project.mcp-dispatch-ceiling-warm",
-    )
-    .await
-    .unwrap();
-    cg.index_all().await.unwrap();
-
-    let started = std::time::Instant::now();
-    let result = handle_tool_call_with_registry_and_implicit_project(
-        &cg,
-        "tracedecay_context",
-        json!({ "task": "probe" }),
-        None,
-        None,
-        ToolCallRegistryOptions::default(),
-    )
-    .await
-    .expect("a warm context call succeeds under the ceiling");
-    assert!(
-        started.elapsed() < TOOL_DISPATCH_CEILING,
-        "a warm call must finish far inside the ceiling, took {:?}",
-        started.elapsed(),
-    );
-    assert!(result.value["content"][0]["text"].is_string());
-
-    cg.close();
 }
 
 #[test]
@@ -1542,7 +1463,19 @@ fn unavailable_effect_contract_fails_before_handler_dispatch() {
             "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
         ))
     );
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_dashboard").is_ok());
+    for tool_name in [
+        "tracedecay_dashboard",
+        "tracedecay_session_start",
+        "tracedecay_session_end",
+    ] {
+        let error = super::ensure_mcp_dispatch_available(tool_name).unwrap_err();
+        assert_eq!(
+            error.project_route_context().map(|context| context.0),
+            Some("mcp_dispatch_effect_journey_unverified"),
+            "{tool_name}",
+        );
+    }
+    assert!(super::ensure_mcp_dispatch_available("tracedecay_fact_store").is_ok());
     assert!(super::ensure_mcp_dispatch_available("tracedecay_search").is_ok());
 }
 

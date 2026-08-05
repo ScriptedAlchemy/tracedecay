@@ -28,6 +28,96 @@ where
         })
 }
 
+#[cfg(test)]
+mod blocking_span_tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_blocking_git_span_remains_not_joined_until_blocking_work_finishes() {
+        let cancellation = tracedecay_application::CancellationSignal::active(
+            "cancellation.git-blocking-retirement",
+        )
+        .expect("cancellation signal");
+        let control = crate::mcp::tools::handlers::McpToolDispatchControl::new(
+            "tracedecay_changelog",
+            None,
+            cancellation,
+        )
+        .expect("dispatch control");
+        let tasks = Arc::new(crate::mcp::server::RetainedToolDispatchTasks::new());
+        let settlement = Arc::new(crate::mcp::server::DispatchExecutionSettlement::new());
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker_entered = Arc::clone(&entered);
+        let worker_release = Arc::clone(&release);
+        let runner_control = control.clone();
+        let runner_tasks = Arc::clone(&tasks);
+        let runner_settlement = Arc::clone(&settlement);
+        let runner = tokio::spawn(async move {
+            runner_control
+                .run_retained(
+                    crate::mcp::tools::handlers::McpToolDispatchStage::Handler,
+                    &runner_tasks,
+                    runner_settlement,
+                    async move {
+                        blocking_git_span("blocking cancellation fixture", move || {
+                            worker_entered.wait();
+                            worker_release.wait();
+                            7_u8
+                        })
+                        .await
+                    },
+                )
+                .await
+        });
+
+        tokio::task::spawn_blocking(move || entered.wait())
+            .await
+            .expect("blocking Git fixture entered");
+        control.cancel(tracedecay_application::clock::now_micros());
+        tokio::time::advance(std::time::Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(26)).await;
+        let error = runner
+            .await
+            .expect("dispatch controller joins")
+            .expect_err("cancelled blocking Git span");
+        assert_eq!(
+            error.project_route_context().map(|context| context.0),
+            Some("tool_dispatch_cancelled")
+        );
+        assert!(
+            settlement.is_settling(),
+            "a running spawn_blocking span must never be stamped joined"
+        );
+
+        let shutdown_tasks = Arc::clone(&tasks);
+        let shutdown = tokio::spawn(async move {
+            shutdown_tasks
+                .shutdown_within(std::time::Duration::from_millis(100))
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(101)).await;
+        assert!(
+            !shutdown.await.expect("bounded shutdown joins"),
+            "shutdown must close over a non-cooperative blocking Git span"
+        );
+        drop(tasks);
+        release.wait();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        for _ in 0..1_000 {
+            tokio::task::yield_now().await;
+            if settlement.is_joined() {
+                return;
+            }
+        }
+        panic!("retired blocking Git settlement was detached from its owner");
+    }
+}
+
 /// Handles `tracedecay_diff_context` tool calls.
 pub(crate) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_diff_context")?;

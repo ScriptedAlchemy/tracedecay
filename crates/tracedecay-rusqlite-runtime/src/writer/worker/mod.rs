@@ -662,6 +662,11 @@ fn build_batches(
             .is_some_and(|(existing_priority, existing, batch)| {
                 existing_priority != &priority
                     || existing != &compatibility
+                    || item.probe.requires_isolated_commit()
+                    || batch
+                        .items
+                        .first()
+                        .is_some_and(|item| item.probe.requires_isolated_commit())
                     || batch.items.len() >= budget.max_operations as usize
                     || batch
                         .bytes

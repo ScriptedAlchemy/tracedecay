@@ -1,4 +1,7 @@
+use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
 
@@ -14,12 +17,14 @@ use super::super::render;
 use super::support;
 use super::support::{project_registry_context, project_selector_present};
 
+const WORKER_SETTLEMENT_GRACE: std::time::Duration = std::time::Duration::from_millis(25);
+
 pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
     support::text_tool_result(text, Vec::new())
 }
 
-pub(in crate::mcp::tools) fn json_result(value: &Value) -> ToolResult {
-    text_tool_result(&serde_json::to_string(value).unwrap_or_default())
+pub(in crate::mcp::tools) fn json_result(value: &Value) -> Result<ToolResult> {
+    Ok(text_tool_result(&serde_json::to_string(value)?))
 }
 
 pub(super) fn boxed_send<'a, T, F>(
@@ -29,6 +34,266 @@ where
     F: std::future::Future<Output = T> + Send + 'a,
 {
     Box::pin(future)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum McpToolDispatchStage {
+    SchemaValidation,
+    ProjectSelection,
+    Handler,
+    Serialization,
+}
+
+impl McpToolDispatchStage {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::SchemaValidation => "schema_validation",
+            Self::ProjectSelection => "project_selection",
+            Self::Handler => "handler",
+            Self::Serialization => "serialization",
+        }
+    }
+}
+
+/// One absolute deadline and cancellation signal for a complete MCP tool call.
+///
+/// Clones preserve the ingress deadline and deadline provenance; no stage can
+/// restart the lifecycle budget or turn a fired deadline into cancellation.
+#[derive(Clone)]
+pub(crate) struct McpToolDispatchControl {
+    tool_name: Arc<str>,
+    budget: std::time::Duration,
+    deadline: tracedecay_application::Deadline,
+    deadline_at: tokio::time::Instant,
+    cancellation: tracedecay_application::CancellationSignal,
+    deadline_triggered: Arc<AtomicBool>,
+}
+
+impl McpToolDispatchControl {
+    fn retained_lane(&self) -> crate::mcp::server::RetainedToolDispatchLane {
+        if matches!(
+            self.tool_name.as_ref(),
+            "tracedecay_status" | "tracedecay_active_project" | "tracedecay_port_status"
+        ) {
+            crate::mcp::server::RetainedToolDispatchLane::Control
+        } else {
+            crate::mcp::server::RetainedToolDispatchLane::General
+        }
+    }
+
+    pub(crate) fn new(
+        tool_name: impl Into<Arc<str>>,
+        carried_deadline: Option<tracedecay_application::Deadline>,
+        cancellation: tracedecay_application::CancellationSignal,
+    ) -> Result<Self> {
+        let tool_name = tool_name.into();
+        let budget =
+            super::dispatch_groups::tool_dispatch_budget(&tool_name, carried_deadline.as_ref())
+                .ok_or_else(|| {
+                    Self::deadline_error_for(
+                        &tool_name,
+                        std::time::Duration::ZERO,
+                        McpToolDispatchStage::SchemaValidation,
+                    )
+                })?;
+        let use_carried_deadline = carried_deadline.as_ref().is_some_and(|deadline| {
+            crate::daemon_client::deadline_remaining(deadline).is_some_and(|remaining| {
+                remaining <= super::dispatch_groups::tool_dispatch_ceiling(&tool_name)
+            })
+        });
+        let now = tracedecay_application::clock::now_micros();
+        let deadline = if use_carried_deadline {
+            carried_deadline.ok_or_else(|| TraceDecayError::Config {
+                message: "MCP dispatch deadline disappeared during admission".to_owned(),
+            })?
+        } else {
+            let budget_micros =
+                i64::try_from(budget.as_micros()).map_err(|_| TraceDecayError::Config {
+                    message: "MCP dispatch deadline exceeds the domain clock".to_owned(),
+                })?;
+            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                now.0.saturating_add(budget_micros),
+            ))
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("invalid MCP dispatch deadline: {error}"),
+            })?
+        };
+        let deadline_at = tokio::time::Instant::now()
+            .checked_add(budget)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "MCP dispatch deadline cannot be represented by the runtime clock"
+                    .to_owned(),
+            })?;
+        Ok(Self {
+            tool_name,
+            budget,
+            deadline,
+            deadline_at,
+            cancellation,
+            deadline_triggered: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    pub(crate) fn deadline(&self) -> tracedecay_application::Deadline {
+        self.deadline.clone()
+    }
+
+    pub(crate) fn cancellation(&self) -> tracedecay_application::CancellationSignal {
+        self.cancellation.clone()
+    }
+
+    pub(crate) fn cancel(&self, requested_at: tracedecay_domain::UtcMicros) -> bool {
+        self.cancellation.cancel(requested_at)
+    }
+
+    pub(crate) fn check(&self, stage: McpToolDispatchStage) -> Result<()> {
+        if self.cancellation.is_cancelled() {
+            return Err(self.terminal_cancellation_error(stage));
+        }
+        if tokio::time::Instant::now() >= self.deadline_at {
+            self.deadline_triggered.store(true, Ordering::Release);
+            self.cancel(tracedecay_application::clock::now_micros());
+            if !self.cancellation.commit_started() {
+                return Err(self.deadline_error(stage));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn run<T, F>(&self, stage: McpToolDispatchStage, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        self.check(stage)?;
+        let deadline = tokio::time::sleep_until(self.deadline_at);
+        let cancellation = crate::daemon_client::wait_for_cancellation(self.cancellation.clone());
+        tokio::pin!(deadline);
+        tokio::pin!(cancellation);
+        tokio::pin!(future);
+        let terminal_error = tokio::select! {
+            biased;
+            () = &mut cancellation => self.terminal_cancellation_error(stage),
+            () = &mut deadline => {
+                self.deadline_triggered.store(true, Ordering::Release);
+                self.cancel(tracedecay_application::clock::now_micros());
+                self.deadline_error(stage)
+            }
+            result = &mut future => return result,
+        };
+
+        // Cancellation owns the admitted work until it settles. Dropping this
+        // future here would detach any spawn_blocking child it is awaiting and
+        // make the response's worker settlement unknowable. Handlers receive
+        // the same cancellation signal and deadline, so cooperative work exits
+        // promptly while non-interruptible blocking work remains joined.
+        let _ = future.await;
+        Err(terminal_error)
+    }
+
+    pub(crate) async fn run_retained<T, F>(
+        &self,
+        stage: McpToolDispatchStage,
+        tasks: &Arc<crate::mcp::server::RetainedToolDispatchTasks>,
+        settlement: Arc<crate::mcp::server::DispatchExecutionSettlement>,
+        future: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T>> + Send + 'static,
+    {
+        self.check(stage)?;
+        let mut result = tasks
+            .spawn(self.retained_lane(), Arc::clone(&settlement), future)
+            .await?;
+        let deadline = tokio::time::sleep_until(self.deadline_at);
+        let cancellation = crate::daemon_client::wait_for_cancellation(self.cancellation.clone());
+        tokio::pin!(deadline);
+        tokio::pin!(cancellation);
+        let terminal_error = tokio::select! {
+            biased;
+            () = &mut cancellation => self.terminal_cancellation_error(stage),
+            () = &mut deadline => {
+                self.deadline_triggered.store(true, Ordering::Release);
+                self.cancel(tracedecay_application::clock::now_micros());
+                self.deadline_error(stage)
+            }
+            output = &mut result => return output.map_err(|error| TraceDecayError::Config {
+                message: format!("retained MCP tool dispatch ended without a result: {error}"),
+            })?,
+        };
+
+        if self.cancellation.commit_started() {
+            return result.await.map_err(|error| TraceDecayError::Config {
+                message: format!("committed MCP tool dispatch ended without a result: {error}"),
+            })?;
+        }
+
+        // Cooperative handlers normally settle inside this grace and can say
+        // "joined" in the terminal receipt. A commit that wins while the
+        // grace is running owns settlement and its canonical result. Otherwise
+        // non-cooperative work remains owned by the registry and the
+        // pre-commit terminal response stays bounded.
+        match tokio::time::timeout(WORKER_SETTLEMENT_GRACE, &mut result).await {
+            Ok(output) => {
+                if self.cancellation.commit_started() {
+                    return output.map_err(|error| TraceDecayError::Config {
+                        message: format!(
+                            "committed MCP tool dispatch ended without a result: {error}"
+                        ),
+                    })?;
+                }
+                return Err(terminal_error);
+            }
+            Err(_) if self.cancellation.commit_started() => {
+                return result.await.map_err(|error| TraceDecayError::Config {
+                    message: format!("committed MCP tool dispatch ended without a result: {error}"),
+                })?;
+            }
+            Err(_) => {}
+        }
+        Err(terminal_error)
+    }
+
+    fn deadline_error(&self, stage: McpToolDispatchStage) -> TraceDecayError {
+        Self::deadline_error_for(&self.tool_name, self.budget, stage)
+    }
+
+    fn deadline_error_for(
+        tool_name: &str,
+        budget: std::time::Duration,
+        stage: McpToolDispatchStage,
+    ) -> TraceDecayError {
+        TraceDecayError::project_route(
+            "tool_dispatch_deadline_exceeded",
+            true,
+            format!(
+                "tool '{tool_name}' exceeded its {}ms absolute deadline during {}",
+                budget.as_millis(),
+                stage.as_str(),
+            ),
+        )
+    }
+
+    fn cancellation_error(&self, stage: McpToolDispatchStage) -> TraceDecayError {
+        TraceDecayError::project_route(
+            "tool_dispatch_cancelled",
+            true,
+            format!(
+                "tool '{}' was cancelled during {}",
+                self.tool_name,
+                stage.as_str(),
+            ),
+        )
+    }
+
+    fn terminal_cancellation_error(&self, stage: McpToolDispatchStage) -> TraceDecayError {
+        if self.deadline_triggered.load(Ordering::Acquire) {
+            self.deadline_error(stage)
+        } else {
+            self.cancellation_error(stage)
+        }
+    }
 }
 
 pub(crate) const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
@@ -143,8 +408,7 @@ pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResul
                     "created_at": record.created_at,
                     "expires_at": record.expires_at,
                     "content": record.content,
-                }))
-                .unwrap_or_default()
+                }))?
             } else {
                 format!(
                     "## Retrieved Response\n**handle:** `{}` ({} chars, expires at {})\n\n{}",
@@ -183,4 +447,295 @@ pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResul
         }),
     };
     Ok(support::tool_json(Some(cg.project_root()), args, &payload))
+}
+
+#[cfg(test)]
+mod dispatch_control_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_remains_deadline_during_response_materialization() {
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancellation.deadline.fixture")
+                .expect("cancellation");
+        let control = McpToolDispatchControl::new("tracedecay_search", None, cancellation)
+            .expect("dispatch control");
+        let worker_cancellation = control.cancellation();
+        let worker_started = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::clone(&worker_started);
+        let settled = Arc::new(AtomicBool::new(false));
+        let worker_settled = Arc::clone(&settled);
+        let runner_control = control.clone();
+        let runner = tokio::spawn(async move {
+            runner_control
+                .run(McpToolDispatchStage::Handler, async move {
+                    started.notify_one();
+                    crate::daemon_client::wait_for_cancellation(worker_cancellation).await;
+                    worker_settled.store(true, Ordering::Release);
+                    Ok(())
+                })
+                .await
+        });
+        worker_started.notified().await;
+        tokio::time::advance(control.budget + std::time::Duration::from_millis(1)).await;
+        let handler_error = runner
+            .await
+            .expect("dispatch runner joins")
+            .expect_err("expired handler");
+        assert_eq!(
+            handler_error
+                .project_route_context()
+                .map(|context| context.0),
+            Some("tool_dispatch_deadline_exceeded")
+        );
+        assert!(
+            settled.load(Ordering::Acquire),
+            "deadline cancellation must join the owned worker"
+        );
+
+        let serialization_error = control
+            .check(McpToolDispatchStage::Serialization)
+            .expect_err("expired serialization");
+        assert_eq!(
+            serialization_error
+                .project_route_context()
+                .map(|context| context.0),
+            Some("tool_dispatch_deadline_exceeded"),
+            "deadline-triggered cancellation must not be reclassified"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_cooperative_worker_returns_settling_receipt_state_and_remains_owned() {
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancellation.settling.fixture")
+                .expect("cancellation");
+        let control = McpToolDispatchControl::new("tracedecay_search", None, cancellation)
+            .expect("dispatch control");
+        let tasks = Arc::new(crate::mcp::server::RetainedToolDispatchTasks::new());
+        let settlement = Arc::new(crate::mcp::server::DispatchExecutionSettlement::new());
+        let worker_started = Arc::new(tokio::sync::Notify::new());
+        let worker_release = Arc::new(tokio::sync::Notify::new());
+        let runner_control = control.clone();
+        let runner_tasks = Arc::clone(&tasks);
+        let runner_settlement = Arc::clone(&settlement);
+        let started = Arc::clone(&worker_started);
+        let release = Arc::clone(&worker_release);
+        let runner = tokio::spawn(async move {
+            runner_control
+                .run_retained(
+                    McpToolDispatchStage::Handler,
+                    &runner_tasks,
+                    runner_settlement,
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+
+        worker_started.notified().await;
+        tokio::time::advance(control.budget + std::time::Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(WORKER_SETTLEMENT_GRACE + std::time::Duration::from_millis(1)).await;
+        let error = runner
+            .await
+            .expect("dispatch runner joins")
+            .expect_err("non-cooperative handler exceeds deadline");
+        assert_eq!(
+            error.project_route_context().map(|context| context.0),
+            Some("tool_dispatch_deadline_exceeded")
+        );
+        assert!(settlement.is_settling());
+
+        worker_release.notify_one();
+        tasks.shutdown().await;
+        assert!(settlement.is_joined());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_non_cooperative_worker_is_retired_without_blocking_shutdown() {
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancellation.reap.fixture")
+                .expect("cancellation");
+        let control = McpToolDispatchControl::new("tracedecay_search", None, cancellation)
+            .expect("dispatch control");
+        let tasks = Arc::new(crate::mcp::server::RetainedToolDispatchTasks::new());
+        let settlement = Arc::new(crate::mcp::server::DispatchExecutionSettlement::new());
+        let worker_started = Arc::new(tokio::sync::Notify::new());
+        let worker_release = Arc::new(tokio::sync::Notify::new());
+        let runner_control = control.clone();
+        let runner_tasks = Arc::clone(&tasks);
+        let runner_settlement = Arc::clone(&settlement);
+        let started = Arc::clone(&worker_started);
+        let release = Arc::clone(&worker_release);
+        let runner = tokio::spawn(async move {
+            runner_control
+                .run_retained(
+                    McpToolDispatchStage::Handler,
+                    &runner_tasks,
+                    runner_settlement,
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+
+        worker_started.notified().await;
+        control.cancel(tracedecay_application::clock::now_micros());
+        tokio::task::yield_now().await;
+        tokio::time::advance(WORKER_SETTLEMENT_GRACE + std::time::Duration::from_millis(1)).await;
+        let error = runner
+            .await
+            .expect("dispatch runner joins")
+            .expect_err("cancelled non-cooperative handler");
+        assert_eq!(
+            error.project_route_context().map(|context| context.0),
+            Some("tool_dispatch_cancelled")
+        );
+        assert!(settlement.is_settling());
+
+        let drained = tasks
+            .shutdown_within(std::time::Duration::from_millis(100))
+            .await;
+        assert!(
+            !drained,
+            "non-cooperative work must retire after the bounded shutdown grace"
+        );
+        assert!(
+            settlement.is_settling(),
+            "retirement must retain the pending settlement until the worker joins"
+        );
+
+        worker_release.notify_one();
+        assert!(
+            tasks
+                .reconcile_within(std::time::Duration::from_millis(100))
+                .await,
+            "the retained retirement must become joinable after worker release"
+        );
+        assert!(settlement.is_joined());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_after_commit_waits_for_and_returns_the_canonical_outcome() {
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancellation.commit.fixture")
+                .expect("cancellation");
+        let control =
+            McpToolDispatchControl::new("tracedecay_configuration_set", None, cancellation.clone())
+                .expect("dispatch control");
+        let tasks = Arc::new(crate::mcp::server::RetainedToolDispatchTasks::new());
+        let settlement = Arc::new(crate::mcp::server::DispatchExecutionSettlement::new());
+        let commit_started = Arc::new(tokio::sync::Notify::new());
+        let worker_release = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::clone(&commit_started);
+        let release = Arc::clone(&worker_release);
+        let runner_control = control.clone();
+        let runner_tasks = Arc::clone(&tasks);
+        let runner_settlement = Arc::clone(&settlement);
+        let runner = tokio::spawn(async move {
+            runner_control
+                .run_retained(
+                    McpToolDispatchStage::Handler,
+                    &runner_tasks,
+                    runner_settlement,
+                    async move {
+                        assert!(cancellation.try_begin_commit());
+                        started.notify_one();
+                        release.notified().await;
+                        Ok("committed")
+                    },
+                )
+                .await
+        });
+
+        commit_started.notified().await;
+        tokio::time::advance(control.budget + std::time::Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(WORKER_SETTLEMENT_GRACE + std::time::Duration::from_millis(1)).await;
+        assert!(
+            !runner.is_finished(),
+            "a deadline after the commit boundary must not publish a failure"
+        );
+
+        worker_release.notify_one();
+        assert_eq!(
+            runner
+                .await
+                .expect("dispatch runner joins")
+                .expect("outcome"),
+            "committed"
+        );
+        assert!(settlement.is_joined());
+    }
+
+    #[tokio::test]
+    async fn retained_dispatch_admission_reports_typed_saturation() {
+        let tasks = Arc::new(crate::mcp::server::RetainedToolDispatchTasks::fixture(
+            64, 2,
+        ));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut receivers = Vec::new();
+        for _ in 0..64 {
+            let worker_release = Arc::clone(&release);
+            receivers.push(
+                tasks
+                    .spawn(
+                        crate::mcp::server::RetainedToolDispatchLane::General,
+                        Arc::new(crate::mcp::server::DispatchExecutionSettlement::new()),
+                        async move {
+                            worker_release
+                                .acquire()
+                                .await
+                                .expect("release semaphore")
+                                .forget();
+                        },
+                    )
+                    .await
+                    .expect("dispatch below saturation limit"),
+            );
+        }
+
+        let error = tasks
+            .spawn(
+                crate::mcp::server::RetainedToolDispatchLane::General,
+                Arc::new(crate::mcp::server::DispatchExecutionSettlement::new()),
+                std::future::pending::<()>(),
+            )
+            .await
+            .expect_err("dispatch beyond saturation limit");
+        assert_eq!(
+            error.project_route_context().map(|context| context.0),
+            Some("tool_dispatch_saturated")
+        );
+
+        let control_release = Arc::clone(&release);
+        let control = tasks
+            .spawn(
+                crate::mcp::server::RetainedToolDispatchLane::Control,
+                Arc::new(crate::mcp::server::DispatchExecutionSettlement::new()),
+                async move {
+                    control_release
+                        .acquire()
+                        .await
+                        .expect("control release")
+                        .forget();
+                },
+            )
+            .await
+            .expect("reserved control lane remains available");
+
+        release.add_permits(65);
+        assert!(tasks.shutdown().await);
+        control.await.expect("retained control result");
+        for receiver in receivers {
+            receiver.await.expect("retained result");
+        }
+    }
 }

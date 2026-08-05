@@ -226,6 +226,7 @@ impl CancellationContext {
 }
 
 const ACTIVE_CANCELLATION_SIGNAL: i64 = i64::MIN;
+const COMMIT_STARTED_CANCELLATION_SIGNAL: i64 = i64::MAX;
 
 /// One live transport cancellation identity shared by adapter clones.
 ///
@@ -248,6 +249,9 @@ impl CancellationSignal {
     }
 
     pub fn cancel(&self, requested_at: UtcMicros) -> bool {
+        if requested_at.0 == COMMIT_STARTED_CANCELLATION_SIGNAL {
+            return false;
+        }
         if self
             .requested_at
             .compare_exchange(
@@ -263,11 +267,37 @@ impl CancellationSignal {
         true
     }
 
+    /// Atomically enters an irreversible commit section unless cancellation
+    /// already won admission.
+    ///
+    /// Callers must invoke this immediately before the first durable commit.
+    /// Once it succeeds, later cancellation requests are rejected and the
+    /// caller owns post-commit settlement to a canonical outcome.
+    pub fn try_begin_commit(&self) -> bool {
+        match self.requested_at.compare_exchange(
+            ACTIVE_CANCELLATION_SIGNAL,
+            COMMIT_STARTED_CANCELLATION_SIGNAL,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(COMMIT_STARTED_CANCELLATION_SIGNAL) => true,
+            Err(_) => false,
+        }
+    }
+
+    pub fn commit_started(&self) -> bool {
+        self.requested_at.load(Ordering::Acquire) == COMMIT_STARTED_CANCELLATION_SIGNAL
+    }
+
     pub fn context(&self) -> CancellationContext {
         let requested_at = self.requested_at.load(Ordering::Acquire);
         CancellationContext {
             token_id: self.token_id.clone(),
-            state: if requested_at == ACTIVE_CANCELLATION_SIGNAL {
+            state: if matches!(
+                requested_at,
+                ACTIVE_CANCELLATION_SIGNAL | COMMIT_STARTED_CANCELLATION_SIGNAL
+            ) {
                 CancellationState::Active
             } else {
                 CancellationState::Cancelled {
@@ -278,12 +308,19 @@ impl CancellationSignal {
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.requested_at.load(Ordering::Acquire) != ACTIVE_CANCELLATION_SIGNAL
+        !matches!(
+            self.requested_at.load(Ordering::Acquire),
+            ACTIVE_CANCELLATION_SIGNAL | COMMIT_STARTED_CANCELLATION_SIGNAL
+        )
     }
 
     pub fn cancelled_at(&self) -> Option<UtcMicros> {
         let requested_at = self.requested_at.load(Ordering::Acquire);
-        (requested_at != ACTIVE_CANCELLATION_SIGNAL).then_some(UtcMicros(requested_at))
+        (!matches!(
+            requested_at,
+            ACTIVE_CANCELLATION_SIGNAL | COMMIT_STARTED_CANCELLATION_SIGNAL
+        ))
+        .then_some(UtcMicros(requested_at))
     }
 }
 
@@ -410,5 +447,29 @@ mod tests {
                 requested_at: UtcMicros(41)
             }
         ));
+    }
+
+    #[test]
+    fn commit_start_wins_the_same_atomic_race_without_appearing_cancelled() {
+        let signal = CancellationSignal::active("cancel.commit-wins.fixture").unwrap();
+        let commit_owner = signal.clone();
+
+        assert!(commit_owner.try_begin_commit());
+        assert!(signal.commit_started());
+        assert!(!signal.cancel(UtcMicros(51)));
+        assert!(!signal.is_cancelled());
+        assert_eq!(signal.cancelled_at(), None);
+        assert!(matches!(signal.context().state, CancellationState::Active));
+    }
+
+    #[test]
+    fn cancellation_wins_the_same_atomic_race_before_commit_starts() {
+        let signal = CancellationSignal::active("cancel.cancel-wins.fixture").unwrap();
+        let commit_owner = signal.clone();
+
+        assert!(signal.cancel(UtcMicros(61)));
+        assert!(!commit_owner.try_begin_commit());
+        assert!(!signal.commit_started());
+        assert_eq!(signal.cancelled_at(), Some(UtcMicros(61)));
     }
 }

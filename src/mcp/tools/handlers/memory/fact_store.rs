@@ -19,8 +19,9 @@ use super::args::{
 };
 use super::status::feedback_history_repair_payload;
 use super::{
-    TargetMemoryDb, config_error, memory_application, memory_application_error,
-    memory_operation_context, open_target_memory_db, refresh_target_memory_digest,
+    TargetMemoryDb, config_error, controlled_memory_application, memory_application,
+    memory_application_error, memory_operation_context, open_target_memory_db,
+    refresh_target_memory_digest,
 };
 
 fn rendered_fact_store(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
@@ -39,10 +40,20 @@ fn results_envelope(action: &str, results: &Value, count: usize) -> Value {
     })
 }
 
+#[cfg(test)]
 pub(in crate::mcp::tools::handlers) async fn handle_fact_store(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
+) -> Result<ToolResult> {
+    handle_fact_store_controlled(cg, args, global_db, None).await
+}
+
+pub(in crate::mcp::tools::handlers) async fn handle_fact_store_controlled(
+    cg: &TraceDecay,
+    args: Value,
+    global_db: Option<&RegisteredGlobalDb>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let cross_project_selector = project_selector_present(&args, &["project_path"]);
@@ -57,7 +68,13 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_store(
     // bounded once, centrally, by the retained memory dispatch off the
     // admission-carried client deadline (dispatch_groups::dispatch_memory_operation).
     let target_memory = open_target_memory_db(cg, &args, global_db).await?;
-    handle_fact_store_for_target(args, cross_project_selector, target_memory).await
+    handle_fact_store_for_target_controlled(
+        args,
+        cross_project_selector,
+        target_memory,
+        cancellation,
+    )
+    .await
 }
 
 pub(super) async fn handle_fact_store_for_target(
@@ -65,10 +82,24 @@ pub(super) async fn handle_fact_store_for_target(
     cross_project_selector: bool,
     target_memory: TargetMemoryDb<'_>,
 ) -> Result<ToolResult> {
+    handle_fact_store_for_target_controlled(args, cross_project_selector, target_memory, None).await
+}
+
+async fn handle_fact_store_for_target_controlled(
+    args: Value,
+    cross_project_selector: bool,
+    target_memory: TargetMemoryDb<'_>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let action_kind = FactStoreAction::parse(action)
         .ok_or_else(|| config_error(format!("unknown fact_store action: {action}")))?;
-    let memory = memory_application(&target_memory)?;
+    let settlement_cancellation = cancellation.clone();
+    let memory = if action_kind.writes() {
+        controlled_memory_application(&target_memory, cancellation)?
+    } else {
+        memory_application(&target_memory)?
+    };
     let mut refresh_digest = false;
     let out = match action_kind {
         FactStoreAction::Add => {
@@ -208,8 +239,15 @@ pub(super) async fn handle_fact_store_for_target(
             json!({ "action": action, "removed": removed, "count": usize::from(removed) })
         }
     };
-    if refresh_digest && !target_memory.user_scope {
-        refresh_target_memory_digest(&memory, &target_memory).await;
+    // A controlled exact replay can return the pre-existing fact without
+    // crossing the SQLite commit boundary. Its digest was settled by the
+    // original call, so do not introduce a new filesystem mutation without a
+    // commit claim.
+    let controlled_write_committed = settlement_cancellation
+        .as_ref()
+        .is_none_or(tracedecay_application::CancellationSignal::commit_started);
+    if refresh_digest && controlled_write_committed && !target_memory.user_scope {
+        refresh_target_memory_digest(&memory, &target_memory).await?;
     }
     Ok(rendered_fact_store(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),

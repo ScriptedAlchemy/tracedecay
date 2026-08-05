@@ -23,7 +23,7 @@ fn queued_cancellable_request_key(
                     .as_ref()
                     .and_then(|params| params.get("name"))
                     .and_then(Value::as_str)
-                    .is_some_and(super::requests::tool_supports_live_cancellation)
+                    .is_some()
                 && request
                     .id
                     .as_ref()
@@ -442,17 +442,25 @@ impl McpServer {
             let response = if rejecting_for_drain {
                 parsed.as_ref().ok().and_then(|request| {
                     request.id.clone().map(|id| {
-                        JsonRpcResponse::error(
+                        let response = JsonRpcResponse::error(
                             id,
                             ErrorCode::InternalError,
                             "TraceDecay daemon is draining for upgrade; retry the request"
                                 .to_string(),
-                        )
+                        );
+                        if request.method == "tools/call" {
+                            super::request_receipts::finish_early_tool_call_response(
+                                response,
+                                super::request_receipts::ToolCallTerminal::Shutdown,
+                            )
+                        } else {
+                            response
+                        }
                     })
                 })
             } else if !project_request_admitted {
                 revocable_tool_call.as_ref().map(|(id, tool_name)| {
-                    JsonRpcResponse::error_with_data(
+                    let response = JsonRpcResponse::error_with_data(
                         id.clone(),
                         ErrorCode::InternalError,
                         "tool project route failed: project server was retired".to_owned(),
@@ -462,6 +470,10 @@ impl McpServer {
                             "retryable": true,
                             "detail": "the retained project server was replaced or revoked; retry against the current owner",
                         })),
+                    );
+                    super::request_receipts::finish_early_tool_call_response(
+                        response,
+                        super::request_receipts::ToolCallTerminal::Unavailable,
                     )
                 })
             } else {
@@ -477,13 +489,12 @@ impl McpServer {
                                 )
                                 .await;
                         }
-                        let cancellable_tool_call = request.method == "tools/call"
-                            && request
-                                .params
-                                .as_ref()
-                                .and_then(|params| params.get("name"))
-                                .and_then(Value::as_str)
-                                .is_some_and(super::requests::tool_supports_live_cancellation);
+                        // Every tools/call admission now owns one dispatch
+                        // cancellation signal, even when a legacy handler does
+                        // not consume the request id itself. This keeps
+                        // connection teardown from dropping an in-flight
+                        // handler and detaching blocking work.
+                        let cancellable_tool_call = request.method == "tools/call";
                         if cancellable_tool_call {
                             let external_shutdown_requested = async {
                                 if listen_for_process_signals {
@@ -677,7 +688,7 @@ impl McpServer {
             return;
         }
 
-        self.shutdown_background_tasks().await;
+        let retained_dispatch_drained = self.shutdown_background_tasks().await;
 
         let uptime = self.stats.started_at.elapsed();
         let tool_calls = self.stats.tool_calls.load(Ordering::Relaxed);
@@ -708,11 +719,7 @@ impl McpServer {
                 && let Some(_total) = crate::cloud::flush_pending(config.pending_upload)
             {
                 config.pending_upload = 0;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                config.last_upload_at = now;
+                config.last_upload_at = crate::tracedecay::current_timestamp();
             }
             if let Err(err) = config.save() {
                 tracing::warn!(error = %err, "could not save upload config during shutdown");
@@ -724,15 +731,37 @@ impl McpServer {
             tracing::warn!(error = %e, "failed to checkpoint WAL during shutdown");
         }
 
-        tracing::info!(
-            tool_calls,
-            tokens_saved,
-            uptime_secs = uptime.as_secs(),
-            "MCP server shutdown complete"
-        );
+        if retained_dispatch_drained {
+            tracing::info!(
+                tool_calls,
+                tokens_saved,
+                uptime_secs = uptime.as_secs(),
+                "MCP server shutdown complete"
+            );
+        } else {
+            tracing::warn!(
+                tool_calls,
+                tokens_saved,
+                uptime_secs = uptime.as_secs(),
+                "MCP server control plane closed; retained tool work is still settling"
+            );
+        }
     }
 
-    pub(crate) async fn shutdown_background_tasks(&self) {
+    pub(crate) async fn shutdown_background_tasks(&self) -> bool {
+        let now = crate::mcp::server::requests::mcp_now_micros();
+        for cancellation in
+            crate::mcp::server::requests::recover_lock(&self.application_surface_cancellations)
+                .values()
+        {
+            cancellation.cancel(now);
+        }
+        let retained_dispatch_drained = self.retained_tool_dispatch_tasks.shutdown().await;
+        if !retained_dispatch_drained {
+            tracing::warn!(
+                "MCP shutdown retired non-cooperative tool work; settlement remains owned until join"
+            );
+        }
         if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
             worker.shutdown().await;
         }
@@ -741,6 +770,7 @@ impl McpServer {
         // joined, and the machine marked cancelled.
         self.shutdown_startup_catch_up_sync().await;
         self.shutdown_startup_transcript_ingest().await;
+        retained_dispatch_drained
     }
 
     pub(crate) async fn replay_host_admission(

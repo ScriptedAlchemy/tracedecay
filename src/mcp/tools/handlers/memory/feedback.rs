@@ -59,7 +59,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
         .await
         .map_err(memory_application_error)?;
     if !target_memory.user_scope {
-        refresh_target_memory_digest(&memory, &target_memory).await;
+        refresh_target_memory_digest(&memory, &target_memory).await?;
     }
     let value = json!({ "status": "recorded", "feedback": result });
     Ok(tool_json(

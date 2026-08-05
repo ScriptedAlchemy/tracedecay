@@ -50,7 +50,11 @@ mod lifecycle;
 mod project_registry;
 mod protocol;
 mod read_coalescing;
+mod request_receipts;
 mod requests;
+pub(crate) use requests::{
+    DispatchExecutionSettlement, RetainedToolDispatchLane, RetainedToolDispatchTasks,
+};
 mod rmcp;
 mod routing;
 mod session_refresh;
@@ -417,7 +421,8 @@ pub struct McpServer {
     /// never masquerades as a real session.
     connection_identity: McpConnectionIdentityAuthority,
     /// One lazy authenticated application client retained for this server.
-    application_surface_client: tokio::sync::OnceCell<crate::daemon_client::DaemonInvocationClient>,
+    application_surface_client:
+        tokio::sync::OnceCell<Arc<crate::daemon_client::DaemonInvocationClient>>,
     /// Daemon-local executor installed by production project composition.
     /// External/direct servers fall back to the authenticated socket client.
     application_invocation_executor:
@@ -430,6 +435,11 @@ pub struct McpServer {
     /// Live MCP cancellation tokens keyed by canonical application request id.
     application_surface_cancellations:
         std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
+    /// Owns admitted tool handlers until their actual settlement.
+    retained_tool_dispatch_tasks: Arc<requests::RetainedToolDispatchTasks>,
+    /// Lets retained result materialization own the server without requiring
+    /// public request entry points to receive `&Arc<Self>`.
+    retained_dispatch_server: std::sync::Weak<McpServer>,
 }
 
 impl McpServer {
@@ -835,7 +845,7 @@ impl McpServer {
             )
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
 
-        let server = Arc::new(Self {
+        let server = Arc::new_cyclic(|retained_dispatch_server| Self {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
             branch_reopen_completions: Arc::new(AtomicU64::new(0)),
@@ -919,6 +929,8 @@ impl McpServer {
             project_server_live,
             project_server_lifecycle: ProjectServerResponseLifecycle::default(),
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
+            retained_tool_dispatch_tasks: Arc::new(requests::RetainedToolDispatchTasks::new()),
+            retained_dispatch_server: retained_dispatch_server.clone(),
         });
 
         tokio::task::spawn_blocking(move || {
