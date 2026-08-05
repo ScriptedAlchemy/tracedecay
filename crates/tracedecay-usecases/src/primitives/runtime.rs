@@ -151,7 +151,6 @@ pub trait Pr12OperationalPrimitivePort: Send + Sync {
 #[serde(deny_unknown_fields)]
 pub struct QualifiedNamePrimitiveRequest {
     pub qualified_name: String,
-    pub page: tracedecay_application::PageRequest,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -159,7 +158,6 @@ pub struct QualifiedNamePrimitiveRequest {
 pub struct QualifiedNamePrimitiveResult {
     pub symbols: Vec<tracedecay_application::retrieval::SymbolPrimitiveRecord>,
     pub total: Option<u64>,
-    pub next_cursor: Option<OpaqueCursor>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

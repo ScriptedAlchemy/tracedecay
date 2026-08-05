@@ -533,10 +533,9 @@ pub(super) fn def_session_lookup() -> ToolDefinition {
         "session_lookup",
         "Look up a session",
         json!({
-            "session_id": string_property("Exact session identity."),
-            "meta": retrieval_meta_schema()
+            "session_id": string_property("Exact session identity.")
         }),
-        &["session_id", "meta"],
+        &["session_id"],
     )
 }
 
@@ -545,10 +544,9 @@ pub(super) fn def_qualified_name_read() -> ToolDefinition {
         "qualified_name",
         "Read qualified symbols",
         json!({
-            "qualified_name": string_property("Exact qualified symbol name."),
-            "page": page_request_schema()
+            "qualified_name": string_property("Exact qualified symbol name.")
         }),
-        &["qualified_name", "page"],
+        &["qualified_name"],
     )
 }
 
@@ -636,12 +634,7 @@ pub(super) fn def_file_metadata_read() -> ToolDefinition {
 }
 
 pub(super) fn def_health_read() -> ToolDefinition {
-    primitive_read_definition(
-        "health_read",
-        "Read project health",
-        json!({"meta": retrieval_meta_schema()}),
-        &["meta"],
-    )
+    primitive_read_definition("health_read", "Read project health", json!({}), &[])
 }
 
 pub(super) fn def_health_delta() -> ToolDefinition {
@@ -658,10 +651,9 @@ pub(super) fn def_health_delta() -> ToolDefinition {
                 "type": "string",
                 "maxLength": 4096,
                 "description": "Optional project-relative scope prefix."
-            },
-            "meta": retrieval_meta_schema()
+            }
         }),
-        &["meta"],
+        &[],
     )
 }
 
@@ -1350,23 +1342,10 @@ mod tests {
             );
         }
 
-        let session = def_session_lookup();
-        let meta = &session.input_schema["properties"]["meta"];
-        assert_eq!(
-            meta["required"],
-            json!(["temporal", "page", "projection", "order"])
-        );
-        assert_eq!(meta["additionalProperties"], json!(false));
-        assert_eq!(meta["properties"]["page"]["required"], json!(["page_size"]));
-        assert_eq!(
-            meta["properties"]["page"]["additionalProperties"],
-            json!(false)
-        );
-
         let qualified_name = def_qualified_name_read();
         assert_eq!(
-            qualified_name.input_schema["properties"]["page"]["required"],
-            json!(["page_size"])
+            qualified_name.input_schema["required"],
+            json!(["qualified_name"])
         );
 
         let source_lines = def_source_lines_read();

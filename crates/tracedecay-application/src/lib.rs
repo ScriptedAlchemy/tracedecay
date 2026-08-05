@@ -34,6 +34,7 @@ pub mod multi_root;
 pub mod multi_root_catalog;
 pub mod observability;
 pub mod operation_events;
+pub mod page_admission;
 pub mod policy;
 pub mod remote;
 pub mod result;
@@ -55,6 +56,10 @@ pub mod workflow_runtime;
 
 pub use multi_root_catalog::{
     MultiRootApplicationOperation, multi_root_executable_binding_registry,
+};
+pub use page_admission::{
+    AdmittedPageRequest, PageAdmissionError, PageAdmissionFuture, PageAdmissionPort,
+    PageAdmissionRequest, PageAdmissionSeal, PageAdmissionService,
 };
 
 mod error;

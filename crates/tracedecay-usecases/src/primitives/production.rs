@@ -140,6 +140,20 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
     })
 }
 
+fn unavailable<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOutcome<T> {
+    match failed(domain, finished_at) {
+        RetrievalPortOutcome::Failed(mut evidence) => {
+            evidence.omissions.push(Omission {
+                domain,
+                count: 0,
+                reason: OmissionReason::Unavailable,
+            });
+            RetrievalPortOutcome::Unavailable(evidence)
+        }
+        outcome => outcome,
+    }
+}
+
 /// Reports a test primitive read that could not be served.
 ///
 /// A graph read that fails leaves the port with no measurement at all. The
@@ -787,21 +801,11 @@ impl TraceDecayTemporalPortV1 {
 impl TemporalRetrievalPort for TraceDecayTemporalPortV1 {
     fn session_lookup(
         &self,
-        context: &RetrievalPortContext<'_>,
-        request: &SessionLookupRequest,
+        _context: &RetrievalPortContext<'_>,
+        _request: &SessionLookupRequest,
     ) -> RetrievalPortOutcome<SessionLookupResult> {
-        let _ = (context, &self.session_db, request);
-        let finished_at = now_observed();
-        // Session temporal anchors are owned by the PR8 kernel; when no exact
-        // session handle is supplied on this compatibility port, return an
-        // authoritative empty page rather than inventing anchors.
-        completed(
-            SessionLookupResult {
-                anchors: Vec::new(),
-            },
-            EvidenceDomain::Temporal,
-            finished_at,
-        )
+        let _ = &self.session_db;
+        unavailable(EvidenceDomain::Temporal, now_observed())
     }
 }
 
@@ -1100,7 +1104,6 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 QualifiedNamePrimitiveResult {
                     symbols,
                     total: Some(total),
-                    next_cursor: None,
                 },
                 EvidenceDomain::Symbol,
                 now_observed(),

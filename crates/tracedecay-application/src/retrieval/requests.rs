@@ -200,7 +200,6 @@ pub struct AffectedTestsResult {
 #[serde(deny_unknown_fields)]
 pub struct SessionLookupRequest {
     pub session_id: SessionId,
-    pub meta: RetrievalRequestMeta,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -224,9 +223,7 @@ pub struct AnchorExpandResult {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct HealthReadRequest {
-    pub meta: RetrievalRequestMeta,
-}
+pub struct HealthReadRequest {}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -239,7 +236,6 @@ pub struct HealthReadResult {
 pub struct HealthDeltaRequest {
     pub before_cursor: Option<String>,
     pub path_prefix: Option<String>,
-    pub meta: RetrievalRequestMeta,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

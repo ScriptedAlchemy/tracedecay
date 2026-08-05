@@ -436,14 +436,32 @@ fn application_invoker_for_surface(
     let resolver = CatalogBindingResolver::new(composition.snapshot());
     let wire_schemas = build_application_wire_schema_registry(composition.snapshot())?;
     if surface == BindingSurface::Http {
-        for operation in HttpApplicationOperation::ALL {
-            if !operation.is_http_exposed() {
+        for binding in composition
+            .snapshot()
+            .bindings()
+            .iter()
+            .filter(|binding| binding.surface() == BindingSurface::Http)
+        {
+            let Some(capability) = composition
+                .snapshot()
+                .capability(binding.capability_id())
+                .filter(|capability| capability.availability().is_callable())
+            else {
                 continue;
-            }
-            let Some(binding) = resolve_application_binding(&resolver, surface, operation) else {
+            };
+            let Some(operation) =
+                HttpApplicationOperation::from_catalog_name(binding.operation().as_str())
+            else {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             };
-            if wire_schemas.get(&binding.binding_id).is_none() {
+            if resolve_application_binding(&resolver, surface, operation)
+                .is_none_or(|resolved| &resolved.binding_id != binding.binding_id())
+                || wire_schemas.get(binding.binding_id()).is_none()
+                || capability
+                    .binding_ids()
+                    .binary_search(binding.binding_id())
+                    .is_err()
+            {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             }
         }

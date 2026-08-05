@@ -117,7 +117,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         summary: "List feedback findings",
         description: "List authorized feedback findings with Plan 05 cursors.",
         example: "List feedback findings for this branch",
-        paginated: true,
+        paginated: false,
         surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
@@ -141,7 +141,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         summary: "Read affected tests",
         description: "Project affected-test state from an authorized completed feedback cycle.",
         example: "Read affected tests from this feedback cycle",
-        paginated: true,
+        paginated: false,
         surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
@@ -153,7 +153,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         summary: "Read recent test results",
         description: "Read the latest daemon-retained managed test result for the admitted project root.",
         example: "Read the latest managed test results",
-        paginated: false,
+        paginated: true,
         surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
@@ -440,6 +440,26 @@ mod tests {
                 .expect("registered feedback capability");
             assert!(capability.availability().is_callable());
             assert_eq!(capability.binding_ids().len(), spec.surfaces.len());
+        }
+    }
+
+    #[test]
+    fn transport_pagination_excludes_owner_authenticated_request_handles() {
+        let contribution = feedback_surface_catalog_contribution().expect("contribution");
+
+        for capability in contribution.capabilities() {
+            let operation = contribution
+                .bindings()
+                .iter()
+                .find(|binding| binding.capability_id() == capability.capability_id())
+                .map(|binding| binding.operation().as_str());
+            if let Some(operation) = operation {
+                assert_eq!(
+                    capability.pagination().is_some(),
+                    operation == "test_results",
+                    "{operation}"
+                );
+            }
         }
     }
 }

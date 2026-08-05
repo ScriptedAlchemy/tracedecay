@@ -9,7 +9,7 @@ use tracedecay_tool_catalog::{
     RetrievalPrimitiveManifestV1, RetrieverId, RevalidationContract, RevalidationPoint,
     RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, ScoringContractRef,
     SortContract, SortContractId, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
-    SurfaceOperationName, TemporalMode, TerminalState, TerminalStateContract,
+    SurfaceOperationName, TemporalMode, TerminalState, TerminalStateContract, UnavailabilityReason,
 };
 
 use crate::current_bindings;
@@ -58,6 +58,21 @@ struct PrimitiveReadSpec {
     operation: &'static str,
     capability: &'static str,
     use_case: &'static str,
+}
+
+const fn primitive_read_is_paginated(operation: &str) -> bool {
+    matches!(
+        operation,
+        "code_signature_search"
+            | "code_implementations"
+            | "code_type_hierarchy"
+            | "code_callers"
+            | "diagnostics_read"
+    )
+}
+
+const fn primitive_read_is_callable(operation: &str) -> bool {
+    operation != "session_lookup"
 }
 
 fn primitive_profile_ids(operation: &str) -> &'static [&'static str] {
@@ -219,11 +234,19 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             spec.capability.replace('_', "-")
         ))?;
         let surfaces = primitive_read_surfaces(spec);
-        let (surface_bindings, mut binding_ids) =
-            current_bindings(&capability_id, spec.operation, surfaces.iter().copied())?;
+        let (surface_bindings, mut binding_ids) = if primitive_read_is_callable(spec.operation) {
+            current_bindings(&capability_id, spec.operation, surfaces.iter().copied())?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         bindings.extend(surface_bindings);
-        binding_ids.reserve(primitive_lsp_methods(spec.operation).len());
-        for method in primitive_lsp_methods(spec.operation) {
+        let lsp_methods: &[&str] = if primitive_read_is_callable(spec.operation) {
+            primitive_lsp_methods(spec.operation)
+        } else {
+            &[]
+        };
+        binding_ids.reserve(lsp_methods.len());
+        for method in lsp_methods {
             let method_id = method.to_ascii_lowercase().replace('/', "-");
             let binding_id =
                 BindingId::new(format!("binding.lsp.{}.{}.v1", spec.operation, method_id))?;
@@ -266,7 +289,9 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
                 CancellationPoint::DuringRead,
             ])?,
             deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
-            pagination: Some(PaginationContract::new(10, 1_000, 60_000)?),
+            pagination: primitive_read_is_paginated(spec.operation)
+                .then(|| PaginationContract::new(10, 1_000, 60_000))
+                .transpose()?,
             idempotency: IdempotencyContract::NotRequired,
             inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
             authority_revalidation: RevalidationContract::required(vec![
@@ -285,9 +310,19 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
                 TerminalState::Unavailable,
                 TerminalState::Partial,
             ])?,
-            availability: AvailabilityContract::Available,
+            availability: if primitive_read_is_callable(spec.operation) {
+                AvailabilityContract::Available
+            } else {
+                AvailabilityContract::Unavailable {
+                    reason: UnavailabilityReason::NotImplemented,
+                }
+            },
             binding_ids,
-            profile_eligibility: application_profile_ids(primitive_profile_ids(spec.operation))?,
+            profile_eligibility: if primitive_read_is_callable(spec.operation) {
+                application_profile_ids(primitive_profile_ids(spec.operation))?
+            } else {
+                Vec::new()
+            },
             required_features: Vec::new(),
         })?);
     }
@@ -481,5 +516,46 @@ mod tests {
             .expect("symbol-search retrieval primitive");
 
         assert_eq!(primitive.temporal_modes(), &[TemporalMode::Current]);
+    }
+
+    #[test]
+    fn primitive_pagination_matches_the_production_cursor_owners() {
+        let contribution = primitive_read_contribution().expect("primitive contribution");
+
+        for capability in contribution
+            .capabilities()
+            .iter()
+            .filter(|capability| capability.availability().is_callable())
+        {
+            let operation = contribution
+                .bindings()
+                .iter()
+                .find(|binding| binding.capability_id() == capability.capability_id())
+                .expect("primitive capability binding")
+                .operation()
+                .as_str();
+            assert_eq!(
+                capability.pagination().is_some(),
+                primitive_read_is_paginated(operation),
+                "{operation}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_lookup_is_unavailable_without_a_real_temporal_owner() {
+        let contribution = primitive_read_contribution().expect("primitive contribution");
+        let session = contribution
+            .capabilities()
+            .iter()
+            .find(|capability| {
+                capability.capability_id().as_str()
+                    == "capability.application.primitive.session-lookup"
+            })
+            .expect("session lookup capability");
+
+        assert!(!session.availability().is_callable());
+        assert!(session.binding_ids().is_empty());
+        assert!(session.profile_eligibility().is_empty());
     }
 }

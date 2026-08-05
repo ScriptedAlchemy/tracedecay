@@ -334,7 +334,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 14] = [
         description: "Read reauthorized append-only redacted configuration audit events.",
         example: "Show configuration audit history",
         effect: EffectClass::Read,
-        paginated: true,
+        paginated: false,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -729,5 +729,19 @@ mod tests {
         assert!(configuration_surface_request_schema("configuration_get").is_ok());
         assert!(configuration_surface_result_schema("configuration_get").is_ok());
         assert!(configuration_surface_request_schema("configuration_unknown").is_err());
+    }
+
+    #[test]
+    fn configuration_audit_continuation_is_not_a_transport_cursor() {
+        let contribution = configuration_surface_catalog_contribution().expect("contribution");
+        let audit = contribution
+            .capabilities()
+            .iter()
+            .find(|capability| {
+                capability.capability_id().as_str() == "capability.application.configuration.audit"
+            })
+            .expect("configuration audit capability");
+
+        assert!(audit.pagination().is_none());
     }
 }
