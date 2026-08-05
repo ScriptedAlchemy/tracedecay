@@ -265,23 +265,11 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     pub(super) database: Arc<crate::global_db::RegisteredGlobalDb>,
-    pub(super) runtime:
-        Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>>,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
     pub(super) authority_digest: ManifestDigest,
     pub(super) policy_digest: ManifestDigest,
     pub(super) configuration_digest: ManifestDigest,
-}
-
-impl RegisteredWorkRuntime {
-    /// Takes the provider runtime out for shutdown, dropping the rest of the
-    /// registration with it.
-    pub(in crate::daemon::service) fn into_runtime(
-        self,
-    ) -> Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>> {
-        self.runtime
-    }
 }
 
 pub(in crate::daemon::service) struct RegisteredFeedbackRuntime {

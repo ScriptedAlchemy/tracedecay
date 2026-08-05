@@ -16,9 +16,9 @@ use tracedecay_domain::{
 use tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-mod work_registered_store;
+mod registered_workflow_store;
 
-use work_registered_store::RegisteredWorkStore;
+use registered_workflow_store::RegisteredWorkflowStore;
 
 const TOKEN_SECRET: &str = "handoff-open-secret-00000000000000000001";
 
@@ -109,8 +109,8 @@ fn run<T>(future: impl Future<Output = T>) -> T {
 
 #[test]
 fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
-    let store = RegisteredWorkStore::start("handoff-open");
-    let sqlite = HandoffOpenSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let store = RegisteredWorkflowStore::start("handoff-open");
+    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
     let issue_context = context("request.handoff.issue");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
@@ -137,7 +137,7 @@ fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
 
     drop(service);
     let store = store.restart("handoff-open-restart");
-    let sqlite = HandoffOpenSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
     let open_context = context("request.handoff.open");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let request = OpenTaskHandoffRequestV1 {
@@ -186,8 +186,8 @@ fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
 
 #[test]
 fn wrong_session_and_expired_grants_are_concealed_without_consuming() {
-    let store = RegisteredWorkStore::start("handoff-open-conceal");
-    let sqlite = HandoffOpenSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let store = RegisteredWorkflowStore::start("handoff-open-conceal");
+    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
     let issue_context = context("request.handoff.issue-conceal");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();

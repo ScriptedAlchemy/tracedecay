@@ -789,10 +789,6 @@ impl DaemonWorkRuntimeRegistrar {
         grant: CapabilityGrantSnapshot,
         policy_digest: ManifestDigest,
         configuration_digest: ManifestDigest,
-        config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
-        executable_bindings: Arc<
-            dyn crate::config::work_executable_binding::WorkExecutableBindingResolver + Send + Sync,
-        >,
     ) -> Result<(), TraceDecayError> {
         if authority.project_id() != &grant.scope.project_id
             || authority.repository_id() != &grant.scope.repository_id
@@ -831,20 +827,8 @@ impl DaemonWorkRuntimeRegistrar {
                     })
                 },
                 || {
-                    // Opening the provider runtime is deferred until the slot is
-                    // known to be free so a refused registration never starts one.
-                    let runtime = DaemonWorkRuntimeV1::new(
-                        authority,
-                        database.work_storage()?,
-                        config,
-                        executable_bindings,
-                        configuration_digest.clone(),
-                        Arc::clone(&database),
-                        project_root.clone(),
-                    );
                     Ok(RegisteredWorkRuntime {
                         database,
-                        runtime: Arc::new(runtime),
                         actor: actor.clone(),
                         grant: grant.clone(),
                         authority_digest: authority_digest.clone(),

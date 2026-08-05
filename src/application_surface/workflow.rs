@@ -8,7 +8,7 @@ use tracedecay_application::{
     TaskHandoffIssueRequest, TaskHandoffRedeemRequest, WorkflowDefinitionActivateRequest,
     WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
     WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest, WorkflowFanOutRequest,
+    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -190,20 +190,6 @@ async fn invoke_operation(
             )
             .await
         }
-        WorkflowOperation::ExecuteFanOut => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowFanOutRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_domain::WorkflowRunProjection>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::ExecuteFanOut(Box::new(decoded)),
-                execute_fan_out_outcome,
-            )
-            .await
-        }
         WorkflowOperation::HandoffIssue => {
             let Ok(decoded) = serde_json::from_value::<TaskHandoffIssueRequest>(body) else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
@@ -322,11 +308,6 @@ workflow_selector!(
     retire_definition_outcome,
     RetireDefinition,
     tracedecay_application::WorkflowRetirement
-);
-workflow_selector!(
-    execute_fan_out_outcome,
-    ExecuteFanOut,
-    tracedecay_domain::WorkflowRunProjection
 );
 workflow_selector!(
     handoff_issue_outcome,

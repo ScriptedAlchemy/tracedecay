@@ -15,7 +15,7 @@ use tracedecay_application::{
     WorkflowDefinitionActivateRequest, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
     WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
     WorkflowDefinitionRegisterRequest, WorkflowDefinitionRetireRequest,
-    WorkflowDefinitionValidateRequest, WorkflowFanOutRequest, workflow_executable_binding_registry,
+    WorkflowDefinitionValidateRequest, workflow_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
@@ -74,9 +74,6 @@ fn decode_workflow_invocation(
             .map(WorkflowApplicationInvocation::ActivateDefinition),
         WorkflowOperation::RetireDefinition => decode::<WorkflowDefinitionRetireRequest>(body)
             .map(WorkflowApplicationInvocation::RetireDefinition),
-        WorkflowOperation::ExecuteFanOut => decode::<WorkflowFanOutRequest>(body)
-            .map(Box::new)
-            .map(WorkflowApplicationInvocation::ExecuteFanOut),
         WorkflowOperation::HandoffIssue => {
             decode::<TaskHandoffIssueRequest>(body).map(WorkflowApplicationInvocation::HandoffIssue)
         }
@@ -115,9 +112,6 @@ fn workflow_outcome_matches(
         ) | (
             WorkflowOperation::RetireDefinition,
             WorkflowApplicationOutcome::RetireDefinition(_)
-        ) | (
-            WorkflowOperation::ExecuteFanOut,
-            WorkflowApplicationOutcome::ExecuteFanOut(_)
         ) | (
             WorkflowOperation::HandoffIssue,
             WorkflowApplicationOutcome::HandoffIssue(_)
@@ -224,7 +218,6 @@ fn erase_workflow_outcome(
         WorkflowApplicationOutcome::DiffDefinition(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::ActivateDefinition(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::RetireDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::ExecuteFanOut(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::HandoffIssue(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::HandoffRedeem(outcome) => serde_json::to_value(outcome),
     }?;

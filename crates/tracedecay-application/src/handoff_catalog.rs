@@ -114,12 +114,7 @@ fn handoff_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVali
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Stateless,
         streaming: StreamingContract::Unsupported,
-        cancellation: CancellationContract::cooperative(vec![
-            CancellationPoint::BeforeAdmission,
-            CancellationPoint::BeforeEffect,
-            CancellationPoint::EffectInFlight,
-            CancellationPoint::AfterCommit,
-        ])?,
+        cancellation: CancellationContract::cooperative(vec![CancellationPoint::BeforeAdmission])?,
         deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
         pagination: None::<PaginationContract>,
         idempotency: IdempotencyContract::Required,

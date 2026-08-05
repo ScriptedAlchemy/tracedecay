@@ -99,9 +99,6 @@ impl ProjectRuntimeRegistryV1 {
             if let Some(external_acquisition) = runtime.external_acquisition {
                 external_acquisition.cancel();
             }
-            if let Some(work) = runtime.work {
-                let _ = work.into_runtime().shutdown();
-            }
             if let Some(semantic) = runtime.semantic {
                 crate::application::semantic_runtime::unregister_project_semantic_runtime(
                     &project_root,

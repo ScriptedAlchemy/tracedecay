@@ -15,12 +15,9 @@ function page<T extends string>(path: T, label: string, load: () => Promise<{ de
   return { path, label, Page: lazy(load) } as const;
 }
 
-// The thirteen workspaces, each its own lazy code-split chunk: the shell stays
-// light and a surface loads on first navigation. All thirteen read real routes;
-// Work was the last gated one, and its nine routes are mounted. What has not
-// changed is the rule the gate enforced: a surface renders what its contract
-// answered, and never substitutes fixture or browser-owned state for a read
-// that did not land.
+// Each workspace is its own lazy code-split chunk: the shell stays light and a
+// surface loads on first navigation. A surface is listed only while its
+// production routes are mounted.
 export const WORKSPACES = [
   page('brain', 'Brain', () =>
     import('../workspaces/brain/BrainPage.tsx').then((m) => ({ default: m.BrainPage }))),
@@ -46,8 +43,6 @@ export const WORKSPACES = [
     import('../workspaces/costs/CostsPage.tsx').then((m) => ({ default: m.CostsPage }))),
   page('settings', 'Settings', () =>
     import('../workspaces/settings/SettingsPage.tsx').then((m) => ({ default: m.SettingsPage }))),
-  page('work', 'Work', () =>
-    import('../workspaces/work/WorkPage.tsx').then((m) => ({ default: m.WorkPage }))),
 ] as const;
 
 /** Brain is the index surface: the all-projects aggregate. */

@@ -260,6 +260,7 @@ fn hook_lifecycle() -> ContextScoutLifecycleAddressV1 {
     }
 }
 
+mod configuration_registrars_tests;
 mod configuration_tests;
 mod dispatch_tests;
 mod feedback_tests;
@@ -269,6 +270,4 @@ mod lsp_lease_tests;
 mod lsp_tests;
 mod plan26_tests;
 mod primitive_tests;
-mod registrars_tests;
 mod types_tests;
-mod work_tests;

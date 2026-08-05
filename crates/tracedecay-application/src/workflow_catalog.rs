@@ -17,12 +17,12 @@ use crate::{
     WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
     WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
     WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation, WorkflowFanOutRequest, WorkflowRetirement,
+    WorkflowDefinitionValidation, WorkflowRetirement,
 };
 
 const WORKFLOW_SERVICE_ID: &str = "service.workflow";
 
-pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 11] = [
+pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 10] = [
     (
         "register_definition",
         "capability.workflow.register_definition",
@@ -62,11 +62,6 @@ pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 11] = [
         "retire_definition",
         "capability.workflow.retire_definition",
         "use-case.workflow.retire_definition",
-    ),
-    (
-        "execute_fan_out",
-        "capability.workflow.execute_fan_out",
-        "use-case.workflow.execute_fan_out",
     ),
     (
         "handoff_issue",
@@ -122,12 +117,6 @@ pub fn workflow_executable_binding_registry()
                     available::<WorkflowDefinitionRetireRequest, WorkflowRetirement>(
                         operation,
                         "/application/workflow/retire-definition",
-                    )
-                }
-                "execute_fan_out" => {
-                    available::<WorkflowFanOutRequest, tracedecay_domain::WorkflowRunProjection>(
-                        operation,
-                        "/application/workflow/execute-fan-out",
                     )
                 }
                 "handoff_issue" => available::<TaskHandoffIssueRequest, TaskHandoffGrant>(
@@ -214,20 +203,7 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Stateless,
         streaming: StreamingContract::Unsupported,
-        cancellation: CancellationContract::cooperative(if read_only {
-            vec![
-                CancellationPoint::BeforeAdmission,
-                CancellationPoint::BeforeRead,
-                CancellationPoint::DuringRead,
-            ]
-        } else {
-            vec![
-                CancellationPoint::BeforeAdmission,
-                CancellationPoint::BeforeEffect,
-                CancellationPoint::EffectInFlight,
-                CancellationPoint::AfterCommit,
-            ]
-        })?,
+        cancellation: CancellationContract::cooperative(vec![CancellationPoint::BeforeAdmission])?,
         deadline: DeadlineContract::new(
             30_000,
             if read_only {
@@ -301,12 +277,12 @@ mod tests {
     #[test]
     fn workflow_registry_advertises_every_mounted_application_route() {
         let registry = workflow_executable_binding_registry().unwrap();
-        assert_eq!(registry.iter().count(), 11);
+        assert_eq!(registry.iter().count(), 10);
         let advertised = registry
             .iter()
             .filter_map(|availability| availability.binding())
             .collect::<Vec<_>>();
-        assert_eq!(advertised.len(), 11);
+        assert_eq!(advertised.len(), 10);
         for binding in advertised {
             let tracedecay_tool_catalog::RouteExposureV1::Public { route_path, .. } =
                 binding.exposure()
