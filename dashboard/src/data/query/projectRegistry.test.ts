@@ -19,6 +19,7 @@ import { targetedInvalidationKeys } from '../sse/useEvents.tsx';
 import type { SseBatch } from '../sse/types.ts';
 import {
   PROJECT_REGISTRY_ROOT,
+  PROJECT_NOT_FOUND,
   projectRegistryEntryKey,
   projectRegistryInvalidationKey,
   projectRegistryListKey,
@@ -34,6 +35,7 @@ import {
 } from '../../contracts/generated.ts';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
+import { READ_ONLY_SCOPE_STATUS } from '../scope/store.ts';
 
 /**
  * React Query's default key matching: a query is invalidated when the
@@ -171,7 +173,7 @@ describe('fetchProjectRegistry', () => {
     );
   });
 
-  it('keeps a decoded 503 registry answer as its typed non-ok payload', async () => {
+  it('keeps a decoded 503 registry answer in the canonical envelope result', async () => {
     const payload = {
       ...fixturePayload('/api/projects/proj_b'),
       status: 'registry_unavailable',
@@ -189,9 +191,79 @@ describe('fetchProjectRegistry', () => {
     await expect(
       fetchProjectRegistry('/api/projects/proj_b', ProjectContextPayloadV1Schema),
     ).resolves.toMatchObject({
-      outcome: 'source_unavailable',
-      httpStatus: 503,
+      outcome: 'envelope',
       envelope: { payload: { status: 'registry_unavailable' } },
+    });
+  });
+
+  it.each([
+    ['200', 200],
+    ['404', 404],
+    ['500', 500],
+  ])('maps a typed %s not_found envelope to an absent project', async (_label, status) => {
+    const payload = context({
+      status: PROJECT_NOT_FOUND,
+      error: 'no project registered with id proj_ghost',
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(fixtureEnvelope(payload)), { status })),
+    );
+
+    const result = await fetchProjectRegistry('/api/projects/proj_ghost', ProjectContextPayloadV1Schema);
+
+    expect(result.outcome).toBe('envelope');
+    expect(registryReading(result)).toEqual({
+      state: 'absent',
+      reason: 'no project registered with id proj_ghost',
+    });
+  });
+
+  it.each([
+    ['200', 200],
+    ['503', 503],
+  ])('keeps a typed %s unavailable registry envelope distinct from an absent project', async (_label, status) => {
+    const payload = context({
+      status: 'registry_unavailable',
+      error: 'registry database could not be opened',
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(fixtureEnvelope(payload)), { status })),
+    );
+
+    const result = await fetchProjectRegistry('/api/projects/proj_ghost', ProjectContextPayloadV1Schema);
+
+    expect(result.outcome).toBe('envelope');
+    expect(registryReading(result)).toEqual({ state: 'unknown' });
+    expect(registryAnnotation(result)).toBe(
+      'registry unavailable · registry database could not be opened',
+    );
+  });
+
+  it('keeps the typed write refusal ahead of generic envelope handling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            status: READ_ONLY_SCOPE_STATUS,
+            detail: 'project is read-only outside the active scope',
+            project_id: 'proj_ghost',
+          }),
+          { status: 405 },
+        ),
+      ),
+    );
+
+    await expect(
+      fetchProjectRegistry('/api/projects/proj_ghost', ProjectContextPayloadV1Schema, {
+        method: 'POST',
+      }),
+    ).resolves.toEqual({
+      outcome: 'transport',
+      state: 'locked',
+      detail: 'project is read-only outside the active scope',
     });
   });
 
@@ -241,17 +313,6 @@ function registryEnvelope(
   };
 }
 
-function sourceUnavailable(
-  payload: ProjectContextPayloadV1,
-  httpStatus: number,
-): ProjectRegistryResult<ProjectContextPayloadV1> {
-  return {
-    outcome: 'source_unavailable',
-    httpStatus,
-    envelope: { payload } as DashboardEnvelopeV1<ProjectContextPayloadV1>,
-  };
-}
-
 describe('registryReading', () => {
   it('measures both facts from an ok answer', () => {
     expect(
@@ -294,31 +355,29 @@ describe('registryReading', () => {
     expect(registryReading(result)).toEqual({ state: 'unknown' });
   });
 
-  it('measures a 404 not_found as the registry holding no such project', () => {
+  it('measures not_found as the registry holding no such project', () => {
     expect(
       registryReading(
-        sourceUnavailable(
+        registryEnvelope(
           context({
             status: 'not_found',
             error: 'no project registered with id proj_ghost',
           }),
-          404,
         ),
       ),
     ).toEqual({ state: 'absent', reason: 'no project registered with id proj_ghost' });
   });
 
   it.each(['missing_registry', 'registry_unavailable'])(
-    'reports a 503 %s as unknown, not as an absent project',
+    'reports %s as unknown, not as an absent project',
     (status) => {
       expect(
         registryReading(
-          sourceUnavailable(
+          registryEnvelope(
             context({
               status,
               error: 'registry database could not be opened',
             }),
-            503,
           ),
         ),
       ).toEqual({ state: 'unknown' });
@@ -355,24 +414,22 @@ describe('registryAnnotation', () => {
   it("repeats the registry's own sentence rather than restating the status code", () => {
     expect(
       registryAnnotation(
-        sourceUnavailable(
+        registryEnvelope(
           context({
             status: 'not_found',
             error: 'no project registered with id proj_ghost',
           }),
-          404,
         ),
       ),
     ).toBe('not in registry · no project registered with id proj_ghost');
 
     expect(
       registryAnnotation(
-        sourceUnavailable(
+        registryEnvelope(
           context({
             status: 'missing_registry',
             error: 'no registry at /home/x/.tracedecay/registry.db',
           }),
-          503,
         ),
       ),
     ).toBe('registry unavailable · no registry at /home/x/.tracedecay/registry.db');
@@ -380,9 +437,7 @@ describe('registryAnnotation', () => {
 
   it('still names the state when the payload sent no sentence', () => {
     expect(
-      registryAnnotation(
-        sourceUnavailable(context({ status: 'registry_unavailable' }), 503),
-      ),
+      registryAnnotation(registryEnvelope(context({ status: 'registry_unavailable' }))),
     ).toBe('registry unavailable');
   });
 });

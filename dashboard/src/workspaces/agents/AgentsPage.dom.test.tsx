@@ -27,6 +27,25 @@ describe('AgentsPage read coverage', () => {
     expect(screen.queryByText(/no tool families reported/i)).toBeNull();
   });
 
+  it('keeps an underused-family query failure distinct from an empty family list', async () => {
+    stubAnalytics({
+      usage: usageSummary({ message_count: 8 }),
+      diagnostics: { available: false, hook_call_count: 0, by_mcp_tool: [] },
+      underused: unavailableAnalyticsEnvelope(
+        { available: false, families: [] },
+        'session-message query failed: no such table: session_messages',
+      ),
+    });
+    renderAgents();
+
+    expect(
+      await screen.findByText(
+        /Hint diagnostics unavailable: session-message query failed: no such table: session_messages/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/no tool families reported/i)).toBeNull();
+  });
+
   /** An unreported window size used to be substituted with the categorized
    * total, which made the two agree by construction: the uncategorized
    * remainder came out as zero and the whole disclosure disappeared, so unknown
@@ -117,12 +136,41 @@ function stubAnalytics(payloads: Record<string, unknown>) {
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const endpoint = String(input).split('/').pop() ?? '';
-      const body = fixtureEnvelope(payloads[endpoint] ?? {});
+      const response = payloads[endpoint] ?? {};
+      const body = isEnvelope(response) ? response : fixtureEnvelope(response);
       return new Response(JSON.stringify(body), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });
     }),
+  );
+}
+
+function unavailableAnalyticsEnvelope(payload: unknown, reason: string): Record<string, unknown> {
+  return {
+    ...fixtureEnvelope(payload, 'unknown'),
+    coverage: {
+      completeness: 'unknown',
+      eligible: null,
+      examined: null,
+      matched: null,
+      excluded: null,
+      omitted: null,
+      unknown: null,
+      denominator: null,
+      unit: 'tool_families',
+      omission_reasons: [reason],
+    },
+    freshness: { state: 'unknown', observed_at_micros: null, watermark: null },
+  };
+}
+
+function isEnvelope(value: unknown): value is Record<string, unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'domain_state' in value &&
+    'payload' in value
   );
 }
 

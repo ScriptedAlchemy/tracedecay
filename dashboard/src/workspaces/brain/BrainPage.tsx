@@ -180,9 +180,6 @@ function toEnvelopeResult(
   if (result.outcome === 'envelope') {
     return { outcome: 'envelope', envelope: result.envelope };
   }
-  if (result.outcome === 'source_unavailable') {
-    return { outcome: 'envelope', envelope: result.envelope };
-  }
   if (result.outcome === 'transport') {
     return { outcome: 'transport', state: result.state, detail: result.detail };
   }

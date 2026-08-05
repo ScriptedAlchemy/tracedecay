@@ -50,17 +50,14 @@ export function projectRegistryEntryKey(projectId: string): readonly string[] {
  * and every entry at once. */
 export const projectRegistryInvalidationKey = [PROJECT_REGISTRY_ROOT] as const;
 
-/** Result of a registry fetch. Transport failures become domain states; 404/503
- * answers that still carry a decoded envelope stay typed refusals, not generic
- * HTTP errors — the payload's own `status` is what distinguishes them. */
+/** Result of a registry fetch. A decoded registry envelope is authoritative
+ * regardless of the HTTP status it travelled with: registry outcomes live in
+ * the payload's `status`, while HTTP remains authoritative for write and
+ * authorization refusals, malformed bodies, and failures with no typed
+ * registry outcome. */
 export type ProjectRegistryResult<T> =
   | { outcome: 'envelope'; envelope: DashboardEnvelopeV1<T> }
-  | { outcome: 'transport'; state: DashboardDomainStateV1; detail?: string }
-  | {
-      outcome: 'source_unavailable';
-      httpStatus: number;
-      envelope: DashboardEnvelopeV1<T>;
-    };
+  | { outcome: 'transport'; state: DashboardDomainStateV1; detail?: string };
 
 const undecodable = Symbol('undecodable');
 
@@ -75,9 +72,10 @@ async function decodedBody(response: Response): Promise<unknown> {
 /**
  * `GET /api/projects` or `GET /api/projects/{id}` — envelope-only.
  *
- * On 200 the body must be `DashboardEnvelopeV1<T>`. On 404/503 the body must
- * still be that envelope with a non-`ok` payload; bare payloads are not
- * accepted here.
+ * A body is accepted only when it is `DashboardEnvelopeV1<T>`. The envelope's
+ * known registry outcomes (`not_found`, `missing_registry`, and
+ * `registry_unavailable`) are preserved across a 200 or an older non-2xx
+ * transport. A non-typed non-2xx answer remains an error.
  */
 export async function fetchProjectRegistry<T>(
   url: string,
@@ -110,16 +108,20 @@ export async function fetchProjectRegistry<T>(
     return { outcome: 'transport', state: 'unsupported_schema' };
   }
   const envelope = parsed.data as DashboardEnvelopeV1<T>;
-  if (response.ok) {
+  if (response.ok || typedRegistryOutcome(envelope.payload)) {
     return { outcome: 'envelope', envelope };
   }
-  if (response.status === 404 || response.status === 503) {
-    const status = (envelope.payload as { status?: unknown }).status;
-    if (typeof status === 'string' && status !== 'ok') {
-      return { outcome: 'source_unavailable', httpStatus: response.status, envelope };
-    }
-  }
   return { outcome: 'transport', state: 'error', detail: `HTTP ${response.status}` };
+}
+
+function typedRegistryOutcome(payload: unknown): boolean {
+  if (typeof payload !== 'object' || payload === null) return false;
+  const status = (payload as { status?: unknown }).status;
+  return status === PROJECT_NOT_FOUND || isRegistryUnavailableStatus(status);
+}
+
+function isRegistryUnavailableStatus(status: unknown): boolean {
+  return status === 'missing_registry' || status === 'registry_unavailable';
 }
 
 /**
@@ -168,10 +170,7 @@ export function useProjectEntry(projectId: string | null, options?: { enabled?: 
 export function projectRegistryPayload<T>(
   result: ProjectRegistryResult<T> | undefined,
 ): T | undefined {
-  if (!result) return undefined;
-  if (result.outcome === 'envelope') return result.envelope.payload;
-  if (result.outcome === 'source_unavailable') return result.envelope.payload;
-  return undefined;
+  return result?.outcome === 'envelope' ? result.envelope.payload : undefined;
 }
 
 /**
@@ -193,26 +192,17 @@ export function registryReading(
 ): RegistryReading {
   const payload = projectRegistryPayload(result);
   if (!result || payload === undefined) return { state: 'unknown' };
-  switch (result.outcome) {
-    case 'source_unavailable':
-      return payload.status === PROJECT_NOT_FOUND
-        ? { state: 'absent', reason: payload.error ?? null }
-        : { state: 'unknown' };
-    case 'envelope':
-      return payload.status === 'ok'
-        ? {
-            state: 'measured',
-            label: payload.project?.label ?? null,
-            isActive: payload.is_active ?? null,
-          }
-        : { state: 'unknown' };
-    case 'transport':
-      return { state: 'unknown' };
-    default: {
-      const exhaustive: never = result;
-      return exhaustive;
-    }
+  if (payload.status === PROJECT_NOT_FOUND) {
+    return { state: 'absent', reason: payload.error ?? null };
   }
+  if (payload.status === 'ok') {
+    return {
+      state: 'measured',
+      label: payload.project?.label ?? null,
+      isActive: payload.is_active ?? null,
+    };
+  }
+  return { state: 'unknown' };
 }
 
 /** Appends the source's own sentence to a state word, when it sent one. */
@@ -229,6 +219,12 @@ export function registryAnnotation(
 ): string | null {
   const payload = projectRegistryPayload(result);
   if (!result) return 'resolving';
+  if (payload?.status === PROJECT_NOT_FOUND) {
+    return withReason('not in registry', payload.error);
+  }
+  if (isRegistryUnavailableStatus(payload?.status)) {
+    return withReason('registry unavailable', payload?.error);
+  }
   switch (result.outcome) {
     case 'envelope':
       if (payload?.status !== 'ok') {
@@ -237,11 +233,6 @@ export function registryAnnotation(
           : 'unconfirmed';
       }
       return payload.project ? null : withReason('unconfirmed', payload.error);
-    case 'source_unavailable':
-      return withReason(
-        payload?.status === PROJECT_NOT_FOUND ? 'not in registry' : 'registry unavailable',
-        payload?.error,
-      );
     case 'transport':
       switch (result.state) {
         case 'offline':

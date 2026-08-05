@@ -406,8 +406,8 @@ describe('ScopedBrain', () => {
    * The registry backbone failing, told apart from a project that holds
    * nothing.
    *
-   * `projects.rs::context` answers 503 with a complete payload whose `status`
-   * is `registry_unavailable` and whose `stores`/`aliases` are empty — so a
+   * `projects.rs::context` answers a typed envelope whose `status` is
+   * `registry_unavailable` and whose `stores`/`aliases` are empty — so a
    * rail that read those arrays without checking `status` drew the exact
    * picture an empty project draws. The reason it sent is the difference
    * between "this project has no stores" and "nothing could be read".
@@ -418,7 +418,7 @@ describe('ScopedBrain', () => {
       serve({
         '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
         '/api/projects/proj_x': {
-          status: 503,
+          status: 200,
           body: withEnvelopePayload(
             {
               status: 'registry_unavailable',
@@ -435,12 +435,38 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() =>
-      expect(screen.getByText(/registry reported: registry_unavailable/i)).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByText('Source unavailable')).toBeTruthy());
     expect(screen.getByText(/unable to open \/home\/x\/\.tracedecay\/global\.db/)).toBeTruthy();
     // The store card the successful backbone draws must not be there.
     expect(screen.queryByText('release/2.4')).toBeNull();
+  });
+
+  it('treats a typed 200 missing project as an absent deep link, not an unknown read', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
+        '/api/projects/proj_x': {
+          status: 200,
+          body: withEnvelopePayload(
+            {
+              status: 'not_found',
+              error: 'no project registered with id proj_x',
+              is_active: null,
+              project: null,
+              aliases: [],
+              stores: [],
+            },
+            'complete_zero_findings',
+          ),
+        },
+      }),
+    );
+    renderScoped();
+
+    expect(await screen.findByText('Complete · zero findings')).toBeTruthy();
+    expect(screen.getByText(/no project registered with id proj_x/)).toBeTruthy();
+    expect(screen.queryByText(/no response has been recorded/i)).toBeNull();
   });
 
   it('prints an em dash rather than a number it was never given', async () => {
