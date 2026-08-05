@@ -1377,7 +1377,7 @@ pub(super) async fn register_project_open_dependent_owners(
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
-        phase = "semantic_activation_registered",
+        phase = "semantic_activation_resolved",
         elapsed_ms = semantic_activation_started.elapsed().as_millis(),
     );
     Ok(())
@@ -1416,114 +1416,117 @@ async fn register_semantic_activation_owner(
             message: format!("semantic accepted-profile authority unavailable: {error}"),
         })?,
     );
-    let current_state = match configuration_store
+    let current_state = configuration_store
         .current_state_if_present()
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("semantic retrieval current state unavailable: {error}"),
-        })? {
-        Some(state) => state,
-        None => {
-            let (report, accepted_profile, runtime) =
-                crate::application::semantic_runtime::bundled_query_authority().map_err(
-                    |error| TraceDecayError::Config {
-                        message: format!("bundled query authority rejected: {error}"),
-                    },
-                )?;
-            let evaluation_corpus_digest = tracedecay_domain::ManifestDigest::new(
-                report.corpus_digest.clone(),
-            )
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("bundled query corpus digest rejected: {error}"),
-            })?;
-            accepted_profiles
-                .publish(
-                    report,
-                    accepted_profile.clone(),
-                    runtime.clone(),
-                    evaluation_corpus_digest,
-                )
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("bundled query authority publication failed: {error}"),
-                })?;
-            let state = crate::config::retrieval::RetrievalProfileStateV1::new(
-                configuration.revision_id.clone(),
-                accepted_profile,
-                &runtime,
-            )
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("bundled query initial state rejected: {error}"),
-            })?;
-            configuration_store
-                .install_initial_state(&configuration_pin, &state)
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("bundled query initial state publication failed: {error}"),
-                })?;
-            state
-        }
-    };
+        })?;
     let observer = invocation.query_activation_registrar(project_root, Arc::clone(&session_db));
-    if current_state.audit().is_empty() {
-        let cursor_keys = Arc::new(
-            session_db
-                .load_session_cursor_key_provider_result()
+    if let Some(current_state) = current_state {
+        if current_state.audit().is_empty() {
+            let cursor_keys = Arc::new(
+                session_db
+                    .load_session_cursor_key_provider_result()
+                    .await
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("query cursor key authority unavailable: {error}"),
+                    })?,
+            );
+            invocation
+                .restore_initial_query_authority_for_project(
+                    scope.clone(),
+                    current_state,
+                    cursor_keys,
+                )
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("evaluated query initial authority restore failed: {error}"),
+                })?;
+        } else {
+            let committed = configuration_store
+                .current_committed_state()
                 .await
                 .map_err(|error| TraceDecayError::Config {
-                    message: format!("query cursor key authority unavailable: {error}"),
-                })?,
-        );
-        invocation
-            .restore_initial_query_authority_for_project(scope.clone(), current_state, cursor_keys)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("bundled query initial authority restore failed: {error}"),
-            })?;
+                    message: format!("semantic retrieval committed state unavailable: {error}"),
+                })?
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "semantic retrieval state has no current committed transition"
+                        .to_owned(),
+                })?;
+            observer
+                .activation_committed(committed)
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("semantic retrieval activation restore failed: {error}"),
+                })?;
+        }
+        if let Err(error) = invocation
+            .mount_query_authority_for_project(project_root, &scope)
+            .await
+        {
+            tracing::debug!(
+                event = "query_authority_mount",
+                outcome = "unavailable",
+                project_id = %scope.project_id,
+                reason = %error,
+                "query search authority unavailable; non-search project surfaces remain mounted"
+            );
+        }
+        if let Err(error) = crate::daemon::code_index_scheduler::semantic_query_runtime::
+            mount_current_semantic_query_authority_on_project_open(
+                &invocation.code_index_schedulers,
+                project_root,
+                &scope,
+                &configuration_store,
+                &configuration_pin,
+            )
+            .await
+        {
+            tracing::debug!(
+                event = "semantic_query_authority_mount",
+                outcome = "unavailable",
+                project_id = %scope.project_id,
+                reason = %error,
+                "semantic query authority unavailable; project surfaces remain mounted"
+            );
+        }
     } else {
-        let committed = configuration_store
-            .current_committed_state()
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("semantic retrieval committed state unavailable: {error}"),
-            })?
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "semantic retrieval state has no current committed transition".to_owned(),
-            })?;
-        observer
-            .activation_committed(committed)
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("semantic retrieval activation restore failed: {error}"),
-            })?;
-    }
-    if let Err(error) = invocation
-        .mount_query_authority_for_project(project_root, &scope)
-        .await
-    {
+        let core_query_available = match session_db.load_session_cursor_key_provider_result().await
+        {
+            Ok(cursor_keys) => {
+                if let Err(error) = invocation
+                    .mount_core_query_authority_for_project(project_root, &scope, &cursor_keys)
+                    .await
+                {
+                    tracing::debug!(
+                        event = "query_authority_mount",
+                        outcome = "unavailable",
+                        project_id = %scope.project_id,
+                        reason = %error,
+                        "core query fallback is unavailable; project admission continues"
+                    );
+                    false
+                } else {
+                    true
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    event = "query_authority_mount",
+                    outcome = "unavailable",
+                    project_id = %scope.project_id,
+                    reason = %error,
+                    "durable query cursor key is unavailable; project admission continues"
+                );
+                false
+            }
+        };
         tracing::debug!(
-            event = "query_authority_mount",
+            event = "semantic_activation_registration",
             outcome = "unavailable",
             project_id = %scope.project_id,
-            reason = %error,
-            "query search authority unavailable; non-search project surfaces remain mounted"
-        );
-    }
-    if let Err(error) = crate::daemon::code_index_scheduler::semantic_query_runtime::
-        mount_current_semantic_query_authority_on_project_open(
-            &invocation.code_index_schedulers,
-            project_root,
-            &scope,
-            &configuration_store,
-            &configuration_pin,
-        )
-        .await
-    {
-        tracing::debug!(
-            event = "semantic_query_authority_mount",
-            outcome = "unavailable",
-            project_id = %scope.project_id,
-            reason = %error,
-            "semantic query authority unavailable; canonical query remains mounted"
+            core_query_available,
+            "no genuinely evaluated optional-stage profile is published"
         );
     }
     let Some(inspector) =

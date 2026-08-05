@@ -480,8 +480,8 @@ pub(crate) mod tests {
     };
     use crate::search_eval::{
         DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
-        DirectQualityMetricsV1, DirectRatioMetricV1, OptionalStageMeasurementV1,
-        OptionalStageMeasurementsV1,
+        DirectQualityMetricsV1, DirectRatioMetricV1, EvaluationExecutionContractV1,
+        OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
     };
     use std::{collections::BTreeMap, path::Path, process::Command};
     use tempfile::TempDir;
@@ -549,6 +549,27 @@ pub(crate) mod tests {
             corpus_digest: "corpus".to_owned(),
             fixture_source_repository_commit: "commit".to_owned(),
             fixture_source_repository_tree: "tree".to_owned(),
+            execution_contract: EvaluationExecutionContractV1 {
+                exact_file_count: 0,
+                exact_corpus_bytes: 0,
+                exact_eligible_chunks_current: 0,
+                exact_eligible_chunks_10x: 0,
+                exact_query_count: 0,
+                model_revision: "model.aggregate-only-test.v1".to_owned(),
+                projection_revision: "projection.aggregate-only-test.v1".to_owned(),
+                fusion_revision: "fusion.aggregate-only-test.v1".to_owned(),
+                runtime_revision: "runtime.aggregate-only-test.v1".to_owned(),
+                cache_state: "empty".to_owned(),
+                concurrency:
+                    crate::search_eval::candidate_output::EvaluationConcurrencyContractV1 {
+                        query_workers: 1,
+                        projection_workers: 1,
+                        query_execution: "serial".to_owned(),
+                    },
+            },
+            profile_material_digests: BTreeMap::new(),
+            raw_output_digest: "sha256:aggregate-only-test".to_owned(),
+            raw_outputs: Vec::new(),
             profiles: vec![row("train"), row("validation")],
         }
     }
