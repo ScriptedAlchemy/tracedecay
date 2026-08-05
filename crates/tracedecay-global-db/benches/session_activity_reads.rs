@@ -79,6 +79,22 @@ fn session_activity_reads(criterion: &mut Criterion) {
     let profile = tempfile::tempdir().expect("temporary benchmark profile");
     let runtime = tokio.block_on(seed_fixture(&profile));
     let database = runtime.profile_database();
+    let database_path = database.db_path();
+    let sibling = |suffix: &str| {
+        let mut path = database_path.as_os_str().to_os_string();
+        path.push(suffix);
+        std::path::PathBuf::from(path)
+    };
+    let main_bytes = std::fs::metadata(database_path).map_or(0, |metadata| metadata.len());
+    let wal_bytes = std::fs::metadata(sibling("-wal")).map_or(0, |metadata| metadata.len());
+    let shm_bytes = std::fs::metadata(sibling("-shm")).map_or(0, |metadata| metadata.len());
+    eprintln!(
+        "fixture_storage main_db_bytes={main_bytes} wal_bytes={wal_bytes} \
+         shm_bytes={shm_bytes} total_bytes={}",
+        main_bytes
+            .saturating_add(wal_bytes)
+            .saturating_add(shm_bytes)
+    );
     let cases = [
         ("current", 90_000_i64, 10_000_u64),
         ("10x", 0_i64, 100_000_u64),
