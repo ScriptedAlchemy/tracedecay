@@ -59,6 +59,23 @@ async fn completed_join_cannot_win_over_cancellation() {
     );
 }
 
+#[tokio::test]
+async fn completed_inner_error_survives_racing_cancellation() {
+    let permits = Arc::new(Semaphore::new(1));
+    let cancellation = ObservationCancellation::default();
+    let task_cancellation = cancellation.clone();
+    let run_control = control(cancellation, Duration::from_secs(10));
+
+    assert_eq!(
+        run_with_semaphore(permits, &run_control, move || {
+            task_cancellation.cancel();
+            Err::<(), _>(BoundedBackfillInterruption::UnsupportedSourceFraming)
+        })
+        .await,
+        Err(BoundedBackfillInterruption::UnsupportedSourceFraming)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detached_task_holds_capacity_until_its_closure_finishes() {
     let permits = Arc::new(Semaphore::new(1));
