@@ -780,10 +780,7 @@ async fn admit_cursor_sweep_observations_with_admission(
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     if cancellation.is_cancelled() {
-        return Ok(CursorTranscriptIngestStats {
-            source_deferred: true,
-            ..CursorTranscriptIngestStats::default()
-        });
+        return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
     }
     let mut budget = match max_new_bytes {
         Some(limit) => IngestByteBudget::bounded(limit),
@@ -791,8 +788,7 @@ async fn admit_cursor_sweep_observations_with_admission(
     };
     for path in source.transcript_paths(project_root) {
         if cancellation.is_cancelled() {
-            budget.defer();
-            break;
+            return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
         }
         let Some(parent_session_id) = sweep_parent_session_id(&path) else {
             continue;
@@ -819,11 +815,10 @@ async fn admit_cursor_sweep_observations_with_admission(
         .await?;
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = if cancellation.is_cancelled() {
-        CursorTranscriptIngestStats::default()
-    } else {
-        drain_cursor_observation_projections(admission, &scope, cancellation).await?
-    };
+    if cancellation.is_cancelled() {
+        return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
+    }
+    let mut stats = drain_cursor_observation_projections(admission, &scope, cancellation).await?;
     stats.bytes_consumed = budget.consumed();
     stats.source_deferred = budget.deferred();
     Ok(stats)
@@ -1802,8 +1797,12 @@ mod tests {
     use crate::admission::test_support::MemoryHostAdmission;
     use serde_json::json;
 
-    #[tokio::test]
-    async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
+    fn cursor_sweep_test_fixture() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        CursorSweepSource,
+        ProjectId,
+    ) {
         let project = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let project_id = ProjectId::new("project.cursor-cancelled-startup").unwrap();
@@ -1822,6 +1821,12 @@ mod tests {
         )
         .unwrap();
         let source = CursorSweepSource::with_home(home.path());
+        (project, home, source, project_id)
+    }
+
+    #[tokio::test]
+    async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
+        let (project, _home, source, project_id) = cursor_sweep_test_fixture();
         let admission = MemoryHostAdmission::default();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
@@ -1838,6 +1843,59 @@ mod tests {
         )
         .await
         .expect_err("pre-cancelled Cursor sweep must stop before persistence");
+
+        assert!(matches!(
+            error,
+            TranscriptIngestError::Cancelled { provider: "cursor" }
+        ));
+        assert!(admission.observations().is_empty());
+
+        let replay = admit_cursor_sweep_observations_with_admission(
+            &source,
+            project.path(),
+            &admission,
+            None,
+            ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+            &ObservationCancellation::default(),
+        )
+        .await
+        .expect("uncancelled Cursor retry must admit the untouched source");
+        assert_eq!(replay.messages_upserted, 1);
+
+        let deduplicated = admit_cursor_sweep_observations_with_admission(
+            &source,
+            project.path(),
+            &admission,
+            None,
+            ObservationScopeV1::Project { project_id },
+            &ObservationCancellation::default(),
+        )
+        .await
+        .expect("completed Cursor retry must be deduplicated");
+        assert_eq!(deduplicated.messages_upserted, 0);
+    }
+
+    #[tokio::test]
+    async fn mid_admission_cancellation_stops_cursor_before_projection() {
+        let (project, _home, source, project_id) = cursor_sweep_test_fixture();
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        admission.cancel_on_next_cursor_read(cancellation.clone());
+
+        let error = admit_cursor_sweep_observations_with_admission(
+            &source,
+            project.path(),
+            &admission,
+            None,
+            ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+            &cancellation,
+        )
+        .await
+        .expect_err("mid-admission cancellation must stop before projection");
 
         assert!(matches!(
             error,
