@@ -1,6 +1,7 @@
 use crate::{
     GitOidV1, ManifestDigest, NativeIntegrationJournalPhaseV1, NativeIntegrationJournalV1,
-    NativeIntegrationMechanicalModeV1, NativeIntegrationPreviewId, NativeIntegrationTransactionId,
+    NativeIntegrationMechanicalModeV1, NativeIntegrationPreviewId, NativeIntegrationReceiptId,
+    NativeIntegrationReceiptOutcomeV1, NativeIntegrationReceiptV1, NativeIntegrationTransactionId,
     RepositoryId, UtcMicros, WorktreeId,
 };
 
@@ -24,7 +25,9 @@ fn prepared() -> NativeIntegrationJournalV1 {
         NativeIntegrationMechanicalModeV1::TwoParentMerge,
         oid('1'),
         oid('2'),
+        oid('5'),
         oid('3'),
+        digest('b'),
         oid('4'),
         UtcMicros(10),
     )
@@ -119,4 +122,83 @@ fn checked_out_destination_requires_materialization_before_ref_commit() {
     journal
         .advance(NativeIntegrationJournalPhaseV1::RefCommitted, UtcMicros(14))
         .expect("ref commit");
+}
+
+#[test]
+fn committed_receipt_requires_exact_final_ref_tree_and_created_commit() {
+    let mut journal = prepared();
+    for (phase, at) in [
+        (NativeIntegrationJournalPhaseV1::NativeApplyStarted, 11),
+        (NativeIntegrationJournalPhaseV1::ObjectsWritten, 12),
+        (NativeIntegrationJournalPhaseV1::RefCommitted, 13),
+        (NativeIntegrationJournalPhaseV1::Verifying, 14),
+        (NativeIntegrationJournalPhaseV1::Committed, 15),
+    ] {
+        journal.advance(phase, UtcMicros(at)).expect("advance");
+    }
+
+    NativeIntegrationReceiptV1::new(
+        NativeIntegrationReceiptId::new("native-integration.receipt.1").expect("receipt"),
+        &journal,
+        Some(digest('c')),
+        Some(journal.expected_new_destination_tip.clone()),
+        Some(journal.candidate_tree.clone()),
+        vec![journal.expected_new_destination_tip.clone()],
+        NativeIntegrationReceiptOutcomeV1::Committed,
+        UtcMicros(15),
+    )
+    .expect("exact committed receipt");
+
+    assert!(
+        NativeIntegrationReceiptV1::new(
+            NativeIntegrationReceiptId::new("native-integration.receipt.2").expect("receipt"),
+            &journal,
+            Some(digest('c')),
+            Some(journal.expected_destination_tip.clone()),
+            Some(journal.candidate_tree.clone()),
+            vec![journal.expected_new_destination_tip.clone()],
+            NativeIntegrationReceiptOutcomeV1::Committed,
+            UtcMicros(15),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn rollback_receipt_proves_exact_old_ref_tree_and_snapshot() {
+    let mut journal = prepared();
+    for (phase, at) in [
+        (NativeIntegrationJournalPhaseV1::NativeApplyStarted, 11),
+        (NativeIntegrationJournalPhaseV1::ObjectsWritten, 12),
+        (NativeIntegrationJournalPhaseV1::RefCommitted, 13),
+        (NativeIntegrationJournalPhaseV1::RolledBack, 14),
+    ] {
+        journal.advance(phase, UtcMicros(at)).expect("advance");
+    }
+
+    NativeIntegrationReceiptV1::new(
+        NativeIntegrationReceiptId::new("native-integration.receipt.3").expect("receipt"),
+        &journal,
+        Some(journal.expected_repository_snapshot_digest.clone()),
+        Some(journal.expected_destination_tip.clone()),
+        Some(journal.expected_destination_tree.clone()),
+        vec![journal.expected_new_destination_tip.clone()],
+        NativeIntegrationReceiptOutcomeV1::RolledBack,
+        UtcMicros(14),
+    )
+    .expect("exact rollback receipt");
+
+    assert!(
+        NativeIntegrationReceiptV1::new(
+            NativeIntegrationReceiptId::new("native-integration.receipt.4").expect("receipt"),
+            &journal,
+            Some(digest('d')),
+            Some(journal.expected_destination_tip.clone()),
+            Some(journal.expected_destination_tree.clone()),
+            vec![journal.expected_new_destination_tip.clone()],
+            NativeIntegrationReceiptOutcomeV1::RolledBack,
+            UtcMicros(14),
+        )
+        .is_err()
+    );
 }
