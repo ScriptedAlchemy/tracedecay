@@ -1,5 +1,6 @@
-use std::io::BufRead;
 use std::time::{Duration, Instant};
+
+use tokio::io::AsyncBufReadExt;
 
 use crate::observation::ObservationCancellation;
 
@@ -280,10 +281,10 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
     .await
     .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
     control.check()?;
-    let mut lines = std::io::BufReader::new(spool).lines();
+    let mut lines = tokio::io::BufReader::new(tokio::fs::File::from_std(spool)).lines();
     let first = lines
-        .next()
-        .transpose()
+        .next_line()
+        .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
         .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
     let PreparedGitEvent::Begin { worktree } =
@@ -304,9 +305,12 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
         Some(transaction)
     };
     let mut row_stats = BackfillStats::default();
-    for line in lines {
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+    {
         control.check()?;
-        let line = line.map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
         let event = serde_json::from_str(&line)
             .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
         apply_git_event(
