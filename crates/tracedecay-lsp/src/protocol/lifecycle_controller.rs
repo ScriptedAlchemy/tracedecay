@@ -135,6 +135,7 @@ where
             diagnostics: DiagnosticsController::new(diagnostics),
             context: ContextController::default(),
             semantic: SemanticController::default(),
+            pending_workspace_mutation: None,
         }
     }
 
@@ -258,6 +259,7 @@ where
         self.context.pending_requests.clear();
         self.context.pending_expansions.clear();
         self.semantic.pending.clear();
+        self.pending_workspace_mutation = None;
     }
 
     pub(super) fn cancel_pending_operations(&mut self) {

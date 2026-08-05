@@ -42,6 +42,7 @@ mod provider;
 mod request_sequence;
 mod rpc;
 mod session;
+mod workspace;
 
 pub use bridge::{
     AsyncContentLengthError, BridgeDirection, BridgePumpOutcome, ContentLengthCodec,
@@ -123,3 +124,4 @@ pub use session::{
     MAX_PUBLICATION_BYTES, PublicationAdmission, PublicationDelivery, PublicationState,
     RequestAdmission, SessionLifecycle,
 };
+pub use workspace::{WorkspaceFolderMutation, WorkspaceFolderMutationApplyError};
