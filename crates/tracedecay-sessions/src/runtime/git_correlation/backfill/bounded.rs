@@ -17,8 +17,9 @@ mod state;
 
 use blocking::run as run_blocking;
 use progress::{
-    canonical_worktree_path, copy_cursor_to_progress, cursor_from_progress, progress_from_cursor,
-    progress_frontier, repository_seal_from_progress, session_row_from_progress,
+    canonical_worktree_evidence, canonical_worktree_path, copy_cursor_to_progress,
+    cursor_from_progress, progress_from_cursor, progress_frontier, repository_seal_from_progress,
+    session_row_from_progress,
 };
 use state::{
     advance_graph, advance_publish, advance_reflog_capture, advance_reflog_verification,
