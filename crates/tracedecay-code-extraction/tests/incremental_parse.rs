@@ -1,9 +1,11 @@
 use std::time::Duration;
 
+use tracedecay_code_extraction::RustExtractor;
 use tracedecay_code_extraction::incremental::{
     ParseCompleteness, ParseDocumentIdentity, ParseError, ParseInputEdit, ParseLimits,
     ParsePartialReason, ParsePoint, ParseResetReason, ParseReuse, RetainedParseDocument,
 };
+use tracedecay_code_extraction::parsed_extraction::ParsedExtractionDisposition;
 use tracedecay_domain::{
     CommitId, ContentDigest, ManifestDigest, ProjectId, RefId, RepositoryDirtyStateV1,
     RepositoryId, TreeId, WorktreeId,
@@ -279,4 +281,52 @@ fn session_overlay_reuses_only_within_exact_scope_and_document_identity() {
         Err(ParseError::IdentityMismatch)
     ));
     assert_eq!(document.source(), after);
+}
+
+#[test]
+fn canonical_reextraction_visits_only_changed_top_level_syntax() {
+    let before = "fn unchanged() -> u32 { 1 }\n\nfn edited() -> u32 { 2 }\n";
+    let after = "fn unchanged() -> u32 { 1 }\n\nasync fn edited() -> u32 { 2 }\n";
+    let (mut document, opened) = RetainedParseDocument::open(
+        identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "rust",
+        before,
+        ParseLimits::default(),
+    )
+    .expect("initial parse");
+    let initial = document
+        .extract_canonical(&RustExtractor, &opened, None)
+        .expect("initial canonical extraction");
+    assert_eq!(
+        initial.disposition,
+        ParsedExtractionDisposition::FullDocument
+    );
+
+    let report = document
+        .reparse(
+            identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            after,
+        )
+        .expect("incremental parse");
+    let increment = document
+        .extract_canonical(&RustExtractor, &report, Some(&initial.result))
+        .expect("incremental canonical extraction");
+
+    assert_eq!(
+        increment.disposition,
+        ParsedExtractionDisposition::ChangedRegions
+    );
+    assert_eq!(increment.metrics.visited_top_level_nodes, 1);
+    assert!(increment.metrics.visited_bytes < after.len());
+    let edited = increment
+        .result
+        .nodes
+        .iter()
+        .find(|node| node.name == "edited")
+        .expect("edited function");
+    assert!(edited.is_async);
+    assert!(matches!(
+        document.extract_canonical(&RustExtractor, &opened, Some(&initial.result)),
+        Err(ParseError::StaleReport)
+    ));
 }

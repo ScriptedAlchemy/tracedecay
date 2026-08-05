@@ -17,7 +17,14 @@ use tracedecay_domain::{
 };
 use tree_sitter::{InputEdit, ParseOptions, Parser, Point, Tree};
 
-use crate::ts_provider;
+use crate::{
+    LanguageExtractor,
+    parsed_extraction::{
+        ParsedExtraction, ParsedExtractionDisposition, ParsedExtractionResetReason,
+        ParsedExtractionScope, merge_changed_extraction,
+    },
+    ts_provider,
+};
 
 /// Default per-document source bound. It matches the LSP overlay hard limit.
 pub const DEFAULT_MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -205,6 +212,7 @@ pub enum ParseReuse {
 pub enum ParsePartialReason {
     SyntaxErrors,
     ChangedRangesTruncated { returned: usize, total: usize },
+    ExtractionRangesTruncated { returned: usize, total: usize },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -222,6 +230,8 @@ pub struct ParseMetrics {
     pub changed_bytes: usize,
     pub changed_range_count: usize,
     pub returned_changed_range_count: usize,
+    pub extraction_range_count: usize,
+    pub returned_extraction_range_count: usize,
     pub parse_elapsed: Duration,
     pub reused_prior_tree: bool,
 }
@@ -230,8 +240,16 @@ pub struct ParseMetrics {
 pub struct ParseReport {
     pub reuse: ParseReuse,
     pub completeness: ParseCompleteness,
+    /// Raw structural differences reported by Tree-sitter.
     pub changed_ranges: Vec<ParseChangedRange>,
+    /// Complete top-level syntax regions that safely bound canonical
+    /// re-extraction. These include byte edits even when the grammar shape did
+    /// not change and Tree-sitter returned no structural range.
+    pub extraction_ranges: Vec<ParseChangedRange>,
+    /// One exact minimal source edit spanning the supplied ordered batch.
+    pub source_edit: Option<ParseInputEdit>,
     pub metrics: ParseMetrics,
+    state_epoch: u64,
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -244,6 +262,8 @@ pub enum ParseError {
     InvalidEdit { detail: String },
     #[error("the next parse identity names another document")]
     IdentityMismatch,
+    #[error("the parse report does not describe the retained document's current state")]
+    StaleReport,
     #[error("Tree-sitter rejected the bundled grammar for {language_id}: {detail}")]
     GrammarRejected { language_id: String, detail: String },
     #[error("Tree-sitter parsing exceeded {limit:?}")]
@@ -263,6 +283,7 @@ pub struct RetainedParseDocument {
     parser: Parser,
     tree: Tree,
     limits: ParseLimits,
+    state_epoch: u64,
 }
 
 impl RetainedParseDocument {
@@ -302,12 +323,15 @@ impl RetainedParseDocument {
         let report = report_for(
             ParseReuse::Initial,
             &tree,
+            changed_ranges.clone(),
             changed_ranges,
+            None,
             source.len(),
             0,
             elapsed,
             false,
             limits.max_changed_ranges,
+            1,
         );
         Ok((
             Self {
@@ -317,6 +341,7 @@ impl RetainedParseDocument {
                 parser,
                 tree,
                 limits,
+                state_epoch: 1,
             },
             report,
         ))
@@ -357,22 +382,29 @@ impl RetainedParseDocument {
                 });
             }
             self.identity = next_identity;
+            self.state_epoch = self.state_epoch.saturating_add(1);
             return Ok(ParseReport {
                 reuse: ParseReuse::Noop,
-                completeness: completeness_for(&self.tree, None),
+                completeness: completeness_for(&self.tree, None, None),
                 changed_ranges: Vec::new(),
+                extraction_ranges: Vec::new(),
+                source_edit: None,
                 metrics: ParseMetrics {
                     source_bytes: self.source.len(),
                     input_edit_count: 0,
                     changed_bytes: 0,
                     changed_range_count: 0,
                     returned_changed_range_count: 0,
+                    extraction_range_count: 0,
+                    returned_extraction_range_count: 0,
                     parse_elapsed: Duration::ZERO,
                     reused_prior_tree: true,
                 },
+                state_epoch: self.state_epoch,
             });
         }
 
+        let source_edit = minimal_edit(&self.source, &new_source);
         let mut edited_tree = self.tree.clone();
         for edit in edits {
             edited_tree.edit(&(*edit).into());
@@ -392,19 +424,26 @@ impl RetainedParseDocument {
                 end_position: range.end_point.into(),
             })
             .collect::<Vec<_>>();
+        let extraction_ranges =
+            extraction_ranges(&new_tree, &new_source, &source_edit, &changed_ranges);
+        let next_epoch = self.state_epoch.saturating_add(1);
         let report = report_for(
             ParseReuse::Incremental,
             &new_tree,
             changed_ranges,
+            extraction_ranges,
+            Some(source_edit),
             new_source.len(),
             edits.len(),
             elapsed,
             true,
             self.limits.max_changed_ranges,
+            next_epoch,
         );
         self.identity = next_identity;
         self.source = new_source;
         self.tree = new_tree;
+        self.state_epoch = next_epoch;
         Ok(report)
     }
 
@@ -450,17 +489,124 @@ impl RetainedParseDocument {
                 reason: ParseResetReason::FullReplacement,
             },
             &new_tree,
+            ranges.clone(),
             ranges,
+            None,
             new_source.len(),
             0,
             elapsed,
             false,
             self.limits.max_changed_ranges,
+            self.state_epoch.saturating_add(1),
         );
         self.identity = next_identity;
         self.source = new_source;
         self.tree = new_tree;
+        self.state_epoch = report.state_epoch;
         Ok(report)
+    }
+
+    /// Produce a complete canonical extraction from the current retained tree.
+    ///
+    /// Incremental reports traverse only complete affected top-level syntax
+    /// regions and merge their canonical rows with `previous`. Unsafe merge
+    /// shapes and missing/partial authority re-extract the full retained tree
+    /// and remain explicit typed resets.
+    pub fn extract_canonical(
+        &self,
+        extractor: &dyn LanguageExtractor,
+        report: &ParseReport,
+        previous: Option<&tracedecay_domain::ExtractionResult>,
+    ) -> Result<ParsedExtraction, ParseError> {
+        if report.state_epoch != self.state_epoch {
+            return Err(ParseError::StaleReport);
+        }
+
+        let full = |reason: Option<ParsedExtractionResetReason>| {
+            let extracted = extractor.extract_parsed(
+                self.identity.logical_path(),
+                &self.source,
+                &self.tree,
+                ParsedExtractionScope::FullDocument,
+            );
+            match reason {
+                Some(reason) => {
+                    ParsedExtraction::reset(extracted.result, reason, self.source.len())
+                }
+                None => extracted,
+            }
+        };
+
+        match report.reuse {
+            ParseReuse::Initial => Ok(full(None)),
+            ParseReuse::Reset { reason } => Ok(full(Some(match reason {
+                ParseResetReason::FullReplacement => ParsedExtractionResetReason::FullReplacement,
+                ParseResetReason::LanguageChanged => ParsedExtractionResetReason::LanguageChanged,
+            }))),
+            ParseReuse::Noop => match previous {
+                Some(previous) => Ok(ParsedExtraction::complete(
+                    previous.clone(),
+                    ParsedExtractionScope::ChangedRegions(&[]),
+                    crate::parsed_extraction::ParsedTraversalMetrics::default(),
+                )),
+                None => Ok(full(Some(
+                    ParsedExtractionResetReason::MissingPriorExtraction,
+                ))),
+            },
+            ParseReuse::Incremental => {
+                if !matches!(report.completeness, ParseCompleteness::Complete) {
+                    return Ok(full(Some(ParsedExtractionResetReason::PartialParse)));
+                }
+                let Some(previous) = previous else {
+                    return Ok(full(Some(
+                        ParsedExtractionResetReason::MissingPriorExtraction,
+                    )));
+                };
+                let Some(edit) = report.source_edit else {
+                    return Ok(full(Some(ParsedExtractionResetReason::PartialParse)));
+                };
+                let old_lines = edit
+                    .old_end_position
+                    .row
+                    .saturating_sub(edit.start_position.row);
+                let new_lines = edit
+                    .new_end_position
+                    .row
+                    .saturating_sub(edit.start_position.row);
+                if old_lines != new_lines {
+                    return Ok(full(Some(ParsedExtractionResetReason::MultilineEdit)));
+                }
+
+                let delta = extractor.extract_parsed(
+                    self.identity.logical_path(),
+                    &self.source,
+                    &self.tree,
+                    ParsedExtractionScope::ChangedRegions(&report.extraction_ranges),
+                );
+                if matches!(delta.disposition, ParsedExtractionDisposition::Reset { .. }) {
+                    return Ok(delta);
+                }
+                let metrics = delta.metrics;
+                let old_start_row = u32::try_from(edit.start_position.row).map_err(|_| {
+                    ParseError::InvalidEdit {
+                        detail: "edit start row does not fit canonical extraction rows".to_owned(),
+                    }
+                })?;
+                let old_end_row = u32::try_from(edit.old_end_position.row).map_err(|_| {
+                    ParseError::InvalidEdit {
+                        detail: "edit end row does not fit canonical extraction rows".to_owned(),
+                    }
+                })?;
+                match merge_changed_extraction(previous, delta.result, old_start_row, old_end_row) {
+                    Some(result) => Ok(ParsedExtraction::complete(
+                        result,
+                        ParsedExtractionScope::ChangedRegions(&report.extraction_ranges),
+                        metrics,
+                    )),
+                    None => Ok(full(Some(ParsedExtractionResetReason::ChangedRootIdentity))),
+                }
+            }
+        }
     }
 }
 
@@ -603,46 +749,116 @@ fn point_at(source: &str, byte: usize) -> ParsePoint {
     ParsePoint { row, column }
 }
 
+fn extraction_ranges(
+    tree: &Tree,
+    source: &str,
+    edit: &ParseInputEdit,
+    structural: &[ParseChangedRange],
+) -> Vec<ParseChangedRange> {
+    if source.is_empty() {
+        return Vec::new();
+    }
+    let mut seeds = structural.to_vec();
+    seeds.push(ParseChangedRange {
+        start_byte: edit.start_byte.min(source.len()),
+        end_byte: edit.new_end_byte.min(source.len()),
+        start_position: edit.start_position,
+        end_position: edit.new_end_position,
+    });
+    let root = tree.root_node();
+    let mut expanded = seeds
+        .into_iter()
+        .filter_map(|range| {
+            let start = range.start_byte.min(source.len().saturating_sub(1));
+            let end = range
+                .end_byte
+                .max(start.saturating_add(1))
+                .min(source.len());
+            let mut node = root.descendant_for_byte_range(start, end)?;
+            while let Some(parent) = node.parent() {
+                if parent.id() == root.id() {
+                    break;
+                }
+                node = parent;
+            }
+            Some(ParseChangedRange {
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+                start_position: node.start_position().into(),
+                end_position: node.end_position().into(),
+            })
+        })
+        .collect::<Vec<_>>();
+    expanded.sort_by_key(|range| (range.start_byte, range.end_byte));
+    expanded.dedup_by(|left, right| {
+        left.start_byte == right.start_byte && left.end_byte == right.end_byte
+    });
+    expanded
+}
+
 #[allow(clippy::too_many_arguments)]
 fn report_for(
     reuse: ParseReuse,
     tree: &Tree,
-    mut ranges: Vec<ParseChangedRange>,
+    mut changed_ranges: Vec<ParseChangedRange>,
+    mut extraction_ranges: Vec<ParseChangedRange>,
+    source_edit: Option<ParseInputEdit>,
     source_bytes: usize,
     input_edit_count: usize,
     parse_elapsed: Duration,
     reused_prior_tree: bool,
     max_changed_ranges: usize,
+    state_epoch: u64,
 ) -> ParseReport {
-    let total_ranges = ranges.len();
-    let truncated = (total_ranges > max_changed_ranges).then_some(total_ranges);
-    ranges.truncate(max_changed_ranges);
-    let changed_bytes = ranges.iter().fold(0usize, |total, range| {
+    let total_ranges = changed_ranges.len();
+    let total_extraction_ranges = extraction_ranges.len();
+    let changed_truncated = (total_ranges > max_changed_ranges).then_some(total_ranges);
+    let extraction_truncated =
+        (total_extraction_ranges > max_changed_ranges).then_some(total_extraction_ranges);
+    changed_ranges.truncate(max_changed_ranges);
+    extraction_ranges.truncate(max_changed_ranges);
+    let changed_bytes = extraction_ranges.iter().fold(0usize, |total, range| {
         total.saturating_add(range.end_byte.saturating_sub(range.start_byte))
     });
     ParseReport {
         reuse,
-        completeness: completeness_for(tree, truncated.map(|total| (ranges.len(), total))),
+        completeness: completeness_for(
+            tree,
+            changed_truncated.map(|total| (changed_ranges.len(), total)),
+            extraction_truncated.map(|total| (extraction_ranges.len(), total)),
+        ),
         metrics: ParseMetrics {
             source_bytes,
             input_edit_count,
             changed_bytes,
             changed_range_count: total_ranges,
-            returned_changed_range_count: ranges.len(),
+            returned_changed_range_count: changed_ranges.len(),
+            extraction_range_count: total_extraction_ranges,
+            returned_extraction_range_count: extraction_ranges.len(),
             parse_elapsed,
             reused_prior_tree,
         },
-        changed_ranges: ranges,
+        changed_ranges,
+        extraction_ranges,
+        source_edit,
+        state_epoch,
     }
 }
 
-fn completeness_for(tree: &Tree, truncated: Option<(usize, usize)>) -> ParseCompleteness {
+fn completeness_for(
+    tree: &Tree,
+    changed_truncated: Option<(usize, usize)>,
+    extraction_truncated: Option<(usize, usize)>,
+) -> ParseCompleteness {
     let mut reasons = Vec::new();
     if tree.root_node().has_error() {
         reasons.push(ParsePartialReason::SyntaxErrors);
     }
-    if let Some((returned, total)) = truncated {
+    if let Some((returned, total)) = changed_truncated {
         reasons.push(ParsePartialReason::ChangedRangesTruncated { returned, total });
+    }
+    if let Some((returned, total)) = extraction_truncated {
+        reasons.push(ParsePartialReason::ExtractionRangesTruncated { returned, total });
     }
     if reasons.is_empty() {
         ParseCompleteness::Complete
