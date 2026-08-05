@@ -133,6 +133,7 @@ where
             ),
             outbound: OutboundController::default(),
             diagnostics: DiagnosticsController::new(diagnostics),
+            dynamic_diagnostics: DynamicDiagnosticsController::default(),
             context: ContextController::default(),
             semantic: SemanticController::default(),
             pending_workspace_mutation: None,
@@ -206,6 +207,7 @@ where
             self.diagnostics.refresh_request = None;
             self.queue_diagnostic_refresh();
         }
+        self.reset_dynamic_diagnostics_after_reconnect();
         Ok(())
     }
 
@@ -469,7 +471,10 @@ where
         ));
     }
 
-    pub(crate) fn handle_client_response(&mut self, id: LspRequestId) {
+    pub(crate) fn handle_client_response(&mut self, id: LspRequestId, succeeded: bool) {
+        if self.handle_dynamic_diagnostic_response(&id, succeeded) {
+            return;
+        }
         if self.diagnostics.refresh_request.as_ref() == Some(&id) {
             self.diagnostics.refresh_request = None;
         }
@@ -571,6 +576,16 @@ where
             })
             .unwrap_or_default();
         let mut gateway_capabilities = self.lifecycle.gateway_capabilities.clone();
+        let dynamic_workspace_diagnostics = client.diagnostic_dynamic_registration
+            && client.supports_document_diagnostics
+            && gateway_capabilities.supports_document_diagnostics
+            && gateway_capabilities.supports_workspace_diagnostics;
+        if !dynamic_workspace_diagnostics {
+            gateway_capabilities.supports_workspace_diagnostics &=
+                self.diagnostics.provider.supports_workspace_diagnostics();
+        }
+        let upstream_capabilities = self.lifecycle.upstream_capabilities.clone();
+        self.configure_dynamic_diagnostics(&client, &gateway_capabilities, &upstream_capabilities);
         gateway_capabilities
             .context_projections
             .retain(|kind, revision| mounted_context.get(kind) == Some(revision));

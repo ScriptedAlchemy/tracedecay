@@ -76,6 +76,7 @@ pub const TRACEDECAY_RENAME_CANDIDATE_METHOD: &str = "tracedecay/textDocument/re
 
 mod context_controller;
 mod diagnostics_controller;
+mod dynamic_diagnostics_controller;
 mod lifecycle_controller;
 mod outbound_controller;
 mod semantic_controller;
@@ -85,6 +86,7 @@ use context_controller::ContextController;
 #[cfg(test)]
 use context_controller::bind_context_document_digest;
 use diagnostics_controller::DiagnosticsController;
+use dynamic_diagnostics_controller::DynamicDiagnosticsController;
 use lifecycle_controller::LifecycleController;
 pub use outbound_controller::DaemonLspProtocolTransport;
 use outbound_controller::OutboundController;
@@ -110,6 +112,7 @@ where
     lifecycle: LifecycleController<P, S>,
     outbound: OutboundController,
     diagnostics: DiagnosticsController<D>,
+    dynamic_diagnostics: DynamicDiagnosticsController,
     context: ContextController,
     semantic: SemanticController,
     pending_workspace_mutation: Option<WorkspaceFolderMutation>,
@@ -126,6 +129,10 @@ where
     /// acknowledges delivery to the bridge.
     pub fn handle_payload(&mut self, payload: &[u8], now_ms: u64) -> ProtocolDispatch {
         self.expire_requests(now_ms);
+        // Capability loss closes admission before the triggering client
+        // request is dispatched. Capability gain is projected only through
+        // the dynamic-registration acknowledgement path.
+        self.reconcile_dynamic_diagnostics();
         let before = self.outbound.queue.len();
         let backpressured_before = self.outbound.queued_bytes >= MAX_QUEUED_OUTBOUND_BYTES;
         if payload.len() > MAX_LSP_FRAME_BYTES {
@@ -160,6 +167,7 @@ where
             };
         };
         self.dispatch_value(value, now_ms);
+        self.reconcile_dynamic_diagnostics();
         self.flush_debounced_diagnostics(now_ms);
         self.poll_context_requests();
         self.poll_context_expansions();
@@ -255,6 +263,7 @@ where
     pub fn flush_due(&mut self, now_ms: u64) -> ProtocolDispatch {
         let before = self.outbound.queue.len();
         self.expire_requests(now_ms);
+        self.reconcile_dynamic_diagnostics();
         self.flush_debounced_diagnostics(now_ms);
         self.poll_context_requests();
         self.poll_context_expansions();
