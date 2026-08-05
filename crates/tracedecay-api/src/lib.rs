@@ -44,20 +44,24 @@ pub use http::{
 };
 pub use multi_root::{
     MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,
-    MultiRootInvocationFuture, multi_root_application_router,
+    MultiRootInvocationFuture, multi_root_application_router, multi_root_openapi_route_documents,
 };
 pub use openapi::{
-    OPENAPI_DOCUMENT_ROUTE_PATH, OpenApiDocumentError, OpenApiDocumentV1, OpenApiRouterBuildError,
-    openapi_document, openapi_router,
+    OPENAPI_DOCUMENT_ROUTE_PATH, OpenApiDocumentError, OpenApiDocumentV1, OpenApiRequestV1,
+    OpenApiRouteDocumentV1, OpenApiRouterBuildError, OpenApiSuccessV1, bind_http_route_documents,
+    openapi_document, openapi_router, openapi_routes_document, openapi_routes_router,
 };
+pub use operation::operation_openapi_route_documents;
 pub use sse::sse_response;
 pub use work::{
     WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,
     WorkOperationFamily, work_application_router, work_core_router, work_invalid_request_response,
+    work_openapi_route_documents,
 };
 pub use workflow::{
     WorkflowApplicationOwner, WorkflowHttpRequest, WorkflowInvocationFuture, WorkflowOperation,
     workflow_application_router, workflow_invalid_request_response,
+    workflow_openapi_route_documents,
 };
 
 /// A resolved canonical invocation result ready for HTTP presentation.

@@ -39,6 +39,7 @@ use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem,
     application_problem_response, invalid_request_response,
 };
+use crate::openapi::{OpenApiDocumentError, OpenApiRouteDocumentV1};
 
 fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
     T::schema_name()
@@ -298,6 +299,27 @@ impl WorkOperation {
             .copied()
             .find(|operation| operation.route_segment() == segment)
     }
+}
+
+/// Bind every mounted Work route to the canonical executable registry.
+pub fn work_openapi_route_documents() -> Result<Vec<OpenApiRouteDocumentV1>, OpenApiDocumentError> {
+    let registry = tracedecay_application::work_executable_binding_registry().map_err(|error| {
+        OpenApiDocumentError::SchemaAuthority {
+            family: "work",
+            message: error.to_string(),
+        }
+    })?;
+    WorkOperation::ALL
+        .into_iter()
+        .map(|operation| {
+            OpenApiRouteDocumentV1::executable_json(
+                &registry,
+                operation.operation_id_str(),
+                operation.route_path(),
+                operation.application_route_path(),
+            )
+        })
+        .collect()
 }
 
 /// One Work request, resolved to its canonical operation and ready to dispatch.

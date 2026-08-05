@@ -26,6 +26,11 @@ fn build_http_application_router(project_id: &str, project_path: &Path) -> Resul
     .map_err(|error| TraceDecayError::Config {
         message: format!("could not mount daemon HTTP application routes: {error}"),
     })?;
+    let openapi =
+        crate::application_surface::openapi::router().map_err(|error| TraceDecayError::Config {
+            message: format!("could not mount daemon HTTP OpenAPI route: {error}"),
+        })?;
+    let application = application.merge(openapi);
     Ok(tracedecay_api::delivery::http_delivery_router(application))
 }
 

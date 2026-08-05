@@ -171,6 +171,12 @@ async fn router_serves_byte_stable_authorized_document() {
         document["paths"]["/git/diff"]["post"]["operationId"],
         "git_diff"
     );
+    assert_eq!(
+        document["paths"]["/git/status"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"]["value"]["properties"]["outcome"]["oneOf"][0]["properties"]["value"]
+            ["properties"]["payload"]["oneOf"][0]["$ref"],
+        "#/components/schemas/binding.git_status.http.result"
+    );
 
     let reverse = openapi_router(&[diff_route, status_route], &registry)
         .expect("reverse OpenAPI router")

@@ -14,6 +14,7 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -106,6 +107,7 @@ use crate::daemon_contract::{
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 mod multi_root_http;
+pub(crate) mod openapi;
 mod wire_schema;
 mod workflow;
 
@@ -1168,17 +1170,19 @@ impl Drop for SseDisconnectObserver {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct HttpOperationEventQuery {
     #[serde(default)]
     next_sequence: u64,
     #[serde(default)]
+    #[schemars(with = "Option<String>")]
     resume_token: Option<ResumeToken>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct HttpOperationCancelResponse {
+    #[schemars(with = "OperationCancelOutcome")]
     status: &'static str,
 }
 
@@ -1195,11 +1199,11 @@ fn http_operation_event_router(
 ) -> axum::Router {
     axum::Router::new()
         .route(
-            "/operations/{operation_id}/events",
+            tracedecay_api::operation::OPERATION_EVENTS_ROUTE_PATH,
             get(http_operation_events),
         )
         .route(
-            "/operations/{operation_id}/cancel",
+            tracedecay_api::operation::OPERATION_CANCEL_ROUTE_PATH,
             post(http_operation_cancel),
         )
         .with_state(HttpOperationEventState {

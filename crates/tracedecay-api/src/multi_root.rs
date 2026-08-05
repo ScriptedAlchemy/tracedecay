@@ -15,6 +15,7 @@ use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, constant_operation_handlers,
     invalid_request_response,
 };
+use crate::openapi::{OpenApiDocumentError, OpenApiRouteDocumentV1};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MultiRootHttpOperation {
@@ -24,6 +25,12 @@ pub enum MultiRootHttpOperation {
 }
 
 impl MultiRootHttpOperation {
+    pub const ALL: [Self; 3] = [
+        Self::ScopeSetRead,
+        Self::ScopeSetCompareAndSwap,
+        Self::Execute,
+    ];
+
     pub const fn operation_id(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "operation.multi_root.scope_set_read",
@@ -31,6 +38,37 @@ impl MultiRootHttpOperation {
             Self::Execute => "operation.multi_root.execute",
         }
     }
+
+    pub const fn route_path(self) -> &'static str {
+        match self {
+            Self::ScopeSetRead => "/multi-root/scope-set/read",
+            Self::ScopeSetCompareAndSwap => "/multi-root/scope-set/compare-and-swap",
+            Self::Execute => "/multi-root/execute",
+        }
+    }
+}
+
+/// Bind every mounted multi-root route to the canonical executable registry.
+pub fn multi_root_openapi_route_documents()
+-> Result<Vec<OpenApiRouteDocumentV1>, OpenApiDocumentError> {
+    let registry =
+        tracedecay_application::multi_root_executable_binding_registry().map_err(|error| {
+            OpenApiDocumentError::SchemaAuthority {
+                family: "multi_root",
+                message: error.to_string(),
+            }
+        })?;
+    MultiRootHttpOperation::ALL
+        .into_iter()
+        .map(|operation| {
+            OpenApiRouteDocumentV1::executable_json(
+                &registry,
+                operation.operation_id(),
+                operation.route_path(),
+                operation.route_path(),
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -62,12 +100,18 @@ where
     O: MultiRootApplicationOwner,
 {
     Router::new()
-        .route("/multi-root/scope-set/read", post(scope_set_read::<O>))
         .route(
-            "/multi-root/scope-set/compare-and-swap",
+            MultiRootHttpOperation::ScopeSetRead.route_path(),
+            post(scope_set_read::<O>),
+        )
+        .route(
+            MultiRootHttpOperation::ScopeSetCompareAndSwap.route_path(),
             post(scope_set_compare_and_swap::<O>),
         )
-        .route("/multi-root/execute", post(execute::<O>))
+        .route(
+            MultiRootHttpOperation::Execute.route_path(),
+            post(execute::<O>),
+        )
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owner)
 }

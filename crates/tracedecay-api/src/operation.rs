@@ -15,14 +15,18 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::Stream;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracedecay_application::{
     ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
     OperationCancelOutcome, OperationEventSubscription, RequestContext, RequestId, ResumeToken,
     RetryDirective, SafeDiagnostic, StreamEvent,
 };
+use tracedecay_tool_catalog::SchemaBodyAuthorityV1;
 
 use crate::http::{adapter_problem, application_problem_response, invalid_request_response};
+use crate::openapi::{
+    OpenApiDocumentError, OpenApiRequestV1, OpenApiRouteDocumentV1, OpenApiSuccessV1,
+};
 use crate::{CanonicalInvocationResult, HttpApplicationControls, sse_response};
 
 /// Default maximum number of retained events requested when opening a stream.
@@ -31,6 +35,10 @@ pub const DEFAULT_OPERATION_EVENT_PAGE_SIZE: u16 = 256;
 pub const MAX_OPERATION_EVENT_PAGE_SIZE: u16 = 256;
 const MAX_OPERATION_EVENT_SEQUENCE: u64 = i64::MAX as u64;
 const MAX_OPERATION_CANCEL_BODY_BYTES: usize = 1_024;
+/// Mounted route for resumable operation-event subscriptions.
+pub const OPERATION_EVENTS_ROUTE_PATH: &str = "/operations/{operation_id}/events";
+/// Mounted route for idempotent explicit operation cancellation.
+pub const OPERATION_CANCEL_ROUTE_PATH: &str = "/operations/{operation_id}/cancel";
 
 /// Exact authenticated input forwarded when an operation stream is opened.
 #[derive(Clone, Debug)]
@@ -108,16 +116,65 @@ where
     O: OperationEventOwner,
 {
     Router::new()
-        .route(
-            "/operations/{operation_id}/events",
-            get(operation_events::<O>),
-        )
-        .route(
-            "/operations/{operation_id}/cancel",
-            post(cancel_operation::<O>),
-        )
+        .route(OPERATION_EVENTS_ROUTE_PATH, get(operation_events::<O>))
+        .route(OPERATION_CANCEL_ROUTE_PATH, post(cancel_operation::<O>))
         .layer(DefaultBodyLimit::max(MAX_OPERATION_CANCEL_BODY_BYTES))
         .with_state(owner)
+}
+
+/// Bind the adapter-owned operation routes to the actual extractor and result
+/// types that own their wire representations.
+pub fn operation_openapi_route_documents(
+    query: SchemaBodyAuthorityV1,
+    cancellation: SchemaBodyAuthorityV1,
+) -> Result<Vec<OpenApiRouteDocumentV1>, OpenApiDocumentError> {
+    let event_stream = event_stream_schema()?;
+    Ok(vec![
+        OpenApiRouteDocumentV1::adapter(
+            "GET",
+            OPERATION_EVENTS_ROUTE_PATH,
+            "operation.events.subscribe",
+            OpenApiRequestV1::Query(query),
+            OpenApiSuccessV1::ServerSentEvents(event_stream),
+            vec!["200"],
+            json!({
+                "resumption": "resume_token",
+            }),
+        ),
+        OpenApiRouteDocumentV1::adapter(
+            "POST",
+            OPERATION_CANCEL_ROUTE_PATH,
+            "operation.events.cancel",
+            OpenApiRequestV1::Empty,
+            OpenApiSuccessV1::Json(cancellation),
+            vec!["200", "202"],
+            json!({
+                "idempotency": "outcome_distinguishes_requested_and_terminal_state",
+            }),
+        ),
+    ])
+}
+
+fn event_stream_schema() -> Result<SchemaBodyAuthorityV1, OpenApiDocumentError> {
+    let schema_id = tracedecay_tool_catalog::SchemaId::new(
+        "schema.operation.events.sse".to_owned(),
+    )
+    .map_err(|error| OpenApiDocumentError::SchemaAuthority {
+        family: "operation_events",
+        message: error.to_string(),
+    })?;
+    let schema_ref = tracedecay_tool_catalog::SchemaRef::new(schema_id, 1).map_err(|error| {
+        OpenApiDocumentError::SchemaAuthority {
+            family: "operation_events",
+            message: error.to_string(),
+        }
+    })?;
+    SchemaBodyAuthorityV1::for_type::<String>(schema_ref).map_err(|error| {
+        OpenApiDocumentError::SchemaAuthority {
+            family: "operation_events",
+            message: error.to_string(),
+        }
+    })
 }
 
 async fn operation_events<O>(

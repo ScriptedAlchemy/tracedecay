@@ -23,6 +23,7 @@ use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem,
     application_problem_response, invalid_request_response,
 };
+use crate::openapi::{OpenApiDocumentError, OpenApiRouteDocumentV1};
 
 fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
     T::schema_name()
@@ -112,6 +113,29 @@ impl WorkflowOperation {
             .copied()
             .find(|operation| operation.route_segment() == segment)
     }
+}
+
+/// Bind every mounted Workflow route to the canonical executable registry.
+pub fn workflow_openapi_route_documents()
+-> Result<Vec<OpenApiRouteDocumentV1>, OpenApiDocumentError> {
+    let registry =
+        tracedecay_application::workflow_executable_binding_registry().map_err(|error| {
+            OpenApiDocumentError::SchemaAuthority {
+                family: "workflow",
+                message: error.to_string(),
+            }
+        })?;
+    WorkflowOperation::ALL
+        .into_iter()
+        .map(|operation| {
+            OpenApiRouteDocumentV1::executable_json(
+                &registry,
+                operation.operation_id_str(),
+                operation.route_path(),
+                operation.application_route_path(),
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
