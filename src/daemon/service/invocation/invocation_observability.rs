@@ -1,8 +1,8 @@
-//! Plan 26 invocation observation/emission helpers.
+//! Invocation observation and feedback-emission helpers.
 
 use super::*;
 
-pub(super) fn plan26_invocation_subject(
+pub(super) fn invocation_observation_subject(
     request_id: &str,
     operation: DaemonInvocationOperation,
     route: Option<Plan26DeliveryRouteV1>,
@@ -16,7 +16,7 @@ pub(super) fn plan26_invocation_subject(
     .ok()
 }
 
-pub(super) fn plan26_observable_operation(operation: DaemonInvocationOperation) -> bool {
+pub(super) fn is_observable_operation(operation: DaemonInvocationOperation) -> bool {
     matches!(
         operation,
         DaemonInvocationOperation::FeedbackDiagnostics
@@ -33,7 +33,7 @@ pub(super) fn plan26_observable_operation(operation: DaemonInvocationOperation) 
     )
 }
 
-pub(super) fn plan26_feedback_operation(
+pub(super) fn feedback_observation_operation(
     operation: DaemonInvocationOperation,
 ) -> Plan26FeedbackOperationV1 {
     match operation {
@@ -93,7 +93,7 @@ pub(super) fn plan26_feedback_operation(
     }
 }
 
-pub(super) fn emit_plan26_invocation_event(
+pub(super) fn emit_invocation_observation(
     observations: Option<&Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>>,
     subject: Option<&ManifestDigest>,
     observed_at: UtcMicros,
@@ -104,7 +104,7 @@ pub(super) fn emit_plan26_invocation_event(
     }
 }
 
-fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26FeedbackOutcomeV1 {
+fn invocation_response_outcome(response: &DaemonInvocationResponse) -> Plan26FeedbackOutcomeV1 {
     match &response.outcome {
         DaemonInvocationOutcome::GitRead { .. }
         | DaemonInvocationOutcome::GitPreview { .. }
@@ -173,12 +173,12 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
     }
 }
 
-pub(super) fn plan26_rejected_argument(
+pub(super) fn invocation_rejected_argument(
     response: &DaemonInvocationResponse,
 ) -> Option<(Plan26RejectedArgumentV1, Plan26ArgumentRejectionClassV1)> {
     match &response.outcome {
         DaemonInvocationOutcome::Problem { problem } => {
-            plan26_invocation_problem_rejected_argument(*problem)
+            invocation_problem_rejected_argument(*problem)
         }
         DaemonInvocationOutcome::ApplicationProblem { problem }
             if problem.kind() == ApplicationProblemKind::InvalidRequest =>
@@ -192,7 +192,7 @@ pub(super) fn plan26_rejected_argument(
     }
 }
 
-pub(super) const fn plan26_invocation_problem_rejected_argument(
+pub(super) const fn invocation_problem_rejected_argument(
     problem: DaemonInvocationProblem,
 ) -> Option<(Plan26RejectedArgumentV1, Plan26ArgumentRejectionClassV1)> {
     match problem {
@@ -210,7 +210,7 @@ pub(super) const fn plan26_invocation_problem_rejected_argument(
     }
 }
 
-pub(super) fn observe_plan26_invocation_response(
+pub(super) fn observe_invocation_response(
     observations: Option<&Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>>,
     subject: Option<&ManifestDigest>,
     operation: DaemonInvocationOperation,
@@ -219,15 +219,15 @@ pub(super) fn observe_plan26_invocation_response(
     response: &DaemonInvocationResponse,
 ) {
     let observed_at = current_micros();
-    let outcome = plan26_response_outcome(response);
+    let outcome = invocation_response_outcome(response);
     let duration_micros = u64::try_from(observed_at.0.saturating_sub(started_at.0)).ok();
     if let Some(route) = route {
-        emit_plan26_invocation_event(
+        emit_invocation_observation(
             observations,
             subject,
             observed_at,
             Plan26FeedbackSourceEventV1::Delivery {
-                operation: plan26_feedback_operation(operation),
+                operation: feedback_observation_operation(operation),
                 route,
                 outcome,
                 item_count: match &response.outcome {
@@ -246,23 +246,23 @@ pub(super) fn observe_plan26_invocation_response(
         outcome,
         Plan26FeedbackOutcomeV1::Cancelled | Plan26FeedbackOutcomeV1::TimedOut
     ) {
-        emit_plan26_invocation_event(
+        emit_invocation_observation(
             observations,
             subject,
             observed_at,
             Plan26FeedbackSourceEventV1::Cancellation {
-                operation: plan26_feedback_operation(operation),
+                operation: feedback_observation_operation(operation),
                 outcome,
             },
         );
     }
-    if let Some((argument, rejection)) = plan26_rejected_argument(response) {
-        emit_plan26_invocation_event(
+    if let Some((argument, rejection)) = invocation_rejected_argument(response) {
+        emit_invocation_observation(
             observations,
             subject,
             observed_at,
             Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
-                operation: plan26_feedback_operation(operation),
+                operation: feedback_observation_operation(operation),
                 route,
                 argument,
                 rejection,
@@ -280,12 +280,12 @@ pub(super) fn observe_plan26_invocation_response(
             |total| total.saturating_sub(result.page().returned),
         );
         if omitted > 0 || result.page().cursor.is_some() {
-            emit_plan26_invocation_event(
+            emit_invocation_observation(
                 observations,
                 subject,
                 observed_at,
                 Plan26FeedbackSourceEventV1::Truncation {
-                    operation: plan26_feedback_operation(operation),
+                    operation: feedback_observation_operation(operation),
                     returned_count: result.page().returned.try_into().unwrap_or(u32::MAX),
                     omitted_count: omitted.try_into().unwrap_or(u32::MAX),
                 },
@@ -293,7 +293,7 @@ pub(super) fn observe_plan26_invocation_response(
         }
     }
     if operation == DaemonInvocationOperation::FeedbackExpand {
-        emit_plan26_invocation_event(
+        emit_invocation_observation(
             observations,
             subject,
             observed_at,
@@ -310,17 +310,4 @@ pub(super) fn observe_plan26_invocation_response(
             },
         );
     }
-}
-
-pub(super) fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or_default()
-}
-
-/// Retained name for this module's many call sites; the saturating clamp is the
-/// shared one so it cannot drift from every other runtime that stamps "now".
-pub(super) fn current_micros() -> UtcMicros {
-    now_micros()
 }

@@ -17,12 +17,11 @@ use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
-use tracedecay_application::clock::now_micros;
 use tracedecay_application::feedback::{
     FeedbackReadPort, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
 };
@@ -187,12 +186,13 @@ use tracedecay_hooks::{
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).
+mod clock;
 mod configuration;
 mod dispatch;
 mod feedback;
 mod git;
+mod invocation_observability;
 mod lsp;
-mod plan26;
 mod primitive;
 mod registrars;
 #[cfg(test)]
@@ -200,18 +200,18 @@ mod tests;
 mod types;
 mod work;
 
+use clock::{current_micros, now_millis};
 use configuration::*;
 use feedback::*;
 use git::*;
+use invocation_observability::{
+    emit_invocation_observation, feedback_observation_operation, invocation_observation_subject,
+    invocation_problem_rejected_argument, invocation_rejected_argument, is_observable_operation,
+    observe_invocation_response,
+};
 use lsp::PublishedCodeIndexWorkspaceDocuments;
 #[cfg(test)]
 use lsp::*;
-pub(crate) use plan26::now_millis;
-use plan26::{
-    current_micros, emit_plan26_invocation_event, observe_plan26_invocation_response,
-    plan26_feedback_operation, plan26_invocation_problem_rejected_argument,
-    plan26_invocation_subject, plan26_observable_operation, plan26_rejected_argument,
-};
 use primitive::*;
 use registrars::*;
 use types::*;
