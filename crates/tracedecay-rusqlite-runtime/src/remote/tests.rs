@@ -688,7 +688,9 @@ fn startup_releases_only_interrupted_attempt_markers_for_idempotent_retry() {
     let recovery = storage
         .recover_interrupted_replay_attempts(UtcMicros(30))
         .unwrap();
+    assert!(recovery.lease_id.starts_with("replay.recovery."));
     assert_eq!(recovery.interrupted_attempts, 1);
+    assert_eq!(recovery.preserved_newer_markers, 0);
     assert_eq!(
         storage.state(&receipt.event_id).unwrap(),
         RemoteReplaySpoolStateV1 {
