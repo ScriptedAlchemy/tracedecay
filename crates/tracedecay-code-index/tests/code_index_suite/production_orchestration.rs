@@ -342,6 +342,27 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
 }
 
 #[test]
+fn retained_parse_syntax_errors_publish_partial_generation_coverage() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request_with_source(
+                "file.retained.partial",
+                1_100_000,
+                "commit.retained.partial",
+                "tree.retained.partial",
+                "fn broken(\n",
+            ),
+            &ActiveControl,
+        )
+        .expect("partial generation publishes");
+
+    assert_eq!(generation.coverage().files_partial, 1);
+}
+
+#[test]
 fn published_generation_serves_current_conservative_test_attribution() {
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
