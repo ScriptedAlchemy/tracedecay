@@ -81,10 +81,6 @@ pub(super) fn parse_git_oid(
     GitOidV1::new(text.trim()).map_err(|_| NativeGitIndexError::MalformedOutput { operation })
 }
 
-pub(super) fn git_timestamp(micros: i64) -> String {
-    format!("@{} +0000", micros.div_euclid(1_000_000))
-}
-
 pub(super) fn current_operation_state(git_dir: &Path) -> GitOperationStateV1 {
     if git_dir.join("MERGE_HEAD").is_file() {
         GitOperationStateV1::Merge
@@ -133,17 +129,4 @@ pub(super) fn worktree_mode(path: &Path) -> Option<GitFileModeV1> {
         return None;
     };
     GitFileModeV1::new(mode).ok()
-}
-
-#[cfg(unix)]
-pub(super) fn is_executable_hook(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    path.is_file()
-        && std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-pub(super) fn is_executable_hook(path: &Path) -> bool {
-    path.is_file()
 }

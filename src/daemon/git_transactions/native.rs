@@ -43,7 +43,6 @@ use super::{
 pub(crate) struct MaterializedGitIndexPreview {
     pub preview: GitIndexPreviewV1,
     pub execution: OperationReceipt,
-    pub commit_intent: Option<GitIndexCommitIntentV1>,
     pub(crate) runner: FixedGitIndexRunner,
     pub(crate) patches: Vec<ValidatedIndexPatch>,
 }
@@ -529,7 +528,6 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
         Ok(MaterializedGitIndexPreview {
             preview,
             execution: completed_execution(request),
-            commit_intent: request.commit_intent.clone(),
             runner,
             patches,
         })
@@ -804,7 +802,6 @@ fn unsupported_materialized(
     Ok(MaterializedGitIndexPreview {
         preview,
         execution: completed_execution(request),
-        commit_intent: request.commit_intent.clone(),
         runner,
         patches: Vec::new(),
     })
