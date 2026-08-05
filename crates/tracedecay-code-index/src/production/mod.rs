@@ -14,17 +14,19 @@ use std::{
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_code_extraction::LanguageExtractor as ParserLanguageExtractor;
 use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseError};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, ComponentVersion, CoverageSummaryV1,
-    ExtractionBatchV1, ExtractionFailureV1, FileOccurrenceId, GenerationTestAttributionV1,
-    IntakeRejectionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
-    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
-    ProviderEvaluationStateV1, RefId, RepositoryDirtyStateV1, RepositoryId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
-    SymbolLineageCandidateV1, SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId,
-    UtcMicros, ValidatedCodeFileV1, ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
+    ExtractionBatchV1, ExtractionFailureV1, ExtractionResult, FileOccurrenceId,
+    GenerationTestAttributionV1, IntakeRejectionV1, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
+    ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1, RefId,
+    RepositoryDirtyStateV1, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, ValidatedCodeFileV1,
+    ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
 };
 
 use super::{
@@ -302,7 +304,8 @@ fn parse_for_indexing(
     repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
     file: &SanitizedCodeFileV1,
     captured: &CodeIndexCapturedFileV1,
-) -> Result<(), CodeIndexProductionErrorV1> {
+    parser: &dyn ParserLanguageExtractor,
+) -> Result<(ExtractionResult, usize), CodeIndexProductionErrorV1> {
     let language = file.language.as_ref().ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract(
             "present snapshot file has no declared language".to_owned(),
@@ -313,7 +316,13 @@ fn parse_for_indexing(
             "admitted sanitized source is not UTF-8: {error}"
         ))
     })?;
-    retained_parses.parse(
+    let mut parsed_len = source
+        .len()
+        .min(crate::extract::MAX_EXTRACTION_SOURCE_BYTES);
+    while !source.is_char_boundary(parsed_len) {
+        parsed_len = parsed_len.saturating_sub(1);
+    }
+    let (_, extraction) = retained_parses.parse_and_extract(
         ParseDocumentIdentity::Repository {
             project_id: config.project_id.clone(),
             repository_id: snapshot.repository.clone(),
@@ -325,9 +334,10 @@ fn parse_for_indexing(
             logical_path: file.logical_path.clone(),
         },
         language.as_str(),
-        source,
+        &source[..parsed_len],
+        parser,
     )?;
-    Ok(())
+    Ok((extraction.result, parsed_len))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1526,18 +1536,45 @@ where
             return Ok(reused);
         }
         let snapshot = &capability.snapshot().snapshot;
-        parse_for_indexing(
+        let parser = extractor
+            .resolve_parser(receipt_bound.validated_file(), descriptor)
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Extraction(ExtractionFailureV1::GrammarUnavailable {
+                    language: descriptor.language.clone(),
+                })
+            })?;
+        if crate::languages::canonical_language_id(parser.language_name())
+            != descriptor.language.as_str()
+        {
+            return Err(CodeIndexProductionErrorV1::Extraction(
+                ExtractionFailureV1::IncompatibleDescriptor {
+                    detail: format!(
+                        "descriptor {} resolved to a {} parser",
+                        descriptor.language,
+                        parser.language_name()
+                    ),
+                },
+            ));
+        }
+        let (parse_artifacts, parsed_len) = parse_for_indexing(
             retained_parses,
             config,
             snapshot,
             repository_parse_identity,
             file,
             captured,
+            parser,
         )?;
         Self::checkpoint(control)?;
         let cancellation = ExtractionControlBridge { control };
         let extraction = extractor
-            .extract(&receipt_bound, descriptor, &cancellation)
+            .extract_preparsed(
+                &receipt_bound,
+                descriptor,
+                parse_artifacts,
+                parsed_len,
+                &cancellation,
+            )
             .map_err(|error| match error {
                 ExtractionFailureV1::Cancelled | ExtractionFailureV1::TimedOut => {
                     Self::interruption_error(control)

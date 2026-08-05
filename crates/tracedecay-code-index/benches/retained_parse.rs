@@ -1,18 +1,28 @@
-use std::{error::Error, fmt::Write as _, hint::black_box, process::Command, time::Instant};
+use std::{
+    error::Error,
+    fmt::Write as _,
+    hint::black_box,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tracedecay_code_extraction::incremental::{
-    ParseCompleteness, ParseDocumentIdentity, ParseReuse,
+use tracedecay_code_extraction::{
+    LanguageExtractor, RustExtractor,
+    incremental::{ParseCompleteness, ParseDocumentIdentity, ParseLimits, ParseReport, ParseReuse},
+    parsed_extraction::{ParsedExtraction, ParsedExtractionDisposition},
 };
-use tracedecay_code_index::retained_parse::SharedRetainedParsePool;
+use tracedecay_code_index::retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool};
 use tracedecay_domain::{
-    CommitId, ProjectId, RefId, RepositoryDirtyStateV1, RepositoryId, TreeId, WorktreeId,
+    CommitId, ExtractionResult, ProjectId, RefId, RepositoryDirtyStateV1, RepositoryId, TreeId,
+    WorktreeId,
 };
 
 const WARMUPS: usize = 5;
 const MEASURED: usize = 30;
-const FUNCTION_COUNT: usize = 4_096;
+const CURRENT_FUNCTION_COUNT: usize = 4_096;
+const TEN_X_FUNCTION_COUNT: usize = CURRENT_FUNCTION_COUNT * 10;
 
 #[derive(Serialize)]
 struct Sample {
@@ -21,6 +31,11 @@ struct Sample {
     parser_ns: u64,
     changed_bytes: usize,
     changed_ranges: usize,
+    extraction_disposition: &'static str,
+    visited_top_level_nodes: usize,
+    extracted_bytes: usize,
+    canonical_rows_sha256: String,
+    reset_extractions: u64,
     retained_source_bytes: usize,
     reuse: &'static str,
     complete: bool,
@@ -43,9 +58,16 @@ struct Evaluation {
     acceptance: Acceptance,
     build: BuildIdentity,
     environment: Environment,
+    scales: Vec<ScaleEvaluation>,
+}
+
+#[derive(Serialize)]
+struct ScaleEvaluation {
+    scale: &'static str,
     workload: Workload,
     cold: Measurements,
     incremental: Measurements,
+    criteria: Vec<Criterion>,
 }
 
 #[derive(Serialize)]
@@ -56,7 +78,7 @@ struct Acceptance {
 
 #[derive(Serialize)]
 struct Criterion {
-    name: &'static str,
+    name: String,
     passed: bool,
     observed: String,
 }
@@ -100,14 +122,57 @@ struct Measurements {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let before = source_with_literal("1");
-    let after = source_with_literal("123456");
+    let build = build_identity();
+    let scales = vec![
+        evaluate_scale("current", CURRENT_FUNCTION_COUNT)?,
+        evaluate_scale("10x", TEN_X_FUNCTION_COUNT)?,
+    ];
+    let mut criteria = vec![Criterion {
+        name: "immutable_clean_source".to_owned(),
+        passed: !build.dirty && !build.commit.is_empty() && !build.tree.is_empty(),
+        observed: format!(
+            "commit={}, tree={}, dirty={}",
+            build.commit, build.tree, build.dirty
+        ),
+    }];
+    criteria.extend(
+        scales
+            .iter()
+            .flat_map(|scale| scale.criteria.iter())
+            .map(|criterion| Criterion {
+                name: criterion.name.clone(),
+                passed: criterion.passed,
+                observed: criterion.observed.clone(),
+            }),
+    );
+    let accepted = criteria.iter().all(|criterion| criterion.passed);
+    let evaluation = Evaluation {
+        schema_version: 2,
+        evidence_status: if accepted { "accepted" } else { "rejected" },
+        workload_id: "retained-tree-canonical-rust-current-plus-10x-v2",
+        acceptance: Acceptance { accepted, criteria },
+        build,
+        environment: environment(),
+        scales,
+    };
+    println!("{}", serde_json::to_string_pretty(&evaluation)?);
+    if accepted {
+        Ok(())
+    } else {
+        Err("retained parse evaluation did not satisfy its declared criteria".into())
+    }
+}
 
+fn evaluate_scale(
+    scale: &'static str,
+    function_count: usize,
+) -> Result<ScaleEvaluation, Box<dyn Error>> {
+    let before = source_with_literal(function_count, "1");
+    let after = source_with_literal(function_count, "123456");
     for _ in 0..WARMUPS {
         black_box(measure_cold(0, &after)?);
         black_box(measure_incremental(0, &before, &after)?);
     }
-
     let cold = (0..MEASURED)
         .map(|repetition| measure_cold(repetition, &after))
         .collect::<Result<Vec<_>, _>>()?;
@@ -121,48 +186,70 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|sample| sample.changed_bytes)
         .max()
         .unwrap_or(0);
+    let max_extracted_bytes = incremental
+        .iter()
+        .map(|sample| sample.extracted_bytes)
+        .max()
+        .unwrap_or(0);
     let max_retained_bytes = incremental
         .iter()
         .map(|sample| sample.retained_source_bytes)
         .max()
         .unwrap_or(0);
-    let all_incremental = incremental
+    let cold_digests = cold
         .iter()
-        .all(|sample| sample.reuse == "incremental");
-    let all_complete = incremental.iter().all(|sample| sample.complete);
-    let build = build_identity();
-
+        .map(|sample| sample.canonical_rows_sha256.as_str())
+        .collect::<Vec<_>>();
+    let canonical_matches = incremental
+        .iter()
+        .all(|sample| cold_digests.contains(&sample.canonical_rows_sha256.as_str()));
+    let prefix = |criterion: &str| format!("{scale}_{criterion}");
     let criteria = vec![
         Criterion {
-            name: "immutable_clean_source",
-            passed: !build.dirty && !build.commit.is_empty() && !build.tree.is_empty(),
-            observed: format!(
-                "commit={}, tree={}, dirty={}",
-                build.commit, build.tree, build.dirty
-            ),
-        },
-        Criterion {
-            name: "all_measured_updates_reused_prior_tree",
-            passed: all_incremental,
+            name: prefix("all_updates_reused_prior_tree"),
+            passed: incremental
+                .iter()
+                .all(|sample| sample.reuse == "incremental"),
             observed: format!("{}/{} incremental", incremental.len(), MEASURED),
         },
         Criterion {
-            name: "all_measured_updates_complete",
-            passed: all_complete,
+            name: prefix("all_updates_complete"),
+            passed: incremental.iter().all(|sample| sample.complete),
             observed: format!("{}/{} complete", incremental.len(), MEASURED),
         },
         Criterion {
-            name: "changed_work_bounded_to_less_than_one_percent",
-            passed: max_changed_bytes.saturating_mul(100) < after.len(),
-            observed: format!("{max_changed_bytes}/{} bytes", after.len()),
+            name: prefix("all_extractions_changed_region_bounded"),
+            passed: incremental.iter().all(|sample| {
+                sample.extraction_disposition == "changed_regions"
+                    && sample.reset_extractions == 0
+                    && sample.visited_top_level_nodes == 1
+            }),
+            observed: format!(
+                "max_extracted_bytes={max_extracted_bytes}, source_bytes={}",
+                after.len()
+            ),
         },
         Criterion {
-            name: "retained_source_within_document_bound",
+            name: prefix("changed_parse_and_extraction_under_one_percent"),
+            passed: max_changed_bytes.saturating_mul(100) < after.len()
+                && max_extracted_bytes.saturating_mul(100) < after.len(),
+            observed: format!(
+                "parse={max_changed_bytes}, extraction={max_extracted_bytes}, source={}",
+                after.len()
+            ),
+        },
+        Criterion {
+            name: prefix("canonical_rows_equal_cold_extraction"),
+            passed: canonical_matches,
+            observed: format!("{} incremental digests matched cold", incremental.len()),
+        },
+        Criterion {
+            name: prefix("retained_source_within_document_bound"),
             passed: max_retained_bytes == after.len(),
             observed: format!("{max_retained_bytes} bytes"),
         },
         Criterion {
-            name: "incremental_median_faster_than_cold_median",
+            name: prefix("incremental_median_faster_than_cold_median"),
             passed: incremental_distribution.p50_ns < cold_distribution.p50_ns,
             observed: format!(
                 "incremental={}ns, cold={}ns",
@@ -170,19 +257,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             ),
         },
     ];
-    let accepted = criteria.iter().all(|criterion| criterion.passed);
-    let evaluation = Evaluation {
-        schema_version: 1,
-        evidence_status: if accepted { "accepted" } else { "rejected" },
-        workload_id: "retained-tree-rust-single-literal-v1",
-        acceptance: Acceptance { accepted, criteria },
-        build,
-        environment: environment(),
+    Ok(ScaleEvaluation {
+        scale,
         workload: Workload {
             warmups: WARMUPS,
             measured_repetitions: MEASURED,
             language: "rust",
-            function_count: FUNCTION_COUNT,
+            function_count,
             before_bytes: before.len(),
             after_bytes: after.len(),
             before_sha256: sha256(before.as_bytes()),
@@ -197,26 +278,28 @@ fn main() -> Result<(), Box<dyn Error>> {
             wall: incremental_distribution,
             raw_samples: incremental,
         },
-    };
-    println!("{}", serde_json::to_string_pretty(&evaluation)?);
-    if accepted {
-        Ok(())
-    } else {
-        Err("retained parse evaluation did not satisfy its declared criteria".into())
-    }
+        criteria,
+    })
 }
 
 fn measure_cold(repetition: usize, source: &str) -> Result<Sample, Box<dyn Error>> {
-    let pool = SharedRetainedParsePool::default();
+    let pool = evaluation_pool()?;
+    let extractor = RustExtractor;
     let started = Instant::now();
-    let report = pool.parse(identity("commit-cold", "tree-cold"), "rust", source)?;
+    let (report, extraction) = pool.parse_and_extract(
+        identity("commit-cold", "tree-cold"),
+        "rust",
+        source,
+        &extractor,
+    )?;
     let wall = started.elapsed();
     Ok(sample(
         repetition,
         wall.as_nanos() as u64,
         &report,
-        pool.stats().retained_source_bytes,
-    ))
+        extraction,
+        &pool,
+    )?)
 }
 
 fn measure_incremental(
@@ -224,41 +307,86 @@ fn measure_incremental(
     before: &str,
     after: &str,
 ) -> Result<Sample, Box<dyn Error>> {
-    let pool = SharedRetainedParsePool::default();
-    pool.parse(identity("commit-before", "tree-before"), "rust", before)?;
+    let pool = evaluation_pool()?;
+    let extractor = RustExtractor;
+    pool.parse_and_extract(
+        identity("commit-before", "tree-before"),
+        "rust",
+        before,
+        &extractor,
+    )?;
     let started = Instant::now();
-    let report = pool.parse(identity("commit-after", "tree-after"), "rust", after)?;
+    let (report, extraction) = pool.parse_and_extract(
+        identity("commit-after", "tree-after"),
+        "rust",
+        after,
+        &extractor,
+    )?;
     let wall = started.elapsed();
     Ok(sample(
         repetition,
         wall.as_nanos() as u64,
         &report,
-        pool.stats().retained_source_bytes,
-    ))
+        extraction,
+        &pool,
+    )?)
 }
 
 fn sample(
     repetition: usize,
     wall_ns: u64,
-    report: &tracedecay_code_extraction::incremental::ParseReport,
-    retained_source_bytes: usize,
-) -> Sample {
+    report: &ParseReport,
+    extraction: ParsedExtraction,
+    pool: &SharedRetainedParsePool,
+) -> Result<Sample, Box<dyn Error>> {
     let reuse = match report.reuse {
         ParseReuse::Initial => "initial",
         ParseReuse::Incremental => "incremental",
         ParseReuse::Noop => "noop",
         ParseReuse::Reset { .. } => "reset",
     };
-    Sample {
+    let extraction_disposition = match extraction.disposition {
+        ParsedExtractionDisposition::FullDocument => "full_document",
+        ParsedExtractionDisposition::ChangedRegions => "changed_regions",
+        ParsedExtractionDisposition::Reset { .. } => "reset",
+    };
+    let stats = pool.stats();
+    Ok(Sample {
         repetition,
         wall_ns,
         parser_ns: report.metrics.parse_elapsed.as_nanos() as u64,
         changed_bytes: report.metrics.changed_bytes,
         changed_ranges: report.metrics.changed_range_count,
-        retained_source_bytes,
+        extraction_disposition,
+        visited_top_level_nodes: extraction.metrics.visited_top_level_nodes,
+        extracted_bytes: extraction.metrics.visited_bytes,
+        canonical_rows_sha256: extraction_digest(extraction.result)?,
+        reset_extractions: stats.reset_extractions,
+        retained_source_bytes: stats.retained_source_bytes,
         reuse,
         complete: report.completeness == ParseCompleteness::Complete,
+    })
+}
+
+fn evaluation_pool() -> Result<SharedRetainedParsePool, Box<dyn Error>> {
+    Ok(SharedRetainedParsePool::new(RetainedParsePoolLimits {
+        max_documents: 2,
+        max_total_source_bytes: 8 * 1024 * 1024,
+        document: ParseLimits {
+            max_source_bytes: 4 * 1024 * 1024,
+            max_changed_ranges: 256,
+            max_parse_time: Duration::from_secs(3),
+        },
+    })?)
+}
+
+fn extraction_digest(mut result: ExtractionResult) -> Result<String, Box<dyn Error>> {
+    for node in &mut result.nodes {
+        node.updated_at = 0;
     }
+    result.duration_ms = 0;
+    result.sanitize();
+    Ok(sha256(&serde_json::to_vec(&result)?))
 }
 
 fn distribution(samples: &[Sample]) -> Distribution {
@@ -284,10 +412,10 @@ fn percentile(values: &[u64], percentile: usize) -> u64 {
     values[index]
 }
 
-fn source_with_literal(literal: &str) -> String {
-    let mut source = String::with_capacity(FUNCTION_COUNT * 64);
-    for index in 0..FUNCTION_COUNT {
-        let value = if index == FUNCTION_COUNT / 2 {
+fn source_with_literal(function_count: usize, literal: &str) -> String {
+    let mut source = String::with_capacity(function_count * 64);
+    for index in 0..function_count {
+        let value = if index == function_count / 2 {
             literal
         } else {
             "1"
