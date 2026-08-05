@@ -115,7 +115,7 @@ pub(crate) struct NativeIndexLock {
     published: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct NativeRefState {
     name: String,
     object: GitOidV1,
@@ -499,9 +499,10 @@ impl FixedGitIndexRunner {
         }
 
         self.update_ref_with_namespace_cas(&current_ref, &created_commit, commit, &expected_refs)?;
-        if self.ref_snapshot_excluding(&current_ref)?
-            != refs_excluding(&expected_refs, &current_ref)
-        {
+        if !same_ref_states(
+            &self.ref_snapshot_excluding(&current_ref)?,
+            &refs_excluding(&expected_refs, &current_ref),
+        ) {
             return Err(NativeGitIndexError::StaleRepositoryState
                 .into_commit_boundary_unknown("update-ref verification"));
         }
@@ -943,4 +944,13 @@ fn refs_excluding(refs: &[NativeRefState], excluded: &str) -> Vec<NativeRefState
         .filter(|reference| reference.name != excluded)
         .cloned()
         .collect()
+}
+
+fn same_ref_states(left: &[NativeRefState], right: &[NativeRefState]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.name == right.name
+                && left.object == right.object
+                && left.symbolic_target == right.symbolic_target
+        })
 }
