@@ -68,16 +68,6 @@ pub(super) fn non_negative_i64_arg(args: &Value, name: &str) -> Result<Option<i6
     Ok(Some(integer))
 }
 
-pub(super) fn signed_i64_arg(args: &Value, name: &str) -> Result<Option<i64>> {
-    let Some(value) = args.get(name) else {
-        return Ok(None);
-    };
-    value
-        .as_i64()
-        .map(Some)
-        .ok_or_else(|| argument_error(format!("{name} must be an integer")))
-}
-
 pub(super) fn bool_arg(args: &Value, name: &str) -> Result<Option<bool>> {
     let Some(value) = args.get(name) else {
         return Ok(None);

@@ -176,7 +176,7 @@ pub(super) async fn codex_compact(
             None,
             LcmHostProtocol::CodexContextCompacted {
                 protocol_revision: "codex.context-compacted.v1".to_owned(),
-                event_digest: tracedecay_domain::canonical_sha256(event_json)
+                event_digest: tracedecay_domain::canonical_sha256(&event_json)
                     .map_err(|error| config_error(format!("digest Codex event failed: {error}")))?,
             },
         ))
@@ -244,9 +244,9 @@ pub(super) async fn cursor_compact(
             fresh_tail_count,
             LcmHostProtocol::CursorPreCompact {
                 protocol_revision: "cursor.precompact.v1".to_owned(),
-                event_digest: tracedecay_domain::canonical_sha256(event_json).map_err(|error| {
-                    config_error(format!("digest Cursor event failed: {error}"))
-                })?,
+                event_digest: tracedecay_domain::canonical_sha256(&event_json).map_err(
+                    |error| config_error(format!("digest Cursor event failed: {error}")),
+                )?,
             },
         ))
         .await

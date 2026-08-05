@@ -1,7 +1,6 @@
 pub mod compression;
 pub mod compression_decision;
 pub mod dag;
-pub mod doctor;
 pub mod extraction;
 pub mod gc;
 pub mod hermes;

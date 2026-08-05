@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 
@@ -19,8 +18,8 @@ use crate::sessions::lcm::{
     LcmExpandQueryRequest, LcmExpandTarget, LcmGrepSort, LcmScope,
 };
 use crate::sessions::{
-    ProviderScope, SessionMessageRecord, SessionMessageSearchResult, SessionMessageType,
-    SessionSearchScope, SessionSearchTimeRange,
+    ProviderScope, SessionMessageSearchResult, SessionMessageType, SessionSearchScope,
+    SessionSearchTimeRange,
 };
 use crate::timeutil::SearchTimeBound;
 use crate::tracedecay::{TraceDecay, current_timestamp};

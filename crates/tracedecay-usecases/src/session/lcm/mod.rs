@@ -15,9 +15,9 @@ pub use tracedecay_sessions::lcm::compression_policy;
 pub use authority::{
     LcmAuthorityFuture, LcmAuthorityInvocation, LcmAuthorityOperation, LcmAuthorityOutcome,
     LcmAuthorityPayload, LcmAuthorityPort, LcmAuthorityReceipt, LcmAuthorityRequest,
-    LcmAuthorityResponse, LcmAuthorityUnavailableReason, LcmCompactionCommand,
-    LcmCompressionEvidence, LcmHostProtocol, LcmStatusQuery, LcmTranscriptIngestCommand,
-    lcm_authority_operation_identity,
+    LcmAuthorityResponse, LcmAuthorityTarget, LcmAuthorityUnavailableReason, LcmCompactionCommand,
+    LcmCompressionEvidence, LcmDoctorQuery, LcmHostProtocol, LcmStatusQuery,
+    LcmTranscriptIngestCommand, lcm_authority_operation_identity,
 };
 pub use contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,

@@ -246,13 +246,13 @@ subsystem).
 - **Tier:** T2. **Go.** Closes retrieval Risk B.
 
 #### M5 — The missing memory doctor (visibility §5.3)
-- **What:** A `gather_diagnostics → plan_and_apply_repairs` module modeled on
-  `src/sessions/lcm/doctor.rs`, with `mode ∈ {diagnose, repair, clean}` +
-  `apply: bool` + pre-apply DB backup (reuse LCM's `backup_database`/
-  `checkpoint_wal_for_backup`). Diagnostics are cheap read-only SQL (the full
+- **What:** A read-only `gather_diagnostics` module modeled on the daemon-owned
+  LCM health authority. Recovery is referenced through independently admitted
+  owning operations, not a Doctor `mode`/`apply` switch. Diagnostics are cheap
+  read-only SQL (the full
   list is visibility §5.3: schema version, counts, vector health, orphan-entity
   count, FTS sync, staleness, bank freshness, compaction state). This is the
-  home for the four new repair primitives below.
+  home for findings that may name the four recovery primitives below.
 - **Depends on:** Q3 (status surfacing) for the read side; M6/M7/M8 are its
   actions.
 - **Acceptance / observability:** `diagnose` returns the diagnostics bundle
