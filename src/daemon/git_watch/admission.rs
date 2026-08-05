@@ -2,11 +2,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use tracedecay_runtime_core::git_discovery::GitRepositoryIdentity;
+
 use super::ownership::{join_retired_repository_state, retire_missing_repository_owners};
 use super::state::{WatchState, WorktreeRegistration};
 use super::{
-    GitWatcher, GitWatcherAdmission, MAX_WORKTREES_PER_REPOSITORY, WatchIdentity,
-    WatchIdentityResolution, log_daemon_event, resolve_watch_identity, supervise_repository,
+    GitWatcher, GitWatcherAdmission, MAX_WORKTREES_PER_REPOSITORY, WatchIdentityResolution,
+    log_daemon_event, resolve_watch_identity, supervise_repository,
 };
 use crate::config::SyncConfig;
 
@@ -40,12 +42,15 @@ impl GitWatcher {
         {
             WatchIdentityResolution::Ready(identity) => identity,
             WatchIdentityResolution::Cancelled => return GitWatcherAdmission::ShuttingDown,
-            WatchIdentityResolution::Unavailable => {
+            WatchIdentityResolution::NotRepository => {
+                return GitWatcherAdmission::NotRepository;
+            }
+            WatchIdentityResolution::Unknown => {
                 return GitWatcherAdmission::IdentityUnavailable;
             }
         };
-        let WatchIdentity {
-            canonical_root,
+        let GitRepositoryIdentity {
+            worktree_root: canonical_root,
             common_dir,
             git_dir,
         } = identity;
@@ -64,9 +69,10 @@ impl GitWatcher {
             #[cfg(test)]
             self.inner.repository_publication_probe.block_if_armed();
             if let Some(state) = projects.get(&common_dir).cloned() {
-                match state.register_worktree(
+                match state.register_worktree_with_config(
                     canonical_root.clone(),
                     git_dir.clone(),
+                    config.clone(),
                     MAX_WORKTREES_PER_REPOSITORY,
                 ) {
                     WorktreeRegistration::Ready => {

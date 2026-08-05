@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
+use tracedecay_runtime_core::git_discovery::GitRepositoryIdentity;
 
 use super::{
     CodeIndexArrivalV1, CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1,
@@ -1028,21 +1029,22 @@ impl CodeIndexSchedulerRegistryV1 {
     /// frontier through its canonical gix reconciliation.
     pub(in crate::daemon) fn request_for_root(
         &self,
-        project_root: &Path,
-        identity: super::identity::IndexingIdentityV1,
+        identity: &GitRepositoryIdentity,
     ) -> GitStateChangeRequestV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
-            return GitStateChangeRequestV1::Unmounted;
-        };
         let Ok(mounted) = self.mounted.try_lock() else {
             return GitStateChangeRequestV1::Busy;
         };
-        let Some(worktree) = mounted.get(&project_root) else {
+        let Some(worktree) = mounted.get(&identity.worktree_root) else {
             return GitStateChangeRequestV1::Unmounted;
         };
-        if worktree.repository_id != *identity.repository_id()
-            || worktree.worktree_id != *identity.worktree_id()
-        {
+        let Ok(repository_id) = super::identity::repository_id_for_common_dir(&identity.common_dir)
+        else {
+            return GitStateChangeRequestV1::IdentityMismatch;
+        };
+        let Ok(worktree_id) = super::identity::worktree_id_for(&identity.worktree_root) else {
+            return GitStateChangeRequestV1::IdentityMismatch;
+        };
+        if worktree.repository_id != repository_id || worktree.worktree_id != worktree_id {
             return GitStateChangeRequestV1::IdentityMismatch;
         }
         worktree

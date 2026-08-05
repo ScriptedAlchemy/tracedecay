@@ -33,6 +33,45 @@ async fn pinned_project_config_is_the_only_activation_authority() {
     assert!(watcher.shutdown().await.is_clean());
 }
 
+#[tokio::test]
+async fn linked_worktree_registration_reconciles_its_pinned_timing() {
+    let (_container, primary, linked) = linked_worktree_fixture();
+    let mut primary_config = fast_watch_config();
+    primary_config.watch_debounce_ms = 90;
+    primary_config.watch_max_delay_ms = 900;
+    primary_config.backstop_interval_mins = 9;
+    let watcher = GitWatcher::new(primary_config.clone());
+
+    assert_eq!(
+        watcher
+            .ensure_watching_with_config(&primary, &primary_config)
+            .await,
+        GitWatcherAdmission::Ready
+    );
+    let mut linked_config = primary_config;
+    linked_config.watch_debounce_ms = 15;
+    linked_config.watch_max_delay_ms = 150;
+    linked_config.backstop_interval_mins = 3;
+    assert_eq!(
+        watcher
+            .ensure_watching_with_config(&linked, &linked_config)
+            .await,
+        GitWatcherAdmission::Ready
+    );
+
+    let state = ready_registered_state(&watcher, &primary).await;
+    let timing = state.effective_timing();
+    assert_eq!(timing.debounce, Duration::from_millis(15));
+    assert_eq!(timing.max_delay, Duration::from_millis(150));
+    assert_eq!(timing.backstop_interval, Some(Duration::from_secs(180)));
+    assert_eq!(
+        state.config_for_root(&linked.canonicalize().expect("linked canonical root")),
+        Some(linked_config),
+        "the shared repository owner must retain the exact linked-worktree pin"
+    );
+    assert!(watcher.shutdown().await.is_clean());
+}
+
 #[test]
 fn metadata_paths_route_to_exact_worktree_or_shared_reconciliation() {
     let (_container, primary, linked) = linked_worktree_fixture();
@@ -423,6 +462,69 @@ async fn concurrent_shutdown_waits_for_retained_join_completion() {
     assert!(!state.has_retained_task());
 }
 
+#[tokio::test(start_paused = true)]
+async fn shutdown_bounds_a_stuck_repository_join() {
+    let repo = temp_repo();
+    let watcher = GitWatcher::new(fast_watch_config());
+    let state = Arc::new(WatchState::new(
+        crate::worktree::git_common_dir(repo.path()).expect("git common directory"),
+        repo.path().canonicalize().expect("canonical project root"),
+        worktree_git_dir(repo.path()).expect("worktree git directory"),
+        MaintenanceCoordinator::default(),
+    ));
+    state.retain_task(tokio::spawn(std::future::pending::<()>()));
+    watcher
+        .inner
+        .projects
+        .lock()
+        .await
+        .insert(state.common_dir.clone(), Arc::clone(&state));
+
+    let outcome = tokio::time::timeout(
+        GIT_OBSERVATION_BUDGET + Duration::from_millis(1),
+        watcher.shutdown(),
+    )
+    .await
+    .expect("shutdown must not wait beyond the watcher observation budget");
+
+    assert_eq!(
+        outcome.failures(),
+        &[GitWatcherTaskFailure {
+            owner: GitWatcherTaskOwner::Repository(state.common_dir.clone()),
+            kind: GitWatcherTaskFailureKind::TimedOut,
+        }]
+    );
+    assert!(!state.has_retained_task());
+}
+
+#[tokio::test]
+async fn an_unmounted_scheduler_does_not_retry_the_exact_watcher_frontier() {
+    let repo = temp_repo();
+    let watcher = GitWatcher::new(fast_watch_config());
+    assert_eq!(
+        watcher.ensure_watching(repo.path()).await,
+        GitWatcherAdmission::Ready
+    );
+    let state = ready_registered_state(&watcher, repo.path()).await;
+
+    request_freshness_for_repository(&watcher.inner, &state, None).await;
+
+    assert!(
+        watcher
+            .inner
+            .projects
+            .lock()
+            .await
+            .contains_key(&state.common_dir),
+        "an existing checkout remains observable for a later scheduler mount"
+    );
+    assert!(
+        state.retry_not_before().is_none(),
+        "an unmounted scheduler is terminal for this frontier, not an infinite retry"
+    );
+    assert!(watcher.shutdown().await.is_clean());
+}
+
 #[tokio::test]
 async fn missing_owner_is_joined_and_capacity_can_remount() {
     let container = tempfile::tempdir().expect("repository container");
@@ -554,6 +656,60 @@ async fn retired_linked_owner_is_replaced_before_recreated_root_admission() {
 }
 
 #[tokio::test]
+async fn concurrent_registration_prevents_empty_owner_retirement() {
+    let container = tempfile::tempdir().expect("repository container");
+    let missing_root = container.path().join("missing");
+    let replacement = container.path().join("replacement");
+    seed_repo(&replacement);
+    let watcher = GitWatcher::new(fast_watch_config());
+    let common_dir =
+        crate::worktree::git_common_dir(&replacement).expect("replacement common directory");
+    let state = Arc::new(WatchState::new(
+        common_dir.clone(),
+        missing_root,
+        common_dir.join("missing-git-dir"),
+        MaintenanceCoordinator::default(),
+    ));
+    state.retain_task(tokio::spawn(async {}));
+    watcher
+        .inner
+        .projects
+        .lock()
+        .await
+        .insert(common_dir.clone(), Arc::clone(&state));
+    state.retirement_probe.arm();
+
+    let inner = Arc::clone(&watcher.inner);
+    let retirement = tokio::spawn(async move {
+        retire_missing_repository_owners(&inner).await;
+    });
+    state.retirement_probe.after_empty.notified().await;
+    assert!(matches!(
+        state.register_worktree(
+            replacement
+                .canonicalize()
+                .expect("replacement canonical root"),
+            worktree_git_dir(&replacement).expect("replacement git directory"),
+            8,
+        ),
+        WorktreeRegistration::Ready
+    ));
+    state.retirement_probe.release.notify_one();
+    retirement.await.expect("retirement task");
+
+    assert!(
+        watcher
+            .inner
+            .projects
+            .lock()
+            .await
+            .contains_key(&common_dir),
+        "registration that wins before final retirement must keep the owner live"
+    );
+    assert!(watcher.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn explicit_metadata_watch_plan_fails_closed_at_its_directory_cap() {
     let repo = temp_repo();
     let common_dir = crate::worktree::git_common_dir(repo.path()).expect("git common directory");
@@ -573,6 +729,41 @@ async fn explicit_metadata_watch_plan_fails_closed_at_its_directory_cap() {
         observe_watch_plan(state, cancellation).await,
         Err(WatchPlanFailure::Capacity),
         "nested ref namespaces must degrade instead of recursively amplifying OS watches"
+    );
+}
+
+#[tokio::test]
+async fn a_new_nested_ref_directory_requests_a_watch_plan_rebuild() {
+    let repo = temp_repo();
+    let common_dir = crate::worktree::git_common_dir(repo.path()).expect("git common directory");
+    let state = Arc::new(WatchState::new(
+        common_dir.clone(),
+        repo.path().canonicalize().expect("canonical project root"),
+        worktree_git_dir(repo.path()).expect("worktree git directory"),
+        MaintenanceCoordinator::default(),
+    ));
+    let nested = common_dir.join("refs/heads/team/new");
+    std::fs::create_dir_all(&nested).expect("create nested ref namespace");
+
+    classify_and_mark(
+        &state,
+        &notify::Event {
+            kind: EventKind::Create(notify::event::CreateKind::Folder),
+            paths: vec![nested.clone()],
+            attrs: notify::event::EventAttributes::default(),
+        },
+    );
+
+    tokio::time::timeout(Duration::from_millis(50), state.reconfigure.notified())
+        .await
+        .expect("a nested metadata directory must rebuild the explicit watch plan");
+    let cancellation = state.cancellation(&crate::application::context::CancellationToken::new());
+    let plan = observe_watch_plan(state, cancellation)
+        .await
+        .expect("rebuilt watch plan");
+    assert!(
+        plan.contains(&nested),
+        "the rebuilt plan must include the newly created nested ref directory"
     );
 }
 
