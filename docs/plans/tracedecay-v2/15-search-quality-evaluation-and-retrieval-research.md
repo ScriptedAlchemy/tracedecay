@@ -258,10 +258,10 @@ pub struct FusionProfile {
     pub retrieval_budget: RetrievalBudget,
 }
 
-pub struct Pr9FallbackSubpayload {
+pub struct LexicalGraphFallbackSubpayload {
     pub profile_id: FusionProfileId,
     pub ordered_candidates: Vec<RankedCandidate>,
-    pub public_pr9_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    pub public_exact_lexical_graph_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     pub freshness: Vec<SourceFreshness>,
     pub cursor: Option<RetrievalCursor>,
     pub digest: FallbackSubpayloadDigest,
@@ -284,7 +284,7 @@ pub struct SemanticRerankOutcome {
 pub struct RetrievalResult {
     pub snapshot: RetrievalSnapshot,
     pub profile_id: FusionProfileId,
-    pub pr9_fallback: Pr9FallbackSubpayload,
+    pub lexical_graph_fallback: LexicalGraphFallbackSubpayload,
     pub ordered_candidates: Vec<RankedCandidate>,
     pub internal_lane_outcomes: BTreeMap<RetrieverKind, RetrieverOutcome<()>>,
     pub public_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
@@ -304,14 +304,14 @@ statuses, and checkpoint IDs for admitted authorized lanes only. Sealed denial o
 never affect cursor or cache-key bytes. Resume uses the bound candidate set or rejects
 the cursor; it never recomputes a differently completed set.
 
-`Pr9FallbackSubpayload` is canonical-encoded and hashed independently with the
-schema/domain separator `tracedecay.pr9-fallback.v1`; the digest field itself
+`LexicalGraphFallbackSubpayload` is canonical-encoded and hashed independently with the
+schema/domain separator `tracedecay.lexical-graph-fallback.v1`; the digest field itself
 is excluded from those hashed bytes. Its
-ranked candidates contain the PR9 contributions/decisions/explanations; its
+ranked candidates contain the exact/lexical/graph contributions, decisions, and explanations; its
 maps contain only `ExactLiteral`, `Lexical`, and `Graph`. Semantic/rerank
 execution may change the enclosing final candidates and
 `semantic_rerank_outcome`, but cannot change the subpayload, its digest, or
-cursor identity. "Byte-identical fallback" means this typed PR9 subpayload is
+cursor identity. "Byte-identical fallback" means this typed capability subpayload is
 identical; it does not forbid the enclosing response from truthfully reporting
 semantic unavailability.
 
