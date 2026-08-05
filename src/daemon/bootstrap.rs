@@ -261,9 +261,19 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
             message: format!("mount native profile relation graph: {error}"),
         })?;
     profile_session_database
-        .bind_session_relation_graph(profile_relation_scope, profile_relation_graph)
+        .bind_session_relation_graph(profile_relation_scope.clone(), profile_relation_graph)
         .map_err(|error| TraceDecayError::Config {
             message: format!("bind profile session relation graph: {error}"),
+        })?;
+    engine
+        .invocation
+        .embedded_graph_runtime
+        .ensure_relation_effect_scheduler(
+            &profile_relation_scope,
+            Arc::clone(&profile_session_database),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("start profile session relation effect scheduler: {error}"),
         })?;
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),

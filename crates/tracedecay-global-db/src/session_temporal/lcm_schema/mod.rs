@@ -395,6 +395,7 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("table", "session_refresh_operations"),
     ("table", "session_refresh_progress"),
     ("table", "session_refresh_receipts"),
+    ("table", "session_relation_effect_journal"),
     ("table", "session_relation_receipts"),
     ("table", "session_summary_availability"),
     ("table", "session_summary_nodes"),

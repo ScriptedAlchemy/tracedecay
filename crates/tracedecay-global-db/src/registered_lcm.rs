@@ -225,17 +225,7 @@ impl RegisteredGlobalDb {
         check_execution(control)?;
         before_commit()?;
         transaction.commit().await?;
-        check_execution(control)?;
-        self.apply_active_session_relation_projection(
-            &session_id,
-            execution_control_graph_cancellation(control),
-        )
-        .await
-        .map_err(|error| {
-            LcmError::Db(format!(
-                "apply native LCM summary relation projection: {error}"
-            ))
-        })?;
+        self.notify_session_relation_effect_appended();
         check_execution(control)?;
         Ok(receipt)
     }
@@ -335,16 +325,7 @@ impl RegisteredGlobalDb {
         transaction.commit().await?;
         payload_rollback.disarm();
         if !response.summary_nodes.is_empty() {
-            check_execution(control)?;
-            self.apply_active_session_relation_projection(
-                &session_id,
-                execution_control_graph_cancellation(control),
-            )
-            .await
-            .map_err(|error| {
-                LcmError::Db(format!("apply native LCM relation projection: {error}"))
-            })?;
-            check_execution(control)?;
+            self.notify_session_relation_effect_appended();
         }
         Ok(response)
     }

@@ -1296,6 +1296,48 @@ fn valid_foreign_grafeo_store_requires_reset() {
 }
 
 #[test]
+fn tracedecay_store_with_foreign_catalog_object_requires_reset() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("graph.grafeo");
+    GraphDb::open(persistent_options(path.clone()))
+        .unwrap()
+        .close()
+        .unwrap();
+    let raw = grafeo_engine::GrafeoDB::with_config(
+        grafeo_engine::Config::persistent(&path)
+            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
+    )
+    .unwrap();
+    raw.session()
+        .execute("CREATE SCHEMA foreign_schema")
+        .unwrap();
+    raw.close().unwrap();
+
+    let error = GraphDb::open(persistent_options(path)).unwrap_err();
+    assert!(matches!(error, GraphDbError::ResetRequired { .. }));
+}
+
+#[test]
+fn tracedecay_store_with_foreign_row_shape_requires_reset() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("graph.grafeo");
+    GraphDb::open(persistent_options(path.clone()))
+        .unwrap()
+        .close()
+        .unwrap();
+    let raw = grafeo_engine::GrafeoDB::with_config(
+        grafeo_engine::Config::persistent(&path)
+            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
+    )
+    .unwrap();
+    raw.session().create_node(&["foreign"]);
+    raw.close().unwrap();
+
+    let error = GraphDb::open(persistent_options(path)).unwrap_err();
+    assert!(matches!(error, GraphDbError::ResetRequired { .. }));
+}
+
+#[test]
 fn wrong_tracedecay_format_requires_reset() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("graph.grafeo");

@@ -827,6 +827,17 @@ impl HostAdmissionTestRuntimeV1 {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn session_database_arc_for_test(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> Result<Arc<RegisteredGlobalDb>> {
+        match scope {
+            HostAdmissionScope::Project => self.project_configuration_database_for_test(),
+            HostAdmissionScope::Profile => Ok(Arc::clone(&self.profile_registered)),
+        }
+    }
+
     pub fn facade(&self) -> HostAdmissionFacade<'_> {
         match (self.project_id.as_ref(), self.project_registered.as_ref()) {
             (Some(project_id), Some(project_registered)) => HostAdmissionFacade::new(

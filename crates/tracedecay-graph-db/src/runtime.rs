@@ -12,7 +12,7 @@ use crate::error::rollback_failure;
 use crate::location::ValidatedOpen;
 use crate::schema::{
     FINAL_SCHEMA, FORMAT_LABEL, FORMAT_VERSION_PROPERTY, INDEXED_PROPERTIES, SCHEMA_PROPERTY,
-    SEQUENCE_PROPERTY,
+    SEQUENCE_PROPERTY, is_native_label, is_native_property, is_native_relation_type,
 };
 use crate::state::{
     FormatState, latest_projection, projection_entities, projection_relations, publication,
@@ -593,6 +593,7 @@ fn validate_or_initialize_format(
         for property in INDEXED_PROPERTIES {
             database.create_property_index(property);
         }
+        validate_final_catalog(database)?;
         if validated.durability == GraphDurability::Sync
             && let Err(error) = database.wal_checkpoint()
         {
@@ -626,6 +627,71 @@ fn validate_or_initialize_format(
     if marker.get_property(SCHEMA_PROPERTY).and_then(Value::as_str) != Some(FINAL_SCHEMA) {
         return Err(GraphDbError::ResetRequired {
             message: "TraceDecay graph schema is not the final native scalar schema".to_owned(),
+        });
+    }
+    validate_final_catalog(database)?;
+    Ok(())
+}
+
+fn validate_final_catalog(database: &GrafeoDB) -> Result<(), GraphDbError> {
+    for statement in [
+        "SHOW SCHEMAS",
+        "SHOW GRAPH TYPES",
+        "SHOW NODE TYPES",
+        "SHOW EDGE TYPES",
+        "SHOW INDEXES",
+        "SHOW CONSTRAINTS",
+    ] {
+        let result = database
+            .session()
+            .execute(statement)
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        if result.row_count() != 0 {
+            return Err(GraphDbError::ResetRequired {
+                message: format!(
+                    "TraceDecay graph catalog contains foreign objects reported by {statement}"
+                ),
+            });
+        }
+    }
+
+    let grafeo_engine::SchemaInfo::Lpg(schema) = database.schema() else {
+        return Err(GraphDbError::ResetRequired {
+            message: "TraceDecay graph catalog is not an LPG catalog".to_owned(),
+        });
+    };
+    if schema
+        .labels
+        .iter()
+        .any(|label| !is_native_label(&label.name))
+        || schema
+            .edge_types
+            .iter()
+            .any(|edge| !is_native_relation_type(&edge.name))
+        || schema
+            .property_keys
+            .iter()
+            .any(|property| !is_native_property(property))
+    {
+        return Err(GraphDbError::ResetRequired {
+            message:
+                "TraceDecay graph catalog contains foreign labels, relation types, or properties"
+                    .to_owned(),
+        });
+    }
+    let actual_indexes = database
+        .graph_store()
+        .property_index_keys()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let expected_indexes = INDEXED_PROPERTIES
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if actual_indexes != expected_indexes {
+        return Err(GraphDbError::ResetRequired {
+            message: "TraceDecay graph catalog property indexes are not the exact final set"
+                .to_owned(),
         });
     }
     Ok(())

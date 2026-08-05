@@ -6,7 +6,7 @@ use tracedecay_domain::{
     DurableObservationV1, MessageId, MessageOccurrenceIdV1, RetrievalAnchorId,
     RetrievalAnchorRecord, SessionId, SessionProjectionGenerationV1, TemporalValidityV1, UtcMicros,
 };
-use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_store::SessionStoreResult;
 
@@ -59,51 +59,14 @@ impl RegisteredGlobalDb {
         ) {
             Ok(relations) => relations,
             Err(SessionRelationError::NotFound) => {
-                self.apply_active_session_relation_projection(
-                    session_id,
-                    Arc::clone(&cancellation),
-                )
-                .await?;
-                store
-                    .summary_relations(
-                        scope,
-                        session_id,
-                        generation.value(),
-                        summary_ids,
-                        max_relations,
-                        cancellation,
-                    )
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+                return Err(storage(
+                    RECONSTRUCT_OPERATION,
+                    SessionRelationError::Unavailable,
+                ));
             }
             Err(error) => return Err(storage(RECONSTRUCT_OPERATION, error)),
         };
         Ok((generation, relations))
-    }
-
-    pub async fn apply_active_session_relation_projection(
-        &self,
-        session_id: &SessionId,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> SessionStoreResult<GraphWatermark> {
-        let generation = self.active_relation_generation(session_id).await?;
-        let (scope, _) = self
-            .session_relation_store()
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let projection = reconstruct_session_relation_projection(
-            &snapshot,
-            scope,
-            session_id,
-            generation,
-            DEFAULT_MAX_ENTITIES,
-            DEFAULT_MAX_RELATIONS,
-            Arc::clone(&cancellation),
-        )
-        .await?;
-        super::relation_receipts::apply_relation_projection(self, &projection, cancellation).await
     }
 
     pub async fn recover_pending_session_relation_projections(
@@ -127,10 +90,14 @@ impl RegisteredGlobalDb {
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let mut rows = snapshot
             .query(
-                "SELECT session_id, generation, scope_kind, scope_id
-                 FROM session_relation_receipts
-                 WHERE state = 'pending'
-                 ORDER BY created_at, session_id, generation
+                "SELECT receipt.session_id, receipt.generation, receipt.scope_kind,
+                        receipt.scope_id, journal.projection_json
+                 FROM session_relation_receipts AS receipt
+                 JOIN session_relation_effect_journal AS journal
+                   ON journal.session_id = receipt.session_id
+                  AND journal.generation = receipt.generation
+                 WHERE receipt.state = 'pending'
+                 ORDER BY receipt.created_at, receipt.session_id, receipt.generation
                  LIMIT ?1",
                 params![
                     i64::try_from(limit).map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
@@ -174,28 +141,31 @@ impl RegisteredGlobalDb {
                     "pending relation receipt does not belong to the mounted session scope",
                 ));
             }
-            pending.push((session_id, generation));
+            let projection_json: String = row
+                .get(4)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let projection: SessionRelationProjection = serde_json::from_str(&projection_json)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            if projection.session_id != session_id || projection.generation != generation.value() {
+                return Err(storage_message(
+                    RECONSTRUCT_OPERATION,
+                    "relation effect journal identity does not match its receipt",
+                ));
+            }
+            if projection.scope != *scope {
+                return Err(storage_message(
+                    RECONSTRUCT_OPERATION,
+                    "relation effect journal does not belong to the mounted session scope",
+                ));
+            }
+            pending.push(projection);
         }
         drop(rows);
         drop(snapshot);
-        for (session_id, generation) in &pending {
-            let snapshot = self
-                .read_snapshot()
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let projection = reconstruct_session_relation_projection(
-                &snapshot,
-                scope,
-                session_id,
-                *generation,
-                DEFAULT_MAX_ENTITIES,
-                DEFAULT_MAX_RELATIONS,
-                Arc::clone(&cancellation),
-            )
-            .await?;
+        for projection in &pending {
             super::relation_receipts::apply_relation_projection(
                 self,
-                &projection,
+                projection,
                 Arc::clone(&cancellation),
             )
             .await?;
@@ -236,18 +206,10 @@ pub async fn seed_session_relation_projection(
         Arc::clone(&cancellation),
     ) {
         Ok(projection) => Ok(projection),
-        Err(SessionRelationError::NotFound) => {
-            reconstruct_session_relation_projection(
-                conn,
-                scope,
-                session_id,
-                generation,
-                DEFAULT_MAX_ENTITIES,
-                DEFAULT_MAX_RELATIONS,
-                cancellation,
-            )
-            .await
-        }
+        Err(SessionRelationError::NotFound) => Err(storage(
+            RECONSTRUCT_OPERATION,
+            SessionRelationError::Unavailable,
+        )),
         Err(error) => Err(storage(RECONSTRUCT_OPERATION, error)),
     }
 }

@@ -18,7 +18,7 @@ use super::query::{
     now_micros, read_generation, require_active_generation, storage, storage_message,
 };
 use super::relation_projection::reconstruct_session_relation_projection;
-use super::relation_receipts::{apply_relation_projection, record_relation_receipt};
+use super::relation_receipts::record_relation_receipt;
 use super::relations::{SessionRelationError, SessionRelationProjection};
 use super::store::execution_control_graph_cancellation;
 
@@ -230,7 +230,7 @@ pub(super) async fn rebuild_candidate_session_relations(
     operation: &'static str,
 ) -> SessionStoreResult<SessionRelationProjection> {
     checkpoint_relation_rebuild_control(control)?;
-    let (scope, relation_store) = database
+    let (scope, _) = database
         .session_relation_store()
         .map_err(|error| storage(operation, error))?;
     let snapshot = database
@@ -263,33 +263,9 @@ pub(super) async fn rebuild_candidate_session_relations(
         .commit()
         .await
         .map_err(|error| storage(operation, error))?;
+    database.notify_session_relation_effect_appended();
     checkpoint_relation_rebuild_control(control)?;
-
-    let apply_cancellation = execution_control_graph_cancellation(control);
-    checkpoint_relation_rebuild_control(control)?;
-    let applied = apply_relation_projection(database, &reconstructed, apply_cancellation).await;
-    checkpoint_relation_rebuild_control(control)?;
-    applied?;
-
-    let load_cancellation = execution_control_graph_cancellation(control);
-    checkpoint_relation_rebuild_control(control)?;
-    let loaded = relation_store.load_projection(
-        scope,
-        session_id,
-        generation.value(),
-        MAX_REBUILD_RELATION_PROJECTION_ITEMS,
-        MAX_REBUILD_RELATION_PROJECTION_ITEMS,
-        load_cancellation,
-    );
-    checkpoint_relation_rebuild_control(control)?;
-    let loaded = loaded.map_err(|error| map_relation_rebuild_error(operation, error))?;
-    if loaded != reconstructed {
-        return Err(storage_message(
-            operation,
-            "native session relation graph did not preserve the canonical reconstruction",
-        ));
-    }
-    Ok(loaded)
+    Ok(reconstructed)
 }
 
 pub(super) fn checkpoint_relation_rebuild_control(

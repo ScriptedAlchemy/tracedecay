@@ -781,6 +781,30 @@ pub(super) const TABLES: &[Table] = &[
         ]
     ),
     table!(
+        "session_relation_effect_journal",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("projection_json", "TEXT", true, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_relation_receipts",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_relation_receipts",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
         "session_summary_sources",
         [
             column("summary_id", "TEXT", true, None, 1),

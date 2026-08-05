@@ -759,15 +759,26 @@ pub(super) async fn production_project_server(
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("mount native project relation graph: {error}"),
                 })?;
+            let project_relation_scope =
+                tracedecay_global_db::session_temporal::relations::SessionRelationScope::project(
+                    code_search_project_id.clone(),
+                );
             registered_project_session_db
                 .bind_session_relation_graph(
-                    tracedecay_global_db::session_temporal::relations::SessionRelationScope::project(
-                        code_search_project_id.clone(),
-                    ),
+                    project_relation_scope.clone(),
                     session_relation_graph,
                 )
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("bind project session relation graph: {error}"),
+                })?;
+            invocation
+                .embedded_graph_runtime
+                .ensure_relation_effect_scheduler(
+                    &project_relation_scope,
+                    Arc::clone(&registered_project_session_db),
+                )
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("start project session relation effect scheduler: {error}"),
                 })?;
             log_daemon_event(
                 "project_open_phase",
@@ -800,9 +811,21 @@ pub(super) async fn production_project_server(
                     message: format!("mount native profile relation graph: {error}"),
                 })?;
             registered_user_session_db
-                .bind_session_relation_graph(profile_relation_scope, profile_relation_graph)
+                .bind_session_relation_graph(
+                    profile_relation_scope.clone(),
+                    profile_relation_graph,
+                )
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("bind profile session relation graph: {error}"),
+                })?;
+            invocation
+                .embedded_graph_runtime
+                .ensure_relation_effect_scheduler(
+                    &profile_relation_scope,
+                    Arc::clone(&registered_user_session_db),
+                )
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("start profile session relation effect scheduler: {error}"),
                 })?;
             log_daemon_event(
                 "project_open_phase",

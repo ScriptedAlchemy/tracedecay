@@ -60,6 +60,57 @@ pub(crate) const INDEXED_PROPERTIES: [&str; 5] = [
     PUBLICATION_KEY_PROPERTY,
 ];
 
+pub(crate) fn is_native_label(value: &str) -> bool {
+    matches!(
+        value,
+        FORMAT_LABEL | ENTITY_LABEL | RELATION_LABEL | PROJECTION_LABEL | PUBLICATION_LABEL
+    ) || [
+        DOMAIN_LABEL_PREFIX,
+        OWNER_LABEL_PREFIX,
+        OWNER_DOMAIN_LABEL_PREFIX,
+        ENTITY_KEY_LABEL_PREFIX,
+        RELATION_KEY_LABEL_PREFIX,
+        RELATION_EDGE_LABEL_PREFIX,
+        RELATION_OWNER_LABEL_PREFIX,
+        PROJECTION_STATE_LABEL_PREFIX,
+        PUBLICATION_KEY_LABEL_PREFIX,
+    ]
+    .iter()
+    .any(|prefix| value.starts_with(prefix))
+}
+
+pub(crate) fn is_native_relation_type(value: &str) -> bool {
+    value.starts_with(RELATION_TYPE_PREFIX)
+}
+
+pub(crate) fn is_native_property(value: &str) -> bool {
+    matches!(
+        value,
+        FORMAT_VERSION_PROPERTY
+            | SCHEMA_PROPERTY
+            | SEQUENCE_PROPERTY
+            | NAMESPACE_PROPERTY
+            | PROJECTION_PROPERTY
+            | ENTITY_ID_PROPERTY
+            | RELATION_ID_PROPERTY
+            | RELATION_FROM_PROPERTY
+            | RELATION_TO_PROPERTY
+            | RELATION_KIND_PROPERTY
+            | RELATION_EDGE_PROPERTY
+            | ENTITY_KEY_PROPERTY
+            | RELATION_KEY_PROPERTY
+            | PROJECTION_KEY_PROPERTY
+            | PUBLICATION_KEY_PROPERTY
+            | SOURCE_GENERATION_PROPERTY
+            | WATERMARK_PROPERTY
+            | DIGEST_PROPERTY
+            | PUBLICATION_DIGEST_PROPERTY
+            | IDEMPOTENCY_KEY_PROPERTY
+            | COMMIT_SEQUENCE_PROPERTY
+    ) || value.starts_with(PROPERTY_PREFIX)
+        || value.starts_with(VECTOR_PREFIX)
+}
+
 pub(crate) fn stable_key(namespace: &GraphNamespace, identity: &str) -> String {
     format!(
         "{}:{}",

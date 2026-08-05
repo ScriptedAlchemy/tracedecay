@@ -53,7 +53,49 @@ pub(crate) async fn record_relation_receipt(
             "immutable relation receipt rejected different graph identity",
         ));
     }
+    record_pending_effect_journal(conn, projection, now).await?;
     Ok(watermark)
+}
+
+async fn record_pending_effect_journal(
+    conn: &impl Executor,
+    projection: &SessionRelationProjection,
+    now: i64,
+) -> SessionStoreResult<()> {
+    let projection_json =
+        serde_json::to_string(projection).map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    let changed = conn
+        .execute(
+            "INSERT INTO session_relation_effect_journal (
+                 session_id, generation, projection_json, created_at
+             )
+             SELECT ?1, ?2, ?3, ?4
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM session_relation_receipts
+                 WHERE session_id = ?1 AND generation = ?2 AND state = 'pending'
+             )
+             ON CONFLICT(session_id, generation) DO UPDATE SET
+                 projection_json = excluded.projection_json
+             WHERE session_relation_effect_journal.projection_json =
+                   excluded.projection_json",
+            params![
+                projection.session_id.as_str(),
+                i64::try_from(projection.generation)
+                    .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+                projection_json,
+                now,
+            ],
+        )
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    if changed != 1 {
+        return Err(storage_message(
+            RECEIPT_OPERATION,
+            "immutable relation effect journal rejected different projection",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn apply_relation_projection(
@@ -125,6 +167,24 @@ pub(crate) async fn apply_relation_projection(
         return Err(storage_message(
             RECEIPT_OPERATION,
             "relation receipt changed during native graph acknowledgement",
+        ));
+    }
+    let removed = transaction
+        .execute(
+            "DELETE FROM session_relation_effect_journal
+             WHERE session_id = ?1 AND generation = ?2",
+            params![
+                projection.session_id.as_str(),
+                i64::try_from(projection.generation)
+                    .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+            ],
+        )
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    if removed != 1 {
+        return Err(storage_message(
+            RECEIPT_OPERATION,
+            "relation effect journal changed during native graph acknowledgement",
         ));
     }
     transaction

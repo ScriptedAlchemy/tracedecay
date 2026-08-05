@@ -2,7 +2,11 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use tracedecay_global_db::session_temporal::relations::{
@@ -10,6 +14,11 @@ use tracedecay_global_db::session_temporal::relations::{
     persistent_session_relation_graph_path,
 };
 use tracedecay_graph_db::{GraphDb, GraphDbError};
+
+const RELATION_EFFECT_PAGE_SIZE: usize = 64;
+const RELATION_EFFECT_MAX_PAGES_PER_WAKE: usize = 8;
+const RELATION_EFFECT_MAX_RUN_TIME: Duration = Duration::from_millis(500);
+const RELATION_EFFECT_IDLE_RETRY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub(crate) enum EmbeddedGraphRuntimeError {
@@ -50,9 +59,18 @@ struct MountedProjectGraph {
     database: Arc<GraphDb>,
 }
 
+struct SessionRelationEffectScheduler {
+    wake: Arc<tokio::sync::Notify>,
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+    join: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct EmbeddedGraphRuntimeRegistry {
     mounted: Arc<Mutex<BTreeMap<SessionRelationScope, MountedProjectGraph>>>,
+    effect_schedulers:
+        Arc<Mutex<BTreeMap<SessionRelationScope, Arc<SessionRelationEffectScheduler>>>>,
 }
 
 impl std::fmt::Debug for EmbeddedGraphRuntimeRegistry {
@@ -116,6 +134,160 @@ impl EmbeddedGraphRuntimeRegistry {
         );
         Ok(database)
     }
+
+    pub(crate) fn ensure_relation_effect_scheduler(
+        &self,
+        scope: &SessionRelationScope,
+        database: Arc<tracedecay_global_db::RegisteredGlobalDb>,
+    ) -> Result<(), EmbeddedGraphRuntimeError> {
+        let mut schedulers = self.effect_schedulers.lock().map_err(|_| {
+            EmbeddedGraphRuntimeError::Unavailable(
+                "session relation effect scheduler lock is poisoned".to_owned(),
+            )
+        })?;
+        if let Some(existing) = schedulers.get(scope) {
+            database
+                .bind_session_relation_effect_wake(Arc::clone(&existing.wake))
+                .map_err(|error| EmbeddedGraphRuntimeError::Unavailable(error.to_string()))?;
+            existing.wake.notify_one();
+            return Ok(());
+        }
+
+        let wake = Arc::new(tokio::sync::Notify::new());
+        database
+            .bind_session_relation_effect_wake(Arc::clone(&wake))
+            .map_err(|error| EmbeddedGraphRuntimeError::Unavailable(error.to_string()))?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let worker_wake = Arc::clone(&wake);
+        let worker_shutdown = Arc::clone(&shutdown);
+        let worker_shutdown_notify = Arc::clone(&shutdown_notify);
+        let join = tokio::spawn(async move {
+            run_relation_effect_scheduler(
+                database,
+                worker_wake,
+                worker_shutdown,
+                worker_shutdown_notify,
+            )
+            .await;
+        });
+        schedulers.insert(
+            scope.clone(),
+            Arc::new(SessionRelationEffectScheduler {
+                wake,
+                shutdown,
+                shutdown_notify,
+                join: Mutex::new(Some(join)),
+            }),
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn shutdown_relation_effect_schedulers(&self) {
+        let schedulers = match self.effect_schedulers.lock() {
+            Ok(schedulers) => schedulers.values().cloned().collect::<Vec<_>>(),
+            Err(_) => {
+                tracing::error!(
+                    event = "session_relation_effect_scheduler_shutdown",
+                    outcome = "registry_lock_poisoned"
+                );
+                return;
+            }
+        };
+        for scheduler in &schedulers {
+            scheduler.shutdown.store(true, Ordering::Release);
+            scheduler.shutdown_notify.notify_waiters();
+            scheduler.wake.notify_waiters();
+        }
+        for scheduler in schedulers {
+            let join = match scheduler.join.lock() {
+                Ok(mut join) => join.take(),
+                Err(_) => {
+                    tracing::error!(
+                        event = "session_relation_effect_scheduler_shutdown",
+                        outcome = "join_lock_poisoned"
+                    );
+                    None
+                }
+            };
+            if let Some(join) = join
+                && let Err(error) = join.await
+            {
+                tracing::error!(
+                    event = "session_relation_effect_scheduler_shutdown",
+                    outcome = "join_failed",
+                    error = %error
+                );
+            }
+        }
+        if let Ok(mut schedulers) = self.effect_schedulers.lock() {
+            schedulers.clear();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SchedulerCancellation {
+    shutdown: Arc<AtomicBool>,
+}
+
+impl tracedecay_graph_db::GraphCancellation for SchedulerCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
+}
+
+async fn run_relation_effect_scheduler(
+    database: Arc<tracedecay_global_db::RegisteredGlobalDb>,
+    wake: Arc<tokio::sync::Notify>,
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+) {
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        let started = Instant::now();
+        for _ in 0..RELATION_EFFECT_MAX_PAGES_PER_WAKE {
+            if shutdown.load(Ordering::Acquire) || started.elapsed() >= RELATION_EFFECT_MAX_RUN_TIME
+            {
+                break;
+            }
+            let recovered = database
+                .recover_pending_session_relation_projections(
+                    RELATION_EFFECT_PAGE_SIZE,
+                    Arc::new(SchedulerCancellation {
+                        shutdown: Arc::clone(&shutdown),
+                    }),
+                )
+                .await;
+            match recovered {
+                Ok(0) => break,
+                Ok(recovered) if recovered < RELATION_EFFECT_PAGE_SIZE => break,
+                Ok(_) => {}
+                Err(_) if shutdown.load(Ordering::Acquire) => break,
+                Err(error) => {
+                    crate::daemon::log_daemon_event(
+                        "session_relation_effect_scheduler",
+                        &[
+                            ("outcome", "degraded".to_owned()),
+                            ("database", database.db_path().display().to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    break;
+                }
+            }
+        }
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        tokio::select! {
+            () = wake.notified() => {}
+            () = shutdown_notify.notified() => {}
+            () = tokio::time::sleep(RELATION_EFFECT_IDLE_RETRY) => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +296,7 @@ mod tests {
     use tracedecay_domain::{ProjectId, UserProfileId};
 
     use super::*;
+    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
     #[test]
     fn project_and_profile_mounts_require_distinct_exact_store_roots() {
@@ -151,5 +324,50 @@ mod tests {
             .resolve_scope(&profile_scope, &profile_root)
             .expect("profile mount");
         assert!(!Arc::ptr_eq(&project, &profile));
+    }
+
+    #[tokio::test]
+    async fn relation_effect_scheduler_survives_idle_and_shutdown_joins_worker() {
+        let temporary = TempDir::new().expect("temporary profile root");
+        let runtime = HostAdmissionTestRuntimeV1::profile(temporary.path())
+            .await
+            .expect("registered profile runtime");
+        let database = runtime
+            .session_database_arc_for_test(HostAdmissionScope::Profile)
+            .expect("profile session database");
+        let scope = SessionRelationScope::profile(database.binding().shard_id.profile_id.clone());
+        let registry = EmbeddedGraphRuntimeRegistry::default();
+
+        registry
+            .ensure_relation_effect_scheduler(&scope, database)
+            .expect("start relation effect scheduler");
+        tokio::task::yield_now().await;
+        let scheduler = registry
+            .effect_schedulers
+            .lock()
+            .expect("scheduler registry")
+            .get(&scope)
+            .cloned()
+            .expect("retained scheduler");
+        assert!(
+            !scheduler
+                .join
+                .lock()
+                .expect("scheduler join")
+                .as_ref()
+                .expect("scheduler worker")
+                .is_finished(),
+            "the scheduler must remain retained while the journal is idle"
+        );
+
+        registry.shutdown_relation_effect_schedulers().await;
+        assert!(
+            registry
+                .effect_schedulers
+                .lock()
+                .expect("scheduler registry after shutdown")
+                .is_empty(),
+            "shutdown must join and retire every relation effect worker"
+        );
     }
 }

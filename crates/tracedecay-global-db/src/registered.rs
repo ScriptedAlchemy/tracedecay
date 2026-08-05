@@ -27,6 +27,7 @@ pub struct RegisteredGlobalDb {
         crate::session_temporal::relations::SessionRelationScope,
         Arc<tracedecay_graph_db::GraphDb>,
     )>,
+    session_relation_effect_wake: OnceLock<Arc<tokio::sync::Notify>>,
 }
 
 pub struct RegisteredWorkApplicationServicesV1 {
@@ -158,6 +159,7 @@ impl RegisteredGlobalDb {
             runtime,
             authority,
             session_relation_graph: OnceLock::new(),
+            session_relation_effect_wake: OnceLock::new(),
         };
         database.validate_authority_schema_contract().await?;
         Ok(database)
@@ -348,6 +350,34 @@ impl RegisteredGlobalDb {
             scope,
             crate::session_temporal::relations::SessionRelationGraphStore::new(Arc::clone(graph)),
         ))
+    }
+
+    pub fn bind_session_relation_effect_wake(
+        &self,
+        wake: Arc<tokio::sync::Notify>,
+    ) -> tracedecay_runtime_core::errors::Result<()> {
+        if let Some(existing) = self.session_relation_effect_wake.get() {
+            return if Arc::ptr_eq(existing, &wake) {
+                Ok(())
+            } else {
+                Err(registered_error(
+                    "bind session relation effect wake",
+                    "registered session shard already has a different effect scheduler",
+                ))
+            };
+        }
+        self.session_relation_effect_wake.set(wake).map_err(|_| {
+            registered_error(
+                "bind session relation effect wake",
+                "registered session shard effect wake binding raced",
+            )
+        })
+    }
+
+    pub(crate) fn notify_session_relation_effect_appended(&self) {
+        if let Some(wake) = self.session_relation_effect_wake.get() {
+            wake.notify_one();
+        }
     }
 
     /// The store runtime this registered database is mounted on.
