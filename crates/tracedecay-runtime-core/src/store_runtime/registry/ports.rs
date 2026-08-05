@@ -97,6 +97,14 @@ pub trait StoreRuntimeResolver: Send + Sync {
         mode: StoreRuntimeOpenMode,
         database_authority: Option<&'a crate::db::DatabaseAuthority>,
     ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>;
+
+    fn resolve_graph<'a>(
+        &'a self,
+        _key: &'a StoreRuntimeKey,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        Box::pin(async { Err(StoreRuntimeRegistryFailure::UnsupportedShardScope) })
+    }
 }
 
 pub trait ShardRuntimePublisher: Send + Sync {

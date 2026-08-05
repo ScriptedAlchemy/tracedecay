@@ -13,6 +13,7 @@ mod attachment;
 mod capacity;
 mod close;
 mod destructive;
+mod graph;
 mod leases;
 mod open;
 mod ports;
@@ -43,6 +44,7 @@ pub use capacity::StoreRuntimeRegistryConfig;
 pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
 pub use close::ClosedStoreRuntime;
 pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
+pub use graph::CanonicalGraphStoreLeaseV1;
 pub use leases::{
     ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode,
     StoreRuntimeLeaseAcquireResult, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
@@ -601,6 +603,18 @@ pub enum StoreRuntimeRegistryFailure {
         key: Box<StoreRuntimeKey>,
     },
     PublicationIdExhausted,
+    GraphLeaseCountExhausted {
+        binding: Box<StoreRuntimeBindingV1>,
+    },
+    GraphLocatorConflict {
+        key: Box<StoreRuntimeKey>,
+        retained_path: PathBuf,
+        resolved_path: PathBuf,
+    },
+    GraphIncarnationConflict {
+        requested: Box<StoreRuntimeKey>,
+        retained: Box<StoreRuntimeBindingV1>,
+    },
     ResolverFailed {
         message: String,
     },
@@ -705,6 +719,13 @@ struct DestructivePathReservation {
     released: tokio::sync::watch::Sender<bool>,
 }
 
+struct RetainedGraphPublication {
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+    canonical_path: PathBuf,
+    leases: usize,
+}
+
 enum RegistryEntry {
     Opening(open::OpeningRuntime),
     Ready(ReadyRuntime),
@@ -714,6 +735,7 @@ enum RegistryEntry {
 #[derive(Default)]
 struct RegistryState {
     entries: BTreeMap<StoreRuntimeKey, RegistryEntry>,
+    graph_publications: BTreeMap<StoreRuntimeKey, RetainedGraphPublication>,
     destructive_paths: BTreeMap<u64, DestructivePathReservation>,
     profile_authorities: BTreeMap<StoreShardIdV1, StoreRuntimeBindingV1>,
     next_destructive_attempt: u64,
