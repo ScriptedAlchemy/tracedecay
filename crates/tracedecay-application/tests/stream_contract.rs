@@ -2,7 +2,7 @@ mod common;
 
 use tracedecay_application::{
     OperationReceipt, StreamEvent, StreamEventKind, StreamFrontier, StreamGap, StreamTermination,
-    validate_stream,
+    StreamValidationError, validate_stream,
 };
 use tracedecay_domain::UtcMicros;
 
@@ -41,7 +41,32 @@ fn stream_rejects_events_after_the_terminal_receipt() {
         StreamEvent::item(1, "late").unwrap(),
     ];
 
-    assert!(validate_stream(&events).is_err());
+    assert_eq!(
+        validate_stream(&events),
+        Err(StreamValidationError::EventAfterTerminal)
+    );
+}
+
+#[test]
+fn stream_rejects_multiple_terminal_receipts() {
+    let operation = common::operation();
+    let context = common::context(&operation);
+    let receipt = OperationReceipt::completed(
+        UtcMicros(2),
+        UtcMicros(3),
+        context.deadline().clone(),
+        Default::default(),
+    )
+    .unwrap();
+    let events = vec![
+        StreamEvent::<()>::terminal(0, StreamTermination::completed(receipt.clone())).unwrap(),
+        StreamEvent::terminal(1, StreamTermination::completed(receipt)).unwrap(),
+    ];
+
+    assert_eq!(
+        validate_stream(&events),
+        Err(StreamValidationError::MultipleTerminalEvents)
+    );
 }
 
 #[test]
@@ -72,4 +97,89 @@ fn stream_rejects_an_invalid_gap_event() {
     ];
 
     assert!(validate_stream(&events).is_err());
+}
+
+#[test]
+fn stream_gap_advances_sequence_to_the_end_of_the_missing_range() {
+    let operation = common::operation();
+    let context = common::context(&operation);
+    let receipt = OperationReceipt::completed(
+        UtcMicros(2),
+        UtcMicros(3),
+        context.deadline().clone(),
+        Default::default(),
+    )
+    .unwrap();
+    let events = vec![
+        StreamEvent::item(2, ()).unwrap(),
+        StreamEvent {
+            sequence: 3,
+            kind: StreamEventKind::Gap(StreamGap {
+                first_missing_sequence: 3,
+                last_missing_sequence: 5,
+                frontier: StreamFrontier {
+                    next_sequence: 6,
+                    retained_from_sequence: 6,
+                    resume_token: None,
+                },
+            }),
+        },
+        StreamEvent::terminal(6, StreamTermination::completed(receipt)).unwrap(),
+    ];
+
+    assert_eq!(validate_stream(&events), Ok(()));
+}
+
+#[test]
+fn stream_gap_sequence_must_equal_its_first_missing_sequence() {
+    let operation = common::operation();
+    let context = common::context(&operation);
+    let receipt = OperationReceipt::completed(
+        UtcMicros(2),
+        UtcMicros(3),
+        context.deadline().clone(),
+        Default::default(),
+    )
+    .unwrap();
+    let events = vec![
+        StreamEvent {
+            sequence: 3,
+            kind: StreamEventKind::<()>::Gap(StreamGap {
+                first_missing_sequence: 4,
+                last_missing_sequence: 5,
+                frontier: StreamFrontier {
+                    next_sequence: 6,
+                    retained_from_sequence: 6,
+                    resume_token: None,
+                },
+            }),
+        },
+        StreamEvent::terminal(6, StreamTermination::completed(receipt)).unwrap(),
+    ];
+
+    assert!(matches!(
+        validate_stream(&events),
+        Err(StreamValidationError::InvalidGap(_))
+    ));
+}
+
+#[test]
+fn stream_gap_sequence_overflow_is_typed() {
+    let events = [StreamEvent {
+        sequence: u64::MAX,
+        kind: StreamEventKind::<()>::Gap(StreamGap {
+            first_missing_sequence: u64::MAX,
+            last_missing_sequence: u64::MAX,
+            frontier: StreamFrontier {
+                next_sequence: u64::MAX,
+                retained_from_sequence: u64::MAX,
+                resume_token: None,
+            },
+        }),
+    }];
+
+    assert_eq!(
+        validate_stream(&events),
+        Err(StreamValidationError::SequenceOverflow)
+    );
 }
