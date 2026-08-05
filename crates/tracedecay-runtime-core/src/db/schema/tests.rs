@@ -304,7 +304,6 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
     assert!(column_exists(&conn, "memory_v2_proposals", "idempotency_key").await);
     assert!(column_exists(&conn, "memory_v2_proposals", "request_digest").await);
     assert!(column_exists(&conn, "memory_v2_proposal_transitions", "origin").await);
-    assert!(column_exists(&conn, "memory_v2_backfill_progress", "cutover_receipt_json").await);
     for column in [
         "retrieval_count",
         "access_count",

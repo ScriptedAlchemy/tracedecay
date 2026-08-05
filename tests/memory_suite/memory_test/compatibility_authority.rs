@@ -92,6 +92,48 @@ async fn compatibility_dirty_bank_rows(db: &Database, owner: &FactOwnerV1) -> Ve
 }
 
 #[tokio::test]
+async fn derived_rebuild_restores_a_missing_holographic_projection() {
+    let (db, _tmp) = make_memory_store().await;
+    let owner = compatibility_project_owner("projection-rebuild-owner");
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
+    let content = "Canonical project fact survives derived projection loss";
+    let fact =
+        add_compatibility_fixture_fact(&memory, &owner, content, MemoryCategory::Project).await;
+
+    execute_sql(
+        &db,
+        "DELETE FROM memory_facts WHERE fact_id = ?1",
+        rusqlite::params![fact.fact_id],
+    );
+    assert_eq!(
+        scalar_i64(
+            &db,
+            "SELECT COUNT(*) FROM memory_facts WHERE content = 'Canonical project fact survives derived projection loss'",
+        )
+        .await,
+        0
+    );
+
+    memory
+        .rebuild_derived_memory(
+            MemoryOperationContext::generated(&owner, "restore-derived-projection", None).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        scalar_i64(
+            &db,
+            "SELECT COUNT(*) FROM memory_facts
+             WHERE content = 'Canonical project fact survives derived projection loss'
+               AND canonical_fact_id IS NOT NULL",
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn compatibility_repair_rebuilds_only_requested_owner_banks() {
     let (db, _tmp) = make_memory_store().await;
     let owner_a = compatibility_project_owner("repair-owner-a");
@@ -336,7 +378,7 @@ async fn compatibility_v1_remove_redacts_feedback_history_free_text() {
                             SUM(CASE WHEN details_availability = 'available' THEN 1 ELSE 0 END)
                      FROM memory_v2_feedback_history
                      WHERE fact_id = (
-                         SELECT fact_id FROM memory_v2_legacy_map WHERE legacy_fact_id = ?1
+                         SELECT canonical_fact_id FROM memory_facts WHERE fact_id = ?1
                      )",
                 rusqlite::params![fact.fact_id],
                 |row| {
@@ -365,9 +407,8 @@ async fn compatibility_v1_remove_redacts_feedback_history_free_text() {
             .unwrap()
     );
 
-    // A live deletion must erase the same feedback free-text surface as the
-    // canonical purge path: rows stay for lineage, but source/note are gone
-    // and availability is downgraded.
+    // A live deletion retains lineage rows while erasing source/note text and
+    // downgrading availability.
     let (rows, sources, notes, available) = history_state("after remove").await;
     assert_eq!(rows, 1, "feedback lineage rows must survive deletion");
     assert_eq!(
@@ -402,7 +443,7 @@ async fn compatibility_repair_skips_malformed_unavailable_vectors() {
         "UPDATE memory_v2_current_facts
          SET payload_access = 'quarantined'
          WHERE fact_id = (
-             SELECT fact_id FROM memory_v2_legacy_map WHERE legacy_fact_id = ?1
+             SELECT canonical_fact_id FROM memory_facts WHERE fact_id = ?1
          )",
         rusqlite::params![fact.fact_id],
     );
@@ -462,7 +503,7 @@ async fn compatibility_repair_scans_past_a_full_batch_of_unavailable_vectors() {
         "UPDATE memory_v2_current_facts
          SET payload_access = 'unavailable'
          WHERE fact_id <> (
-             SELECT fact_id FROM memory_v2_legacy_map WHERE legacy_fact_id = ?1
+             SELECT canonical_fact_id FROM memory_facts WHERE fact_id = ?1
          )",
         rusqlite::params![eligible.fact_id],
     );
@@ -500,8 +541,8 @@ async fn compatibility_repair_scans_past_a_full_batch_of_unavailable_vectors() {
             &db,
             "SELECT COUNT(*)
              FROM memory_facts AS legacy_facts
-             JOIN memory_v2_legacy_map AS mappings
-               ON mappings.legacy_fact_id = legacy_facts.fact_id
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
              JOIN memory_v2_current_facts AS current_facts
                ON current_facts.fact_id = mappings.fact_id
               AND current_facts.owner_kind = mappings.owner_kind

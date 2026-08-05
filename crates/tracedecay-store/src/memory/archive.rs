@@ -32,10 +32,7 @@ pub enum MemoryV2ArchiveFamilyV1 {
     AssertionEvidence,
     LineageEvent,
     CurrentFact,
-    LegacyFactMap,
-    LegacyQuarantine,
     CompatibilityOperationReceipt,
-    LegacyFeedbackEventMap,
     FeedbackHistory,
     FactRelation,
     Proposal,
@@ -49,10 +46,10 @@ pub fn authoritative_memory_v2_archive_families() -> BTreeSet<MemoryV2ArchiveFam
         CompatibilityOperationReceipt, CurrentFact, EvidenceAssemblyReceipt, EvidenceDerivedAnchor,
         EvidenceOccurrenceSet, EvidenceOccurrenceSetMember, EvidenceRetrieverContribution,
         EvidenceSourceOccurrence, EvidenceSpan, EvidenceSpanMember, EvidenceSpanProjectionReceipt,
-        Fact, FactEvidence, FactRelation, FeedbackHistory, LegacyFactMap, LegacyFeedbackEventMap,
-        LegacyQuarantine, LineageEvent, Proposal, ProposalCurrent, ProposalTransition,
-        RetrievalAnchor, RetrievalAnchorAlias, RetrievalAnchorDerivativeTombstone,
-        RetrievalAnchorDisposition, RetrievalAnchorReverseLineage,
+        Fact, FactEvidence, FactRelation, FeedbackHistory, LineageEvent, Proposal, ProposalCurrent,
+        ProposalTransition, RetrievalAnchor, RetrievalAnchorAlias,
+        RetrievalAnchorDerivativeTombstone, RetrievalAnchorDisposition,
+        RetrievalAnchorReverseLineage,
     };
 
     BTreeSet::from([
@@ -79,10 +76,7 @@ pub fn authoritative_memory_v2_archive_families() -> BTreeSet<MemoryV2ArchiveFam
         AssertionEvidence,
         LineageEvent,
         CurrentFact,
-        LegacyFactMap,
-        LegacyQuarantine,
         CompatibilityOperationReceipt,
-        LegacyFeedbackEventMap,
         FeedbackHistory,
         FactRelation,
         Proposal,
@@ -708,10 +702,7 @@ mod tests {
             MemoryV2ArchiveFamilyV1::AssertionEvidence,
             MemoryV2ArchiveFamilyV1::LineageEvent,
             MemoryV2ArchiveFamilyV1::CurrentFact,
-            MemoryV2ArchiveFamilyV1::LegacyFactMap,
-            MemoryV2ArchiveFamilyV1::LegacyQuarantine,
             MemoryV2ArchiveFamilyV1::CompatibilityOperationReceipt,
-            MemoryV2ArchiveFamilyV1::LegacyFeedbackEventMap,
             MemoryV2ArchiveFamilyV1::FeedbackHistory,
             MemoryV2ArchiveFamilyV1::FactRelation,
             MemoryV2ArchiveFamilyV1::Proposal,
@@ -875,20 +866,6 @@ mod tests {
             ]),
             vec![reference_to(&reverse)],
         );
-        let legacy_map = linked(
-            MemoryV2ArchiveFamilyV1::LegacyFactMap,
-            BTreeMap::from([
-                ("owner_kind".to_owned(), scalar("project")),
-                ("project_id".to_owned(), scalar("project.archive-test")),
-                ("source_store_id".to_owned(), scalar("legacy-memory-v1")),
-                (
-                    "legacy_fact_id".to_owned(),
-                    MemoryV2ArchiveScalarV1::Integer(41),
-                ),
-            ]),
-            vec![reference_to(&fact)],
-        );
-
         let records = vec![
             fact,
             anchor,
@@ -902,7 +879,6 @@ mod tests {
             proposal_current,
             reverse,
             tombstone,
-            legacy_map,
         ];
         let complete = archive(records.clone());
         assert_eq!(complete.records().len(), records.len());
@@ -1096,39 +1072,5 @@ mod tests {
         )
         .unwrap();
         assert!(plan_memory_v2_owner_merge(&archive(Vec::new()), &profile).is_err());
-    }
-
-    #[test]
-    fn stale_legacy_map_is_retained_without_creating_a_second_fact() {
-        let fact = record(MemoryV2ArchiveFamilyV1::Fact, "fact.stable", "payload");
-        let fact_reference =
-            MemoryV2ArchiveReferenceV1::new(MemoryV2ArchiveFamilyV1::Fact, fact.key().clone())
-                .unwrap();
-        let stale_map = MemoryV2ArchiveRecordV1::new(
-            MemoryV2ArchiveFamilyV1::LegacyFactMap,
-            BTreeMap::from([(
-                "legacy_fact_id".to_owned(),
-                MemoryV2ArchiveScalarV1::Integer(7),
-            )]),
-            BTreeMap::from([("fact_id".to_owned(), scalar("fact.stable"))]),
-            vec![fact_reference],
-        )
-        .unwrap();
-        let plan =
-            plan_memory_v2_owner_merge(&archive(vec![fact, stale_map]), &archive(Vec::new()))
-                .unwrap();
-        assert!(plan.can_apply());
-        assert_eq!(
-            plan.inserts()
-                .iter()
-                .filter(|record| record.family() == MemoryV2ArchiveFamilyV1::Fact)
-                .count(),
-            1
-        );
-        assert!(
-            plan.inserts()
-                .iter()
-                .any(|record| { record.family() == MemoryV2ArchiveFamilyV1::LegacyFactMap })
-        );
     }
 }

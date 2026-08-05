@@ -81,15 +81,11 @@ pub async fn list_memory_v2_archive_owners(
          UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_assertions
          UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_evidence
          UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_current_facts
-         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_legacy_map
-         UNION SELECT owner_kind, project_id
-               FROM {prefix}memory_v2_legacy_feedback_event_map
          UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_feedback_history
          UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_fact_relations
          UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_proposals
          UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_proposal_transitions
          UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_proposal_current
-         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_legacy_quarantine
          UNION SELECT owner_kind, project_id
                FROM {prefix}memory_v2_compatibility_operation_receipts
          ORDER BY owner_kind, project_id"
@@ -844,7 +840,6 @@ fn references_for(
         Family::RetrievalAnchor
         | Family::EvidenceOccurrenceSet
         | Family::Fact
-        | Family::LegacyQuarantine
         | Family::Proposal => {}
         Family::RetrievalAnchorAlias => {
             references.push(reference(
@@ -1034,7 +1029,6 @@ fn references_for(
             )?;
             references.push(event_reference(values, "last_event_id")?);
         }
-        Family::LegacyFactMap => references.push(fact_reference(values, "fact_id")?),
         Family::CompatibilityOperationReceipt => {
             push_optional_reference(
                 &mut references,
@@ -1058,7 +1052,7 @@ fn references_for(
                 ],
             )?;
         }
-        Family::LegacyFeedbackEventMap | Family::FeedbackHistory => {
+        Family::FeedbackHistory => {
             references.push(fact_reference(values, "fact_id")?);
             references.push(event_reference(values, "event_id")?);
         }
@@ -1588,47 +1582,6 @@ fn table_specs() -> &'static [TableSpec] {
             owner_filter: O::Scope,
         },
         TableSpec {
-            family: F::LegacyFactMap,
-            table: "memory_v2_legacy_map",
-            columns: &[
-                "owner_kind",
-                "project_id",
-                "owner_json",
-                "source_store_id",
-                "legacy_fact_id",
-                "fact_id",
-                "mapping_json",
-            ],
-            key_columns: &[
-                "owner_kind",
-                "project_id",
-                "source_store_id",
-                "legacy_fact_id",
-            ],
-            owner_filter: O::Scope,
-        },
-        TableSpec {
-            family: F::LegacyQuarantine,
-            table: "memory_v2_legacy_quarantine",
-            columns: &[
-                "owner_kind",
-                "project_id",
-                "source_store_id",
-                "source_table",
-                "source_row_id",
-                "reason_code",
-                "recorded_at",
-            ],
-            key_columns: &[
-                "owner_kind",
-                "project_id",
-                "source_store_id",
-                "source_table",
-                "source_row_id",
-            ],
-            owner_filter: O::Scope,
-        },
-        TableSpec {
             family: F::CompatibilityOperationReceipt,
             table: "memory_v2_compatibility_operation_receipts",
             columns: &[
@@ -1643,25 +1596,6 @@ fn table_specs() -> &'static [TableSpec] {
                 "recorded_at",
             ],
             key_columns: &["owner_kind", "project_id", "operation_id"],
-            owner_filter: O::Scope,
-        },
-        TableSpec {
-            family: F::LegacyFeedbackEventMap,
-            table: "memory_v2_legacy_feedback_event_map",
-            columns: &[
-                "owner_kind",
-                "project_id",
-                "source_store_id",
-                "legacy_feedback_event_id",
-                "fact_id",
-                "event_id",
-            ],
-            key_columns: &[
-                "owner_kind",
-                "project_id",
-                "source_store_id",
-                "legacy_feedback_event_id",
-            ],
             owner_filter: O::Scope,
         },
         TableSpec {

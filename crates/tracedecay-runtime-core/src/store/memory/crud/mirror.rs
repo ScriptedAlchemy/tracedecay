@@ -8,11 +8,9 @@
 //! consumers may read this projection through that compatibility store; they
 //! do not make the mirror an independent write authority.
 //!
-//! The raw V1 rows remain durable compatibility data. Cutover backfills and
-//! verifies their V2 representation, but never bulk-reclaims them with the
-//! canonical fact-deletion primitive. Direct legacy-store mutation is limited
-//! to schema/data migration and tests; production fact mutations enter through
-//! `DatabaseFactStore`.
+//! The raw V1 rows remain durable compatibility data, but never act as
+//! canonical fact identity or survive canonical fact removal. Production fact
+//! mutations enter through `DatabaseFactStore`.
 
 use super::super::primitives::{
     COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey, QUERY_OPERATION,
@@ -566,7 +564,7 @@ pub(super) async fn compatibility_mirror_insert_tx(
         else {
             return Err(storage_message(
                 COMPATIBILITY_WRITE_OPERATION,
-                "compatibility mirror content is already bound to another owner or an unmigrated row",
+                "compatibility mirror content is already bound to another owner or canonical fact",
             ));
         };
         return Ok(CompatibilityMirrorInsertV1::Existing { fact_id });

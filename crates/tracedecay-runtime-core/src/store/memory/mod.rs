@@ -58,7 +58,7 @@ use proposals::{
     list_compatibility_fact_proposals_tx, reject_compatibility_fact_proposal_tx,
     submit_compatibility_fact_proposal_tx,
 };
-use repair::{compatibility_feedback_history_repair_progress_tx, repair_compatibility_memory_tx};
+use repair::repair_compatibility_memory_tx;
 use search::{
     find_compatibility_contradictions_tx, probe_compatibility_facts_tx,
     reason_compatibility_facts_tx, record_compatibility_fact_retrieval_tx,
@@ -443,11 +443,7 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         owner: FactOwnerV1,
     ) -> FactCompatibilityResult<CompatibilityMemoryStatusV1> {
         self.compatibility_read(move |transaction| {
-            Box::pin(async move {
-                let feedback_repair =
-                    compatibility_feedback_history_repair_progress_tx(transaction, &owner).await?;
-                compatibility_memory_status_tx(transaction, &owner, feedback_repair).await
-            })
+            Box::pin(async move { compatibility_memory_status_tx(transaction, &owner).await })
         })
         .await
     }
@@ -512,14 +508,9 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         query: CompatibilityFactFeedbackHistoryQueryV1,
     ) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1> {
         self.compatibility_read(move |transaction| {
-            Box::pin(async move {
-                let feedback_repair = compatibility_feedback_history_repair_progress_tx(
-                    transaction,
-                    query.target().owner(),
-                )
-                .await?;
-                compatibility_fact_feedback_history_tx(transaction, &query, feedback_repair).await
-            })
+            Box::pin(
+                async move { compatibility_fact_feedback_history_tx(transaction, &query).await },
+            )
         })
         .await
     }

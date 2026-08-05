@@ -84,6 +84,7 @@ pub const REQUIRED_SCHEMA_COLUMNS: &[(&str, &[&str])] = &[
         "memory_facts",
         &[
             "fact_id",
+            "canonical_fact_id",
             "content",
             "category",
             "trust_score",
@@ -483,8 +484,7 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
 
     create_holographic_memory_schema(conn, "create_schema").await?;
     super::memory_v2::create_schema(conn, "create_schema").await?;
-    super::memory_v2::install_v22_fresh_schema(conn, "create_schema").await?;
-    super::memory_v2::install_v23_fresh_schema(conn, "create_schema").await?;
+    super::memory_v2::install_final_shape(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
     conn.execute(
@@ -779,6 +779,7 @@ async fn create_holographic_memory_schema(conn: &impl Executor, operation: &str)
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_facts (
             fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            canonical_fact_id TEXT UNIQUE,
             content TEXT NOT NULL UNIQUE,
             category TEXT NOT NULL DEFAULT 'general',
             tags TEXT NOT NULL DEFAULT '[]',
@@ -797,7 +798,9 @@ async fn create_holographic_memory_schema(conn: &impl Executor, operation: &str)
             hrr_vector BLOB,
             hrr_algebra TEXT NOT NULL DEFAULT 'amari_fhrr',
             hrr_dim INTEGER NOT NULL DEFAULT 2048,
-            hrr_precision TEXT NOT NULL DEFAULT 'f32'
+            hrr_precision TEXT NOT NULL DEFAULT 'f32',
+            FOREIGN KEY(canonical_fact_id)
+                REFERENCES memory_v2_facts(fact_id)
         );
 
         CREATE TABLE IF NOT EXISTS memory_entities (

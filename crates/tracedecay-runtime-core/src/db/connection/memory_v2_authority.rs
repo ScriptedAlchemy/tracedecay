@@ -1,6 +1,6 @@
-use tracedecay_domain::{ActorId, FactEventId, FactId, FactOwnerV1, SourceStoreId, UtcMicros};
+use tracedecay_domain::{FactOwnerV1, SourceStoreId, UtcMicros};
 
-use crate::db::{DatabaseMemoryTransaction, MemoryV2LegacyPurgeReceipt, memory_v2};
+use crate::db::{DatabaseMemoryTransaction, memory_v2};
 use crate::errors::Result;
 
 use super::Database;
@@ -97,34 +97,6 @@ impl Database {
             source_store_id,
             bank_name,
             expected_updated_at,
-        )
-        .await
-    }
-
-    /// Applies the guarded migrated-V1 deletion path inside the compatibility
-    /// command's authority transaction, preserving one atomic receipt.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn purge_memory_v2_legacy_fact_payload_in_transaction(
-        &self,
-        transaction: &DatabaseMemoryTransaction<'_>,
-        owner: &FactOwnerV1,
-        source_store_id: &SourceStoreId,
-        fact_id: &FactId,
-        expected_last_event_id: &FactEventId,
-        actor: Option<&ActorId>,
-        occurred_at: UtcMicros,
-    ) -> Result<MemoryV2LegacyPurgeReceipt> {
-        self.require_active_write_scope(
-            "purge memory v2 legacy fact payload in writer transaction",
-        )?;
-        memory_v2::purge_memory_v2_fact_in_transaction(
-            transaction,
-            owner,
-            source_store_id,
-            fact_id,
-            expected_last_event_id,
-            actor,
-            occurred_at,
         )
         .await
     }

@@ -1,21 +1,13 @@
 use tempfile::TempDir;
 use tracedecay_domain::{
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1,
-    LegacyFactMappingV1, LegacyHistoryCoverageV1, ProvenanceId, UtcMicros,
+    ProvenanceId, UtcMicros,
 };
 
 use crate::db::engine::{Connection, TestConnection, params};
 
 use super::schema::{table_exists, table_has_column};
-use super::writers::insert_event;
 use super::*;
-
-// Identity, legacy-mapping, and current-projection rows used to be written by
-// the V1→V2 backfill writer layer. That layer had no production writer left
-// after the fresh-store cutover and was removed, so these tests seed the same
-// rows directly. `insert_event` is *not* duplicated here: it is still a live
-// production writer (the legacy-payload purge path appends through it), so the
-// tests keep exercising the real function.
 
 async fn seed_fact_identity(
     conn: &impl MemoryV2Executor,
@@ -35,30 +27,6 @@ async fn seed_fact_identity(
             owner.json.as_str(),
             identity_json,
             created_at
-        ],
-    )
-    .await
-    .unwrap();
-}
-
-async fn seed_legacy_mapping(
-    conn: &impl MemoryV2Executor,
-    owner: &OwnerKey,
-    mapping: &LegacyFactMappingV1,
-) {
-    conn.execute(
-        "INSERT INTO memory_v2_legacy_map(
-            owner_kind, project_id, owner_json, source_store_id,
-            legacy_fact_id, fact_id, mapping_json
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            owner.kind,
-            owner.project_id.as_str(),
-            owner.json.as_str(),
-            mapping.source_store_id().as_str(),
-            mapping.legacy_fact_id(),
-            mapping.fact_id().as_str(),
-            json_text(mapping).unwrap()
         ],
     )
     .await
@@ -108,39 +76,12 @@ fn owner() -> FactOwnerV1 {
     }
 }
 
-fn source_store_id() -> SourceStoreId {
-    SourceStoreId::new(V1_COMPATIBILITY_SOURCE_STORE).unwrap()
-}
-
 async fn scalar(conn: &Connection, sql: &str) -> i64 {
     scalar_i64(conn, sql).await.unwrap()
 }
 
 #[tokio::test]
-async fn schema_install_does_not_start_unowned_backfill() {
-    let (runtime, _dir) = database().await;
-    let conn = (*runtime).clone();
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_backfill_progress").await,
-        0
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM retrieval_anchors").await,
-        0
-    );
-    assert!(
-        !row_exists(
-            &conn,
-            "SELECT 1 FROM sqlite_master WHERE name = 'memory_v2_retrieval_anchors'",
-            (),
-        )
-        .await
-        .unwrap()
-    );
-}
-
-#[tokio::test]
-async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
+async fn fresh_fact_relations_carry_provenance_and_referential_integrity() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
     let owner = owner_key(&owner()).unwrap();
@@ -148,16 +89,16 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
         "INSERT INTO memory_v2_facts(
             fact_id, owner_kind, project_id, owner_json, identity_json, created_at
          ) VALUES
-            ('v23.relation.source', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1),
-            ('v23.relation.target', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1),
-            ('v23.relation.evidence', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1);
+            ('relation.source', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1),
+            ('relation.target', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1),
+            ('relation.evidence', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1);
          INSERT INTO memory_v2_fact_relations(
             owner_kind, project_id, source_fact_id, target_fact_id, relation,
             confidence, source_label, provenance_json, evidence_fact_ids_json,
             occurred_at, updated_at
          ) VALUES(
-            '{kind}', '{project_id}', 'v23.relation.source', 'v23.relation.target',
-            'supports', 0.8, 'fixture', '{{}}', '[\"v23.relation.evidence\"]', 1, 1
+            '{kind}', '{project_id}', 'relation.source', 'relation.target',
+            'supports', 0.8, 'fixture', '{{}}', '[\"relation.evidence\"]', 1, 1
          );",
         kind = owner.kind,
         project_id = owner.project_id,
@@ -187,7 +128,7 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
             &conn,
             "memory_v2_fact_relations",
             "provenance_json",
-            "memory_v2_v23_relation_upgrade_test",
+            "memory_v2_relation_integrity_test",
         )
         .await
         .unwrap()
@@ -196,8 +137,8 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
         optional_string(
             &conn,
             "SELECT provenance_json FROM memory_v2_fact_relations
-             WHERE source_fact_id = 'v23.relation.source'
-               AND target_fact_id = 'v23.relation.target' AND relation = 'supports'",
+             WHERE source_fact_id = 'relation.source'
+               AND target_fact_id = 'relation.target' AND relation = 'supports'",
             (),
         )
         .await
@@ -209,9 +150,9 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
             owner_kind, project_id, source_fact_id, target_fact_id, relation,
             confidence, source_label, provenance_json, evidence_fact_ids_json,
             occurred_at, updated_at
-         ) VALUES(?1, ?2, 'v23.relation.source', 'v23.relation.target',
+         ) VALUES(?1, ?2, 'relation.source', 'relation.target',
                    'contradicts', 0.8, 'fixture', '{}',
-                   '[\"v23.relation.evidence\"]', 2, 2)",
+                   '[\"relation.evidence\"]', 2, 2)",
         params![owner.kind, owner.project_id.as_str()],
     )
     .await
@@ -227,123 +168,6 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
 }
 
 #[tokio::test]
-async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
-    let (runtime, _dir) = database().await;
-    let conn = (*runtime).clone();
-    let owner = owner();
-    let owner_key = owner_key(&owner).unwrap();
-    let material = FactIdentityMaterialV1::new(
-        owner.clone(),
-        FactIdentitySourceV1::Application {
-            operation_id: ProvenanceId::new("memory-v2.runtime-purge").unwrap(),
-        },
-    )
-    .unwrap();
-    let fact_id = FactId::derive(&material).unwrap();
-    let identity_json = json_text(&material).unwrap();
-    seed_fact_identity(&conn, &owner_key, &fact_id, &identity_json, 10).await;
-    let initial = FactLineageEventV1::new(
-        fact_id.clone(),
-        owner.clone(),
-        FactLineageEventKindV1::PayloadAccessChanged {
-            previous: PayloadAccessState::Unavailable,
-            current: PayloadAccessState::Eligible,
-        },
-        UtcMicros(10),
-        None,
-    )
-    .unwrap();
-    insert_event(&conn, &owner_key, &initial, 10).await.unwrap();
-    seed_current_fact(&conn, &owner_key, &fact_id, initial.event_id(), 10).await;
-    conn.execute(
-        "INSERT INTO memory_v2_assertions(
-            assertion_id, fact_id, owner_kind, project_id, owner_json,
-            assertion_header_json, kind_json, payload_reference_json,
-            receipt_json, asserted_at, actor_id
-         ) VALUES(
-            'assertion.runtime-purge', ?1, ?2, ?3, ?4,
-            '{\"assertion_id\":\"assertion.runtime-purge\"}', '{}', '{}', '{}', 10, NULL
-         )",
-        params![
-            fact_id.as_str(),
-            owner_key.kind,
-            owner_key.project_id.as_str(),
-            owner_key.json.as_str()
-        ],
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO memory_v2_assertion_payloads(
-            assertion_id, fact_id, owner_kind, project_id, payload_json, content
-         ) VALUES(
-            'assertion.runtime-purge', ?1, ?2, ?3,
-            '{\"content\":\"runtime-purge-canary\"}', 'runtime-purge-canary'
-         )",
-        params![
-            fact_id.as_str(),
-            owner_key.kind,
-            owner_key.project_id.as_str()
-        ],
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO memory_v2_assertion_vectors(
-            assertion_id, fact_id, owner_kind, project_id, vector, algebra, dimensions, precision
-         ) VALUES(
-            'assertion.runtime-purge', ?1, ?2, ?3, x'0102', 'fixture', 2, 'f32'
-         )",
-        params![
-            fact_id.as_str(),
-            owner_key.kind,
-            owner_key.project_id.as_str()
-        ],
-    )
-    .await
-    .unwrap();
-
-    let source = source_store_id();
-    assert!(
-        purge_memory_v2_fact(
-            &conn,
-            &owner,
-            &source,
-            &fact_id,
-            initial.event_id(),
-            UtcMicros(20),
-        )
-        .await
-        .unwrap()
-        .payload_purged()
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertion_payloads").await,
-        0
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertion_vectors").await,
-        0
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_assertion_payloads_fts
-             WHERE memory_v2_assertion_payloads_fts MATCH '\"runtime-purge-canary\"'"
-        )
-        .await,
-        0
-    );
-    assert_eq!(
-        current_fact_state(&conn, &owner_key, &fact_id)
-            .await
-            .unwrap()
-            .access,
-        PayloadAccessState::Deleted
-    );
-}
-
-#[tokio::test]
 async fn owner_archive_exports_and_imports_production_writer_closure_idempotently() {
     let (source_runtime, _source_dir) = database().await;
     let source_conn = (*source_runtime).clone();
@@ -351,12 +175,10 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
     let target_conn = (*target_runtime).clone();
     let owner = owner();
     let owner_key = owner_key(&owner).unwrap();
-    let source_store = source_store_id();
     let material = FactIdentityMaterialV1::new(
         owner.clone(),
-        FactIdentitySourceV1::Legacy {
-            source_store_id: source_store.clone(),
-            legacy_fact_id: 91,
+        FactIdentitySourceV1::Application {
+            operation_id: ProvenanceId::new("memory-v2.archive-test").unwrap(),
         },
     )
     .unwrap();
@@ -369,25 +191,32 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
         100,
     )
     .await;
-    let mapping = LegacyFactMappingV1::new(
-        owner.clone(),
-        source_store,
-        91,
-        fact_id.clone(),
-        LegacyHistoryCoverageV1::Complete,
-        UtcMicros(100),
-    )
-    .unwrap();
-    seed_legacy_mapping(&source_conn, &owner_key, &mapping).await;
     let event = FactLineageEventV1::new(
         fact_id.clone(),
         owner.clone(),
-        FactLineageEventKindV1::LegacyImported { mapping },
+        FactLineageEventKindV1::PayloadAccessChanged {
+            previous: PayloadAccessState::Unavailable,
+            current: PayloadAccessState::Eligible,
+        },
         UtcMicros(100),
         None,
     )
     .unwrap();
-    insert_event(&source_conn, &owner_key, &event, 100)
+    source_conn
+        .execute(
+            "INSERT INTO memory_v2_lineage_events(
+                event_id, fact_id, owner_kind, project_id, event_json, occurred_at, recorded_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                event.event_id().as_str(),
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+                json_text(&event).unwrap(),
+                event.occurred_at().0,
+                100,
+            ],
+        )
         .await
         .unwrap();
     seed_current_fact(&source_conn, &owner_key, &fact_id, event.event_id(), 100).await;
@@ -401,7 +230,6 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
         tracedecay_store::MemoryV2ArchiveFamilyV1::Fact,
         tracedecay_store::MemoryV2ArchiveFamilyV1::LineageEvent,
         tracedecay_store::MemoryV2ArchiveFamilyV1::CurrentFact,
-        tracedecay_store::MemoryV2ArchiveFamilyV1::LegacyFactMap,
     ] {
         assert!(
             archive

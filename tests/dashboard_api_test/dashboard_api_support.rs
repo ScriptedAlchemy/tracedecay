@@ -383,7 +383,7 @@ pub(crate) struct DashboardMemoryFixture {
 pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) -> DashboardMemoryFixture {
     // Seed through the public TraceDecay facade so the canonical fact/event
     // store and its compatibility projection stay coherent. Dashboard tests
-    // must not manufacture post-cutover legacy rows directly.
+    // must not manufacture compatibility projection rows directly.
     let fixtures = [
         (
             "Cache invalidation policy must be explicit",

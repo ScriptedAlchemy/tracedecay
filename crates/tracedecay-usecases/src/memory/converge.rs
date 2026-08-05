@@ -71,8 +71,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     /// `action` names the trigger (e.g. `"dashboard-startup-repair"`) used
     /// for the pass's generated operation identity. Saturation is reported as
     /// [`tracedecay_application::DerivedMemoryConvergenceStateV1::Pending`];
-    /// the caller proceeds while the existing daemon scheduler owns the
-    /// remaining durable backlog.
+    /// a later convergence trigger can advance the remaining bounded backlog.
     pub async fn converge_derived_memory(
         &self,
         action: &str,
@@ -81,8 +80,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         if report.is_pending() {
             tracing::warn!(
                 "Derived-memory convergence for {action} remains pending after one bounded pass; \
-                 serving possibly-stale derived state while the daemon repair scheduler owns \
-                 remaining work"
+                 serving possibly-stale derived state until a later convergence trigger"
             );
         }
         Ok(report)

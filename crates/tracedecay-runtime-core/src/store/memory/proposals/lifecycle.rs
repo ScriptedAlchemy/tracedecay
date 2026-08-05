@@ -153,7 +153,7 @@ async fn compatibility_insert_proposal_tx(
     ) {
         return Err(storage_message(
             COMPATIBILITY_WRITE_OPERATION,
-            "compatibility proposal initial state is not durable in V22",
+            "compatibility proposal initial state is not durable",
         ));
     }
     let transition_json = compatibility_proposal_transition_json(

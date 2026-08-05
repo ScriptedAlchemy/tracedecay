@@ -1,5 +1,4 @@
-//! V23 compatibility-bank projection writers (dirty marking, upsert, delete,
-//! and dirty clearing) plus their owner-key helper.
+//! Compatibility-bank projection writers and their owner-key helper.
 
 use tracedecay_domain::{FactOwnerV1, SourceStoreId, UtcMicros};
 
@@ -8,12 +7,11 @@ use crate::errors::Result;
 
 use super::super::types::OwnerKey;
 use super::super::{
-    MemoryV2Executor, OPERATION, V23_COMPATIBILITY_BANK_VECTOR_BYTES,
-    V23_COMPATIBILITY_BANK_VECTOR_HEADER, db_error, db_message, owner_key, validate_scope,
-    validate_v1_compatibility_source,
+    COMPATIBILITY_BANK_VECTOR_BYTES, COMPATIBILITY_BANK_VECTOR_HEADER, MemoryV2Executor, OPERATION,
+    db_error, db_message, owner_key, validate_scope, validate_v1_compatibility_source,
 };
 
-/// Marks one owner-bound V23 compatibility-bank projection dirty inside the
+/// Marks one owner-bound compatibility-bank projection dirty inside the
 /// caller's authoritative writer transaction.
 pub(in crate::db) async fn mark_memory_v2_compatibility_bank_dirty_in_transaction(
     conn: &impl MemoryV2Executor,
@@ -47,7 +45,7 @@ pub(in crate::db) async fn mark_memory_v2_compatibility_bank_dirty_in_transactio
     .map_err(|error| db_error(OPERATION, error))
 }
 
-/// Replaces one owner-bound V23 compatibility-bank projection inside the
+/// Replaces one owner-bound compatibility-bank projection inside the
 /// caller's authoritative writer transaction. The strict binary shape is the
 /// canonical f32-2048 FHRR encoding, never a legacy global-bank payload.
 pub(in crate::db) async fn upsert_memory_v2_compatibility_bank_in_transaction(
@@ -60,8 +58,8 @@ pub(in crate::db) async fn upsert_memory_v2_compatibility_bank_in_transaction(
     updated_at: UtcMicros,
 ) -> Result<()> {
     let owner = compatibility_bank_owner_key(owner, source_store_id, bank_name)?;
-    if vector.len() != V23_COMPATIBILITY_BANK_VECTOR_BYTES
-        || vector[..8] != V23_COMPATIBILITY_BANK_VECTOR_HEADER
+    if vector.len() != COMPATIBILITY_BANK_VECTOR_BYTES
+        || vector[..8] != COMPATIBILITY_BANK_VECTOR_HEADER
     {
         return Err(db_message(
             OPERATION,
@@ -105,7 +103,7 @@ pub(in crate::db) async fn upsert_memory_v2_compatibility_bank_in_transaction(
     .map_err(|error| db_error(OPERATION, error))
 }
 
-/// Deletes an empty owner-bound V23 compatibility-bank projection inside the
+/// Deletes an empty owner-bound compatibility-bank projection inside the
 /// caller's authoritative writer transaction.
 pub(in crate::db) async fn delete_memory_v2_compatibility_bank_in_transaction(
     conn: &impl MemoryV2Executor,
@@ -131,7 +129,7 @@ pub(in crate::db) async fn delete_memory_v2_compatibility_bank_in_transaction(
     .map_err(|error| db_error(OPERATION, error))
 }
 
-/// Clears a V23 dirty projection only when the caller rebuilt the exact owner
+/// Clears a dirty projection only when the caller rebuilt the exact owner
 /// generation it observed. A concurrent mark therefore remains pending.
 pub(in crate::db) async fn clear_memory_v2_compatibility_bank_dirty_in_transaction(
     conn: &impl MemoryV2Executor,

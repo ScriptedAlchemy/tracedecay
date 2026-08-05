@@ -4,12 +4,14 @@ use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params, params_from_iter};
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactEventId, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
-    PayloadAccessState, UtcMicros,
+    LegacyFactMappingV1, LegacyHistoryCoverageV1, PayloadAccessState, SourceStoreId, UtcMicros,
 };
 use tracedecay_store::{FactCurrentQuery, FactLineageQuery, StoredFactV1};
 
 use super::super::support::{decode, invalid, usize_to_i64};
 use super::OwnerColumns;
+
+const COMPATIBILITY_SOURCE_STORE: &str = "legacy-memory-v1";
 
 pub(super) fn read_current(
     connection: &rusqlite::Connection,
@@ -20,7 +22,8 @@ pub(super) fn read_current(
         .query_row(
             "SELECT facts.owner_json, current.payload_access, current.trust_score,
                     current.active_assertion_id, current.last_event_id, current.updated_at,
-                    payload.payload_json, legacy.mapping_json
+                    payload.payload_json, projections.fact_id,
+                    facts.created_at
              FROM memory_v2_current_facts AS current
              JOIN memory_v2_facts AS facts
                USING(fact_id, owner_kind, project_id)
@@ -29,8 +32,8 @@ pub(super) fn read_current(
               AND payload.fact_id = current.fact_id
               AND payload.owner_kind = current.owner_kind
               AND payload.project_id = current.project_id
-             LEFT JOIN memory_v2_legacy_map AS legacy
-               USING(fact_id, owner_kind, project_id)
+             LEFT JOIN memory_facts AS projections
+               ON projections.canonical_fact_id = current.fact_id
              WHERE current.fact_id = ?1
                AND current.owner_kind = ?2
                AND current.project_id = ?3",
@@ -44,7 +47,8 @@ pub(super) fn read_current(
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             },
         )
@@ -57,7 +61,8 @@ pub(super) fn read_current(
         last_event,
         updated_at,
         payload,
-        legacy,
+        projection_id,
+        created_at,
     )) = row
     else {
         return Ok(None);
@@ -75,6 +80,24 @@ pub(super) fn read_current(
     let Some(active_assertion) = active_assertion else {
         return Ok(None);
     };
+    let legacy_mapping = match projection_id {
+        Some(legacy_fact_id) => {
+            let source_store_id =
+                SourceStoreId::new(COMPATIBILITY_SOURCE_STORE).map_err(invalid)?;
+            Some(
+                LegacyFactMappingV1::new(
+                    owner_value.clone(),
+                    source_store_id,
+                    legacy_fact_id,
+                    query.fact_id().clone(),
+                    LegacyHistoryCoverageV1::Complete,
+                    UtcMicros(created_at),
+                )
+                .map_err(invalid)?,
+            )
+        }
+        None => None,
+    };
     StoredFactV1::new(
         query.fact_id().clone(),
         owner_value,
@@ -83,9 +106,7 @@ pub(super) fn read_current(
         Confidence::new(trust.unwrap_or(0.5)).map_err(invalid)?,
         FactAssertionId::new(active_assertion).map_err(invalid)?,
         FactEventId::new(last_event).map_err(invalid)?,
-        legacy
-            .map(decode::<tracedecay_domain::LegacyFactMappingV1>)
-            .transpose()?,
+        legacy_mapping,
         UtcMicros(updated_at),
     )
     .map(Some)

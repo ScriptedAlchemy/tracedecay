@@ -1,4 +1,4 @@
-//! Compatibility feedback-history repair, missing-vector repair, and dirty-bank rebuilds.
+//! Bounded holographic projection, vector, and dirty-bank rebuilds.
 
 use crate::db::Database;
 use crate::memory::encoding::HolographicEncoder;
@@ -9,12 +9,13 @@ use serde_json::json;
 
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    CompatibilityFactRepairVectorV1, CompatibilityFeedbackRepairProgressV1,
-    CompatibilityMemoryRepairStatsV1, FactCompatibilityResult, FactStoreError, FactStoreResult,
+    CompatibilityFactRepairVectorV1, CompatibilityMemoryRepairStatsV1, FactCompatibilityResult,
+    FactStoreError, FactStoreResult,
 };
 
 use super::crud::{
-    compatibility_mark_owner_banks_dirty_tx, compatibility_mirror_vector, load_current_fact_tx,
+    CompatibilityMirrorInsertV1, compatibility_mark_owner_banks_dirty_tx,
+    compatibility_mirror_insert_tx, compatibility_mirror_vector, load_current_fact_tx,
 };
 use super::curation::{
     compatibility_available_curation_fact_tx, compatibility_curation_evidence_ids_tx,
@@ -24,23 +25,20 @@ use super::envelope::{
     compatibility_record_operation_receipt_tx,
 };
 use super::primitives::{
-    COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey,
-    compatibility_legacy_timestamp, compatibility_now, compatibility_source_store_id,
-    nonnegative_u64, row_i64, row_string, storage_error, storage_message,
+    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_legacy_timestamp, compatibility_now,
+    compatibility_source_store_id, row_i64, row_string, storage_error, storage_message,
 };
 use super::projection::compatibility_required_mapping_tx;
 
-/// Per-repair-pass batch caps. The daemon scheduler treats a pass that hits
-/// either cap as incomplete and keeps ticking rather than going idle with a
-/// converging backlog.
+/// Per-pass bounds used to report truthful pending convergence.
 pub(crate) const COMPATIBILITY_REPAIR_VECTOR_BATCH: i64 = 512;
 
 pub(crate) const COMPATIBILITY_REPAIR_BANK_BATCH: i64 = 32;
 
 /// True when a repair pass filled either per-pass batch cap, so backlog may
 /// remain behind the cap. Only the store computes this — it owns the caps — so
-/// the daemon scheduler can consume [`CompatibilityMemoryRepairStatsV1::saturated`]
-/// without depending on these store-internal constants.
+/// callers can consume [`CompatibilityMemoryRepairStatsV1::saturated`] without
+/// depending on these store-internal constants.
 fn compatibility_repair_batches_saturated(
     missing_vectors_repaired: u64,
     banks_rebuilt: u64,
@@ -110,6 +108,15 @@ pub(super) async fn repair_compatibility_memory_tx(
     operation_id: &tracedecay_domain::ProvenanceId,
     actor: Option<&ActorId>,
 ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1> {
+    let projections_rebuilt = rebuild_missing_holographic_projections_tx(
+        db,
+        transaction,
+        owner,
+        COMPATIBILITY_REPAIR_VECTOR_BATCH,
+    )
+    .await?;
+    let projection_rebuild_saturated =
+        projections_rebuilt >= COMPATIBILITY_REPAIR_VECTOR_BATCH as u64;
     let request_digest = compatibility_repair_request_digest(owner, actor)?;
     if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
         transaction,
@@ -125,10 +132,13 @@ pub(super) async fn repair_compatibility_memory_tx(
         let banks_rebuilt = compatibility_receipt_u64(&receipt.receipt, "banks_rebuilt")?;
         return Ok(
             CompatibilityMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
-                .with_saturated(compatibility_repair_batches_saturated(
-                    missing_vectors_repaired,
-                    banks_rebuilt,
-                )),
+                .with_saturated(
+                    projection_rebuild_saturated
+                        || compatibility_repair_batches_saturated(
+                            missing_vectors_repaired,
+                            banks_rebuilt,
+                        ),
+                ),
         );
     }
     let now = compatibility_now()?;
@@ -159,11 +169,113 @@ pub(super) async fn repair_compatibility_memory_tx(
     .await?;
     Ok(
         CompatibilityMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
-            .with_saturated(compatibility_repair_batches_saturated(
-                missing_vectors_repaired,
-                banks_rebuilt,
-            )),
+            .with_saturated(
+                projection_rebuild_saturated
+                    || compatibility_repair_batches_saturated(
+                        missing_vectors_repaired,
+                        banks_rebuilt,
+                    ),
+            ),
     )
+}
+
+async fn rebuild_missing_holographic_projections_tx(
+    db: &Database,
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    limit: i64,
+) -> FactStoreResult<u64> {
+    let key = OwnerKey::new(owner)?;
+    let mut rows = transaction
+        .query(
+            "SELECT current_facts.fact_id
+             FROM memory_v2_current_facts AS current_facts
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = current_facts.fact_id
+              AND facts.owner_kind = current_facts.owner_kind
+              AND facts.project_id = current_facts.project_id
+             LEFT JOIN memory_facts AS projections
+               ON projections.canonical_fact_id = current_facts.fact_id
+             WHERE current_facts.owner_kind = ?1
+               AND current_facts.project_id = ?2
+               AND facts.owner_json = ?3
+               AND current_facts.payload_access = 'eligible'
+               AND current_facts.active_assertion_id IS NOT NULL
+               AND projections.fact_id IS NULL
+             ORDER BY current_facts.fact_id ASC
+             LIMIT ?4",
+            params![key.kind, key.project_id.as_str(), key.json.as_str(), limit,],
+        )
+        .await
+        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+    let mut fact_ids = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+    {
+        fact_ids.push(FactId::new(row_string(
+            &row,
+            0,
+            COMPATIBILITY_WRITE_OPERATION,
+        )?)?);
+    }
+    drop(rows);
+
+    let now = compatibility_now()?;
+    let mut rebuilt = 0_u64;
+    for fact_id in fact_ids {
+        let fact = load_current_fact_tx(transaction, &key, owner, &fact_id)
+            .await?
+            .ok_or_else(|| {
+                storage_message(
+                    COMPATIBILITY_WRITE_OPERATION,
+                    "canonical fact disappeared during holographic projection rebuild",
+                )
+            })?;
+        let payload = fact
+            .payload()
+            .ok_or(FactStoreError::PayloadAccessMismatch)?;
+        match compatibility_mirror_insert_tx(
+            db,
+            transaction,
+            owner,
+            payload,
+            "restored",
+            fact.trust(),
+            now,
+        )
+        .await?
+        {
+            CompatibilityMirrorInsertV1::Inserted(projection_id) => {
+                let changed = transaction
+                    .execute(
+                        "UPDATE memory_facts
+                         SET canonical_fact_id = ?1
+                         WHERE fact_id = ?2 AND canonical_fact_id IS NULL",
+                        params![fact_id.as_str(), projection_id],
+                    )
+                    .await
+                    .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+                if changed != 1 {
+                    return Err(storage_message(
+                        COMPATIBILITY_WRITE_OPERATION,
+                        "rebuilt holographic projection could not bind canonical identity",
+                    ));
+                }
+                rebuilt = rebuilt.saturating_add(1);
+            }
+            CompatibilityMirrorInsertV1::Existing { fact_id: existing } => {
+                if existing != fact_id {
+                    return Err(storage_message(
+                        COMPATIBILITY_WRITE_OPERATION,
+                        "holographic projection content is bound to another canonical fact",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(rebuilt)
 }
 
 pub(super) async fn compatibility_repair_missing_vectors_tx(
@@ -173,41 +285,38 @@ pub(super) async fn compatibility_repair_missing_vectors_tx(
     limit: i64,
 ) -> FactStoreResult<u64> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
-            "SELECT mappings.fact_id
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
+            "SELECT legacy_facts.canonical_fact_id
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = legacy_facts.canonical_fact_id
              JOIN memory_v2_current_facts AS current_facts
-               ON current_facts.fact_id = mappings.fact_id
-              AND current_facts.owner_kind = mappings.owner_kind
-              AND current_facts.project_id = mappings.project_id
+               ON current_facts.fact_id = facts.fact_id
+              AND current_facts.owner_kind = facts.owner_kind
+              AND current_facts.project_id = facts.project_id
              JOIN memory_v2_assertion_payloads AS payloads
                ON payloads.assertion_id = current_facts.active_assertion_id
               AND payloads.fact_id = current_facts.fact_id
               AND payloads.owner_kind = current_facts.owner_kind
               AND payloads.project_id = current_facts.project_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+             WHERE facts.owner_kind = ?1
+               AND facts.project_id = ?2
+               AND facts.owner_json = ?3
                AND current_facts.payload_access = 'eligible'
                AND (
                     legacy_facts.hrr_vector IS NULL
                     OR legacy_facts.hrr_algebra <> 'amari_fhrr'
-                    OR legacy_facts.hrr_dim <> ?5
-                    OR legacy_facts.hrr_precision <> ?6
-                    OR length(legacy_facts.hrr_vector) <> ?7
+                    OR legacy_facts.hrr_dim <> ?4
+                    OR legacy_facts.hrr_precision <> ?5
+                    OR length(legacy_facts.hrr_vector) <> ?6
                )
-             ORDER BY legacy_facts.updated_at DESC, mappings.fact_id ASC
-             LIMIT ?8",
+             ORDER BY legacy_facts.updated_at DESC, legacy_facts.canonical_fact_id ASC
+             LIMIT ?7",
             params![
                 key.kind,
                 key.project_id.as_str(),
                 key.json.as_str(),
-                source_store_id.as_str(),
                 HolographicEncoder::DIMENSIONS as i64,
                 HolographicEncoder::HRR_PRECISION,
                 HolographicEncoder::SERIALIZED_F32_BYTES as i64,
@@ -290,9 +399,8 @@ fn compatibility_average_vectors(vectors: &[Vec<f64>]) -> Vec<f64> {
 }
 
 /// Marks every populated bank dirty when the owner has eligible facts but no
-/// materialized bank projections at all — the state a store lands in when its
-/// legacy cutover predates dirty-marking (or a bank table was lost). Repair
-/// then rebuilds them in the same pass; stores with any banks are untouched.
+/// materialized bank projections at all. Repair then rebuilds them in the same
+/// pass; stores with any banks are untouched.
 async fn compatibility_mark_absent_banks_dirty_tx(
     db: &Database,
     transaction: &Transaction<'_>,
@@ -423,34 +531,34 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
         }
         let mut vectors = transaction
             .query(
-                "SELECT legacy_facts.fact_id, mappings.fact_id, legacy_facts.hrr_vector
-                 FROM memory_v2_legacy_map AS mappings
-                 JOIN memory_facts AS legacy_facts
-                   ON legacy_facts.fact_id = mappings.legacy_fact_id
+                "SELECT legacy_facts.fact_id, legacy_facts.canonical_fact_id,
+                        legacy_facts.hrr_vector
+                 FROM memory_facts AS legacy_facts
+                 JOIN memory_v2_facts AS facts
+                   ON facts.fact_id = legacy_facts.canonical_fact_id
                  JOIN memory_v2_current_facts AS current_facts
-                   ON current_facts.fact_id = mappings.fact_id
-                  AND current_facts.owner_kind = mappings.owner_kind
-                  AND current_facts.project_id = mappings.project_id
+                   ON current_facts.fact_id = facts.fact_id
+                  AND current_facts.owner_kind = facts.owner_kind
+                  AND current_facts.project_id = facts.project_id
                  JOIN memory_v2_assertion_payloads AS payloads
                    ON payloads.assertion_id = current_facts.active_assertion_id
                   AND payloads.fact_id = current_facts.fact_id
                   AND payloads.owner_kind = current_facts.owner_kind
                   AND payloads.project_id = current_facts.project_id
-                 WHERE mappings.owner_kind = ?1 AND mappings.project_id = ?2
-                   AND mappings.owner_json = ?3 AND mappings.source_store_id = ?4
+                 WHERE facts.owner_kind = ?1 AND facts.project_id = ?2
+                   AND facts.owner_json = ?3
                    AND current_facts.payload_access = 'eligible'
                    AND legacy_facts.hrr_vector IS NOT NULL
                    AND legacy_facts.hrr_algebra = 'amari_fhrr'
-                   AND legacy_facts.hrr_dim = ?6
-                   AND legacy_facts.hrr_precision = ?7
-                   AND length(legacy_facts.hrr_vector) = ?8
-                   AND (?5 = 'all' OR legacy_facts.category = ?5)
+                   AND legacy_facts.hrr_dim = ?5
+                   AND legacy_facts.hrr_precision = ?6
+                   AND length(legacy_facts.hrr_vector) = ?7
+                   AND (?4 = 'all' OR legacy_facts.category = ?4)
                  ORDER BY legacy_facts.fact_id ASC",
                 params![
                     key.kind,
                     key.project_id.as_str(),
                     key.json.as_str(),
-                    source_store_id.as_str(),
                     bank_name.as_str(),
                     HolographicEncoder::DIMENSIONS as i64,
                     HolographicEncoder::HRR_PRECISION,
@@ -582,58 +690,4 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
         }
     }
     Ok(rebuilt)
-}
-
-pub(super) async fn compatibility_feedback_history_repair_progress_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-) -> FactCompatibilityResult<CompatibilityFeedbackRepairProgressV1> {
-    let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let mut rows = transaction
-        .query(
-            "SELECT owner_json, feedback_frontier, feedback_cursor, phase
-             FROM memory_v2_feedback_history_repair_progress
-             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3",
-            params![key.kind, key.project_id.as_str(), source_store_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
-    else {
-        return Ok(CompatibilityFeedbackRepairProgressV1::NotRequired);
-    };
-    if row_string(&row, 0, COMPATIBILITY_READ_OPERATION)? != key.json {
-        return Err(FactStoreError::OwnerMismatch.into());
-    }
-    let frontier = nonnegative_u64(
-        row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?,
-        "feedback repair frontier",
-    )?;
-    let cursor = nonnegative_u64(
-        row_i64(&row, 2, COMPATIBILITY_READ_OPERATION)?,
-        "feedback repair cursor",
-    )?;
-    if cursor > frontier {
-        return Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
-            "feedback repair cursor exceeds captured frontier",
-        )
-        .into());
-    }
-    match row_string(&row, 3, COMPATIBILITY_READ_OPERATION)?.as_str() {
-        "pending" => Ok(CompatibilityFeedbackRepairProgressV1::Incomplete {
-            processed: 0,
-            remaining: Some(frontier.saturating_sub(cursor)),
-        }),
-        "complete" => Ok(CompatibilityFeedbackRepairProgressV1::Complete { processed: 0 }),
-        _ => Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
-            "feedback repair progress has an unsupported phase",
-        )
-        .into()),
-    }
 }

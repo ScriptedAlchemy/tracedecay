@@ -19,6 +19,8 @@ fn assertion_schema(connection: &rusqlite::Connection) {
                     owner_kind TEXT NOT NULL,
                     project_id TEXT NOT NULL,
                     owner_json TEXT NOT NULL,
+                    identity_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
                     PRIMARY KEY (fact_id, owner_kind, project_id)
                  );
                  CREATE TABLE memory_v2_current_facts (
@@ -606,11 +608,9 @@ fn current_read_omits_fact_without_active_assertion() {
                     project_id TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                  );
-                 CREATE TABLE memory_v2_legacy_map (
-                    fact_id TEXT NOT NULL,
-                    owner_kind TEXT NOT NULL,
-                    project_id TEXT NOT NULL,
-                    mapping_json TEXT NOT NULL
+                 CREATE TABLE memory_facts (
+                    fact_id INTEGER PRIMARY KEY,
+                    canonical_fact_id TEXT UNIQUE
                  );",
         )
         .unwrap();
@@ -619,8 +619,8 @@ fn current_read_omits_fact_without_active_assertion() {
     connection
         .execute(
             "INSERT INTO memory_v2_facts
-                    (fact_id, owner_kind, project_id, owner_json)
-                 VALUES (?1, 'profile', '', ?2)",
+                    (fact_id, owner_kind, project_id, owner_json, identity_json, created_at)
+                 VALUES (?1, 'profile', '', ?2, '{}', 1)",
             params![fact_id.as_str(), encode(&owner).unwrap()],
         )
         .unwrap();

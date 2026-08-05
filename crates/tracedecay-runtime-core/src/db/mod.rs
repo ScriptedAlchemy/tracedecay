@@ -54,7 +54,6 @@ pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
 pub use fingerprints::StoredFingerprint;
 pub use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;
-pub(crate) use memory_v2::MemoryV2LegacyPurgeReceipt;
 pub use memory_v2::{
     MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, import_memory_v2_owner_archive,
     list_memory_v2_archive_owners, plan_memory_v2_owner_archive_import,

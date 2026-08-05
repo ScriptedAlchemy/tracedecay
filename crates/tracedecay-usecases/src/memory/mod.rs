@@ -74,8 +74,7 @@ pub fn memory_application_error(error: MemoryApplicationError) -> TraceDecayErro
 /// Builds a [`MemoryApplication`] directly over a database handle's
 /// [`DatabaseFactStore`]. The shared resolver for every route that already
 /// holds an open [`Database`] rather than a higher-level fact-store handle —
-/// used by the root crate's daemon scheduler and MCP lifecycle paths as well
-/// as the dashboard API.
+/// used by daemon and MCP lifecycle paths as well as the dashboard API.
 pub fn memory_application_for_db(
     owner: FactOwnerV1,
     db: &Database,
@@ -96,9 +95,8 @@ impl<A> MemoryApplication<A> {
         Self::new_with_compatibility_scope(MemoryCompatibilityScope::runtime(owner)?, authority)
     }
 
-    /// Explicit construction path for a migrated V1 source with a typed,
-    /// immutable source-store identity. Callers never derive this from a path
-    /// or transport field.
+    /// Explicit construction path for a typed, immutable compatibility source
+    /// identity. Callers never derive this from a path or transport field.
     pub fn new_with_compatibility_scope(
         compatibility_scope: MemoryCompatibilityScope,
         authority: A,

@@ -5,11 +5,11 @@
 
 mod baseline;
 mod compatibility;
+mod final_shape;
 mod introspection;
 mod proposals;
-mod upgrades;
 
 pub(in crate::db) use baseline::create_schema;
+pub(in crate::db) use final_shape::install_final_shape;
 #[cfg(test)]
 pub(in crate::db::memory_v2) use introspection::{table_exists, table_has_column};
-pub(in crate::db) use upgrades::{install_v22_fresh_schema, install_v23_fresh_schema};

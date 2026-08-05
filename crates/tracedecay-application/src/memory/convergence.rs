@@ -6,11 +6,11 @@ use std::future::Future;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DerivedMemoryConvergenceStateV1 {
     Converged,
-    /// More durable repair work remains for the daemon scheduler.
+    /// More bounded repair work remains for a later convergence pass.
     Pending,
 }
 
-/// Store-neutral progress for compatibility feedback-history repair.
+/// Store-neutral feedback-history availability state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DerivedMemoryFeedbackHistoryRepairV1 {
     /// The repair authority did not report a progress state.
@@ -18,9 +18,9 @@ pub enum DerivedMemoryFeedbackHistoryRepairV1 {
     Unknown,
     /// No feedback-history repair is needed.
     NotRequired,
-    /// Repair completed during the observed pass.
+    /// History is complete for the observed authority.
     Complete { processed: u64 },
-    /// Repair advanced a bounded batch with durable work remaining.
+    /// History is incomplete and durable work remains.
     Incomplete {
         processed: u64,
         remaining: Option<u64>,
