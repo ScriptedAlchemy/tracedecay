@@ -337,6 +337,7 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeIndexCadenceTriggerV1::Overflow => 3,
             CodeIndexCadenceTriggerV1::QueryAdmission => 4,
             CodeIndexCadenceTriggerV1::BusyFollowUp => 5,
+            CodeIndexCadenceTriggerV1::GitWatcher => 6,
         }
     }
 
@@ -346,6 +347,7 @@ impl CodeIndexSchedulerRegistryV1 {
             3 => CodeIndexCadenceTriggerV1::Overflow,
             4 => CodeIndexCadenceTriggerV1::QueryAdmission,
             5 => CodeIndexCadenceTriggerV1::BusyFollowUp,
+            6 => CodeIndexCadenceTriggerV1::GitWatcher,
             _ => CodeIndexCadenceTriggerV1::Mount,
         }
     }

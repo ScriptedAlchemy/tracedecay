@@ -5,9 +5,8 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use super::{
-    GitWatcher, WatchState, request_freshness_for_repository, retire_missing_repository_owners,
-};
+use super::ownership::retire_missing_repository_owners;
+use super::{GitWatcher, WatchState, request_freshness_for_repository};
 
 pub(super) async fn run(watcher: GitWatcher) {
     let mut ticker = tokio::time::interval(Duration::from_secs(60));

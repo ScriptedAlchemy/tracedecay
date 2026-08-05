@@ -2,13 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 #[cfg(test)]
 use std::time::Instant as StdInstant;
 
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::time::Instant;
 
 use super::DirtySet;
@@ -20,6 +20,12 @@ use crate::daemon::maintenance::MaintenanceCoordinator;
 pub(super) enum WorktreeRegistration {
     Ready,
     Capacity,
+    Retired,
+}
+
+struct WatchStateOwnership {
+    worktrees: BTreeMap<PathBuf, PathBuf>,
+    retired: bool,
 }
 
 #[derive(Clone)]
@@ -93,8 +99,8 @@ impl OperationScanProbe {
 pub(super) struct WatchState {
     pub(super) common_dir: PathBuf,
     pub(super) config: SyncConfig,
-    worktrees: RwLock<BTreeMap<PathBuf, PathBuf>>,
-    pub(super) dirty: Mutex<DirtySet>,
+    ownership: StdMutex<WatchStateOwnership>,
+    pub(super) dirty: AsyncMutex<DirtySet>,
     pub(super) reconciliation_pending: AtomicBool,
     pub(super) wake: Notify,
     pub(super) reconfigure: Notify,
@@ -102,7 +108,7 @@ pub(super) struct WatchState {
     retry_backoff_ms: AtomicU64,
     pub(super) maintenance: MaintenanceCoordinator,
     pub(super) health: ProjectHealth,
-    pub(super) task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     retirement: CancellationToken,
     #[cfg(test)]
     pub(super) entered_debounce: Notify,
@@ -141,8 +147,11 @@ impl WatchState {
         Self {
             common_dir,
             config,
-            worktrees: RwLock::new(BTreeMap::from([(project_root, git_dir)])),
-            dirty: Mutex::new(DirtySet::default()),
+            ownership: StdMutex::new(WatchStateOwnership {
+                worktrees: BTreeMap::from([(project_root, git_dir)]),
+                retired: false,
+            }),
+            dirty: AsyncMutex::new(DirtySet::default()),
             reconciliation_pending: AtomicBool::new(false),
             wake: Notify::new(),
             reconfigure: Notify::new(),
@@ -150,7 +159,7 @@ impl WatchState {
             retry_backoff_ms: AtomicU64::new(250),
             maintenance,
             health: ProjectHealth::default(),
-            task: Mutex::new(None),
+            task: StdMutex::new(None),
             retirement: CancellationToken::new(),
             #[cfg(test)]
             entered_debounce: Notify::new(),
@@ -174,44 +183,52 @@ impl WatchState {
         git_dir: PathBuf,
         max_worktrees: usize,
     ) -> WorktreeRegistration {
-        let mut worktrees = self
-            .worktrees
-            .write()
+        let mut ownership = self
+            .ownership
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if worktrees.get(&project_root) == Some(&git_dir) {
+        if ownership.retired {
+            return WorktreeRegistration::Retired;
+        }
+        if ownership.worktrees.get(&project_root) == Some(&git_dir) {
             return WorktreeRegistration::Ready;
         }
-        if !worktrees.contains_key(&project_root) && worktrees.len() >= max_worktrees {
+        if !ownership.worktrees.contains_key(&project_root)
+            && ownership.worktrees.len() >= max_worktrees
+        {
             return WorktreeRegistration::Capacity;
         }
-        worktrees.insert(project_root, git_dir);
-        drop(worktrees);
+        ownership.worktrees.insert(project_root, git_dir);
+        drop(ownership);
         self.reconfigure.notify_one();
         WorktreeRegistration::Ready
     }
 
     pub(super) fn worktree_roots(&self) -> Vec<PathBuf> {
-        self.worktrees
-            .read()
+        self.ownership
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .worktrees
             .keys()
             .cloned()
             .collect()
     }
 
     pub(super) fn git_dirs(&self) -> Vec<PathBuf> {
-        self.worktrees
-            .read()
+        self.ownership
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .worktrees
             .values()
             .cloned()
             .collect()
     }
 
     pub(super) fn worktrees(&self) -> Vec<(PathBuf, PathBuf)> {
-        self.worktrees
-            .read()
+        self.ownership
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .worktrees
             .iter()
             .map(|(root, git_dir)| (root.clone(), git_dir.clone()))
             .collect()
@@ -250,9 +267,55 @@ impl WatchState {
     }
 
     pub(super) fn retire(&self) {
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retired = true;
+        self.signal_retirement();
+    }
+
+    pub(super) fn is_retired(&self) -> bool {
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retired
+    }
+
+    fn signal_retirement(&self) {
         self.retirement.cancel();
         self.wake.notify_waiters();
         self.reconfigure.notify_waiters();
+    }
+
+    pub(super) fn retain_task(&self, handle: tokio::task::JoinHandle<()>) {
+        *self
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    }
+
+    pub(super) fn take_task(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    #[cfg(test)]
+    pub(super) fn retained_task_id(&self) -> Option<tokio::task::Id> {
+        self.task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(tokio::task::JoinHandle::id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_retained_task(&self) -> bool {
+        self.task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     pub(super) fn schedule_retry(&self) {
@@ -285,12 +348,12 @@ impl WatchState {
     }
 
     pub(super) fn prune_missing_worktrees(&self, mut should_stop: impl FnMut() -> bool) -> bool {
-        let mut worktrees = self
-            .worktrees
-            .write()
+        let mut ownership = self
+            .ownership
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut missing = Vec::new();
-        for (root, git_dir) in worktrees.iter() {
+        for (root, git_dir) in &ownership.worktrees {
             if should_stop() {
                 return false;
             }
@@ -299,23 +362,25 @@ impl WatchState {
             }
         }
         for root in missing {
-            worktrees.remove(&root);
+            ownership.worktrees.remove(&root);
+        }
+        let retired = ownership.worktrees.is_empty();
+        if retired {
+            ownership.retired = true;
+        }
+        drop(ownership);
+        if retired {
+            self.signal_retirement();
         }
         true
     }
 
-    pub(super) fn is_empty(&self) -> bool {
-        self.worktrees
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
-    }
-
     #[cfg(test)]
     pub(super) fn contains_worktree(&self, project_root: &Path) -> bool {
-        self.worktrees
-            .read()
+        self.ownership
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .worktrees
             .contains_key(project_root)
     }
 }

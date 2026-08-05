@@ -791,7 +791,7 @@ async fn shutdown_cancels_and_joins_repository_watcher_tasks() {
     watcher.shutdown().await;
 
     assert!(watcher.inner.projects.lock().await.is_empty());
-    assert!(state.task.lock().await.is_none());
+    assert!(!state.has_retained_task());
     assert_eq!(
         watcher.ensure_watching(repo.path()).await,
         GitWatcherAdmission::ShuttingDown,
@@ -849,7 +849,7 @@ async fn shutdown_cancels_and_joins_active_metadata_scan() {
         0,
         "no watcher-owned blocking scan may survive shutdown"
     );
-    assert!(state.task.lock().await.is_none());
+    assert!(!state.has_retained_task());
 }
 
 /// The safety-critical property that justifies this metadata watcher over the

@@ -51,6 +51,7 @@ use super::maintenance::retention_maintenance_enabled;
 use super::store_maintenance;
 use super::{log_daemon_event, maintenance::MaintenanceCoordinator};
 
+mod admission;
 mod backstop;
 mod health;
 mod ownership;
@@ -61,10 +62,12 @@ use health::HEARTBEAT_STALE_MILLIS;
 #[cfg(test)]
 use health::ProjectHealthSnapshot;
 use health::ProjectWatchStatus;
-use ownership::{GitWatcherShutdownOutcome, join_watcher_tasks, retire_missing_repository_owners};
+use ownership::{GitWatcherShutdownOutcome, join_watcher_tasks};
 #[cfg(test)]
 use ownership::{GitWatcherTaskFailure, GitWatcherTaskFailureKind, GitWatcherTaskOwner};
-use state::{WatchCancellation, WatchState, WorktreeRegistration};
+#[cfg(test)]
+use state::WorktreeRegistration;
+use state::{WatchCancellation, WatchState};
 #[cfg(test)]
 use watch_plan::{MAX_METADATA_WATCH_DIRECTORIES, observe_watch_plan};
 use watch_plan::{WatchInstallFailure, WatchPlanFailure, install_watches};
@@ -154,12 +157,21 @@ pub(super) struct GitWatcherInner {
     /// Whether watching is enabled at all (`auto_watch`). When false every
     /// method is a no-op so the daemon runs exactly as before this feature.
     enabled: bool,
+    admission: std::sync::Mutex<()>,
     /// Canonical git common directory → repository-scoped watch state.
     projects: Mutex<HashMap<PathBuf, Arc<WatchState>>>,
     /// Single backstop scheduler task, owned so shutdown can cancel and join it.
     backstop_task: Mutex<Option<JoinHandle<()>>>,
     shutting_down: AtomicBool,
     shutdown_completion: Mutex<Option<Shared<BoxFuture<'static, GitWatcherShutdownOutcome>>>>,
+    #[cfg(test)]
+    repository_publication_probe: ownership::PublicationRaceProbe,
+    #[cfg(test)]
+    spawn_publication_probe: ownership::PublicationRaceProbe,
+    #[cfg(test)]
+    shutdown_requested: tokio::sync::Notify,
+    #[cfg(test)]
+    lifecycle_receipts: ownership::LifecycleLinearizationReceipts,
 }
 
 impl Default for GitWatcher {
@@ -194,10 +206,19 @@ impl GitWatcher {
                 code_index_schedulers,
                 cancellation: crate::application::context::CancellationToken::new(),
                 enabled,
+                admission: std::sync::Mutex::new(()),
                 projects: Mutex::new(HashMap::new()),
                 backstop_task: Mutex::new(None),
                 shutting_down: AtomicBool::new(false),
                 shutdown_completion: Mutex::new(None),
+                #[cfg(test)]
+                repository_publication_probe: ownership::PublicationRaceProbe::default(),
+                #[cfg(test)]
+                spawn_publication_probe: ownership::PublicationRaceProbe::default(),
+                #[cfg(test)]
+                shutdown_requested: tokio::sync::Notify::new(),
+                #[cfg(test)]
+                lifecycle_receipts: ownership::LifecycleLinearizationReceipts::default(),
             }),
         }
     }
@@ -249,7 +270,16 @@ impl GitWatcher {
 
     /// Starts synchronous shutdown fencing without waiting for retained tasks.
     pub(super) fn cancel(&self) {
+        #[cfg(test)]
+        self.inner.shutdown_requested.notify_one();
+        let _admission = self
+            .inner
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.inner.shutting_down.store(true, Ordering::Release);
+        #[cfg(test)]
+        self.inner.lifecycle_receipts.record_shutdown();
         self.inner.cancellation.cancel();
     }
 
@@ -266,98 +296,27 @@ impl GitWatcher {
         // retained project server and graph handle.
 
         let mut retained = self.inner.backstop_task.lock().await;
+        let _admission = self
+            .inner
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return GitWatcherStart::ShuttingDown;
         }
         if retained.is_some() {
             return GitWatcherStart::AlreadyStarted;
         }
+        #[cfg(test)]
+        self.inner.spawn_publication_probe.block_if_armed();
         let watcher = self.clone();
         let handle = tokio::spawn(async move {
             backstop::run(watcher).await;
         });
         *retained = Some(handle);
+        #[cfg(test)]
+        self.inner.lifecycle_receipts.record_spawn();
         GitWatcherStart::Started
-    }
-
-    /// Lazily starts watching `project_root` if not already watched and under
-    /// the repository cap. Linked worktrees register distinct scheduler roots
-    /// on one common-directory watcher.
-    #[cfg(test)]
-    pub async fn ensure_watching(&self, project_root: &Path) -> GitWatcherAdmission {
-        let config = self.inner.config.clone();
-        self.ensure_watching_with_config(project_root, &config)
-            .await
-    }
-
-    pub(super) async fn ensure_watching_with_config(
-        &self,
-        project_root: &Path,
-        config: &SyncConfig,
-    ) -> GitWatcherAdmission {
-        if !self.inner.enabled || !config.auto_watch {
-            return GitWatcherAdmission::Disabled;
-        }
-        if self.inner.shutting_down.load(Ordering::Acquire) {
-            return GitWatcherAdmission::ShuttingDown;
-        }
-        let identity = match resolve_watch_identity(
-            project_root.to_path_buf(),
-            self.inner.cancellation.clone(),
-        )
-        .await
-        {
-            WatchIdentityResolution::Ready(identity) => identity,
-            WatchIdentityResolution::Cancelled => return GitWatcherAdmission::ShuttingDown,
-            WatchIdentityResolution::Unavailable => {
-                return GitWatcherAdmission::IdentityUnavailable;
-            }
-        };
-        let WatchIdentity {
-            canonical_root,
-            common_dir,
-            git_dir,
-        } = identity;
-
-        retire_missing_repository_owners(&self.inner).await;
-        let mut projects = self.inner.projects.lock().await;
-        if self.inner.shutting_down.load(Ordering::Acquire) {
-            return GitWatcherAdmission::ShuttingDown;
-        }
-        if let Some(state) = projects.get(&common_dir) {
-            return match state.register_worktree(
-                canonical_root,
-                git_dir,
-                MAX_WORKTREES_PER_REPOSITORY,
-            ) {
-                WorktreeRegistration::Ready => GitWatcherAdmission::Ready,
-                WorktreeRegistration::Capacity => GitWatcherAdmission::Capacity,
-            };
-        }
-        if projects.len() >= config.watch_max_projects {
-            // Capacity is repository-scoped so linked worktrees never consume
-            // additional OS-watcher slots.
-            return GitWatcherAdmission::Capacity;
-        }
-
-        let state = Arc::new(WatchState::new_with_config(
-            common_dir.clone(),
-            canonical_root,
-            git_dir,
-            self.inner.maintenance.clone(),
-            config.clone(),
-        ));
-        let inner = Arc::clone(&self.inner);
-        let handle = tokio::spawn(supervise_repository(inner, Arc::clone(&state)));
-        *state.task.lock().await = Some(handle);
-        projects.insert(common_dir.clone(), Arc::clone(&state));
-        drop(projects);
-
-        log_daemon_event(
-            "git_watch_started",
-            &[("git_common_dir", common_dir.display().to_string())],
-        );
-        GitWatcherAdmission::Ready
     }
 
     /// Stops every watcher-owned task and joins it before database shutdown.

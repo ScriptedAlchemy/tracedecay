@@ -198,6 +198,46 @@ async fn concurrent_spawn_retains_one_backstop_task() {
     watcher.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_publication_linearizes_before_racing_shutdown() {
+    let watcher = GitWatcher::new(fast_watch_config());
+    watcher.inner.spawn_publication_probe.arm();
+    let start = {
+        let watcher = watcher.clone();
+        tokio::spawn(async move { watcher.spawn().await })
+    };
+    tokio::time::timeout(
+        TEST_READY_TIMEOUT,
+        watcher.inner.spawn_publication_probe.entered.notified(),
+    )
+    .await
+    .expect("start reaches the checked publication boundary");
+
+    let shutdown_requested = watcher.inner.shutdown_requested.notified();
+    let cancellation = {
+        let watcher = watcher.clone();
+        tokio::task::spawn_blocking(move || watcher.cancel())
+    };
+    tokio::time::timeout(TEST_READY_TIMEOUT, shutdown_requested)
+        .await
+        .expect("shutdown reaches the lifecycle fence");
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    watcher.inner.spawn_publication_probe.release();
+
+    assert_eq!(start.await.expect("start task"), GitWatcherStart::Started);
+    cancellation.await.expect("cancellation task");
+    let spawn_order = watcher.inner.lifecycle_receipts.spawn();
+    let shutdown_order = watcher.inner.lifecycle_receipts.shutdown();
+    assert!(
+        spawn_order > 0 && shutdown_order > spawn_order,
+        "a checked start must publish before shutdown: spawn={spawn_order}, shutdown={shutdown_order}"
+    );
+    assert_eq!(watcher.spawn().await, GitWatcherStart::ShuttingDown);
+    assert!(watcher.shutdown().await.is_clean());
+}
+
 #[tokio::test]
 async fn concurrent_repository_admission_retains_one_supervisor_task() {
     let repo = temp_repo();
@@ -209,12 +249,8 @@ async fn concurrent_repository_admission_retains_one_supervisor_task() {
     );
     let state = ready_registered_state(&watcher, repo.path()).await;
     let first_task = state
-        .task
-        .lock()
-        .await
-        .as_ref()
-        .expect("repository admission must retain its supervisor")
-        .id();
+        .retained_task_id()
+        .expect("repository admission must retain its supervisor");
 
     let (left, right) = tokio::join!(
         watcher.ensure_watching(repo.path()),
@@ -223,12 +259,8 @@ async fn concurrent_repository_admission_retains_one_supervisor_task() {
     assert_eq!(left, GitWatcherAdmission::Ready);
     assert_eq!(right, GitWatcherAdmission::Ready);
     let repeated_task = state
-        .task
-        .lock()
-        .await
-        .as_ref()
-        .expect("repeated admission must retain the supervisor")
-        .id();
+        .retained_task_id()
+        .expect("repeated admission must retain the supervisor");
 
     assert_eq!(
         repeated_task, first_task,
@@ -240,6 +272,113 @@ async fn concurrent_repository_admission_retains_one_supervisor_task() {
         "one common repository must retain one watcher authority"
     );
     watcher.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repository_publication_linearizes_before_racing_shutdown() {
+    let repository = temp_repo();
+    let root = repository.path().to_path_buf();
+    let watcher = GitWatcher::new(fast_watch_config());
+    watcher.inner.repository_publication_probe.arm();
+    let admission = {
+        let watcher = watcher.clone();
+        tokio::spawn(async move { watcher.ensure_watching(&root).await })
+    };
+    tokio::time::timeout(
+        TEST_READY_TIMEOUT,
+        watcher
+            .inner
+            .repository_publication_probe
+            .entered
+            .notified(),
+    )
+    .await
+    .expect("admission reaches the checked publication boundary");
+
+    let shutdown_requested = watcher.inner.shutdown_requested.notified();
+    let cancellation = {
+        let watcher = watcher.clone();
+        tokio::task::spawn_blocking(move || watcher.cancel())
+    };
+    tokio::time::timeout(TEST_READY_TIMEOUT, shutdown_requested)
+        .await
+        .expect("shutdown reaches the lifecycle fence");
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    watcher.inner.repository_publication_probe.release();
+
+    assert_eq!(
+        admission.await.expect("admission task"),
+        GitWatcherAdmission::Ready
+    );
+    cancellation.await.expect("cancellation task");
+    let repository_order = watcher.inner.lifecycle_receipts.repository();
+    let shutdown_order = watcher.inner.lifecycle_receipts.shutdown();
+    assert!(
+        repository_order > 0 && shutdown_order > repository_order,
+        "a checked admission must publish before shutdown: repository={repository_order}, shutdown={shutdown_order}"
+    );
+    assert_eq!(
+        watcher.ensure_watching(repository.path()).await,
+        GitWatcherAdmission::ShuttingDown
+    );
+    assert_eq!(watcher.inner.projects.lock().await.len(), 1);
+    assert!(watcher.shutdown().await.is_clean());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linked_registration_linearizes_before_racing_shutdown() {
+    let (_container, primary, linked) = linked_worktree_fixture();
+    let watcher = GitWatcher::new(fast_watch_config());
+    assert_eq!(
+        watcher.ensure_watching(&primary).await,
+        GitWatcherAdmission::Ready
+    );
+    watcher.inner.repository_publication_probe.arm();
+    let registration = {
+        let watcher = watcher.clone();
+        let linked = linked.clone();
+        tokio::spawn(async move { watcher.ensure_watching(&linked).await })
+    };
+    tokio::time::timeout(
+        TEST_READY_TIMEOUT,
+        watcher
+            .inner
+            .repository_publication_probe
+            .entered
+            .notified(),
+    )
+    .await
+    .expect("registration reaches the checked publication boundary");
+
+    let shutdown_requested = watcher.inner.shutdown_requested.notified();
+    let cancellation = {
+        let watcher = watcher.clone();
+        tokio::task::spawn_blocking(move || watcher.cancel())
+    };
+    tokio::time::timeout(TEST_READY_TIMEOUT, shutdown_requested)
+        .await
+        .expect("shutdown reaches the lifecycle fence");
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    watcher.inner.repository_publication_probe.release();
+
+    assert_eq!(
+        registration.await.expect("registration task"),
+        GitWatcherAdmission::Ready
+    );
+    cancellation.await.expect("cancellation task");
+    let registration_order = watcher.inner.lifecycle_receipts.registration();
+    let shutdown_order = watcher.inner.lifecycle_receipts.shutdown();
+    assert!(
+        registration_order > 0 && shutdown_order > registration_order,
+        "a checked linked registration must publish before shutdown: registration={registration_order}, shutdown={shutdown_order}"
+    );
+    let state = ready_registered_state(&watcher, &primary).await;
+    assert!(state.contains_worktree(&linked.canonicalize().unwrap()));
+    assert!(watcher.shutdown().await.is_clean());
 }
 
 #[tokio::test]
@@ -259,7 +398,7 @@ async fn concurrent_shutdown_waits_for_retained_join_completion() {
             task_release.notified().await;
         })
     };
-    *state.task.lock().await = Some(owned_task);
+    state.retain_task(owned_task);
     watcher
         .inner
         .projects
@@ -281,7 +420,7 @@ async fn concurrent_shutdown_waits_for_retained_join_completion() {
     task_release.notify_one();
     first.await;
     repeated.await;
-    assert!(state.task.lock().await.is_none());
+    assert!(!state.has_retained_task());
 }
 
 #[tokio::test]
@@ -308,7 +447,7 @@ async fn missing_owner_is_joined_and_capacity_can_remount() {
         "a missing owner must release repository capacity"
     );
     assert!(
-        retired.task.lock().await.is_none(),
+        !retired.has_retained_task(),
         "eviction must join the retired repository supervisor"
     );
 
@@ -324,7 +463,93 @@ async fn missing_owner_is_joined_and_capacity_can_remount() {
         !Arc::ptr_eq(&retired, &remounted),
         "a recreated repository must receive a fresh watcher owner"
     );
-    assert!(retired.task.lock().await.is_none());
+    assert!(!retired.has_retained_task());
+    assert!(watcher.shutdown().await.is_clean());
+}
+
+#[test]
+fn pruning_the_last_root_retires_registration_authority() {
+    let repository = temp_repo();
+    let root = repository.path().to_path_buf();
+    let state = WatchState::new(
+        crate::worktree::git_common_dir(&root).expect("git common directory"),
+        root,
+        worktree_git_dir(repository.path()).expect("worktree git directory"),
+        MaintenanceCoordinator::default(),
+    );
+    let daemon_cancellation = crate::application::context::CancellationToken::new();
+    let cancellation = state.cancellation(&daemon_cancellation);
+    drop(repository);
+
+    assert!(state.prune_missing_worktrees(|| false));
+    assert!(
+        cancellation.is_cancelled(),
+        "the zero-root transition must retire under the registration authority"
+    );
+}
+
+#[tokio::test]
+async fn retired_linked_owner_is_replaced_before_recreated_root_admission() {
+    let (_container, primary, linked) = linked_worktree_fixture();
+    let unrelated = temp_repo();
+    let mut config = fast_watch_config();
+    config.watch_max_projects = 1;
+    let watcher = GitWatcher::new(config);
+    let common = crate::worktree::git_common_dir(&primary).expect("git common directory");
+    let stale = Arc::new(WatchState::new(
+        common.clone(),
+        linked.canonicalize().expect("canonical linked root"),
+        worktree_git_dir(&linked).expect("linked git directory"),
+        MaintenanceCoordinator::default(),
+    ));
+    stale.retire();
+    let stale_task_release = Arc::new(Notify::new());
+    stale.retain_task({
+        let stale_task_release = Arc::clone(&stale_task_release);
+        tokio::spawn(async move { stale_task_release.notified().await })
+    });
+    watcher
+        .inner
+        .projects
+        .lock()
+        .await
+        .insert(common, Arc::clone(&stale));
+
+    let first_admission = {
+        let watcher = watcher.clone();
+        let linked = linked.clone();
+        tokio::spawn(async move { watcher.ensure_watching(&linked).await })
+    };
+    tokio::time::timeout(TEST_READY_TIMEOUT, async {
+        while stale.has_retained_task() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement starts by joining the retired supervisor");
+    let mut racing_admission = Box::pin(watcher.ensure_watching(&linked));
+    assert!(
+        futures_util::poll!(&mut racing_admission).is_pending(),
+        "a racing recreation must wait until the retired supervisor is joined"
+    );
+    stale_task_release.notify_one();
+    assert_eq!(
+        first_admission.await.expect("first admission task"),
+        GitWatcherAdmission::Ready
+    );
+    assert_eq!(racing_admission.await, GitWatcherAdmission::Ready);
+    let active = ready_registered_state(&watcher, &linked).await;
+    assert!(
+        !Arc::ptr_eq(&active, &stale),
+        "a retired owner must be evicted even when it still carries a linked root"
+    );
+    assert!(active.contains_worktree(&linked.canonicalize().unwrap()));
+    assert!(active.has_retained_task());
+    assert_eq!(
+        watcher.ensure_watching(unrelated.path()).await,
+        GitWatcherAdmission::Capacity,
+        "the replacement must reuse exactly one repository slot"
+    );
     assert!(watcher.shutdown().await.is_clean());
 }
 
@@ -382,7 +607,7 @@ async fn shutdown_reports_cancelled_repository_join() {
     ));
     let task = tokio::spawn(std::future::pending::<()>());
     task.abort();
-    *state.task.lock().await = Some(task);
+    state.retain_task(task);
     watcher
         .inner
         .projects
