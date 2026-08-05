@@ -2,6 +2,71 @@ use super::super::safe_write_json_file;
 use super::*;
 use serde_json::json;
 
+fn write_native_activation(home: &Path) {
+    let settings = home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    safe_write_json_file(
+        &settings,
+        &json!({"enabledPlugins": {"tracedecay@tracedecay": true}}),
+        None,
+    )
+    .unwrap();
+    safe_write_json_file(
+        &known_marketplaces_path(home),
+        &json!({
+            "tracedecay": {
+                "source": {
+                    "source": "directory",
+                    "path": plugin_deploy_dir(home),
+                },
+                "installLocation": plugin_deploy_dir(home),
+            }
+        }),
+        None,
+    )
+    .unwrap();
+    let cache_manifest = claude_current_cached_plugin_manifest_path(home);
+    std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
+    std::fs::copy(
+        plugin_deploy_dir(home).join(".claude-plugin/plugin.json"),
+        cache_manifest,
+    )
+    .unwrap();
+}
+
+#[test]
+fn native_activation_requires_exact_catalog_mount_and_versioned_cache() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
+    write_native_activation(home.path());
+    assert!(claude_plugin_is_natively_active(home.path()).unwrap());
+
+    let marketplace = known_marketplaces_path(home.path());
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marketplace).unwrap()).unwrap();
+    state["tracedecay"]["installLocation"] = json!("/different/marketplace");
+    safe_write_json_file(&marketplace, &state, None).unwrap();
+    assert!(!claude_plugin_is_natively_active(home.path()).unwrap());
+}
+
+#[test]
+fn native_activation_rejects_current_version_manifest_in_unbound_cache_directory() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
+    write_native_activation(home.path());
+    let exact = claude_current_cached_plugin_manifest_path(home.path());
+    let unbound = exact
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("current/.claude-plugin/plugin.json");
+    std::fs::create_dir_all(unbound.parent().unwrap()).unwrap();
+    std::fs::rename(&exact, &unbound).unwrap();
+
+    assert!(!claude_plugin_is_natively_active(home.path()).unwrap());
+}
+
 #[test]
 fn missing_manifest_with_stale_registration_is_repairable() {
     use crate::agents::AgentIntegration;

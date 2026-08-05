@@ -424,6 +424,64 @@ fn install_ctx(home: &Path) -> InstallContext {
     }
 }
 
+fn write_exact_native_activation(home: &Path) {
+    install_codex_personal_bootstrap(home, TEST_BIN).unwrap();
+    let config = codex_config_path(home);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config,
+        "[plugins.\"tracedecay@personal\"]\nenabled = true\n",
+    )
+    .unwrap();
+    let cache_manifest =
+        codex_plugin_current_cached_install_dir(home).join(".codex-plugin/plugin.json");
+    std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
+    std::fs::copy(codex_plugin_manifest_path(home), cache_manifest).unwrap();
+}
+
+#[test]
+fn native_activation_binds_enabled_key_to_exact_marketplace_and_cache() {
+    let home = tempfile::tempdir().unwrap();
+    write_exact_native_activation(home.path());
+    assert!(codex_plugin_activation_state(home.path()).unwrap());
+
+    std::fs::write(
+        codex_config_path(home.path()),
+        "[plugins.\"tracedecay@other\"]\nenabled = true\n",
+    )
+    .unwrap();
+    assert!(!codex_plugin_activation_state(home.path()).unwrap());
+}
+
+#[test]
+fn native_activation_rejects_cache_from_another_marketplace() {
+    let home = tempfile::tempdir().unwrap();
+    write_exact_native_activation(home.path());
+    let exact = codex_plugin_current_cached_install_dir(home.path());
+    let other = codex_plugin_cached_root(home.path(), "other").join(crate::PRODUCT_VERSION);
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::rename(exact, other).unwrap();
+
+    assert!(!codex_plugin_activation_state(home.path()).unwrap());
+}
+
+#[test]
+fn native_activation_rejects_marketplace_source_path_drift() {
+    let home = tempfile::tempdir().unwrap();
+    write_exact_native_activation(home.path());
+    let marketplace_path = codex_personal_marketplace_path(home.path());
+    let mut marketplace: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marketplace_path).unwrap()).unwrap();
+    marketplace["plugins"][0]["source"]["path"] = json!("./plugins/other");
+    std::fs::write(
+        marketplace_path,
+        serde_json::to_vec_pretty(&marketplace).unwrap(),
+    )
+    .unwrap();
+
+    assert!(!codex_plugin_activation_state(home.path()).unwrap());
+}
+
 /// Codex cache activation is intentionally deferred to the host CLI.
 #[test]
 fn codex_reports_host_native_activation_requirement() {

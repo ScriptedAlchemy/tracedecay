@@ -151,6 +151,24 @@ impl CatalogHostComponentRegistrationAuthority {
         operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
         tracedecay_bin: String,
     ) -> crate::errors::Result<Self> {
+        Self::new_with_tracedecay_bin_and_dashboard(
+            agent_id,
+            home,
+            lifecycle_root,
+            operation,
+            tracedecay_bin,
+            true,
+        )
+    }
+
+    pub fn new_with_tracedecay_bin_and_dashboard(
+        agent_id: &str,
+        home: &Path,
+        lifecycle_root: &Path,
+        operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
+        tracedecay_bin: String,
+        dashboard: bool,
+    ) -> crate::errors::Result<Self> {
         let project_path =
             std::env::current_dir().map_err(|error| crate::errors::TraceDecayError::Config {
                 message: format!("failed to resolve host lifecycle project path: {error}"),
@@ -164,7 +182,7 @@ impl CatalogHostComponentRegistrationAuthority {
                 tracedecay_bin,
                 tool_permissions: crate::agents::expected_tool_perms(),
                 project_root: None,
-                dashboard: true,
+                dashboard,
             },
             health_context: crate::agents::HealthcheckContext {
                 home: home.to_path_buf(),
@@ -473,9 +491,11 @@ impl CatalogHostComponentRegistrationAuthority {
         component: crate::agents::host_bundle_v2::HostBundleComponentV1,
     ) -> crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 {
         if self.project_path.is_none() {
-            return self
-                .integration
-                .host_component_registration(component, &self.health_context);
+            return self.integration.host_component_registration_for_lifecycle(
+                component,
+                &self.health_context,
+                &self.context,
+            );
         }
         let Some(path) = &self.registration_path else {
             return crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
@@ -510,7 +530,8 @@ impl CatalogHostComponentRegistrationAuthority {
         }
         let mut paths = self
             .integration
-            .host_component_registration_paths(&components, &self.context.home);
+            .host_component_registration_paths_checked(&components, &self.context.home)
+            .map_err(Self::registration_error)?;
         if self.integration.id() == "claude" {
             let artifact_owned_manifest = self
                 .context

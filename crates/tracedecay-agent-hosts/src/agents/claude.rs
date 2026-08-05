@@ -152,31 +152,21 @@ impl AgentIntegration for ClaudeIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        _component: super::host_bundle_v2::HostBundleComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::{
-            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
-        };
+        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
 
         let settings = match read_optional_json(&ctx.home.join(".claude/settings.json")) {
             Ok(Some(settings)) => settings,
             Ok(None) => json!({}),
             Err(()) => return State::Corrupt,
         };
-        let enabled = settings
-            .pointer("/enabledPlugins/tracedecay@tracedecay")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true);
         let marketplace = match read_optional_json(&known_marketplaces_path(&ctx.home)) {
             Ok(Some(marketplace)) => marketplace,
             Ok(None) => json!({}),
             Err(()) => return State::Corrupt,
         };
-        let marketplace_registered = marketplace
-            .pointer("/tracedecay/source/source")
-            .and_then(serde_json::Value::as_str)
-            == Some("directory");
         let marketplace_residue = marketplace.get("tracedecay").is_some();
         let settings_residue = settings
             .pointer("/enabledPlugins/tracedecay@tracedecay")
@@ -185,25 +175,10 @@ impl AgentIntegration for ClaudeIntegration {
         if !marketplace_residue && !settings_residue {
             return State::Missing;
         }
-        let cache_current = match claude_loaded_cache_matches_catalog_version(&ctx.home) {
-            Ok(current) => current,
-            Err(()) => return State::Corrupt,
-        };
-        if matches!(
-            component,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
-        ) {
-            return if marketplace_registered && enabled && cache_current {
-                State::Current
-            } else {
-                State::Repairable
-            };
-        }
-        let core_current = marketplace_registered && enabled && cache_current;
-        if core_current {
-            State::Current
-        } else {
-            State::Repairable
+        match claude_plugin_is_natively_active(&ctx.home) {
+            Ok(true) => State::Current,
+            Ok(false) => State::Repairable,
+            Err(_) => State::Corrupt,
         }
     }
 
@@ -265,7 +240,7 @@ impl AgentIntegration for ClaudeIntegration {
             known_marketplaces_path(home),
             home.join(".claude/settings.json"),
         ];
-        paths.extend(claude_cached_plugin_manifest_paths(home));
+        paths.push(claude_current_cached_plugin_manifest_path(home));
         paths
     }
 
@@ -322,35 +297,54 @@ fn claude_plugin_registration_is_active(home: &Path) -> Result<bool> {
                 marketplace_path.display()
             ),
         })?;
-    Ok(settings
-        .as_ref()
-        .and_then(|settings| settings.pointer("/enabledPlugins/tracedecay@tracedecay"))
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
+    let source_manifest_current = plugin_manifest_version(&plugin_source_manifest_path(home))
+        .map_err(|()| TraceDecayError::Config {
+            message: format!(
+                "could not read Claude staged plugin identity at {}",
+                plugin_source_manifest_path(home).display()
+            ),
+        })?
+        == Some(crate::PRODUCT_VERSION.to_string());
+    Ok(source_manifest_current
+        && settings
+            .as_ref()
+            .and_then(|settings| settings.pointer("/enabledPlugins/tracedecay@tracedecay"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
         && marketplace
             .as_ref()
             .and_then(|marketplace| marketplace.pointer("/tracedecay/source/source"))
             .and_then(serde_json::Value::as_str)
-            == Some("directory"))
+            == Some("directory")
+        && marketplace.as_ref().is_some_and(|marketplace| {
+            json_path_matches(
+                marketplace.pointer("/tracedecay/source/path"),
+                &plugin_deploy_dir(home),
+            ) && json_path_matches(
+                marketplace.pointer("/tracedecay/installLocation"),
+                &plugin_deploy_dir(home),
+            )
+        }))
 }
 
-fn claude_cached_plugin_manifest_paths(home: &Path) -> Vec<PathBuf> {
-    let root = home.join(".claude/plugins/cache/tracedecay/tracedecay");
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-    let mut manifests = entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_dir())
-        .map(|path| path.join(".claude-plugin/plugin.json"))
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    manifests.sort();
-    manifests
+fn json_path_matches(value: Option<&serde_json::Value>, expected: &Path) -> bool {
+    value.and_then(serde_json::Value::as_str) == expected.to_str()
+}
+
+fn plugin_source_manifest_path(home: &Path) -> PathBuf {
+    plugin_deploy_dir(home).join(".claude-plugin/plugin.json")
+}
+
+fn claude_current_cached_plugin_manifest_path(home: &Path) -> PathBuf {
+    home.join(".claude/plugins/cache/tracedecay/tracedecay")
+        .join(crate::PRODUCT_VERSION)
+        .join(".claude-plugin/plugin.json")
 }
 
 fn plugin_manifest_version(path: &Path) -> std::result::Result<Option<String>, ()> {
-    let manifest = read_optional_json(path)?.ok_or(())?;
+    let Some(manifest) = read_optional_json(path)? else {
+        return Ok(None);
+    };
     if manifest.get("name").and_then(serde_json::Value::as_str) != Some("tracedecay") {
         return Ok(None);
     }
@@ -361,12 +355,10 @@ fn plugin_manifest_version(path: &Path) -> std::result::Result<Option<String>, (
 }
 
 fn claude_loaded_cache_matches_catalog_version(home: &Path) -> std::result::Result<bool, ()> {
-    for manifest in claude_cached_plugin_manifest_paths(home) {
-        if plugin_manifest_version(&manifest)?.as_deref() == Some(crate::PRODUCT_VERSION) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(
+        plugin_manifest_version(&claude_current_cached_plugin_manifest_path(home))?.as_deref()
+            == Some(crate::PRODUCT_VERSION),
+    )
 }
 
 fn claude_native_install_action(staged_dir: Option<&Path>) -> DeferredUserAction {

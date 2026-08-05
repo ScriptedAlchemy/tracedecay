@@ -582,7 +582,7 @@ pub(crate) fn install_pass_covers_tracked_agents(
     tracked.iter().all(|id| refreshed.contains(id))
 }
 
-/// Re-runs full `install()` + `post_install()` for every tracked agent so tool
+/// Re-runs the canonical component lifecycle for every tracked agent so tool
 /// permissions, hooks, and MCP config stay in sync with the running binary — a
 /// superset of `refresh_generated_plugins`, which rewrites generated artifacts
 /// only. Mirrors the canonical `handle_reinstall_command` (global scope:
