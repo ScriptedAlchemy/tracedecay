@@ -1422,6 +1422,6 @@ fn provider_metadata_json_is_structurally_sanitized_or_rejected() {
     );
     assert!(!sanitized.to_string().contains(&secret));
 
-    assert!(sanitize_provider_metadata_json("{malformed", 4_096).is_err());
-    assert!(sanitize_provider_metadata_json(&raw, 8).is_err());
+    assert!(sanitize_provider_metadata_json("{malformed", 4_096).is_none());
+    assert!(sanitize_provider_metadata_json(&raw, 8).is_none());
 }

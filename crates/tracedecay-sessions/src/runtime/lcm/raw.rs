@@ -797,7 +797,7 @@ fn redact_sensitive_text(text: &str, config: &IngestConfig) -> Result<RedactionO
     })
 }
 
-const MAX_PROVIDER_METADATA_BYTES: usize = 1_048_576;
+const MAX_PROVIDER_METADATA_BYTES: u64 = 1_048_576;
 
 fn protected_metadata_json(
     original: Option<&str>,
@@ -805,7 +805,7 @@ fn protected_metadata_json(
 ) -> Result<Option<String>, LcmError> {
     let mut metadata =
         sanitize_provider_metadata_json(original.unwrap_or("{}"), MAX_PROVIDER_METADATA_BYTES)
-            .map_err(|err| LcmError::Db(format!("LCM metadata sanitization failed: {err}")))?;
+            .ok_or_else(|| LcmError::Db("LCM metadata sanitization failed".to_owned()))?;
     if !metadata.is_object() {
         return Err(LcmError::Db(
             "LCM metadata sanitization failed: metadata must be a JSON object".to_owned(),

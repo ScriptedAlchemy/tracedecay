@@ -900,14 +900,20 @@ fn capture_sanitizes_code_and_propagates_scan_evidence() {
     let source = format!("pub const TOKEN: &str = \"{secret}\";\n");
     let fixture = GitFixture::new(&[("src/lib.rs", &source)]);
     let store = TempDir::new().expect("store root");
-    let mut scheduler = scheduler(
+    let mut first_scheduler = scheduler(
         &fixture,
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
 
-    published(scheduler.reconcile_now().expect("publish sanitized code"));
-    let latest = scheduler.latest_complete().expect("latest generation");
+    published(
+        first_scheduler
+            .reconcile_now()
+            .expect("publish sanitized code"),
+    );
+    let latest = first_scheduler
+        .latest_complete()
+        .expect("latest generation");
     let snapshot = latest.generation.snapshot();
 
     assert_eq!(
@@ -935,6 +941,33 @@ fn capture_sanitizes_code_and_propagates_scan_evidence() {
             .chunks()
             .iter()
             .any(|chunk| chunk.sensitivity.level == SensitivityLevelV1::Redacted)
+    );
+
+    drop(latest);
+    drop(first_scheduler);
+    let restarted = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let restored = restarted
+        .latest_complete()
+        .expect("restart restores sanitized generation");
+    assert!(
+        restored
+            .generation
+            .chunks()
+            .chunks()
+            .iter()
+            .all(|chunk| !chunk.sanitized_text.as_str().contains(&secret))
+    );
+    assert!(
+        restored
+            .generation
+            .snapshot()
+            .sanitization_receipts
+            .iter()
+            .all(|receipt| receipt.as_str().starts_with("privacy.code-source.v1."))
     );
 }
 

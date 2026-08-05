@@ -2516,6 +2516,43 @@ mod tests {
     }
 
     #[test]
+    fn authorization_revocation_before_sink_recheck_emits_no_payload() {
+        block_on(async {
+            let payload = b"must-never-cross-the-sink";
+            let backend = FakeBackend {
+                resolutions: Mutex::new(vec![
+                    available(payload.len(), &hash(payload)),
+                    HydrationResolution::Unavailable(HydrationStateV1::Unauthorized),
+                ]),
+                payload: Mutex::new(Ok(payload.to_vec())),
+                calls: Mutex::new(Vec::new()),
+            };
+            let adapter = SessionTemporalHydrationAdapter::new(backend);
+            let snapshot = snapshot(ExecutionControl::default());
+
+            assert_eq!(
+                adapter.authorize(&snapshot, &anchor()).await,
+                Ok(HydrationAuthorization::Authorized)
+            );
+            let mut output = Vec::new();
+            assert_eq!(
+                adapter
+                    .read_after_recheck(&snapshot, &anchor(), payload.len(), 8, &mut |chunk| {
+                        output.extend_from_slice(chunk);
+                        Ok(())
+                    })
+                    .await,
+                Err(HydrationError::Unavailable)
+            );
+            assert!(output.is_empty());
+            assert_eq!(
+                adapter.backend.calls.lock().expect("calls").as_slice(),
+                ["resolve", "resolve"]
+            );
+        });
+    }
+
+    #[test]
     fn denial_has_no_payload_and_never_reads() {
         block_on(async {
             let adapter = SessionTemporalHydrationAdapter::new(FakeBackend::denied(

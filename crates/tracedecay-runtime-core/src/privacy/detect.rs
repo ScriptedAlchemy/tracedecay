@@ -556,29 +556,6 @@ pub fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
     result.payload.as_str().map(str::to_owned)
 }
 
-/// Parses and sanitizes provider metadata before it reaches a durable sink.
-///
-/// Metadata is structural rather than lossless transcript content, so malformed
-/// input and bounded-scan failures are rejected instead of being persisted as
-/// an implicitly safe string.
-pub fn sanitize_provider_metadata_json(
-    text: &str,
-    max_bytes: usize,
-) -> Result<Value, DetectionError> {
-    if max_bytes == 0 || text.len() > max_bytes {
-        return Err(DetectionError::Receipt);
-    }
-    let payload: Value = serde_json::from_str(text).map_err(|_| DetectionError::Receipt)?;
-    if !payload.is_object() {
-        return Err(DetectionError::Receipt);
-    }
-    let detected = redact_sensitive_values(payload, &BTreeSet::new())?;
-    if !detected.quarantine_findings.is_empty() {
-        return Err(DetectionError::Receipt);
-    }
-    Ok(detected.payload)
-}
-
 /// Sanitizes arbitrary source bytes through the canonical credential detector
 /// and issues receipt evidence bound to both the raw input and sanitized text.
 pub fn sanitize_code_source_bytes(raw: &[u8]) -> Result<CodeSourceSanitizationV1, DetectionError> {
