@@ -48,12 +48,21 @@ pub(crate) async fn cost_summary(
 /// Parse a range string into a unix timestamp for "since".
 pub fn parse_range(range: &str) -> u64 {
     let now = now_epoch();
+    match parse_range_at(range, now) {
+        Ok(since) => since,
+        Err(_) => now.saturating_sub(7 * 86400),
+    }
+}
+
+/// Resolve a supported range against an admitted clock observation.
+pub(crate) fn parse_range_at(range: &str, now: u64) -> Result<u64, String> {
     match range {
-        "today" => today_start_epoch(now),
-        "30d" => now.saturating_sub(30 * 86400),
-        "month" => month_start_epoch(now),
-        "all" => 0,
-        _ => now.saturating_sub(7 * 86400),
+        "today" => Ok(today_start_epoch(now)),
+        "7d" => Ok(now.saturating_sub(7 * 86400)),
+        "30d" => Ok(now.saturating_sub(30 * 86400)),
+        "month" => Ok(month_start_epoch(now)),
+        "all" => Ok(0),
+        _ => Err(format!("unsupported accounting range '{range}'")),
     }
 }
 
@@ -92,6 +101,7 @@ mod tests {
         assert!(now - week <= 7 * 86400 + 1);
 
         assert_eq!(parse_range("all"), 0);
+        assert!(parse_range_at("unsupported", now).is_err());
     }
 
     #[test]

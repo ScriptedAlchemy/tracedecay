@@ -21,9 +21,7 @@ fn queued_cancellable_request_key(
                 && request
                     .params
                     .as_ref()
-                    .and_then(|params| params.get("name"))
-                    .and_then(Value::as_str)
-                    .is_some_and(super::requests::tool_supports_live_cancellation)
+                    .is_some_and(super::requests::tool_call_params_support_live_cancellation)
                 && request
                     .id
                     .as_ref()
@@ -478,12 +476,9 @@ impl McpServer {
                                 .await;
                         }
                         let cancellable_tool_call = request.method == "tools/call"
-                            && request
-                                .params
-                                .as_ref()
-                                .and_then(|params| params.get("name"))
-                                .and_then(Value::as_str)
-                                .is_some_and(super::requests::tool_supports_live_cancellation);
+                            && request.params.as_ref().is_some_and(
+                                super::requests::tool_call_params_support_live_cancellation,
+                            );
                         if cancellable_tool_call {
                             let external_shutdown_requested = async {
                                 if listen_for_process_signals {

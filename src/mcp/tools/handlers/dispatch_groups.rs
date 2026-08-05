@@ -262,6 +262,12 @@ pub(super) async fn dispatch_admin_tools(
                 args,
                 options.global_db,
                 options.accounting_db,
+                super::AccountingAdapterControls {
+                    authority: options.accounting_authority,
+                    request_id: options.application_request_id.clone(),
+                    deadline: options.application_deadline.clone(),
+                    cancellation: options.application_cancellation.clone(),
+                },
                 options.profile_root,
                 options.session_authorities,
             )
@@ -272,6 +278,12 @@ pub(super) async fn dispatch_admin_tools(
                 cg,
                 args,
                 options.global_db.map(std::sync::Arc::as_ref),
+                super::AccountingAdapterControls {
+                    authority: options.accounting_authority,
+                    request_id: options.application_request_id.clone(),
+                    deadline: options.application_deadline.clone(),
+                    cancellation: options.application_cancellation.clone(),
+                },
                 options.automation_scheduler_reconciler.clone(),
             )
             .await

@@ -128,6 +128,30 @@ pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::mcp::tools::tool_supports_live_cancellation(tool_name)
 }
 
+fn tool_call_supports_live_cancellation(tool_name: &str, arguments: &Value) -> bool {
+    tool_supports_live_cancellation(tool_name)
+        || matches!(
+            (tool_name, arguments.get("action").and_then(Value::as_str),),
+            (
+                "tracedecay_admin_cli",
+                Some("cost_summary" | "analytics_sync" | "analytics_diagnostics")
+            ) | ("tracedecay_admin_project", Some("status_accounting"))
+        )
+}
+
+pub(super) fn tool_call_params_support_live_cancellation(params: &Value) -> bool {
+    let Some(tool_name) = params.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    if tool_supports_live_cancellation(tool_name) {
+        return true;
+    }
+    let Some(arguments) = params.get("arguments") else {
+        return false;
+    };
+    tool_call_supports_live_cancellation(tool_name, arguments)
+}
+
 fn dispatch_deadline_horizon_micros(
     application_surface: bool,
     thirty_second_operation: bool,
@@ -849,7 +873,7 @@ impl McpServer {
         {
             map.insert("__mcp_request_id".to_string(), json!(request_id));
         }
-        if tool_supports_live_cancellation(tool_name)
+        if tool_call_supports_live_cancellation(tool_name, &handler_arguments)
             && let Some(map) = handler_arguments.as_object_mut()
         {
             map.remove("__mcp_request_id");
@@ -919,6 +943,7 @@ impl McpServer {
                     .as_ref()
                     .map(|service| service as &dyn WorkflowIndexReadPort),
                 accounting_db: self.accounting_db.as_deref(),
+                accounting_authority: self.accounting_authority.as_deref(),
                 registered_project_session_db: self.registered_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),
                 profile_root: self.profile_root.as_deref(),
@@ -1086,6 +1111,7 @@ impl McpServer {
                 &cg,
                 id,
                 tool_name,
+                &routed.arguments,
                 memory_request_scope,
                 pre_cancelled,
             )
@@ -1159,6 +1185,7 @@ impl McpServer {
         cg: &TraceDecay,
         id: &Value,
         tool_name: &str,
+        arguments: &Value,
         memory_request_scope: &str,
         pre_cancelled: bool,
     ) -> ApplicationSurfaceDispatch<'a> {
@@ -1166,7 +1193,12 @@ impl McpServer {
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
         let source_edit = is_source_edit_tool(tool_name);
         let controlled_read = is_controlled_read_tool(tool_name);
-        let request_id = tool_supports_live_cancellation(tool_name)
+        let accounting_admin = tool_call_supports_live_cancellation(tool_name, arguments)
+            && matches!(
+                tool_name,
+                "tracedecay_admin_cli" | "tracedecay_admin_project"
+            );
+        let request_id = tool_call_supports_live_cancellation(tool_name, arguments)
             .then(|| application_surface_request_id(id, memory_request_scope))
             .flatten()
             .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
@@ -1192,11 +1224,15 @@ impl McpServer {
                 .as_ref()
                 .map(|request_id| request_id.as_str().to_owned()),
         };
-        let deadline = dispatch_deadline_horizon_micros(
-            application_surface.is_some() || source_edit,
-            controlled_read || source_edit,
-        )
-        .and_then(|horizon| {
+        let deadline_horizon = if accounting_admin {
+            Some(600_000_000)
+        } else {
+            dispatch_deadline_horizon_micros(
+                application_surface.is_some() || source_edit,
+                controlled_read || source_edit,
+            )
+        };
+        let deadline = deadline_horizon.and_then(|horizon| {
             let now = mcp_now_micros().0;
             tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
                 now.saturating_add(horizon),
@@ -1830,6 +1866,14 @@ mod git_read_control_tests {
             "tracedecay_run_affected_tests"
         ));
         assert!(!tool_supports_live_cancellation("tracedecay_outline"));
+        assert!(tool_call_params_support_live_cancellation(&json!({
+            "name": "tracedecay_admin_cli",
+            "arguments": { "action": "analytics_sync" },
+        })));
+        assert!(!tool_call_params_support_live_cancellation(&json!({
+            "name": "tracedecay_admin_cli",
+            "arguments": { "action": "registry_list", "limit": 1 },
+        })));
         for tool_name in [
             "tracedecay_git_status",
             "tracedecay_git_diff",

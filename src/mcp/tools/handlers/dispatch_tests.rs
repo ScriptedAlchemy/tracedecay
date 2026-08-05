@@ -1648,3 +1648,23 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     );
     cg.close();
 }
+
+#[tokio::test]
+async fn missing_accounting_authority_is_a_semantic_unavailable_result() {
+    let result = invoke_accounting_authority(
+        AccountingAdapterControls::default(),
+        tracedecay_application::AccountingOperationV1::AnalyticsSync,
+    )
+    .await;
+
+    assert_eq!(result.semantic_error(), Some(true));
+    let text = result.value["content"][0]["text"]
+        .as_str()
+        .expect("accounting result text");
+    let payload: serde_json::Value = serde_json::from_str(text).expect("accounting JSON");
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(
+        payload["availability"]["reason"],
+        "accounting_authority_or_admission_controls_unavailable"
+    );
+}

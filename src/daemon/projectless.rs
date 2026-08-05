@@ -232,16 +232,69 @@ pub(super) async fn projectless_tools_call_response(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        let accounting_db = match store_administration.registered_profile_database().await {
+        let profile_identity = match store_administration.profile_identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
+        let profile_sessions = match store_administration
+            .registered_profile_session_database()
+            .await
+        {
             Ok(database) => database,
             Err(error) => {
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
+        let accounting_authority = crate::global_db::global_accounting_enabled()
+            .then(|| {
+                crate::daemon::accounting_authority::DaemonAccountingAuthority::new(
+                    crate::daemon::accounting_authority::DaemonAccountingOwners {
+                        profile_id: profile_identity.profile_id().clone(),
+                        accounting: Arc::clone(&global_db),
+                        profile_root: profile_identity.profile_root().to_path_buf(),
+                        transcript_source_home: daemon_transcript_source_home(
+                            profile_identity.profile_root(),
+                        ),
+                        project_id: None,
+                        project_root: None,
+                        graph: None,
+                        project_sessions: None,
+                        profile_sessions: Some(Arc::clone(&profile_sessions)),
+                    },
+                )
+            })
+            .flatten();
+        let request_id = crate::mcp::server::application_surface_request_id(
+            &id,
+            profile_identity.profile_id().as_str(),
+        )
+        .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
+        let cancellation = request_id.as_ref().and_then(|request_id| {
+            tracedecay_application::CancellationSignal::active(format!(
+                "cancellation.{}",
+                request_id.as_str()
+            ))
+            .ok()
+        });
+        let now = tracedecay_application::clock::now_micros();
+        let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+            now.0.saturating_add(600_000_000),
+        ))
+        .ok();
         return match crate::mcp::tools::handle_projectless_admin_cli(
             arguments,
             &global_db,
-            crate::global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
+            crate::global_db::global_accounting_enabled().then_some(global_db.as_ref()),
+            crate::mcp::tools::AccountingAdapterControls {
+                authority: accounting_authority.as_ref().map(|authority| {
+                    authority as &dyn tracedecay_application::AccountingAuthorityPort
+                }),
+                request_id,
+                deadline,
+                cancellation,
+            },
             &client_identity.profile_root,
         )
         .await

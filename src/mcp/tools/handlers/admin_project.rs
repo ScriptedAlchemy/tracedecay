@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use tracedecay_application::AccountingOperationV1;
 use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
     CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
@@ -250,6 +251,7 @@ pub(super) async fn handle_admin_project(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
+    accounting_controls: super::AccountingAdapterControls<'_>,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
 ) -> Result<ToolResult> {
     let action: AdminProjectAction =
@@ -277,20 +279,11 @@ pub(super) async fn handle_admin_project(
             json!({ "scope": "project", "outcome": outcome })
         }
         AdminProjectAction::StatusAccounting => {
-            let global_db = global_db.ok_or_else(|| TraceDecayError::Config {
-                message: "daemon global database is unavailable".to_string(),
-            })?;
-            let tokens_saved = cg.get_tokens_saved().await.unwrap_or(0);
-            global_db.upsert(cg.project_root(), tokens_saved).await;
-            let global_tokens_saved = global_db
-                .global_tokens_saved()
-                .await
-                .map(|total| total.saturating_sub(tokens_saved))
-                .filter(|total| *total > 0);
-            json!({
-                "tokens_saved": tokens_saved,
-                "global_tokens_saved": global_tokens_saved,
-            })
+            return Ok(super::invoke_accounting_authority(
+                accounting_controls,
+                AccountingOperationV1::StatusAccounting,
+            )
+            .await);
         }
         AdminProjectAction::MemoryStatus => {
             let status = cg.memory_status().await?;
@@ -704,6 +697,7 @@ mod tests {
                     "limit": 50,
                 }),
                 None,
+                Default::default(),
                 None,
             )
             .await
@@ -724,6 +718,7 @@ mod tests {
                 &cg,
                 json!({ "action": "fact_view", "id": apply_id }),
                 None,
+                Default::default(),
                 None,
             )
             .await
@@ -754,6 +749,7 @@ mod tests {
                 &cg,
                 json!({ "action": "fact_apply", "id": apply_id }),
                 None,
+                Default::default(),
                 None,
             )
             .await
@@ -778,6 +774,7 @@ mod tests {
                     "reason": "not durable",
                 }),
                 None,
+                Default::default(),
                 None,
             )
             .await
@@ -797,6 +794,7 @@ mod tests {
                     "options": { "max_clusters": 9, "min_confidence": 0.7 }
                 }),
                 None,
+                Default::default(),
                 None,
             )
             .await

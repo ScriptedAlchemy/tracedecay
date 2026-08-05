@@ -1,14 +1,18 @@
 use std::path::Path;
 
 use crate::config::TraceDecayConfig;
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 impl TraceDecay {
     /// Returns the persisted tokens-saved counter.
     pub async fn get_tokens_saved(&self) -> Result<u64> {
         match self.db.get_metadata("tokens_saved").await? {
-            Some(v) => Ok(v.parse::<u64>().unwrap_or(0)),
+            Some(value) => value
+                .parse::<u64>()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("invalid persisted tokens_saved value: {error}"),
+                }),
             None => Ok(0),
         }
     }
@@ -26,7 +30,11 @@ impl TraceDecay {
     /// independently reset via [`Self::reset_local_counter`].
     pub async fn get_local_counter(&self) -> Result<u64> {
         match self.db.get_metadata("local_counter").await? {
-            Some(v) => Ok(v.parse::<u64>().unwrap_or(0)),
+            Some(value) => value
+                .parse::<u64>()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("invalid persisted local_counter value: {error}"),
+                }),
             None => Ok(0),
         }
     }

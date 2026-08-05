@@ -99,10 +99,13 @@ pub(crate) use tool_call_support::selected_registered_project_reader;
 pub(super) use tool_call_support::{json_result, text_tool_result};
 
 use serde_json::{Value, json};
-use tracedecay_application::RetainedSurfaceOperation;
 #[cfg(test)]
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, retained_surface_application_operation,
+};
+use tracedecay_application::{
+    AccountingAuthorityPort, AccountingInvocationV1, AccountingOperationV1, AccountingOutcomeV1,
+    RetainedSurfaceOperation,
 };
 use tracedecay_tool_catalog::BindingSurface;
 #[cfg(test)]
@@ -135,6 +138,92 @@ use dispatch_groups::{
 use retained_catalog::dispatch_profile_retained_application_tool;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
+
+#[derive(Clone, Default)]
+pub(crate) struct AccountingAdapterControls<'a> {
+    pub(crate) authority: Option<&'a dyn AccountingAuthorityPort>,
+    pub(crate) request_id: Option<tracedecay_application::RequestId>,
+    pub(crate) deadline: Option<tracedecay_application::Deadline>,
+    pub(crate) cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+async fn invoke_accounting_authority(
+    controls: AccountingAdapterControls<'_>,
+    operation: AccountingOperationV1,
+) -> ToolResult {
+    let (Some(authority), Some(request_id), Some(deadline), Some(cancellation)) = (
+        controls.authority,
+        controls.request_id,
+        controls.deadline,
+        controls.cancellation,
+    ) else {
+        let value = json!({
+            "status": "unavailable",
+            "availability": {
+                "state": "unavailable",
+                "reason": "accounting_authority_or_admission_controls_unavailable",
+            },
+        });
+        return json_result(&value).with_semantic_error(true);
+    };
+    let value = render_accounting_outcome(
+        authority
+            .invoke(AccountingInvocationV1 {
+                request_id,
+                deadline,
+                cancellation,
+                operation,
+            })
+            .await,
+    );
+    let semantic_error = matches!(
+        value.get("status").and_then(Value::as_str),
+        Some("unavailable" | "cancelled" | "timed_out")
+    );
+    json_result(&value).with_semantic_error(semantic_error)
+}
+
+fn render_accounting_outcome(outcome: AccountingOutcomeV1) -> Value {
+    match outcome {
+        AccountingOutcomeV1::Complete(response) | AccountingOutcomeV1::Partial(response) => {
+            let status = if response.receipt.termination
+                == tracedecay_application::OperationTermination::Partial
+            {
+                "partial"
+            } else {
+                "complete"
+            };
+            let mut payload = response.payload;
+            let authority = json!({
+                "status": status,
+                "scope": response.scope,
+                "coverage": response.coverage,
+                "ingest_guarantee": response.ingest_guarantee,
+                "receipt": response.receipt,
+            });
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("_accounting_authority".to_owned(), authority);
+                payload
+            } else {
+                json!({
+                    "value": payload,
+                    "_accounting_authority": authority,
+                })
+            }
+        }
+        other => match serde_json::to_value(other) {
+            Ok(value) => value,
+            Err(error) => json!({
+                "status": "unavailable",
+                "availability": {
+                    "state": "unavailable",
+                    "reason": "accounting_outcome_serialization_failed",
+                    "detail": error.to_string(),
+                },
+            }),
+        },
+    }
+}
 
 /// Dispatches a tool call to the appropriate handler.
 ///
@@ -193,6 +282,8 @@ pub struct ToolCallRegistryOptions<'a> {
     /// project-session authority, not a successful empty index.
     pub workflow_index_reads: Option<&'a dyn WorkflowIndexReadPort>,
     pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
+    pub(crate) accounting_authority:
+        Option<&'a dyn tracedecay_application::AccountingAuthorityPort>,
     pub(crate) registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub(crate) registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub profile_root: Option<&'a Path>,
@@ -236,6 +327,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             project_registry_reads: None,
             workflow_index_reads: None,
             accounting_db: None,
+            accounting_authority: None,
             registered_project_session_db: None,
             registered_savings_db: None,
             profile_root: None,

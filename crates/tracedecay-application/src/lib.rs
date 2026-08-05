@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod accounting;
 pub mod advisory;
 pub mod authorization;
 pub mod clock;
@@ -65,6 +66,11 @@ mod surface_binding;
 
 pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
 
+pub use accounting::{
+    AccountingAuthorityPort, AccountingFuture, AccountingIngestGuaranteeV1, AccountingInvocationV1,
+    AccountingOperationV1, AccountingOutcomeV1, AccountingProjectScopeV1, AccountingResponseV1,
+    AccountingScopeV1, AccountingSourceCoverageV1, AccountingSourceStateV1, AccountingSourceV1,
+};
 pub use advisory::*;
 pub use authorization::{
     AuthorizationAdmission, AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome,

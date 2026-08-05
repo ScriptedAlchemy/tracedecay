@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tracedecay_application::AccountingOperationV1;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{AnalyticsEventQuery, RegisteredGlobalDb};
@@ -78,6 +79,7 @@ const fn default_storage_report_page_limit() -> usize {
 struct AdminCliContext<'a> {
     global_db: &'a Arc<RegisteredGlobalDb>,
     accounting_db: Option<&'a RegisteredGlobalDb>,
+    accounting_controls: super::AccountingAdapterControls<'a>,
     profile_root: Option<&'a Path>,
     project: Option<&'a TraceDecay>,
     project_session_db: Option<&'a Arc<RegisteredGlobalDb>>,
@@ -91,12 +93,14 @@ impl<'a> AdminCliContext<'a> {
         cg: &'a TraceDecay,
         global_db: &'a Arc<RegisteredGlobalDb>,
         accounting_db: Option<&'a RegisteredGlobalDb>,
+        accounting_controls: super::AccountingAdapterControls<'a>,
         profile_root: Option<&'a Path>,
         session_authorities: super::SessionAuthorities<'a>,
     ) -> Self {
         Self {
             global_db,
             accounting_db,
+            accounting_controls,
             profile_root,
             project: Some(cg),
             project_session_db: session_authorities.project,
@@ -109,11 +113,13 @@ impl<'a> AdminCliContext<'a> {
     fn projectless(
         global_db: &'a Arc<RegisteredGlobalDb>,
         accounting_db: Option<&'a RegisteredGlobalDb>,
+        accounting_controls: super::AccountingAdapterControls<'a>,
         profile_root: &'a Path,
     ) -> Self {
         Self {
             global_db,
             accounting_db,
+            accounting_controls,
             profile_root: Some(profile_root),
             project: None,
             project_session_db: None,
@@ -139,10 +145,6 @@ impl<'a> AdminCliContext<'a> {
         self.profile_root.ok_or_else(|| TraceDecayError::Config {
             message: "daemon TraceDecay profile root is unavailable".to_string(),
         })
-    }
-
-    fn project_root(&self) -> Option<&'a Path> {
-        self.project.map(TraceDecay::project_root)
     }
 
     fn require_project_session_db(&self) -> Result<&'a Arc<RegisteredGlobalDb>> {
@@ -181,6 +183,7 @@ pub(super) async fn handle_admin_cli(
     args: Value,
     global_db: Option<&Arc<RegisteredGlobalDb>>,
     accounting_db: Option<&RegisteredGlobalDb>,
+    accounting_controls: super::AccountingAdapterControls<'_>,
     profile_root: Option<&Path>,
     session_authorities: super::SessionAuthorities<'_>,
 ) -> Result<ToolResult> {
@@ -193,6 +196,7 @@ pub(super) async fn handle_admin_cli(
             cg,
             global_db,
             accounting_db,
+            accounting_controls,
             profile_root,
             session_authorities,
         ),
@@ -205,11 +209,12 @@ pub(crate) async fn handle_projectless_admin_cli(
     args: Value,
     global_db: &Arc<RegisteredGlobalDb>,
     accounting_db: Option<&RegisteredGlobalDb>,
+    accounting_controls: super::AccountingAdapterControls<'_>,
     profile_root: &Path,
 ) -> Result<ToolResult> {
     let action = parse_admin_cli_action(args)?;
     dispatch_admin_cli(
-        AdminCliContext::projectless(global_db, accounting_db, profile_root),
+        AdminCliContext::projectless(global_db, accounting_db, accounting_controls, profile_root),
         action,
     )
     .await
@@ -239,7 +244,11 @@ async fn dispatch_admin_cli(
     let global_db = context.global_db;
     let value = match action {
         AdminCliAction::CostSummary { range } => {
-            cost_summary(context.require_accounting_db()?, &range).await?
+            return Ok(super::invoke_accounting_authority(
+                context.accounting_controls.clone(),
+                AccountingOperationV1::CostSummary { range },
+            )
+            .await);
         }
         AdminCliAction::SessionsIngest => {
             sessions_ingest(
@@ -270,22 +279,21 @@ async fn dispatch_admin_cli(
             sessions_unfinished(context.require_registered_project_session_db()?, limit).await?
         }
         AdminCliAction::AnalyticsSync => {
-            crate::analytics_bridge::analytics_sync_with_db(
-                context.require_accounting_db()?,
-                context.project_root(),
+            return Ok(super::invoke_accounting_authority(
+                context.accounting_controls.clone(),
+                AccountingOperationV1::AnalyticsSync,
             )
-            .await
+            .await);
         }
         AdminCliAction::AnalyticsDiagnostics { all, no_sync } => {
-            crate::analytics_bridge::analytics_diagnostics_with_db(
-                context.require_accounting_db()?,
-                context.registered_project_session_db.map(Arc::as_ref),
-                context.registered_user_session_db.map(Arc::as_ref),
-                context.project_root(),
-                all,
-                no_sync,
+            return Ok(super::invoke_accounting_authority(
+                context.accounting_controls.clone(),
+                AccountingOperationV1::AnalyticsDiagnostics {
+                    all_projects: all,
+                    no_sync,
+                },
             )
-            .await?
+            .await);
         }
         AdminCliAction::RegistryList { limit, query } => {
             registry_list(context.project, global_db, limit, query.as_deref()).await?
@@ -517,56 +525,6 @@ async fn registry_context(
         "project": public.project,
         "aliases": context.aliases,
         "stores": context.stores,
-    }))
-}
-
-async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Result<Value> {
-    let accounting_error = |message| TraceDecayError::Config { message };
-    crate::accounting::pricing::refresh_if_stale();
-    let ingest = crate::accounting::parser::ingest(global_db).await;
-    let since = crate::accounting::metrics::parse_range(range);
-    let tokens_saved = global_db
-        .try_global_tokens_saved()
-        .await
-        .map_err(accounting_error)?;
-    let summary = crate::accounting::metrics::cost_summary(global_db, since, tokens_saved)
-        .await
-        .map_err(accounting_error)?;
-    let today_since = crate::accounting::metrics::parse_range("today");
-    let today_cost = global_db
-        .try_total_cost_since(today_since)
-        .await
-        .map_err(accounting_error)?;
-    let today_breakdown = global_db
-        .try_token_breakdown_since(today_since)
-        .await
-        .map_err(accounting_error)?;
-    let costs =
-        crate::application::observability::costs_read_model(global_db, None, since as i64).await;
-    Ok(json!({
-        "range": range,
-        "ingest": {
-            "turns_inserted": ingest.turns_inserted,
-            "cost_usd": ingest.cost_usd,
-            "tokens_consumed": ingest.tokens_consumed,
-        },
-        "summary": {
-            "total_cost": summary.total_cost,
-            "total_input_tokens": summary.total_input_tokens,
-            "total_output_tokens": summary.total_output_tokens,
-            "total_cache_read_tokens": summary.total_cache_read_tokens,
-            "by_model": summary.by_model,
-            "by_category": summary.by_category,
-            "tokens_saved": summary.tokens_saved,
-            "efficiency_ratio": summary.efficiency_ratio,
-        },
-        "today": {
-            "cost": today_cost,
-            "input_tokens": today_breakdown.0,
-            "output_tokens": today_breakdown.1,
-            "cache_read_tokens": today_breakdown.2,
-        },
-        "costs": costs,
     }))
 }
 

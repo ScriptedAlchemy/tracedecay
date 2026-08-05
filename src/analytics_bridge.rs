@@ -118,9 +118,8 @@ async fn call_admin_cli(
 
 pub(crate) async fn analytics_sync_with_db(
     gdb: &RegisteredGlobalDb,
-    project_root: Option<&Path>,
+    sources: Vec<HookImportSource>,
 ) -> Value {
-    let sources = hook_import_sources(project_root);
     import_hook_analytics(gdb, sources).await.as_json()
 }
 
@@ -129,6 +128,8 @@ pub(crate) async fn analytics_diagnostics_with_db(
     project_sessions: Option<&RegisteredGlobalDb>,
     user_sessions: Option<&RegisteredGlobalDb>,
     project_root: Option<&Path>,
+    project_store_root: Option<&Path>,
+    hook_sources: Vec<HookImportSource>,
     all_projects: bool,
     no_sync: bool,
 ) -> crate::errors::Result<Value> {
@@ -137,7 +138,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     let import = if no_sync {
         Value::Null
     } else {
-        analytics_sync_with_db(gdb, project_root).await
+        analytics_sync_with_db(gdb, hook_sources).await
     };
 
     let project_filter = if all_projects {
@@ -175,14 +176,9 @@ pub(crate) async fn analytics_diagnostics_with_db(
         .map(crate::dashboard::analytics_api::durable_analytics_event_row)
         .collect();
 
-    let store_root = project_root.and_then(|root| {
-        crate::storage::resolve_layout_for_current_profile(root)
-            .ok()
-            .map(|layout| layout.data_root)
-    });
     let hook_filter_root = if all_projects { None } else { project_root };
     let hook_analytics = crate::dashboard::analytics_api::read_hook_analytics_rows_at(
-        store_root.as_deref(),
+        project_store_root,
         hook_filter_root,
     );
 
@@ -283,10 +279,18 @@ mod tests {
             "analytics-cli-observability-parity",
         )
         .await;
-        let output =
-            analytics_diagnostics_with_db(&harness.registered, None, None, None, true, true)
-                .await
-                .expect("CLI diagnostics");
+        let output = analytics_diagnostics_with_db(
+            &harness.registered,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            true,
+            true,
+        )
+        .await
+        .expect("CLI diagnostics");
 
         assert!(
             output["observatory"]["metrics"]

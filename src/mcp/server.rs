@@ -252,6 +252,7 @@ pub struct McpServer {
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     transcript_source_home: Option<PathBuf>,
     accounting_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    accounting_authority: Option<Arc<dyn tracedecay_application::AccountingAuthorityPort>>,
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
     session_db: Option<Arc<RegisteredGlobalDb>>,
@@ -755,6 +756,19 @@ impl McpServer {
             }
         };
         let active_project_id = cg.store_layout().identity.project_id.clone();
+        let accounting_authority = accounting_db
+            .as_ref()
+            .zip(profile_identity.as_ref())
+            .and_then(|(accounting, profile_identity)| {
+                crate::daemon::accounting_authority::DaemonAccountingAuthority::for_project(
+                    profile_identity,
+                    Arc::clone(accounting),
+                    transcript_source_home.clone(),
+                    Arc::clone(&cg),
+                    registered_session_db.clone(),
+                    registered_user_session_db.clone(),
+                )
+            });
         let project_session_retrieval_root = match registry_db.as_deref() {
             Some(registry) => DaemonSessionRetrievalRoot::project(&cg, registry).await,
             None => None,
@@ -845,6 +859,7 @@ impl McpServer {
             last_flush_at: AtomicI64::new(0),
             global_db,
             accounting_db,
+            accounting_authority,
             profile_root,
             profile_identity,
             transcript_source_home,
@@ -1197,7 +1212,7 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
     }
 }
 
-fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
+pub(crate) fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
     crate::request_identity::mcp_connection_request_id(id, connection_scope)
         .map(|request_id| request_id.as_str().to_owned())
 }

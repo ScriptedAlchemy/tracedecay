@@ -20,6 +20,11 @@ fn find_session_files() -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
+    find_session_files_at(&home)
+}
+
+/// Find all Claude transcript files below one admitted host-data home.
+fn find_session_files_at(home: &Path) -> Vec<PathBuf> {
     let projects_dir = home.join(".claude").join("projects");
     if !projects_dir.is_dir() {
         return Vec::new();
@@ -177,31 +182,64 @@ pub struct IngestStats {
     pub cost_usd: f64,
     /// Total input + output tokens of the newly-inserted turns.
     pub tokens_consumed: u64,
+    /// Sources whose parsed turns and cursor failed to commit atomically.
+    pub sources_failed: u64,
 }
 
 /// Ingest all Claude Code session files into the global DB.
 /// Uses offset tracking to only parse new lines since the last run.
 pub(crate) async fn ingest(gdb: &RegisteredGlobalDb) -> IngestStats {
     let files = find_session_files();
+    ingest_files(gdb, &files).await
+}
+
+/// Ingest only transcripts below the daemon-admitted host-data home.
+pub(crate) async fn ingest_at(
+    gdb: &RegisteredGlobalDb,
+    transcript_source_home: &Path,
+) -> IngestStats {
+    let files = find_session_files_at(transcript_source_home);
+    ingest_files(gdb, &files).await
+}
+
+async fn ingest_files(gdb: &RegisteredGlobalDb, files: &[PathBuf]) -> IngestStats {
     let mut total_inserted = 0u64;
     let mut total_cost = 0.0f64;
     let mut total_tokens = 0u64;
+    let mut sources_failed = 0u64;
 
-    for file_path in &files {
+    for file_path in files {
         let path_str = file_path.to_string_lossy().to_string();
 
         // Check file mtime
         let Ok(meta) = fs::metadata(file_path) else {
+            sources_failed = sources_failed.saturating_add(1);
             continue;
         };
-        let mtime = meta
+        let Some(mtime) = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs());
+            .map(|d| d.as_secs())
+        else {
+            sources_failed = sources_failed.saturating_add(1);
+            continue;
+        };
 
         // Check if we've already parsed this file up to this mtime
-        let prev = gdb.get_parse_offset(&path_str).await.unwrap_or_default();
+        let prev = match gdb.get_parse_offset_result(&path_str).await {
+            Ok(Some(previous)) => previous,
+            Ok(None) => crate::global_db::ParseOffset::default(),
+            Err(error) => {
+                sources_failed = sources_failed.saturating_add(1);
+                tracing::warn!(
+                    path = %file_path.display(),
+                    %error,
+                    "accounting transcript cursor could not be read"
+                );
+                continue;
+            }
+        };
         let (prev_offset, prev_mtime) = (prev.byte_offset, prev.mtime);
 
         if mtime == prev_mtime && prev_offset > 0 {
@@ -223,22 +261,35 @@ pub(crate) async fn ingest(gdb: &RegisteredGlobalDb) -> IngestStats {
         let mut turns = Vec::new();
 
         let Ok(f) = fs::File::open(file_path) else {
+            sources_failed = sources_failed.saturating_add(1);
             continue;
         };
         let mut reader = BufReader::new(f);
 
         // Seek to the saved offset
         if seek_to > 0 && reader.seek(SeekFrom::Start(seek_to)).is_err() {
+            sources_failed = sources_failed.saturating_add(1);
             continue;
         }
 
         let mut line = String::new();
         let mut current_offset = seek_to;
+        let mut source_read_failed = false;
 
         loop {
             line.clear();
             match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(error) => {
+                    sources_failed = sources_failed.saturating_add(1);
+                    source_read_failed = true;
+                    tracing::warn!(
+                        path = %file_path.display(),
+                        %error,
+                        "accounting transcript source could not be read"
+                    );
+                    break;
+                }
                 Ok(n) => {
                     current_offset += n as u64;
                     let trimmed = line.trim();
@@ -250,6 +301,9 @@ pub(crate) async fn ingest(gdb: &RegisteredGlobalDb) -> IngestStats {
                     }
                 }
             }
+        }
+        if source_read_failed {
+            continue;
         }
 
         // Commit parsed turns and the new frontier together. This parser tracks
@@ -272,6 +326,7 @@ pub(crate) async fn ingest(gdb: &RegisteredGlobalDb) -> IngestStats {
                 total_tokens = total_tokens.saturating_add(tokens);
             }
             Err(error) => {
+                sources_failed = sources_failed.saturating_add(1);
                 tracing::warn!(
                     path = %file_path.display(),
                     %error,
@@ -285,6 +340,7 @@ pub(crate) async fn ingest(gdb: &RegisteredGlobalDb) -> IngestStats {
         turns_inserted: total_inserted,
         cost_usd: total_cost,
         tokens_consumed: total_tokens,
+        sources_failed,
     }
 }
 

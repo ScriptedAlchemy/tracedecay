@@ -128,6 +128,7 @@ pub fn error_message_is_read_deadline(message: &str) -> bool {
         .any(|deadline| message.contains(deadline))
 }
 
+pub(crate) mod accounting_authority;
 mod authority;
 mod bootstrap;
 mod bootstrap_route;
