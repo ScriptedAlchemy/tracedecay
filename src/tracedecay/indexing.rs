@@ -19,6 +19,8 @@ use crate::types::*;
 use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
 
 const GRAPH_REBUILD_STATE_KEY: &str = "graph_rebuild_state_v1";
+pub(crate) const BRANCH_QUERY_GRAPH_SOURCE_KEY: &str = "branch_query_graph_source_v1";
+const BRANCH_QUERY_GRAPH_SOURCE_UPDATING: &str = "updating";
 const GRAPH_REBUILD_CHECKPOINT_DIR: &str = "graph-rebuild-checkpoint-v1";
 const GRAPH_REBUILD_CHECKPOINT_BATCH_SIZE: usize = 1_024;
 static GRAPH_REBUILD_WORKERS: LazyLock<Mutex<HashSet<PathBuf>>> =
@@ -815,6 +817,8 @@ impl TraceDecay {
         let live_branch = self.branch_memo();
         self.ensure_branch_writable_with("full index", &live_branch)?;
         let sync_lease = self.begin_active_sync()?;
+        self.invalidate_branch_query_publication(&live_branch)
+            .await?;
         #[cfg(any(test, feature = "test-transport"))]
         if rebuild_availability.is_some() {
             let hold_ms = GRAPH_REBUILD_TEST_HOLD_LEASE_MS.load(Ordering::SeqCst);
@@ -993,7 +997,8 @@ impl TraceDecay {
         // Stamp HEAD after releasing the full-index transaction: this helper
         // acquires its own writer lane, as do the incremental-sync call sites.
         let source_oid = self.stamp_last_synced_commit().await;
-        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())?;
+        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())
+            .await?;
 
         let result = IndexResult {
             file_count: files.len(),
@@ -1146,6 +1151,8 @@ impl TraceDecay {
         use crate::sync as sync_mod;
 
         self.ensure_branch_writable_with("sync files", live_branch)?;
+        self.invalidate_branch_query_publication(live_branch)
+            .await?;
 
         let start = Instant::now();
         let project_root = &self.project_root;
@@ -1249,7 +1256,8 @@ impl TraceDecay {
         // HEAD is unchanged, re-stamping the same commit is idempotent; if a
         // hook-driven edit accompanied a commit, this keeps the base accurate.
         let source_oid = self.stamp_last_synced_commit().await;
-        self.publish_branch_meta_synced(live_branch, source_oid.as_deref())?;
+        self.publish_branch_meta_synced(live_branch, source_oid.as_deref())
+            .await?;
         self.db
             .set_metadata(
                 "last_sync_duration_ms",
@@ -1471,6 +1479,8 @@ impl TraceDecay {
         let live_branch = self.branch_memo();
         self.ensure_branch_writable_with("sync", &live_branch)?;
         let sync_lease = self.begin_active_sync()?;
+        self.invalidate_branch_query_publication(&live_branch)
+            .await?;
         let start = Instant::now();
 
         on_progress(0, 0, "scanning files");
@@ -1674,7 +1684,8 @@ impl TraceDecay {
                 .set_metadata("last_sync_at", &current_timestamp().to_string())
                 .await?;
             let source_oid = self.stamp_last_synced_commit().await;
-            self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())?;
+            self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())
+                .await?;
             self.db
                 .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
                 .await?;
@@ -1816,7 +1827,8 @@ impl TraceDecay {
             .await?;
         // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
         let source_oid = self.stamp_last_synced_commit().await;
-        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())?;
+        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())
+            .await?;
         self.db
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
@@ -1986,7 +1998,27 @@ impl TraceDecay {
     }
 
     /// Publishes graph-owner evidence only for an already tracked branch.
-    fn publish_branch_meta_synced(
+    async fn invalidate_branch_query_publication(
+        &self,
+        live_branch: &crate::branch::BranchMemo,
+    ) -> Result<()> {
+        let Some(branch) = live_branch.resolve_for(&self.project_root) else {
+            return Ok(());
+        };
+        if crate::branch_meta::load_branch_meta(&self.store_layout.data_root)
+            .is_some_and(|meta| meta.is_tracked(&branch))
+        {
+            self.db
+                .set_metadata(
+                    BRANCH_QUERY_GRAPH_SOURCE_KEY,
+                    BRANCH_QUERY_GRAPH_SOURCE_UPDATING,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn publish_branch_meta_synced(
         &self,
         live_branch: &crate::branch::BranchMemo,
         source_oid: Option<&str>,
@@ -2013,6 +2045,12 @@ impl TraceDecay {
             })?;
         let source =
             branch_graph_source_for_root(&self.project_root, project_id, &branch, source_oid)?;
+        let encoded = serde_json::to_string(&source).map_err(|error| TraceDecayError::Config {
+            message: format!("branch graph source encoding failed: {error}"),
+        })?;
+        self.db
+            .set_metadata(BRANCH_QUERY_GRAPH_SOURCE_KEY, &encoded)
+            .await?;
         crate::branch_meta::publish_graph_source(&self.store_layout.data_root, &branch, source)
             .map_err(|error| TraceDecayError::Config {
                 message: format!("branch graph source publication failed: {error}"),

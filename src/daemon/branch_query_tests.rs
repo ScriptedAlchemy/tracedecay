@@ -1,6 +1,12 @@
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
+use tracedecay_application::{
+    BranchAuthorizationEpochV1, BranchChangedSymbolV1, BranchDiffRequestV1, BranchDiffSymbolV1,
+    BranchGraphGenerationV1, BranchQueryControlsV1, BranchQueryOutcomeV1, BranchQueryRequestV1,
+    BranchQueryResultV1, BranchQueryStaleReasonV1, BranchQueryUnavailableReasonV1,
+    BranchSearchMatchV1, BranchSearchRequestV1, BranchSnapshotIdentityV1,
+};
 use tracedecay_domain::{
     ActorId, ConfigurationRevisionId, GitOidV1, ManifestDigest, RepositoryId, SessionCursorKeyIdV1,
     SessionCursorVersionV1, SignedCursorKeyRefV1, WorktreeId,
@@ -15,6 +21,7 @@ use super::*;
 #[derive(Default)]
 struct FakeGraph {
     commit: Mutex<Option<String>>,
+    published: Mutex<Option<crate::branch_meta::BranchGraphSourceV1>>,
     search: Vec<BranchSearchMatchV1>,
     nodes: Vec<BranchGraphSymbol>,
 }
@@ -37,6 +44,22 @@ impl BranchGraphReadPort for FakeGraph {
     fn source_commit(&self) -> BranchMarkerFuture<'_> {
         let commit = self.commit.lock().expect("commit").clone();
         Box::pin(async move { commit })
+    }
+
+    fn published_source(&self) -> BranchSourceFuture<'_> {
+        let published = self.published.lock().expect("published").clone();
+        Box::pin(async move { published })
+    }
+}
+
+fn graph_source(worktree: &str) -> crate::branch_meta::BranchGraphSourceV1 {
+    crate::branch_meta::BranchGraphSourceV1 {
+        project_id: "project.fixture".to_owned(),
+        repository_id: "repository.fixture".to_owned(),
+        worktree_id: worktree.to_owned(),
+        worktree_root: format!("/fixture/{worktree}"),
+        reference: "refs/heads/main".to_owned(),
+        source_oid: "a".repeat(40),
     }
 }
 
@@ -609,4 +632,43 @@ fn production_authorization_epoch_survives_grant_reissue_and_detects_real_drift(
         !RegisteredBranchSnapshotResolver::authorization_epoch_is_current(&admitted, &narrowed)
             .expect("narrowed sink")
     );
+}
+
+#[tokio::test]
+async fn same_oid_owner_handoff_is_unavailable_until_both_markers_publish() {
+    let graph = FakeGraph {
+        commit: Mutex::new(Some("a".repeat(40))),
+        ..FakeGraph::default()
+    };
+    let scope = GraphScopeRecord {
+        graph_scope_id: "scope.main".to_owned(),
+        project_id: "project.fixture".to_owned(),
+        store_id: "store.fixture".to_owned(),
+        branch_name: "main".to_owned(),
+        db_relpath: "branches/main.db".to_owned(),
+        parent_scope_id: None,
+        last_synced_at: Some(1),
+        writable: true,
+    };
+    let new_owner = graph_source("worktree.new");
+
+    assert!(matches!(
+        RegisteredBranchSnapshotResolver::current_generation(&graph, &scope, &new_owner, &[],)
+            .await,
+        BranchGenerationOutcome::Unavailable(BranchQueryUnavailableReasonV1::GenerationUnavailable)
+    ));
+
+    *graph.published.lock().expect("published") = Some(graph_source("worktree.old"));
+    assert!(matches!(
+        RegisteredBranchSnapshotResolver::current_generation(&graph, &scope, &new_owner, &[],)
+            .await,
+        BranchGenerationOutcome::Drift
+    ));
+
+    *graph.published.lock().expect("published") = Some(new_owner.clone());
+    assert!(matches!(
+        RegisteredBranchSnapshotResolver::current_generation(&graph, &scope, &new_owner, &[],)
+            .await,
+        BranchGenerationOutcome::Current(_)
+    ));
 }
