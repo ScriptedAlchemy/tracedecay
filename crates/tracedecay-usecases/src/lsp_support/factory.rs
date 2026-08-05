@@ -84,10 +84,7 @@ impl DaemonLspSessionFactory {
     }
 
     fn current_gateway_capabilities(&self) -> GatewayCapabilities {
-        let mut capabilities = self.gateway_capabilities.clone();
-        capabilities.supports_workspace_diagnostics &=
-            self.diagnostics.supports_workspace_diagnostics();
-        capabilities
+        self.gateway_capabilities.clone()
     }
 
     pub fn open_session(&self, root: AdmittedRoot) -> DaemonLspRuntimeSession {
