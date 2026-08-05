@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-host-integration"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "Root-free host integration manifests, receipts, journals, and evidence"

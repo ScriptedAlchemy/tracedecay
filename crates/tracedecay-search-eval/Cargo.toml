@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-search-eval"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay search-quality evaluator: candidate generation, direct evaluation, and native semantic measurement"

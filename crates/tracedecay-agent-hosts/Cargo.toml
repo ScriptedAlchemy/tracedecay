@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-agent-hosts"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "Agent host integrations and self-improvement automation for TraceDecay"
