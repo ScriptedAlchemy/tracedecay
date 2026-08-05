@@ -71,7 +71,7 @@ pub trait SourceAcquisitionStatePortV1: Send + Sync {
 
 pub use tracedecay_store::{
     MAX_SOURCE_ACQUISITION_ATTEMPTS_V1, MAX_SOURCE_ACQUISITION_RECEIPTS_V1,
-    SourceAcquisitionQueueStateV1, SourceScheduledRefetchV1,
+    SourceAcquisitionQueueStateV1, SourceAcquisitionRequestV1, SourceScheduledRefetchV1,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -351,10 +351,41 @@ where
             .map_err(|_| ExternalSourceAcquisitionErrorV1::StateUnavailable)
     }
 
+    /// Drain ready durable work immediately on mount, then wait for admissions
+    /// and bounded retry deadlines until the owning runtime is cancelled.
+    pub async fn run_background(&self, cancellation: &ObservationCancellation) {
+        loop {
+            if cancellation.is_cancelled() {
+                return;
+            }
+            let now = tracedecay_application::now_micros();
+            match self.run_one(now, cancellation).await {
+                Ok(SourceAcquisitionRunOutcomeV1::Idle) => {
+                    tokio::select! {
+                        () = self.wait_for_wake() => {}
+                        () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    }
+                }
+                Ok(SourceAcquisitionRunOutcomeV1::Unavailable { retry_at, .. }) => {
+                    let delay_micros = retry_at.0.saturating_sub(now.0);
+                    let delay = u64::try_from(delay_micros)
+                        .map(Duration::from_micros)
+                        .unwrap_or(Duration::ZERO)
+                        .min(self.policy.maximum_backoff);
+                    tokio::time::sleep(delay).await;
+                }
+                Ok(SourceAcquisitionRunOutcomeV1::Cancelled) => return,
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+            }
+        }
+    }
+
     pub async fn admit_event(
         &self,
         definition: &SourceDefinitionV1,
         binding: &SourceBindingV1,
+        request: &SourceAcquisitionRequestV1,
         event: SourceEventV1,
         admitted_at: UtcMicros,
     ) -> Result<SourceEventAdmissionReceiptV1, ExternalSourceAcquisitionErrorV1> {
@@ -364,6 +395,9 @@ where
         binding
             .validate_against(definition)
             .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
+        request
+            .validate()
+            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
         event
             .validate()
             .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
@@ -371,6 +405,11 @@ where
             .immutable_identity()
             .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
         if event.binding() != &identity {
+            return Err(ExternalSourceAcquisitionErrorV1::AuthorityChanged);
+        }
+        if request.provider() != &definition.provider
+            || request.binding_native_root().ok().as_ref() != Some(&binding.native_root)
+        {
             return Err(ExternalSourceAcquisitionErrorV1::AuthorityChanged);
         }
         for _ in 0..SOURCE_ACQUISITION_CAS_ATTEMPTS_V1 {
@@ -408,6 +447,7 @@ where
                     &definition.definition_digest,
                     binding.binding_revision,
                     &binding.binding_digest,
+                    request.request_digest(),
                 ))
                 .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?,
                 SourceRefreshCauseV1::Event,
@@ -454,6 +494,7 @@ where
             let scheduled = SourceScheduledRefetchV1::new(
                 definition.clone(),
                 binding.clone(),
+                request.clone(),
                 admission.receipt().clone(),
                 None,
                 0,
