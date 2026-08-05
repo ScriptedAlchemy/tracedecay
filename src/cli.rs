@@ -13,7 +13,7 @@ pub use automation::{
 };
 use help::*;
 pub use package_hook::{PackageHookAction, ScoopPackageHookAction};
-pub use workflow::{WorkflowCliOperationArg, WorkflowInvocationArgs};
+pub use workflow::WorkflowInvocationArgs;
 
 fn agent_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(tracedecay::agents::available_integrations())
