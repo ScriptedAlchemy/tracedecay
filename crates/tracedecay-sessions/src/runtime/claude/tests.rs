@@ -297,7 +297,7 @@ fn subagent_metadata_exceeding_structural_limits_is_denied_as_a_whole() {
     std::fs::write(&transcript, "").unwrap();
 
     let mut nested = json!(true);
-    for _ in 0..70 {
+    for _ in 0..=tracedecay_capture::ParseLimits::default_policy().depth {
         nested = json!({"next": nested});
     }
     std::fs::write(

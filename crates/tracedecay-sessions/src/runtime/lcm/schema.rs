@@ -589,15 +589,16 @@ mod tests {
         storage_kind: &str,
         metadata_json: Option<&str>,
     ) -> Result<(), String> {
+        let content_hash = projected_content_hash(content);
         conn.execute(
             "INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, role, ordinal, content,
                 content_hash, storage_kind, snippet_text, index_text, metadata_json
              ) VALUES (
                 'cursor', 'message-1', 'session-1', 'user', 1, ?1,
-                'test-hash', ?2, ?1, ?1, ?3
+                ?2, ?3, ?1, ?1, ?4
              )",
-            params![content, storage_kind, metadata_json],
+            params![content, content_hash, storage_kind, metadata_json],
         )
         .await
         .map_err(|error| error.to_string())?;
