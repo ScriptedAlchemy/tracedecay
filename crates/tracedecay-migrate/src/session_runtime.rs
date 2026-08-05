@@ -1,10 +1,7 @@
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use tracedecay_domain::ProjectId;
-use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
+use tracedecay_runtime_core::db::DatabaseAuthority;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::store_runtime::registry::{
     LifecycleShardRuntimePublisher, ProfileAuthorityPin, ProfileAuthorityPinResult,
@@ -12,8 +9,7 @@ use tracedecay_runtime_core::store_runtime::registry::{
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
 };
 use tracedecay_runtime_core::store_runtime::resolver::{
-    LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
-    LocalStoreRuntimeResolverV1,
+    LocalProfileStoreAuthorityV1, LocalStoreLocatorResolutionV1, LocalStoreRuntimeResolverV1,
 };
 use tracedecay_store::{StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1};
 
@@ -21,15 +17,8 @@ use crate::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::root_seam::global_db::RegisteredGlobalDb;
 
 pub(crate) struct DaemonSessionRuntimeRegistryV1 {
-    identity: LocalProfileIdentityAuthorityV1,
-    incarnation: StoreIncarnationV1,
-    resolver: Arc<LocalStoreRuntimeResolverV1>,
-    registry: StoreRuntimeRegistry,
-    profile_pin: ProfileAuthorityPin,
     _profile_runtime: StoreRuntimeHandle,
     profile_database: Mutex<Option<Arc<RegisteredGlobalDb>>>,
-    profile_sessions: Mutex<Option<Arc<RegisteredGlobalDb>>>,
-    project_sessions: Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
@@ -60,7 +49,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount migration profile authority",
         )
         .await?;
-        let profile_pin = match registry.profile_authority_pin(&profile_shard) {
+        let _profile_pin = match registry.profile_authority_pin(&profile_shard) {
             ProfileAuthorityPinResult::Pinned(pin) => pin,
             outcome => {
                 return Err(runtime_error(
@@ -70,15 +59,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
         };
         Ok(Self {
-            identity,
-            incarnation,
-            resolver,
-            registry,
-            profile_pin,
             _profile_runtime: profile_runtime,
             profile_database: Mutex::new(None),
-            profile_sessions: Mutex::new(None),
-            project_sessions: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -95,105 +77,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             .await?,
         );
         *mounted = Some(Arc::clone(&database));
-        Ok(database)
-    }
-
-    pub(crate) async fn profile_sessions(&self) -> Result<Arc<RegisteredGlobalDb>> {
-        let mut mounted = self.profile_sessions.lock().await;
-        if let Some(database) = mounted.as_ref() {
-            return Ok(Arc::clone(database));
-        }
-        let shard_id = StoreShardIdV1::profile_sessions(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-        );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id,
-            self.incarnation,
-            Some(self.profile_pin.clone()),
-            true,
-            "mount migration profile sessions",
-        )
-        .await?;
-        let database =
-            Arc::new(attach_registered(runtime, "attach migration profile sessions").await?);
-        *mounted = Some(Arc::clone(&database));
-        Ok(database)
-    }
-
-    pub(crate) async fn project_sessions(
-        &self,
-        project_id: ProjectId,
-        enrollment_roots: impl IntoIterator<Item = PathBuf>,
-    ) -> Result<Arc<RegisteredGlobalDb>> {
-        self.resolver
-            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
-                project_id.clone(),
-                enrollment_roots,
-            ))
-            .map_err(|error| {
-                runtime_error("register migration project authority", format!("{error:?}"))
-            })?;
-        let mut mounted = self.project_sessions.lock().await;
-        if let Some(database) = mounted.get(&project_id) {
-            return Ok(Arc::clone(database));
-        }
-        let shard_id = StoreShardIdV1::project_sessions(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-            project_id.clone(),
-        );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id,
-            self.incarnation,
-            Some(self.profile_pin.clone()),
-            true,
-            "mount migration project sessions",
-        )
-        .await?;
-        let database =
-            Arc::new(attach_registered(runtime, "attach migration project sessions").await?);
-        mounted.insert(project_id, Arc::clone(&database));
-        Ok(database)
-    }
-
-    pub(crate) async fn project_memory(
-        &self,
-        project_id: ProjectId,
-        enrollment_roots: impl IntoIterator<Item = PathBuf>,
-    ) -> Result<Database> {
-        self.resolver
-            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
-                project_id.clone(),
-                enrollment_roots,
-            ))
-            .map_err(|error| {
-                runtime_error(
-                    "register migration project memory authority",
-                    format!("{error:?}"),
-                )
-            })?;
-        let shard_id = StoreShardIdV1::project(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-            project_id,
-        );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id,
-            self.incarnation,
-            Some(self.profile_pin.clone()),
-            true,
-            "mount migration project memory",
-        )
-        .await?;
-        let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
-        tracedecay_runtime_core::db::migrations::migrate(&database).await?;
         Ok(database)
     }
 }

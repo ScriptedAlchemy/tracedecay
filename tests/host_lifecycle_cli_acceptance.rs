@@ -6,6 +6,9 @@ use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracedecay::agents::host_bundle_registry::{
+    default_components, unsupported_host_component_set_reason,
+};
 use tracedecay::agents::host_bundle_v2::{
     HostBundleComponentV1, HostComponentSetReceiptV1, HostKindV1, latest_host_component_receipt_at,
     latest_host_component_set_receipt_at,
@@ -63,38 +66,29 @@ const OPENCODE_CONFIGS: &[(&str, &[u8])] = &[(
 "#,
 )];
 
-const HOSTS: &[HostCase] = &[
+fn host_case(host: HostKindV1) -> HostCase {
+    let configs = match host {
+        HostKindV1::ClaudeCode => CLAUDE_CONFIGS,
+        HostKindV1::CursorDesktop => CURSOR_CONFIGS,
+        HostKindV1::Codex => CODEX_CONFIGS,
+        HostKindV1::Hermes => HERMES_CONFIGS,
+        HostKindV1::Kiro => KIRO_CONFIGS,
+        HostKindV1::KimiCode => &[],
+        HostKindV1::OpenCode => OPENCODE_CONFIGS,
+        unsupported => panic!("no production lifecycle case for unsupported host {unsupported:?}"),
+    };
     HostCase {
-        id: "claude",
-        host: HostKindV1::ClaudeCode,
-        configs: CLAUDE_CONFIGS,
-    },
-    HostCase {
-        id: "cursor",
-        host: HostKindV1::CursorDesktop,
-        configs: CURSOR_CONFIGS,
-    },
-    HostCase {
-        id: "codex",
-        host: HostKindV1::Codex,
-        configs: CODEX_CONFIGS,
-    },
-    HostCase {
-        id: "hermes",
-        host: HostKindV1::Hermes,
-        configs: HERMES_CONFIGS,
-    },
-    HostCase {
-        id: "kiro",
-        host: HostKindV1::Kiro,
-        configs: KIRO_CONFIGS,
-    },
-    HostCase {
-        id: "opencode",
-        host: HostKindV1::OpenCode,
-        configs: OPENCODE_CONFIGS,
-    },
-];
+        id: tracedecay::agents::integration_id_for_host(host),
+        host,
+        configs,
+    }
+}
+
+fn supported_host_cases() -> impl Iterator<Item = HostCase> {
+    HostKindV1::ALL
+        .into_iter()
+        .filter_map(|host| (!default_components(host).is_empty()).then(|| host_case(host)))
+}
 
 struct IsolatedCli {
     home: TempDir,
@@ -395,12 +389,11 @@ fn native_feedback(case: HostCase) -> Option<[(&'static str, Vec<u8>); 2]> {
 
 #[test]
 fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
-    for case in HOSTS
-        .iter()
-        .filter(|case| !matches!(case.host, HostKindV1::Codex | HostKindV1::Kiro))
+    for case in supported_host_cases()
+        .filter(|case| !matches!(case.host, HostKindV1::Codex | HostKindV1::KimiCode))
     {
         let cli = IsolatedCli::new();
-        let originals = seed_host(*case, &cli);
+        let originals = seed_host(case, &cli);
 
         assert_success(
             case.id,
@@ -427,7 +420,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         let update_receipt = latest_receipt(&cli, case.host);
         assert_receipt_digests(&cli, &update_receipt);
 
-        if let Some(events) = native_feedback(*case) {
+        if let Some(events) = native_feedback(case) {
             for (phase, (entrypoint, fixture)) in ["edit", "stop"].into_iter().zip(events) {
                 assert_success(case.id, phase, cli.run_with_stdin(&[entrypoint], &fixture));
             }
@@ -437,13 +430,8 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             .component_receipts
             .iter()
             .flat_map(|component| &component.artifacts)
-            .find(|artifact| {
-                !artifact.relative_path.ends_with(".json")
-                    && !artifact.relative_path.ends_with(".toml")
-                    && !artifact.relative_path.ends_with(".yaml")
-                    && !artifact.relative_path.ends_with(".yml")
-            })
-            .expect("non-registration repair artifact");
+            .next()
+            .expect("managed repair artifact");
         fs::write(
             cli.home.path().join(&repair_target.relative_path),
             b"operator-corrupted managed artifact",
@@ -504,6 +492,9 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             "{} recovery did not preserve the pre-interruption receipt",
             case.id
         );
+        assert_success(case.id, "post-recovery repair", cli.run(&["reinstall"]));
+        let repaired_receipt = latest_receipt(&cli, case.host);
+        assert_receipt_digests(&cli, &repaired_receipt);
 
         let state = cli
             .home
@@ -586,10 +577,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
 #[test]
 fn codex_lifecycle_refuses_unavailable_noninteractive_activation() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::Codex)
-        .unwrap();
+    let case = host_case(HostKindV1::Codex);
     let originals = seed_host(case, &cli);
 
     let output = cli.run(&["install", "--agent", "codex"]);
@@ -629,12 +617,60 @@ fn codex_lifecycle_refuses_unavailable_noninteractive_activation() {
 }
 
 #[test]
+fn kimi_lifecycle_reports_official_activation_deferral() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::KimiCode);
+
+    let output = cli.run(&["install", "--agent", case.id]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Kimi") && stderr.contains("plugin"),
+        "Kimi deferral omitted its official activation boundary: {stderr}"
+    );
+    assert!(
+        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn unadmitted_catalog_hosts_never_fall_back_to_direct_installers() {
+    for host in HostKindV1::ALL {
+        let Some(reason) = unsupported_host_component_set_reason(host) else {
+            continue;
+        };
+        if matches!(host, HostKindV1::CursorCloud | HostKindV1::ClineFamily) {
+            continue;
+        }
+        let cli = IsolatedCli::new();
+        let agent = tracedecay::agents::integration_id_for_host(host);
+
+        let output = cli.run(&["install", "--agent", agent]);
+
+        assert!(
+            !output.status.success(),
+            "{host:?} bypassed typed component unavailability through a direct installer"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("{reason:?}")),
+            "{host:?} did not report its catalog reason {reason:?}: {stderr}"
+        );
+        assert!(
+            latest_host_component_set_receipt_at(&cli.lifecycle_root(), host)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn killed_registration_mutation_recovers_exact_pre_effect_state() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -692,10 +728,7 @@ fn killed_registration_mutation_recovers_exact_pre_effect_state() {
 #[test]
 fn killed_install_recovers_with_original_journal_operation() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
     #[cfg(unix)]
@@ -745,10 +778,7 @@ fn recovery_rejects_foreign_metadata_drift_with_unchanged_bytes() {
     use std::os::unix::fs::PermissionsExt;
 
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
@@ -793,10 +823,7 @@ fn recovery_rejects_foreign_metadata_drift_with_unchanged_bytes() {
 #[test]
 fn interrupted_registration_rollback_converges_across_two_restarts() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
     let killed = cli.run_with_env(
@@ -837,10 +864,7 @@ fn successful_atomic_replacement_preserves_mode_and_extended_acl() {
     use std::os::unix::fs::PermissionsExt;
 
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
@@ -880,10 +904,7 @@ fn successful_atomic_replacement_preserves_mode_and_extended_acl() {
 #[test]
 fn claude_nonempty_rewrite_recovers_after_real_write_kill() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     assert_success(
         case.id,
@@ -927,10 +948,7 @@ fn claude_nonempty_rewrite_recovers_after_real_write_kill() {
 #[test]
 fn claude_global_install_recovers_project_config_mutations() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     let mcp_path = cli.project.path().join(".mcp.json");
     let settings_path = cli.project.path().join(".claude/settings.local.json");
@@ -1025,10 +1043,7 @@ fn claude_global_install_recovers_project_config_mutations() {
 #[test]
 fn claude_recovery_recreates_vanished_directory_with_modified_config() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     let originals = seed_host(case, &cli);
     let settings_path = cli.home.path().join(".claude/settings.json");
     let killed = cli.run_with_env(
@@ -1060,10 +1075,7 @@ fn claude_recovery_refuses_foreign_directory_metadata_drift() {
     use std::os::unix::fs::PermissionsExt;
 
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     let claude_dir = cli.home.path().join(".claude");
     fs::set_permissions(&claude_dir, fs::Permissions::from_mode(0o710)).unwrap();
@@ -1087,10 +1099,7 @@ fn claude_recovery_refuses_foreign_directory_metadata_drift() {
 #[test]
 fn claude_tracedecay_only_project_mcp_removal_recovers() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     let mcp_path = cli.project.path().join(".mcp.json");
     let original = br#"{"mcpServers":{"tracedecay":{"command":"old"}}}
@@ -1123,10 +1132,7 @@ fn claude_tracedecay_only_project_mcp_removal_recovers() {
 #[test]
 fn claude_old_directory_missing_backup_layout_recovers() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     let settings_path = cli.home.path().join(".claude/settings.json");
     let killed = cli.run_with_env(
@@ -1173,10 +1179,7 @@ fn claude_old_directory_missing_backup_layout_recovers() {
 #[test]
 fn claude_base_v1_plan_without_directories_key_recovers() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     let settings_path = cli.home.path().join(".claude/settings.json");
     let killed = cli.run_with_env(
@@ -1219,10 +1222,7 @@ fn claude_base_v1_plan_without_directories_key_recovers() {
 #[test]
 fn claude_future_registration_backup_version_fails_truthfully() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     let settings_path = cli.home.path().join(".claude/settings.json");
     let killed = cli.run_with_env(
@@ -1253,10 +1253,7 @@ fn claude_future_registration_backup_version_fails_truthfully() {
 #[test]
 fn claude_future_identity_version_fails_truthfully() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     let settings_path = cli.home.path().join(".claude/settings.json");
     let killed = cli.run_with_env(
@@ -1286,10 +1283,7 @@ fn claude_install_rejects_empty_symlinked_config_directory() {
     use std::os::unix::fs::symlink;
 
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     let claude_dir = cli.home.path().join(".claude");
     fs::remove_dir_all(&claude_dir).unwrap();
@@ -1307,10 +1301,7 @@ fn claude_install_rejects_empty_symlinked_config_directory() {
 #[test]
 fn claude_global_uninstall_removes_current_project_legacy_registration() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1363,10 +1354,7 @@ fn claude_global_uninstall_removes_current_project_legacy_registration() {
 #[test]
 fn killed_install_recovery_refuses_later_operator_edit() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     let killed = cli.run_with_env(
         &["install", "--agent", case.id],
@@ -1404,10 +1392,7 @@ fn killed_install_recovery_refuses_later_operator_edit() {
 #[test]
 fn stale_feedback_registration_refuses_before_artifact_or_receipt_effects() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1480,10 +1465,7 @@ fn stale_feedback_registration_refuses_before_artifact_or_receipt_effects() {
 #[test]
 fn killed_feedback_switch_recovers_from_durable_effect_identity() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1577,10 +1559,7 @@ fn killed_feedback_switch_recovers_from_durable_effect_identity() {
 #[test]
 fn newer_feedback_receipt_refuses_before_restore_effects() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1637,10 +1616,7 @@ fn newer_feedback_receipt_refuses_before_restore_effects() {
 #[test]
 fn killed_feedback_registration_recovers_without_applied_marker() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1690,10 +1666,7 @@ fn killed_feedback_registration_recovers_without_applied_marker() {
 #[test]
 fn killed_feedback_registration_rejects_later_operator_edit() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1747,10 +1720,7 @@ fn killed_feedback_registration_rejects_metadata_only_drift() {
     use std::os::unix::fs::PermissionsExt;
 
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1800,10 +1770,7 @@ fn killed_feedback_registration_rejects_metadata_only_drift() {
 #[test]
 fn killed_feedback_restore_converges_on_restart() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,

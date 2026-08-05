@@ -140,8 +140,8 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
     }
 }
 
-/// Build the canonical default set for a host. Unsupported hosts have no
-/// fabricated component set and remain on their compatibility migration path.
+/// Build the canonical default set for a host. Unsupported hosts return their
+/// catalog reason instead of fabricating an empty successful install.
 pub fn verified_embedded_default_host_component_set(
     host: HostKindV1,
     now_unix: u64,
