@@ -25,8 +25,9 @@ use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
 };
 use crate::runtime::source::{
-    FileDiscoveryReport, TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult,
-    bound_path_list, canonical_framed_sha256,
+    FileDiscoveryReport, HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
+    TranscriptIngestResult, bound_path_list, canonical_framed_sha256,
+    persist_host_provider_coverage,
 };
 
 const PROVIDER: &str = "kimi";
@@ -68,8 +69,12 @@ struct KimiDiscoveryFailure {
 
 struct KimiDiscoveryReport {
     files: FileDiscoveryReport,
+    path_offsets: Vec<(PathBuf, u64)>,
     failures: Vec<KimiDiscoveryFailure>,
     failure_count: u64,
+    witness: u64,
+    start_offset: u64,
+    reached_end: bool,
 }
 
 impl KimiDiscoveryReport {
@@ -119,6 +124,64 @@ fn charge_discovered_path(budget: &mut HostScanBudget, path: &Path) -> bool {
     budget.try_charge_input(bytes)
 }
 
+fn discovery_witness(
+    session_dirs: impl IntoIterator<Item = PathBuf>,
+) -> TranscriptIngestResult<u64> {
+    let mut witness = canonical_framed_sha256(b"tracedecay.kimi.discovery-witness.v1", &[b"start"]);
+    for path in session_dirs {
+        let canonical = match std::fs::canonicalize(&path) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                let error_kind = format!("{:?}", error.kind());
+                let next = canonical_framed_sha256(
+                    b"tracedecay.kimi.discovery-witness.v1",
+                    &[
+                        witness.as_bytes(),
+                        path.as_os_str().as_encoded_bytes(),
+                        b"canonical-unavailable",
+                        error_kind.as_bytes(),
+                    ],
+                );
+                witness = next;
+                continue;
+            }
+        };
+        let metadata =
+            std::fs::metadata(&canonical).map_err(|source| TranscriptIngestError::ScanIo {
+                operation: "stat Kimi sessions directory witness",
+                path: canonical.clone(),
+                source,
+            })?;
+        let modified = metadata
+            .modified()
+            .map_err(|source| TranscriptIngestError::ScanIo {
+                operation: "read Kimi sessions directory generation",
+                path: canonical.clone(),
+                source,
+            })?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| TranscriptIngestError::NonDurableRecord {
+                provider: PROVIDER,
+                offset: 0,
+                end_offset: 0,
+                reason: "Kimi sessions directory generation predates Unix epoch",
+            })?
+            .as_nanos()
+            .to_be_bytes();
+        witness = canonical_framed_sha256(
+            b"tracedecay.kimi.discovery-witness.v1",
+            &[
+                witness.as_bytes(),
+                canonical.as_os_str().as_encoded_bytes(),
+                &metadata.len().to_be_bytes(),
+                &modified,
+            ],
+        );
+    }
+    let prefix = witness.get(..16).ok_or_else(invalid_frame)?;
+    u64::from_str_radix(prefix, 16).map_err(|_| invalid_frame())
+}
+
 impl KimiSource {
     pub fn new() -> Option<Self> {
         let home = crate::runtime::home_dir()?;
@@ -142,26 +205,43 @@ impl KimiSource {
         &self,
         project_root: &Path,
         bounds: TranscriptDiscoveryBounds,
+        frontier: ParseOffset,
         mut budget: HostScanBudget,
     ) -> TranscriptIngestResult<(KimiDiscoveryReport, HostScanBudget)> {
         let mut discovery = KimiDiscoveryReport {
             files: bound_path_list(Vec::new(), bounds),
+            path_offsets: Vec::new(),
             failures: Vec::new(),
             failure_count: 0,
+            witness: 0,
+            start_offset: 0,
+            reached_end: true,
         };
         let Some(metadata) = self.metadata(&mut budget)? else {
             return Ok((discovery, budget));
         };
         let matcher =
             TranscriptScopeMatcher::for_scope(project_root, self.user_registered_roots.as_deref());
+        let mut work_dirs = metadata
+            .work_dirs
+            .into_iter()
+            .filter(|work_dir| matcher.accepts(Some(&work_dir.path)))
+            .collect::<Vec<_>>();
+        work_dirs.sort_by(|left, right| self.sessions_dir(left).cmp(&self.sessions_dir(right)));
+        discovery.witness =
+            discovery_witness(work_dirs.iter().map(|work_dir| self.sessions_dir(work_dir)))?;
+        discovery.start_offset = if frontier.file_id == discovery.witness {
+            frontier.byte_offset
+        } else {
+            0
+        };
         let limit = bounds.max_files.min(MAX_DISCOVERY_CANDIDATES);
         let mut paths = Vec::with_capacity(limit.saturating_add(1));
-        'work_dirs: for work_dir in metadata.work_dirs {
+        let mut raw_offset = 0_u64;
+        'work_dirs: for work_dir in work_dirs {
             if !budget.try_charge_unit() {
+                discovery.reached_end = false;
                 break;
-            }
-            if !matcher.accepts(Some(&work_dir.path)) {
-                continue;
             }
             let sessions_dir = self.sessions_dir(&work_dir);
             let entries = match std::fs::read_dir(&sessions_dir) {
@@ -177,7 +257,8 @@ impl KimiSource {
                 }
             };
             for entry in entries {
-                if paths.len() > limit || !budget.try_charge_unit() {
+                if paths.len() > limit || !budget.checkpoint() {
+                    discovery.reached_end = false;
                     break 'work_dirs;
                 }
                 let entry = match entry {
@@ -192,6 +273,10 @@ impl KimiSource {
                         continue;
                     }
                 };
+                raw_offset = raw_offset.saturating_add(1);
+                if raw_offset <= discovery.start_offset {
+                    continue;
+                }
                 let path = entry.path();
                 let file_type = match entry.file_type() {
                     Ok(file_type) => file_type,
@@ -205,27 +290,18 @@ impl KimiSource {
                         continue;
                     }
                 };
-                if file_type.is_symlink() {
-                    continue;
-                }
-                if file_type.is_file()
+                let candidate = if file_type.is_symlink() {
+                    None
+                } else if file_type.is_file()
                     && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
                 {
-                    if !charge_discovered_path(&mut budget, &path) {
-                        break 'work_dirs;
-                    }
-                    paths.push(path);
+                    Some(path)
                 } else if file_type.is_dir() {
                     let context = path.join("context.jsonl");
                     match std::fs::symlink_metadata(&context) {
-                        Ok(metadata) if metadata.is_file() => {
-                            if !charge_discovered_path(&mut budget, &context) {
-                                break 'work_dirs;
-                            }
-                            paths.push(context);
-                        }
-                        Ok(_) => {}
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Ok(metadata) if metadata.is_file() => Some(context),
+                        Ok(_) => None,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                         Err(error) => {
                             discovery.record_failure(
                                 KimiDiscoveryFailureKind::ContextMetadataUnavailable,
@@ -233,12 +309,23 @@ impl KimiSource {
                                 &error,
                                 &mut budget,
                             );
+                            None
                         }
                     }
+                } else {
+                    None
+                };
+                let Some(candidate) = candidate else {
+                    continue;
+                };
+                if !budget.try_charge_unit() || !charge_discovered_path(&mut budget, &candidate) {
+                    discovery.reached_end = false;
+                    break 'work_dirs;
                 }
+                discovery.path_offsets.push((candidate.clone(), raw_offset));
+                paths.push(candidate);
             }
         }
-        paths.sort();
         discovery.files = bound_path_list(
             paths,
             TranscriptDiscoveryBounds {
@@ -246,6 +333,7 @@ impl KimiSource {
                 ..bounds
             },
         );
+        discovery.path_offsets.truncate(limit);
         Ok((discovery, budget))
     }
 
@@ -310,6 +398,13 @@ pub async fn capture_kimi_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<KimiCaptureOutcome> {
+    let frontier = facade
+        .get_parse_offset(&scope, KIMI_DISCOVERY_FRONTIER_KEY)
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error(PROVIDER, outcome)
+        })?
+        .unwrap_or_default();
     let scan_budget = HostScanBudget::new(
         MAX_DISCOVERY_INPUT_BYTES,
         MAX_DISCOVERY_UNITS,
@@ -322,6 +417,7 @@ pub async fn capture_kimi_observations(
         owned_source.discover(
             &owned_project_root,
             TranscriptDiscoveryBounds::from_discovered_units(MAX_DISCOVERY_CANDIDATES),
+            frontier,
             scan_budget,
         )
     })
@@ -346,23 +442,10 @@ pub async fn capture_kimi_observations(
         );
     }
     let discovery_truncated = discovery.files.is_truncated();
-    let frontier = facade
-        .get_parse_offset(&scope, KIMI_DISCOVERY_FRONTIER_KEY)
-        .await
-        .map_err(|outcome| {
-            crate::runtime::snapshot_observation::host_admission_error(PROVIDER, outcome)
-        })?
-        .unwrap_or_default();
-    let mut scheduled_paths = discovery.files.paths;
-    scheduled_paths.sort();
-    scheduled_paths.dedup();
-    if !scheduled_paths.is_empty() {
-        let start =
-            usize::try_from(frontier.byte_offset).unwrap_or(usize::MAX) % scheduled_paths.len();
-        scheduled_paths.rotate_left(start);
-    }
+    let mut scheduled_paths = discovery.path_offsets;
     let unscheduled_files = scheduled_paths.len().saturating_sub(MAX_SESSION_FILES);
     scheduled_paths.truncate(MAX_SESSION_FILES);
+    let scheduled_count = scheduled_paths.len();
     let mut outcome = KimiCaptureOutcome {
         deferred: discovery_truncated
             || unscheduled_files > 0
@@ -373,7 +456,8 @@ pub async fn capture_kimi_observations(
     };
     let mut remaining = max_new_bytes.unwrap_or(u64::MAX);
     let mut processed = 0_usize;
-    for path in scheduled_paths {
+    let mut processed_offset = discovery.start_offset;
+    for (path, next_offset) in scheduled_paths {
         if cancellation.is_cancelled() || remaining == 0 {
             outcome.deferred = true;
             break;
@@ -385,6 +469,7 @@ pub async fn capture_kimi_observations(
                 outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);
                 outcome.deferred = true;
                 processed = processed.saturating_add(1);
+                processed_offset = next_offset;
                 continue;
             }
         };
@@ -446,6 +531,7 @@ pub async fn capture_kimi_observations(
                 outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);
                 outcome.deferred = true;
                 processed = processed.saturating_add(1);
+                processed_offset = next_offset;
                 continue;
             }
             Err(error) => return Err(error),
@@ -456,18 +542,26 @@ pub async fn capture_kimi_observations(
         outcome.deferred |= progress.source_deferred;
         remaining = remaining.saturating_sub(progress.bytes_consumed);
         processed = processed.saturating_add(1);
+        processed_offset = next_offset;
     }
-    if processed > 0 {
+    if processed > 0 || discovery.reached_end {
+        let next_offset = if discovery.reached_end
+            && unscheduled_files == 0
+            && !discovery_truncated
+            && processed == scheduled_count
+        {
+            0
+        } else {
+            processed_offset
+        };
         facade
             .advance_parse_offset(
                 &scope,
                 KIMI_DISCOVERY_FRONTIER_KEY,
                 ParseOffset {
-                    byte_offset: frontier
-                        .byte_offset
-                        .saturating_add(u64::try_from(processed).unwrap_or(u64::MAX)),
-                    mtime: 0,
-                    file_id: 1,
+                    byte_offset: next_offset,
+                    mtime: frontier.mtime.saturating_add(1),
+                    file_id: discovery.witness,
                 },
             )
             .await
@@ -475,6 +569,21 @@ pub async fn capture_kimi_observations(
                 crate::runtime::snapshot_observation::host_admission_error(PROVIDER, outcome)
             })?;
     }
+    let deferred_units = outcome
+        .discovery_failures
+        .saturating_add(u64::from(outcome.deferred));
+    persist_host_provider_coverage(
+        facade,
+        &scope,
+        PROVIDER,
+        if outcome.deferred {
+            HostProviderCoverage::Partial
+        } else {
+            HostProviderCoverage::Complete
+        },
+        deferred_units,
+    )
+    .await?;
     Ok(outcome)
 }
 
@@ -527,11 +636,12 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
     use tracedecay_domain::ObservationScopeV1;
+    use tracedecay_store::ParseOffset;
 
-    use crate::admission::test_support::MemoryHostAdmission;
+    use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
     use crate::observation::ObservationCancellation;
     use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
-    use crate::runtime::source::TranscriptDiscoveryBounds;
+    use crate::runtime::source::{HostProviderCoverage, TranscriptDiscoveryBounds};
 
     use super::{KimiSource, capture_kimi_observations};
 
@@ -596,6 +706,16 @@ mod tests {
         .unwrap();
         assert!(partial.deferred);
         assert_eq!(admission.observations().len(), 1);
+        let partial_coverage = admission
+            .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://kimi/v1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            partial_coverage.file_id,
+            HostProviderCoverage::Partial as u64
+        );
+        assert!(partial_coverage.byte_offset > 0);
 
         let resumed = capture_kimi_observations(
             &admission,
@@ -609,6 +729,16 @@ mod tests {
         .unwrap();
         assert!(!resumed.deferred);
         assert_eq!(admission.observations().len(), 2);
+        let complete_coverage = admission
+            .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://kimi/v1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            complete_coverage.file_id,
+            HostProviderCoverage::Complete as u64
+        );
+        assert_eq!(complete_coverage.byte_offset, 0);
     }
 
     #[tokio::test]
@@ -720,6 +850,7 @@ mod tests {
                     max_files: 1,
                     ..TranscriptDiscoveryBounds::default_walk()
                 },
+                ParseOffset::default(),
                 discovery_budget(),
             )
             .unwrap()
@@ -731,6 +862,7 @@ mod tests {
                 .discover(
                     &project.join("unregistered"),
                     TranscriptDiscoveryBounds::default_walk(),
+                    ParseOffset::default(),
                     discovery_budget(),
                 )
                 .unwrap()
@@ -742,7 +874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_discovery_frontier_reaches_files_beyond_first_window() {
+    async fn durable_discovery_frontier_survives_restart_beyond_candidate_window() {
         let (_temp, project, first, source) = fixture();
         if first.exists() {
             std::fs::remove_file(first).unwrap();
@@ -751,7 +883,7 @@ mod tests {
             "{:x}",
             Md5::digest(project.to_string_lossy().as_bytes())
         ));
-        for ordinal in 0..=super::MAX_SESSION_FILES {
+        for ordinal in 0..=super::MAX_DISCOVERY_CANDIDATES {
             let transcript = sessions
                 .join(format!("session-{ordinal:04}"))
                 .join("context.jsonl");
@@ -778,23 +910,39 @@ mod tests {
         assert!(first.deferred);
         assert_eq!(admission.observations().len(), super::MAX_SESSION_FILES);
 
-        capture_kimi_observations(
-            &admission,
-            &source,
-            &project,
-            ObservationScopeV1::Profile,
-            None,
-            &ObservationCancellation::default(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(admission.observations().len(), super::MAX_SESSION_FILES + 1);
+        let mut previous = admission.observations().len();
+        for _ in 0..10 {
+            let restarted = KimiSource::with_share_dir(&source.share_dir);
+            capture_kimi_observations(
+                &admission,
+                &restarted,
+                &project,
+                ObservationScopeV1::Profile,
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .unwrap();
+            let current = admission.observations().len();
+            assert!(
+                current >= previous,
+                "restart must not lose durable progress"
+            );
+            previous = current;
+            if current == super::MAX_DISCOVERY_CANDIDATES + 1 {
+                break;
+            }
+        }
+        assert_eq!(
+            admission.observations().len(),
+            super::MAX_DISCOVERY_CANDIDATES + 1
+        );
         assert!(admission.observations().iter().any(|stored| {
             stored
                 .observation()
                 .payload()
                 .to_string()
-                .contains("message-0512")
+                .contains("message-4096")
         }));
     }
 }

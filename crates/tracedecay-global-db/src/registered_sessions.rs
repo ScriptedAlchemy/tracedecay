@@ -10,9 +10,9 @@ use tracedecay_sessions::compatibility::{
 
 use super::{
     RegisteredGlobalDb, SESSION_MESSAGE_SEARCH_MAX_FETCH, SessionActivityRow, SessionIngestHealth,
-    SessionMessageRecord, SessionMessageSearchResult, SessionRecord,
-    UNIX_TIMESTAMP_MILLIS_THRESHOLD, downrank_inventory_messages,
-    interleave_workflow_search_results, session_fts_query,
+    SessionMessageRecord, SessionMessageSearchResult, SessionProviderCoverage,
+    SessionProviderCoverageState, SessionRecord, UNIX_TIMESTAMP_MILLIS_THRESHOLD,
+    downrank_inventory_messages, interleave_workflow_search_results, session_fts_query,
 };
 
 const SESSION_INGEST_HEALTH_PAGE_SIZE: i64 = 512;
@@ -90,6 +90,55 @@ impl RegisteredGlobalDb {
         }
         drop(frontier_rows);
         health.observed_providers = observed_providers.into_iter().collect();
+        let mut coverage_rows = reader
+            .query(
+                "SELECT file_path, byte_offset, file_id
+                 FROM parse_offsets
+                 WHERE file_path LIKE 'host-coverage://%/v1'
+                 ORDER BY file_path",
+                (),
+            )
+            .await
+            .map_err(|error| format!("failed to query host ingest coverage: {error}"))?;
+        while let Some(row) = coverage_rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read host ingest coverage: {error}"))?
+        {
+            let key = row
+                .get::<String>(0)
+                .map_err(|error| format!("failed to decode host ingest coverage key: {error}"))?;
+            let Some(provider_name) = key
+                .strip_prefix("host-coverage://")
+                .and_then(|suffix| suffix.strip_suffix("/v1"))
+                .filter(|provider_name| !provider_name.is_empty())
+            else {
+                continue;
+            };
+            if provider.is_some_and(|selected| selected != provider_name) {
+                continue;
+            }
+            let deferred = row.get::<i64>(1).map_err(|error| {
+                format!("failed to decode host ingest coverage deferred units: {error}")
+            })?;
+            let deferred_units = u64::try_from(deferred)
+                .map_err(|_| format!("negative deferred units for provider {provider_name}"))?;
+            let state = match row
+                .get::<i64>(2)
+                .map_err(|error| format!("failed to decode host ingest coverage state: {error}"))?
+            {
+                1 => SessionProviderCoverageState::Complete,
+                2 => SessionProviderCoverageState::Partial,
+                3 => SessionProviderCoverageState::Unavailable,
+                _ => continue,
+            };
+            health.provider_coverage.push(SessionProviderCoverage {
+                provider: provider_name.to_owned(),
+                state,
+                deferred_units,
+            });
+        }
+        drop(coverage_rows);
         let mut after_path = String::new();
         loop {
             let mut rows = reader
@@ -936,6 +985,21 @@ mod tests {
                 .await
                 .unwrap();
         }
+        for (provider, state, deferred_units) in
+            [("kimi", 1, 0), ("opencode", 2, 3), ("claude", 3, 1)]
+        {
+            database
+                .set_parse_offset(
+                    &format!("host-coverage://{provider}/v1"),
+                    ParseOffset {
+                        byte_offset: deferred_units,
+                        mtime: 1,
+                        file_id: state,
+                    },
+                )
+                .await
+                .unwrap();
+        }
 
         let runtime_surface = database.cursor_session_ingest_health().await.unwrap();
         let status_surface = database.cursor_session_ingest_health().await.unwrap();
@@ -954,6 +1018,26 @@ mod tests {
         assert_eq!(
             all_providers.observed_providers,
             ["claude", "cursor", "kimi", "opencode"]
+        );
+        assert_eq!(
+            all_providers.provider_coverage,
+            [
+                SessionProviderCoverage {
+                    provider: "claude".into(),
+                    state: SessionProviderCoverageState::Unavailable,
+                    deferred_units: 1,
+                },
+                SessionProviderCoverage {
+                    provider: "kimi".into(),
+                    state: SessionProviderCoverageState::Complete,
+                    deferred_units: 0,
+                },
+                SessionProviderCoverage {
+                    provider: "opencode".into(),
+                    state: SessionProviderCoverageState::Partial,
+                    deferred_units: 3,
+                },
+            ]
         );
     }
 }

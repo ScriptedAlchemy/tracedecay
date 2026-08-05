@@ -415,6 +415,7 @@ pub(crate) mod test_support {
         parse_offsets: Vec<(ObservationScopeV1, String, ParseOffset)>,
         capture_failures_remaining: usize,
         session_message_failures_remaining: usize,
+        session_message_reads: usize,
     }
 
     #[derive(Clone, Default)]
@@ -598,6 +599,10 @@ pub(crate) mod test_support {
                 .unwrap_or_else(|error| error.into_inner()) = Some(cancellation);
         }
 
+        pub(crate) fn session_message_read_count(&self) -> usize {
+            self.store.state().session_message_reads
+        }
+
         fn application(
             &self,
         ) -> Result<ObservationApplication<MemoryObservationStore>, HostAdmissionOutcome> {
@@ -731,6 +736,7 @@ pub(crate) mod test_support {
             Box::pin(async move {
                 {
                     let mut state = self.store.state();
+                    state.session_message_reads = state.session_message_reads.saturating_add(1);
                     if state.session_message_failures_remaining > 0 {
                         state.session_message_failures_remaining -= 1;
                         return Err(HostAdmissionOutcome::registered_authority_unavailable());

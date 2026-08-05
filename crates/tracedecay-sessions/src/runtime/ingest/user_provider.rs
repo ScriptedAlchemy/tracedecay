@@ -5,6 +5,7 @@ use tracedecay_domain::ObservationScopeV1;
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
+use crate::runtime::source::{HostProviderCoverage, persist_host_provider_coverage};
 use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::{
     SessionProvider, claude_observation, cline_like, hermes, kimi, kiro, opencode, vibe,
@@ -223,15 +224,34 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 }
                 run
             }
-            Err(error) => ProviderRunOutcome::failed(
-                warn_transcript_catch_up_failure(
+            Err(error) => {
+                let mut run = ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "kimi",
+                        "observation",
+                        &error,
+                        "user Kimi observation catch-up failed",
+                    ),
+                    self.max_new_bytes,
+                );
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    &ObservationScopeV1::Profile,
                     "kimi",
-                    "observation",
-                    &error,
-                    "user Kimi observation catch-up failed",
-                ),
-                self.max_new_bytes,
-            ),
+                    HostProviderCoverage::Unavailable,
+                    1,
+                )
+                .await
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "kimi",
+                        "coverage",
+                        &coverage_error,
+                        "user Kimi coverage persistence failed",
+                    ));
+                }
+                run
+            }
         }
     }
 
@@ -264,15 +284,34 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 }
                 run
             }
-            Err(error) => ProviderRunOutcome::failed(
-                warn_transcript_catch_up_failure(
+            Err(error) => {
+                let mut run = ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "opencode",
+                        "observation",
+                        &error,
+                        "user OpenCode observation catch-up failed",
+                    ),
+                    self.max_new_bytes,
+                );
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    &ObservationScopeV1::Profile,
                     "opencode",
-                    "observation",
-                    &error,
-                    "user OpenCode observation catch-up failed",
-                ),
-                self.max_new_bytes,
-            ),
+                    HostProviderCoverage::Unavailable,
+                    1,
+                )
+                .await
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "opencode",
+                        "coverage",
+                        &coverage_error,
+                        "user OpenCode coverage persistence failed",
+                    ));
+                }
+                run
+            }
         }
     }
 

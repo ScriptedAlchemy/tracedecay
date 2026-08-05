@@ -17,6 +17,11 @@ pub fn normalize_observation(
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     let message = native.get("message").unwrap_or(native);
+    let message_id = message
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|id| ObservationId::new(id).ok())
+        .unwrap_or_else(|| stable_record_id.clone());
     let role = message
         .get("role")
         .and_then(Value::as_str)
@@ -44,7 +49,25 @@ pub fn normalize_observation(
             ),
         });
     }
-    append_parts(&mut facts, parts, &stable_record_id)?;
+    if role == "user"
+        && let Some(system) = message
+            .get("system")
+            .and_then(Value::as_str)
+            .filter(|system| !system.is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::System,
+            content: Value::String(system.to_owned()),
+            model: None,
+            timestamp: timestamp_secs(
+                message
+                    .pointer("/time/created")
+                    .or_else(|| message.get("time_created")),
+            ),
+        });
+    }
+    append_usage(&mut facts, message.get("tokens"));
+    append_parts(&mut facts, parts, &message_id)?;
     if facts.is_empty() {
         return Err(ObservationRecordParseErrorV1::Empty);
     }
@@ -64,7 +87,7 @@ pub fn normalize_observation(
         "message",
         stable_record_id.clone(),
         CanonicalObservationRelationsV1::new(SessionId::new(session_id).map_err(|_| invalid())?)
-            .with_message_id(stable_record_id),
+            .with_message_id(message_id),
         facts,
         evidence,
     )
@@ -97,10 +120,60 @@ fn append_parts(
                 });
             }
             Some("tool") => append_tool_fact(facts, part, message_id)?,
+            Some("step-finish") => append_usage(facts, part.get("tokens")),
             _ => {}
         }
     }
     Ok(())
+}
+
+fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, tokens: Option<&Value>) {
+    let Some(tokens) = tokens else {
+        return;
+    };
+    let input_tokens = canonical_u64(tokens.get("input").or_else(|| tokens.get("input_tokens")));
+    let output_tokens = canonical_u64(tokens.get("output").or_else(|| tokens.get("output_tokens")));
+    let reasoning_tokens = canonical_u64(
+        tokens
+            .get("reasoning")
+            .or_else(|| tokens.get("reasoning_tokens")),
+    );
+    let cache_read_tokens = canonical_u64(
+        tokens
+            .pointer("/cache/read")
+            .or_else(|| tokens.get("cache_read_tokens")),
+    );
+    let cache_write_tokens = canonical_u64(
+        tokens
+            .pointer("/cache/write")
+            .or_else(|| tokens.get("cache_write_tokens")),
+    );
+    if [
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+    ]
+    .iter()
+    .any(Option::is_some)
+    {
+        facts.push(CanonicalObservationFactV1::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+        });
+    }
+}
+
+fn canonical_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+    })
 }
 
 fn append_tool_fact(
@@ -256,5 +329,67 @@ mod tests {
                 .iter()
                 .any(|fact| matches!(fact, CanonicalObservationFactV1::ToolResult { .. }))
         );
+    }
+
+    #[test]
+    fn preserves_user_system_and_message_and_step_finish_tokens() {
+        let envelope = normalize_observation(
+            &json!({
+                "message": {
+                    "id": "msg_usage",
+                    "role": "user",
+                    "system": "retain this system instruction",
+                    "tokens": {
+                        "input": 11,
+                        "output": 7,
+                        "reasoning": 5,
+                        "cache": {"read": 3, "write": 2}
+                    }
+                },
+                "parts": [{
+                    "id": "step_1",
+                    "type": "step-finish",
+                    "tokens": {
+                        "input": 13,
+                        "output": 8,
+                        "reasoning": 6,
+                        "cache": {"read": 4, "write": 1}
+                    }
+                }]
+            }),
+            "session",
+            ObservationId::new("msg_usage.version").unwrap(),
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
+        )
+        .unwrap();
+
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Message {
+                role: tracedecay_domain::CanonicalMessageRoleV1::System,
+                content,
+                ..
+            } if content == "retain this system instruction"
+        )));
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Usage {
+                input_tokens: Some(11),
+                output_tokens: Some(7),
+                reasoning_tokens: Some(5),
+                cache_read_tokens: Some(3),
+                cache_write_tokens: Some(2),
+            }
+        )));
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Usage {
+                input_tokens: Some(13),
+                output_tokens: Some(8),
+                reasoning_tokens: Some(6),
+                cache_read_tokens: Some(4),
+                cache_write_tokens: Some(1),
+            }
+        )));
     }
 }
