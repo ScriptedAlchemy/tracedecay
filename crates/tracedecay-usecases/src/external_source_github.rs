@@ -31,8 +31,8 @@ use crate::configuration::ConfigurationControlStore;
 use crate::external_source_acquisition::{
     SourceAcquisitionAuthorizationOutcomeV1, SourceAcquisitionAuthorizationPhaseV1,
     SourceAcquisitionAuthorizationPortV1, SourceAcquisitionFuture, SourceAcquisitionGrantV1,
-    SourceCanonicalRefetchOutcomeV1, SourceCanonicalRefetchPageV1, SourceCanonicalRefetchPortV1,
-    SourceScheduledRefetchV1,
+    SourceAcquisitionRequestV1, SourceCanonicalRefetchOutcomeV1, SourceCanonicalRefetchPageV1,
+    SourceCanonicalRefetchPortV1, SourceScheduledRefetchV1,
 };
 use crate::external_source_store::RuntimeExternalSourceStore;
 use crate::observation::ObservationCancellation;
@@ -55,7 +55,7 @@ pub struct GitHubExternalSourceAcquisitionV1<R, A, C> {
     store: RuntimeExternalSourceStore,
     configuration: C,
     context: RequestContext,
-    request: GitHubReviewReadRequestV1,
+    acquisition_request: SourceAcquisitionRequestV1,
     definition: SourceDefinitionV1,
     binding: SourceBindingV1,
     grant: SourceAcquisitionGrantV1,
@@ -121,6 +121,14 @@ where
             1,
         )
         .map_err(|_| GitHubExternalSourceOpenErrorV1::InvalidSource)?;
+        let acquisition_request = SourceAcquisitionRequestV1::github_review(
+            definition.provider.clone(),
+            source_access.binding.source_locator_digest.clone(),
+            request.scope.clone(),
+            request.operation,
+            request.pull_request_id.clone(),
+        )
+        .map_err(|_| GitHubExternalSourceOpenErrorV1::InvalidSource)?;
         let source_anchor = tracedecay_domain::RetrievalAnchorId::new(format!(
             "anchor.github-source.{}",
             digest_suffix(
@@ -146,7 +154,9 @@ where
             &definition,
             SourceBindingOwnerV1::Project(context.scope().project_id.clone()),
             authorization.privacy_domain_id,
-            source_access.binding.source_locator_digest.clone(),
+            acquisition_request
+                .binding_native_root()
+                .map_err(|_| GitHubExternalSourceOpenErrorV1::InvalidSource)?,
             1,
         )
         .map_err(|_| GitHubExternalSourceOpenErrorV1::InvalidSource)?;
@@ -177,7 +187,7 @@ where
             configuration,
             request_grant_digest: context.grant().digest.clone(),
             context,
-            request,
+            acquisition_request,
             definition,
             binding,
             grant,
@@ -193,6 +203,10 @@ where
         &self.binding
     }
 
+    pub fn acquisition_request(&self) -> &SourceAcquisitionRequestV1 {
+        &self.acquisition_request
+    }
+
     pub fn event(
         &self,
         stable_signal_digest: ManifestDigest,
@@ -201,13 +215,24 @@ where
             self.binding
                 .immutable_identity()
                 .map_err(|_| GitHubExternalSourceOpenErrorV1::InvalidSource)?,
-            stable_signal_digest,
+            canonical_sha256(&(
+                "tracedecay.github-review.external-source-event-signal.v1",
+                self.acquisition_request.request_digest(),
+                stable_signal_digest,
+            ))
+            .map_err(|_| GitHubExternalSourceOpenErrorV1::InvalidSource)?,
         )
         .map_err(|_| GitHubExternalSourceOpenErrorV1::InvalidSource)
     }
 
-    async fn current_grant(&self) -> SourceAcquisitionAuthorizationOutcomeV1 {
-        match self.github.authorize(&self.context, &self.request).await {
+    async fn current_grant(
+        &self,
+        task: &SourceScheduledRefetchV1,
+    ) -> SourceAcquisitionAuthorizationOutcomeV1 {
+        let Some(request) = github_review_request(task.request()) else {
+            return SourceAcquisitionAuthorizationOutcomeV1::Unauthorized;
+        };
+        match self.github.authorize(&self.context, &request).await {
             GitHubProviderLifecycleV1::Ready => {}
             GitHubProviderLifecycleV1::Unavailable => {
                 return SourceAcquisitionAuthorizationOutcomeV1::Unavailable;
@@ -269,17 +294,19 @@ where
         if cancellation.is_cancelled()
             || task.definition() != &self.definition
             || task.binding() != &self.binding
+            || task.request() != &self.acquisition_request
             || grant != &self.grant
         {
             return None;
         }
+        let request = github_review_request(task.request())?;
         let GitHubReviewRefreshOutcomeV1::Stored(receipt) =
-            self.github.refresh(&self.context, &self.request).await
+            self.github.refresh(&self.context, &request).await
         else {
             return None;
         };
         let response = &receipt.state.latest_attempt;
-        if response.validate_for(&self.request).is_err()
+        if response.validate_for(&request).is_err()
             || response.ingress.outcome != GitHubReviewIngressProviderOutcomeV1::Complete
             || response.ingress.items.len() > tracedecay_store::MAX_SOURCE_COMMIT_OBSERVATIONS_V1
         {
@@ -289,9 +316,9 @@ where
         let partition = SourcePartitionIdV1::new(
             canonical_sha256(&(
                 "tracedecay.github-review.external-source-partition.v1",
-                &self.request.scope.repository_id,
-                &self.request.pull_request_id,
-                self.request.operation,
+                &request.scope.repository_id,
+                &request.pull_request_id,
+                request.operation,
             ))
             .ok()?,
         );
@@ -314,7 +341,7 @@ where
             present_objects.insert(native_object.clone());
             let GitHubReviewBodyReadOutcomeV1::Current(body) = self
                 .github
-                .expand_retained_body(&self.context, &self.request, &item.body_anchor)
+                .expand_retained_body(&self.context, &request, &item.body_anchor)
                 .await
             else {
                 return None;
@@ -386,7 +413,7 @@ where
                 &response.ingress.provider_base_commit_id,
                 &response.ingress.provider_head_commit_id,
                 &response.ingress.merge_base_commit_id,
-                self.request.operation,
+                request.operation,
             ))
             .ok()?,
         );
@@ -436,10 +463,13 @@ where
         _phase: SourceAcquisitionAuthorizationPhaseV1,
     ) -> SourceAcquisitionFuture<'a, SourceAcquisitionAuthorizationOutcomeV1> {
         Box::pin(async move {
-            if task.definition() != &self.definition || task.binding() != &self.binding {
+            if task.definition() != &self.definition
+                || task.binding() != &self.binding
+                || task.request() != &self.acquisition_request
+            {
                 return SourceAcquisitionAuthorizationOutcomeV1::Unauthorized;
             }
-            self.current_grant().await
+            self.current_grant(task).await
         })
     }
 }
@@ -471,4 +501,21 @@ where
 
 fn digest_suffix(digest: &ManifestDigest) -> Option<&str> {
     digest.as_str().strip_prefix("sha256:")
+}
+
+fn github_review_request(
+    request: &SourceAcquisitionRequestV1,
+) -> Option<GitHubReviewReadRequestV1> {
+    match request {
+        SourceAcquisitionRequestV1::GitHubReview {
+            scope,
+            operation,
+            pull_request_id,
+            ..
+        } => Some(GitHubReviewReadRequestV1 {
+            operation: *operation,
+            scope: scope.clone(),
+            pull_request_id: pull_request_id.clone(),
+        }),
+    }
 }

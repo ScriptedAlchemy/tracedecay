@@ -1883,13 +1883,25 @@ async fn register_production_advisory_owner(
             });
         }
     };
+    let external_acquisition_request =
+        github_pull_request_id
+            .clone()
+            .map(|pull_request_id| GitHubReviewReadRequestV1 {
+                operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+                scope: feedback_scope_for_work.clone(),
+                pull_request_id,
+            });
+    let external_acquisition_context = external_acquisition_request.as_ref().and_then(|_| {
+        github_discovery_authorization_context(&source_access, &feedback_scope_for_work)
+    });
     let external_acquisition =
         crate::daemon::external_acquisition::mount_production_github_external_acquisition(
             invocation,
             project_root,
             registration.as_ref(),
             Arc::clone(&project_runtime_db),
-            source_access.clone(),
+            external_acquisition_context,
+            external_acquisition_request,
             github_provider,
             external_store,
         )

@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use tracedecay_domain::feedback::{
+    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
+};
 use tracedecay_domain::{
-    AccessPolicyDigest, CapabilityId, ComponentVersion, LocatorDigest, ManifestDigest,
-    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
+    AccessPolicyDigest, CapabilityId, CommitId, ComponentVersion, LocatorDigest, ManifestDigest,
+    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId, RepositoryId,
     ResolutionAuthorizationV1, RetrievalAnchorId, SanitizationReceiptId, SanitizationReceiptRefV1,
     ScopeResolutionId, SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1,
     SourceAggregateFrontierV1, SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1,
@@ -11,12 +14,12 @@ use tracedecay_domain::{
     SourceEventV1, SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1,
     SourceObjectRevisionV1, SourcePartitionFrontierV1, SourcePartitionIdV1,
     SourceRefetchStrategyV1, SourceRefreshCauseV1, SourceRefreshReceiptV1,
-    SourceSnapshotCompletionV1, SourceSnapshotIdV1, UtcMicros, canonical_sha256,
+    SourceSnapshotCompletionV1, SourceSnapshotIdV1, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_store::{
-    SourceAcquisitionQueueCasV1, SourceAcquisitionQueueStateV1, SourceAuthorityPublicationV1,
-    SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
-    SourceScheduledRefetchV1, build_source_projection,
+    SourceAcquisitionQueueCasV1, SourceAcquisitionQueueStateV1, SourceAcquisitionRequestV1,
+    SourceAuthorityPublicationV1, SourceObjectMutationV1, SourceObjectTransitionV1,
+    SourceObservationEvidenceV1, SourceScheduledRefetchV1, build_source_projection,
 };
 
 use super::*;
@@ -148,11 +151,25 @@ fn acquisition_state() -> (SourceAcquisitionQueueStateV1, SourceBindingIdentityV
         1,
     )
     .unwrap();
+    let request = SourceAcquisitionRequestV1::github_review(
+        definition.provider.clone(),
+        LocatorDigest::new(digest('9').as_str()).unwrap(),
+        FeedbackScopeV1 {
+            project_id: ProjectId::new("project.runtime-fixture").unwrap(),
+            repository_id: RepositoryId::new("repository.runtime-fixture").unwrap(),
+            worktree_id: WorktreeId::new("worktree.runtime-fixture").unwrap(),
+            branch_ref: "refs/heads/runtime-fixture".to_owned(),
+            head_commit_id: CommitId::new("9".repeat(40)).unwrap(),
+        },
+        GitHubReviewReadOperationV1::RestListPullRequestReviewComments,
+        GitHubPullRequestIdV1::new("pr.runtime-fixture").unwrap(),
+    )
+    .unwrap();
     let binding = SourceBindingV1::new(
         &definition,
         SourceBindingOwnerV1::Project(ProjectId::new("project.runtime-fixture").unwrap()),
         PrivacyDomainId::new("privacy.runtime-fixture").unwrap(),
-        LocatorDigest::new(digest('9').as_str()).unwrap(),
+        request.binding_native_root().unwrap(),
         1,
     )
     .unwrap();
@@ -177,6 +194,7 @@ fn acquisition_state() -> (SourceAcquisitionQueueStateV1, SourceBindingIdentityV
     let scheduled = SourceScheduledRefetchV1::new(
         definition.clone(),
         binding.clone(),
+        request,
         receipt.clone(),
         None,
         0,

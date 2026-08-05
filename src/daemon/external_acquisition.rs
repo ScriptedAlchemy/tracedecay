@@ -5,14 +5,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracedecay_application::feedback::GitHubReviewReadRequestV1;
-use tracedecay_application::{RequestAdmission, RequestContext};
+use tracedecay_application::feedback::{
+    GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GitHubReviewReadRequestV1, feedback_surface_operation,
+};
+use tracedecay_application::{
+    AuthorizationPhase, AuthorizationRequest, RequestAdmission, RequestContext,
+};
+use tracedecay_domain::configuration::SourceKindV1;
 use tracedecay_domain::{ManifestDigest, ProviderId, UtcMicros};
 use tracedecay_hooks::HookEventEnvelopeV2;
 
 use crate::application::advisory::{
-    GitHubReviewRuntimeOwnerV1, Pr13AdvisoryProductionStartupRegistrationV1,
-    ProjectGitHubAnchorAuthorityV1,
+    Pr13AdvisoryProductionStartupRegistrationV1, ProjectGitHubAnchorAuthorityV1,
 };
 use crate::application::external_source_acquisition::{
     ExternalSourceAcquisitionOwnerV1, SourceAcquisitionPolicyV1, SourceAcquisitionRunOutcomeV1,
@@ -22,7 +26,9 @@ use crate::application::external_source_github::{
 };
 use crate::application::external_source_store::RuntimeExternalSourceStore;
 use crate::application::observation::ObservationCancellation;
-use crate::application::source_authorization::ProjectSourceAccessSnapshot;
+use crate::application::source_authorization::{
+    ProjectSourceAccessOutcome, project_source_access_snapshot_for_request,
+};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
@@ -47,30 +53,37 @@ pub(crate) trait DaemonExternalAcquisitionRuntimeV1: Send + Sync {
         stable_signal_digest: ManifestDigest,
         observed_at: UtcMicros,
     ) -> DaemonExternalAcquisitionFutureV1<'a>;
+
+    fn cancel(&self);
 }
 
-type ProductionGitHubOwnerV1 = GitHubReviewRuntimeOwnerV1<
+type ProductionGitHubAdapterV1 = GitHubExternalSourceAcquisitionV1<
     Arc<ProjectGitHubAnchorAuthorityV1>,
     Arc<ProjectGitHubAnchorAuthorityV1>,
+    OwnedGlobalDbConfigurationControlStore,
+>;
+type ProductionGitHubAcquisitionOwnerV1 = ExternalSourceAcquisitionOwnerV1<
+    RuntimeExternalSourceStore,
+    ProductionGitHubAdapterV1,
+    ProductionGitHubAdapterV1,
+    RuntimeExternalSourceStore,
 >;
 
 pub(crate) struct ProductionGitHubExternalAcquisitionV1 {
-    github: Arc<ProductionGitHubOwnerV1>,
-    store: RuntimeExternalSourceStore,
-    configuration: OwnedGlobalDbConfigurationControlStore,
-    source_access: ProjectSourceAccessSnapshot,
-    provider: ProviderId,
-    sink_revision: u64,
-    sink_digest: ManifestDigest,
+    owner: Arc<ProductionGitHubAcquisitionOwnerV1>,
+    adapter: Arc<ProductionGitHubAdapterV1>,
+    cancellation: ObservationCancellation,
+    worker: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl ProductionGitHubExternalAcquisitionV1 {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub(crate) async fn new(
         registration: &Pr13AdvisoryProductionStartupRegistrationV1,
         store: RuntimeExternalSourceStore,
         configuration: OwnedGlobalDbConfigurationControlStore,
-        source_access: ProjectSourceAccessSnapshot,
+        context: RequestContext,
+        request: GitHubReviewReadRequestV1,
         provider: ProviderId,
         sink_revision: u64,
         sink_digest: ManifestDigest,
@@ -79,15 +92,87 @@ impl ProductionGitHubExternalAcquisitionV1 {
             .runtime()
             .github_owner()
             .ok_or(GitHubExternalSourceOpenErrorV1::InvalidSource)?;
-        Ok(Self {
+        let operation = feedback_surface_operation("github_review_ingest")
+            .map_err(|_| GitHubExternalSourceOpenErrorV1::InvalidAuthority)?
+            .filter(|operation| {
+                operation.capability_id().as_str() == GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1
+            })
+            .ok_or(GitHubExternalSourceOpenErrorV1::InvalidAuthority)?;
+        let observed_at = tracedecay_application::now_micros();
+        let authorization = AuthorizationRequest {
+            context: &context,
+            operation: &operation,
+            phase: AuthorizationPhase::Admission,
+            observed_at,
+        };
+        let ProjectSourceAccessOutcome::Allowed(source_access) =
+            project_source_access_snapshot_for_request(
+                &configuration,
+                &authorization,
+                SourceKindV1::GitHub,
+            )
+            .await
+        else {
+            return Err(GitHubExternalSourceOpenErrorV1::InvalidAuthority);
+        };
+        let adapter = Arc::new(GitHubExternalSourceAcquisitionV1::new(
             github,
-            store,
+            store.clone(),
             configuration,
-            source_access,
+            context,
+            request,
+            &source_access,
             provider,
             sink_revision,
             sink_digest,
+        )?);
+        let policy = SourceAcquisitionPolicyV1::new(
+            5,
+            Duration::from_secs(5),
+            Duration::from_millis(250),
+            Duration::from_secs(30),
+        )
+        .map_err(|_| GitHubExternalSourceOpenErrorV1::InvalidAuthority)?;
+        let owner = Arc::new(
+            ExternalSourceAcquisitionOwnerV1::new(
+                Arc::new(store.clone()),
+                Arc::clone(&adapter),
+                Arc::clone(&adapter),
+                Arc::new(store),
+                policy,
+            )
+            .map_err(|_| GitHubExternalSourceOpenErrorV1::InvalidAuthority)?,
+        );
+        Ok(Self {
+            owner,
+            adapter,
+            cancellation: ObservationCancellation::default(),
+            worker: std::sync::Mutex::new(None),
         })
+    }
+
+    fn start_worker(&self) {
+        let owner = Arc::clone(&self.owner);
+        let cancellation = self.cancellation.clone();
+        let worker = tokio::spawn(async move {
+            owner.run_background(&cancellation).await;
+        });
+        *self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+    }
+
+    fn stop_worker(&self) {
+        self.cancellation.cancel();
+        if let Some(worker) = self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            worker.abort();
+        }
     }
 
     async fn handle(
@@ -102,62 +187,41 @@ impl ProductionGitHubExternalAcquisitionV1 {
         {
             return DaemonExternalAcquisitionOutcomeV1::Unavailable;
         }
-        let adapter = match GitHubExternalSourceAcquisitionV1::new(
-            Arc::clone(&self.github),
-            self.store.clone(),
-            self.configuration.clone(),
-            context.clone(),
-            request,
-            &self.source_access,
-            self.provider.clone(),
-            self.sink_revision,
-            self.sink_digest.clone(),
-        ) {
-            Ok(adapter) => Arc::new(adapter),
-            Err(_) => return DaemonExternalAcquisitionOutcomeV1::Unavailable,
-        };
-        let policy = match SourceAcquisitionPolicyV1::new(
-            5,
-            Duration::from_secs(5),
-            Duration::from_millis(250),
-            Duration::from_secs(30),
-        ) {
-            Ok(policy) => policy,
-            Err(_) => return DaemonExternalAcquisitionOutcomeV1::Unavailable,
-        };
-        let owner = match ExternalSourceAcquisitionOwnerV1::new(
-            Arc::new(self.store.clone()),
-            Arc::clone(&adapter),
-            Arc::clone(&adapter),
-            Arc::new(self.store.clone()),
-            policy,
-        ) {
-            Ok(owner) => owner,
-            Err(_) => return DaemonExternalAcquisitionOutcomeV1::Unavailable,
-        };
-        let cancellation = ObservationCancellation::default();
-        let resumed = match owner.run_one(observed_at, &cancellation).await {
-            Ok(outcome) => outcome,
-            Err(_) => return DaemonExternalAcquisitionOutcomeV1::Unavailable,
-        };
-        let event = match adapter.event(stable_signal_digest) {
+        if request
+            != match self.adapter.acquisition_request() {
+                crate::application::external_source_acquisition::SourceAcquisitionRequestV1::GitHubReview {
+                    scope,
+                    operation,
+                    pull_request_id,
+                    ..
+                } => GitHubReviewReadRequestV1 {
+                    operation: *operation,
+                    scope: scope.clone(),
+                    pull_request_id: pull_request_id.clone(),
+                },
+            }
+        {
+            return DaemonExternalAcquisitionOutcomeV1::Unavailable;
+        }
+        let event = match self.adapter.event(stable_signal_digest) {
             Ok(event) => event,
             Err(_) => return DaemonExternalAcquisitionOutcomeV1::Unavailable,
         };
-        if owner
-            .admit_event(adapter.definition(), adapter.binding(), event, observed_at)
+        if self
+            .owner
+            .admit_event(
+                self.adapter.definition(),
+                self.adapter.binding(),
+                self.adapter.acquisition_request(),
+                event,
+                observed_at,
+            )
             .await
             .is_err()
         {
             return DaemonExternalAcquisitionOutcomeV1::Unavailable;
         }
-        match owner.run_one(observed_at, &cancellation).await {
-            Ok(SourceAcquisitionRunOutcomeV1::Idle) => {
-                DaemonExternalAcquisitionOutcomeV1::Deferred(resumed)
-            }
-            Ok(outcome) => DaemonExternalAcquisitionOutcomeV1::Processed(outcome),
-            Err(_) => DaemonExternalAcquisitionOutcomeV1::Unavailable,
-        }
+        DaemonExternalAcquisitionOutcomeV1::Deferred(SourceAcquisitionRunOutcomeV1::Idle)
     }
 }
 
@@ -173,6 +237,16 @@ impl DaemonExternalAcquisitionRuntimeV1 for ProductionGitHubExternalAcquisitionV
             self.handle(context, request, stable_signal_digest, observed_at)
                 .await
         })
+    }
+
+    fn cancel(&self) {
+        self.stop_worker();
+    }
+}
+
+impl Drop for ProductionGitHubExternalAcquisitionV1 {
+    fn drop(&mut self) {
+        self.stop_worker();
     }
 }
 
@@ -198,13 +272,16 @@ pub(crate) async fn mount_production_github_external_acquisition(
     project_root: &std::path::Path,
     registration: &Pr13AdvisoryProductionStartupRegistrationV1,
     database: Arc<RegisteredGlobalDb>,
-    source_access: ProjectSourceAccessSnapshot,
+    context: Option<RequestContext>,
+    request: Option<GitHubReviewReadRequestV1>,
     provider: Option<ProviderId>,
     store: Option<RuntimeExternalSourceStore>,
 ) -> Result<Option<Arc<dyn DaemonExternalAcquisitionRuntimeV1>>> {
-    let (provider, store) = match (provider, store) {
-        (Some(provider), Some(store)) => (provider, store),
-        (None, None) => return Ok(None),
+    let (provider, store, context, request) = match (provider, store, context, request) {
+        (Some(provider), Some(store), Some(context), Some(request)) => {
+            (provider, store, context, request)
+        }
+        (None, None, None, None) => return Ok(None),
         _ => {
             return Err(TraceDecayError::Config {
                 message: "project-open external acquisition authority is incomplete".to_owned(),
@@ -225,15 +302,19 @@ pub(crate) async fn mount_production_github_external_acquisition(
         registration,
         store,
         configuration,
-        source_access,
+        context,
+        request,
         provider,
         sink_revision,
         sink_digest,
     )
+    .await
     .map_err(|_| TraceDecayError::Config {
         message: "project-open external acquisition provider is unavailable".to_owned(),
     })?;
-    let runtime: Arc<dyn DaemonExternalAcquisitionRuntimeV1> = Arc::new(runtime);
+    let runtime = Arc::new(runtime);
+    runtime.start_worker();
+    let runtime: Arc<dyn DaemonExternalAcquisitionRuntimeV1> = runtime;
     invocation
         .advisory_runtime_registrar()
         .register_external_acquisition(project_root.to_path_buf(), Arc::clone(&runtime))

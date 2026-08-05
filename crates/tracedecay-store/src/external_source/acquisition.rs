@@ -4,10 +4,14 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_domain::feedback::{
+    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
+};
 use tracedecay_domain::{
-    DomainError, ManifestDigest, SourceBindingIdentityV1, SourceBindingV1, SourceDefinitionV1,
-    SourceEventAdmissionReceiptV1, SourceEventKeyV1, SourceRefreshCauseV1, SourceRefreshReceiptV1,
-    SourceWholeRootStageV1, UtcMicros, canonical_sha256,
+    DomainError, LocatorDigest, ManifestDigest, ProviderId, SourceBindingIdentityV1,
+    SourceBindingV1, SourceDefinitionV1, SourceEventAdmissionReceiptV1, SourceEventKeyV1,
+    SourceRefreshCauseV1, SourceRefreshReceiptV1, SourceWholeRootStageV1, UtcMicros,
+    canonical_sha256,
 };
 
 pub const MAX_SOURCE_ACQUISITION_ATTEMPTS_V1: u32 = 16;
@@ -29,11 +33,125 @@ impl From<DomainError> for SourceAcquisitionQueueContractErrorV1 {
 
 pub type SourceAcquisitionQueueResultV1<T> = Result<T, SourceAcquisitionQueueContractErrorV1>;
 
+/// Exact, content-free provider request authority persisted with a scheduled
+/// acquisition. A worker must reconstruct its provider read from this value;
+/// mutable hook or project-open state is never a substitute.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum SourceAcquisitionRequestV1 {
+    GitHubReview {
+        provider: ProviderId,
+        configured_source: LocatorDigest,
+        scope: FeedbackScopeV1,
+        operation: GitHubReviewReadOperationV1,
+        pull_request_id: GitHubPullRequestIdV1,
+        request_digest: ManifestDigest,
+    },
+}
+
+impl SourceAcquisitionRequestV1 {
+    pub fn github_review(
+        provider: ProviderId,
+        configured_source: LocatorDigest,
+        scope: FeedbackScopeV1,
+        operation: GitHubReviewReadOperationV1,
+        pull_request_id: GitHubPullRequestIdV1,
+    ) -> SourceAcquisitionQueueResultV1<Self> {
+        let request_digest = canonical_sha256(&(
+            "tracedecay.external-source.github-review-request.v1",
+            &provider,
+            &configured_source,
+            &scope,
+            operation,
+            &pull_request_id,
+        ))?;
+        let request = Self::GitHubReview {
+            provider,
+            configured_source,
+            scope,
+            operation,
+            pull_request_id,
+            request_digest,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn provider(&self) -> &ProviderId {
+        match self {
+            Self::GitHubReview { provider, .. } => provider,
+        }
+    }
+
+    pub fn configured_source(&self) -> &LocatorDigest {
+        match self {
+            Self::GitHubReview {
+                configured_source, ..
+            } => configured_source,
+        }
+    }
+
+    pub fn request_digest(&self) -> &ManifestDigest {
+        match self {
+            Self::GitHubReview { request_digest, .. } => request_digest,
+        }
+    }
+
+    /// Binding locator for this exact request, not merely its repository
+    /// configuration. Distinct refs, heads, worktrees, or pull requests
+    /// therefore cannot share a queue row or event receipt.
+    pub fn binding_native_root(&self) -> SourceAcquisitionQueueResultV1<LocatorDigest> {
+        self.validate()?;
+        LocatorDigest::new(
+            canonical_sha256(&(
+                "tracedecay.external-source.request-binding.v1",
+                self.configured_source(),
+                self.request_digest(),
+            ))?
+            .as_str(),
+        )
+        .map_err(SourceAcquisitionQueueContractErrorV1::from)
+    }
+
+    pub fn validate(&self) -> SourceAcquisitionQueueResultV1<()> {
+        match self {
+            Self::GitHubReview {
+                provider,
+                configured_source,
+                scope,
+                operation,
+                pull_request_id,
+                request_digest,
+            } => {
+                provider.validate()?;
+                configured_source.validate()?;
+                scope.validate()?;
+                pull_request_id.validate()?;
+                request_digest.validate()?;
+                if !operation.is_read_only()
+                    || canonical_sha256(&(
+                        "tracedecay.external-source.github-review-request.v1",
+                        provider,
+                        configured_source,
+                        scope,
+                        operation,
+                        pull_request_id,
+                    ))? != *request_digest
+                {
+                    return Err(SourceAcquisitionQueueContractErrorV1::Inconsistent);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceScheduledRefetchV1 {
     definition: SourceDefinitionV1,
     binding: SourceBindingV1,
+    request: SourceAcquisitionRequestV1,
     event_receipt: SourceEventAdmissionReceiptV1,
     whole_root_stage: Option<SourceWholeRootStageV1>,
     attempt: u32,
@@ -45,6 +163,7 @@ impl SourceScheduledRefetchV1 {
     pub fn new(
         definition: SourceDefinitionV1,
         binding: SourceBindingV1,
+        request: SourceAcquisitionRequestV1,
         event_receipt: SourceEventAdmissionReceiptV1,
         whole_root_stage: Option<SourceWholeRootStageV1>,
         attempt: u32,
@@ -53,6 +172,7 @@ impl SourceScheduledRefetchV1 {
         let scheduled = Self {
             definition,
             binding,
+            request,
             event_receipt,
             whole_root_stage,
             attempt,
@@ -68,6 +188,10 @@ impl SourceScheduledRefetchV1 {
 
     pub fn binding(&self) -> &SourceBindingV1 {
         &self.binding
+    }
+
+    pub fn request(&self) -> &SourceAcquisitionRequestV1 {
+        &self.request
     }
 
     pub fn event_receipt(&self) -> &SourceEventAdmissionReceiptV1 {
@@ -98,6 +222,7 @@ impl SourceScheduledRefetchV1 {
         Self::new(
             self.definition.clone(),
             self.binding.clone(),
+            self.request.clone(),
             self.event_receipt.clone(),
             self.whole_root_stage.clone(),
             attempt,
@@ -113,6 +238,7 @@ impl SourceScheduledRefetchV1 {
         Self::new(
             self.definition.clone(),
             self.binding.clone(),
+            self.request.clone(),
             self.event_receipt.clone(),
             stage,
             0,
@@ -123,12 +249,15 @@ impl SourceScheduledRefetchV1 {
     pub fn validate(&self) -> SourceAcquisitionQueueResultV1<()> {
         self.definition.validate()?;
         self.binding.validate_against(&self.definition)?;
+        self.request.validate()?;
         self.event_receipt.validate()?;
         self.whole_root_stage
             .as_ref()
             .map_or(Ok(()), SourceWholeRootStageV1::validate)?;
         let identity = self.binding.immutable_identity()?;
-        if self.event_receipt.binding() != &identity
+        if self.request.provider() != &self.definition.provider
+            || self.request.binding_native_root()? != self.binding.native_root
+            || self.event_receipt.binding() != &identity
             || self.event_receipt.original_refresh().cause() != SourceRefreshCauseV1::Event
             || self.attempt > MAX_SOURCE_ACQUISITION_ATTEMPTS_V1
         {

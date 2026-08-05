@@ -3,16 +3,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tracedecay_domain::feedback::{
+    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
+};
 use tracedecay_domain::{
-    AccessPolicyDigest, CapabilityId, ComponentVersion, LocatorDigest, ManifestDigest,
-    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
+    AccessPolicyDigest, CapabilityId, CommitId, ComponentVersion, LocatorDigest, ManifestDigest,
+    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId, RepositoryId,
     ResolutionAuthorizationV1, RetrievalAnchorId, SanitizationReceiptId, SanitizationReceiptRefV1,
     ScopeResolutionId, SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1,
     SourceBindingIdentityV1, SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1,
     SourceContentStateV1, SourceCoverageV1, SourceDefinitionV1, SourceDeletionSemanticsV1,
     SourceEnvelopeKindV1, SourceEventAdmissionDispositionV1, SourceEventV1, SourceInstanceId,
     SourceNativeObjectIdV1, SourceObjectObservationV1, SourceObjectRevisionV1, SourcePartitionIdV1,
-    SourceProviderEnvelopeV1, SourceRefetchStrategyV1, SourceSnapshotIdV1, UtcMicros,
+    SourceProviderEnvelopeV1, SourceRefetchStrategyV1, SourceSnapshotIdV1, UtcMicros, WorktreeId,
 };
 use tracedecay_store::{
     SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
@@ -24,7 +27,11 @@ fn digest(seed: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
 }
 
-fn source() -> (SourceDefinitionV1, SourceBindingV1) {
+fn source() -> (
+    SourceDefinitionV1,
+    SourceBindingV1,
+    SourceAcquisitionRequestV1,
+) {
     let capabilities = SourceAcquisitionCapabilitiesV1::new(
         BTreeSet::from([SourceCaptureModeV1::Event]),
         BTreeSet::from([SourceRefetchStrategyV1::WholeRoot]),
@@ -45,15 +52,29 @@ fn source() -> (SourceDefinitionV1, SourceBindingV1) {
         1,
     )
     .unwrap();
+    let request = SourceAcquisitionRequestV1::github_review(
+        definition.provider.clone(),
+        LocatorDigest::new(digest('a').as_str()).unwrap(),
+        FeedbackScopeV1 {
+            project_id: ProjectId::new("project.scheduler-fixture").unwrap(),
+            repository_id: RepositoryId::new("repository.scheduler-fixture").unwrap(),
+            worktree_id: WorktreeId::new("worktree.scheduler-fixture").unwrap(),
+            branch_ref: "refs/heads/scheduler-fixture".to_owned(),
+            head_commit_id: CommitId::new("a".repeat(40)).unwrap(),
+        },
+        GitHubReviewReadOperationV1::RestListPullRequestReviewComments,
+        GitHubPullRequestIdV1::new("pr.scheduler-fixture").unwrap(),
+    )
+    .unwrap();
     let binding = SourceBindingV1::new(
         &definition,
         SourceBindingOwnerV1::Project(ProjectId::new("project.scheduler-fixture").unwrap()),
         PrivacyDomainId::new("privacy.scheduler-fixture").unwrap(),
-        LocatorDigest::new(digest('a').as_str()).unwrap(),
+        request.binding_native_root().unwrap(),
         1,
     )
     .unwrap();
-    (definition, binding)
+    (definition, binding, request)
 }
 
 #[derive(Default)]
@@ -339,6 +360,132 @@ async fn pending_task(
         .clone()
 }
 
+#[test]
+fn exact_github_request_identity_partitions_binding_and_durable_queue_state() {
+    let (definition, first_binding, first_request) = source();
+    let SourceAcquisitionRequestV1::GitHubReview {
+        provider,
+        configured_source,
+        scope,
+        operation,
+        ..
+    } = &first_request;
+    let second_request = SourceAcquisitionRequestV1::github_review(
+        provider.clone(),
+        configured_source.clone(),
+        FeedbackScopeV1 {
+            branch_ref: "refs/heads/other".to_owned(),
+            head_commit_id: CommitId::new("b".repeat(40)).unwrap(),
+            ..scope.clone()
+        },
+        *operation,
+        GitHubPullRequestIdV1::new("pr.other").unwrap(),
+    )
+    .unwrap();
+    let second_binding = SourceBindingV1::new(
+        &definition,
+        first_binding.owner.clone(),
+        first_binding.privacy_domain.clone(),
+        second_request.binding_native_root().unwrap(),
+        first_binding.binding_revision,
+    )
+    .unwrap();
+
+    assert_ne!(
+        first_request.request_digest(),
+        second_request.request_digest()
+    );
+    assert_ne!(
+        first_binding.immutable_identity().unwrap(),
+        second_binding.immutable_identity().unwrap(),
+        "a different ref/head/pull request must never share a durable queue row"
+    );
+    let encoded = serde_json::to_value(&second_request).unwrap();
+    assert_eq!(encoded["scope"]["branch_ref"], "refs/heads/other");
+    assert_eq!(encoded["pull_request_id"], "pr.other");
+    assert_eq!(
+        encoded["scope"]["repository_id"],
+        "repository.scheduler-fixture"
+    );
+}
+
+#[tokio::test]
+async fn same_hook_signal_for_distinct_requests_produces_distinct_queue_receipts() {
+    let state = Arc::new(MemoryStatePort::default());
+    let owner = ExternalSourceAcquisitionOwnerV1::new(
+        state,
+        Arc::new(NeverPort),
+        Arc::new(NeverPort),
+        Arc::new(NeverPort),
+        SourceAcquisitionPolicyV1::new(
+            3,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let (definition, first_binding, first_request) = source();
+    let SourceAcquisitionRequestV1::GitHubReview {
+        provider,
+        configured_source,
+        scope,
+        operation,
+        ..
+    } = &first_request;
+    let second_request = SourceAcquisitionRequestV1::github_review(
+        provider.clone(),
+        configured_source.clone(),
+        FeedbackScopeV1 {
+            branch_ref: "refs/heads/replacement".to_owned(),
+            head_commit_id: CommitId::new("c".repeat(40)).unwrap(),
+            ..scope.clone()
+        },
+        *operation,
+        GitHubPullRequestIdV1::new("pr.replacement").unwrap(),
+    )
+    .unwrap();
+    let second_binding = SourceBindingV1::new(
+        &definition,
+        first_binding.owner.clone(),
+        first_binding.privacy_domain.clone(),
+        second_request.binding_native_root().unwrap(),
+        first_binding.binding_revision,
+    )
+    .unwrap();
+    let signal = digest('d');
+    let first = owner
+        .admit_event(
+            &definition,
+            &first_binding,
+            &first_request,
+            SourceEventV1::new(first_binding.immutable_identity().unwrap(), signal.clone())
+                .unwrap(),
+            UtcMicros(10),
+        )
+        .await
+        .unwrap();
+    let second = owner
+        .admit_event(
+            &definition,
+            &second_binding,
+            &second_request,
+            SourceEventV1::new(second_binding.immutable_identity().unwrap(), signal).unwrap(),
+            UtcMicros(10),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(first.binding(), second.binding());
+    assert_ne!(first.event_key(), second.event_key());
+    assert_ne!(
+        first.original_refresh().refresh_id(),
+        second.original_refresh().refresh_id()
+    );
+    assert_eq!(owner.pending_count().await.unwrap(), 2);
+}
+
 #[tokio::test]
 async fn event_wake_is_content_free_and_duplicate_delivery_schedules_once() {
     let state = Arc::new(MemoryStatePort::default());
@@ -358,7 +505,7 @@ async fn event_wake_is_content_free_and_duplicate_delivery_schedules_once() {
         )
         .unwrap(),
     );
-    let (definition, binding) = source();
+    let (definition, binding, request) = source();
     let event = SourceEventV1::new(binding.immutable_identity().unwrap(), digest('b')).unwrap();
     let wake = {
         let owner = owner.clone();
@@ -368,7 +515,13 @@ async fn event_wake_is_content_free_and_duplicate_delivery_schedules_once() {
     };
 
     let first = owner
-        .admit_event(&definition, &binding, event.clone(), UtcMicros(10))
+        .admit_event(
+            &definition,
+            &binding,
+            &request,
+            event.clone(),
+            UtcMicros(10),
+        )
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(1), wake)
@@ -376,7 +529,7 @@ async fn event_wake_is_content_free_and_duplicate_delivery_schedules_once() {
         .expect("event admission must wake the acquisition owner")
         .unwrap();
     let duplicate = owner
-        .admit_event(&definition, &binding, event, UtcMicros(11))
+        .admit_event(&definition, &binding, &request, event, UtcMicros(11))
         .await
         .unwrap();
 
@@ -406,7 +559,7 @@ async fn event_wake_is_content_free_and_duplicate_delivery_schedules_once() {
 #[tokio::test]
 async fn restart_replays_exact_refresh_and_commits_sanitized_provenance() {
     let state = Arc::new(MemoryStatePort::default());
-    let (definition, binding) = source();
+    let (definition, binding, request) = source();
     let event = SourceEventV1::new(binding.immutable_identity().unwrap(), digest('b')).unwrap();
     let admission_owner = ExternalSourceAcquisitionOwnerV1::new(
         state.clone(),
@@ -423,7 +576,7 @@ async fn restart_replays_exact_refresh_and_commits_sanitized_provenance() {
     )
     .unwrap();
     admission_owner
-        .admit_event(&definition, &binding, event, UtcMicros(10))
+        .admit_event(&definition, &binding, &request, event, UtcMicros(10))
         .await
         .unwrap();
     drop(admission_owner);
@@ -478,9 +631,9 @@ async fn restart_replays_exact_refresh_and_commits_sanitized_provenance() {
 }
 
 #[tokio::test]
-async fn coalesced_event_runs_once_after_the_active_refresh_completes() {
+async fn background_owner_drains_persisted_ready_work_on_start_and_stops_on_cancel() {
     let state = Arc::new(MemoryStatePort::default());
-    let (definition, binding) = source();
+    let (definition, binding, request) = source();
     let seed = ExternalSourceAcquisitionOwnerV1::new(
         state.clone(),
         Arc::new(NeverPort),
@@ -498,6 +651,90 @@ async fn coalesced_event_runs_once_after_the_active_refresh_completes() {
     seed.admit_event(
         &definition,
         &binding,
+        &request,
+        SourceEventV1::new(binding.immutable_identity().unwrap(), digest('b')).unwrap(),
+        UtcMicros(10),
+    )
+    .await
+    .unwrap();
+    drop(seed);
+
+    let task = pending_task(&state, &binding).await;
+    let grant = grant('7');
+    let scripted = Arc::new(ScriptedPort::new(
+        [
+            SourceAcquisitionAuthorizationOutcomeV1::Authorized(grant.clone()),
+            SourceAcquisitionAuthorizationOutcomeV1::Authorized(grant.clone()),
+        ],
+        [SourceCanonicalRefetchOutcomeV1::Fetched(page(
+            &task,
+            &grant,
+            task.refresh().refresh_id().clone(),
+            SourceCoverageV1::Complete,
+        ))],
+    ));
+    let restarted = Arc::new(
+        ExternalSourceAcquisitionOwnerV1::new(
+            state,
+            scripted.clone(),
+            scripted.clone(),
+            scripted.clone(),
+            SourceAcquisitionPolicyV1::new(
+                3,
+                Duration::from_secs(1),
+                Duration::from_millis(10),
+                Duration::from_millis(40),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let cancellation = crate::observation::ObservationCancellation::default();
+    let worker = {
+        let restarted = Arc::clone(&restarted);
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            restarted.run_background(&cancellation).await;
+        })
+    };
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while scripted.commit_count.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("mount-time worker must drain a persisted ready task without another hook");
+    cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(1), worker)
+        .await
+        .expect("cancelled background owner must stop")
+        .unwrap();
+    assert_eq!(restarted.pending_count().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn coalesced_event_runs_once_after_the_active_refresh_completes() {
+    let state = Arc::new(MemoryStatePort::default());
+    let (definition, binding, request) = source();
+    let seed = ExternalSourceAcquisitionOwnerV1::new(
+        state.clone(),
+        Arc::new(NeverPort),
+        Arc::new(NeverPort),
+        Arc::new(NeverPort),
+        SourceAcquisitionPolicyV1::new(
+            3,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    seed.admit_event(
+        &definition,
+        &binding,
+        &request,
         SourceEventV1::new(binding.immutable_identity().unwrap(), digest('b')).unwrap(),
         UtcMicros(10),
     )
@@ -507,6 +744,7 @@ async fn coalesced_event_runs_once_after_the_active_refresh_completes() {
         .admit_event(
             &definition,
             &binding,
+            &request,
             SourceEventV1::new(binding.immutable_identity().unwrap(), digest('c')).unwrap(),
             UtcMicros(11),
         )
@@ -573,7 +811,7 @@ async fn coalesced_event_runs_once_after_the_active_refresh_completes() {
 #[tokio::test]
 async fn revoked_authorization_blocks_fetch_and_commit_independently() {
     let state = Arc::new(MemoryStatePort::default());
-    let (definition, binding) = source();
+    let (definition, binding, request) = source();
     let event = SourceEventV1::new(binding.immutable_identity().unwrap(), digest('b')).unwrap();
     let denied = Arc::new(ScriptedPort::new(
         [SourceAcquisitionAuthorizationOutcomeV1::Unauthorized],
@@ -594,7 +832,7 @@ async fn revoked_authorization_blocks_fetch_and_commit_independently() {
     )
     .unwrap();
     owner
-        .admit_event(&definition, &binding, event, UtcMicros(10))
+        .admit_event(&definition, &binding, &request, event, UtcMicros(10))
         .await
         .unwrap();
     assert_eq!(
@@ -626,7 +864,7 @@ async fn revoked_authorization_blocks_fetch_and_commit_independently() {
     )
     .unwrap();
     task_seed
-        .admit_event(&definition, &binding, event, UtcMicros(20))
+        .admit_event(&definition, &binding, &request, event, UtcMicros(20))
         .await
         .unwrap();
     let task = pending_task(&state, &binding).await;
@@ -674,7 +912,7 @@ async fn revoked_authorization_blocks_fetch_and_commit_independently() {
 #[tokio::test]
 async fn remote_refresh_change_is_blocked_before_commit() {
     let state = Arc::new(MemoryStatePort::default());
-    let (definition, binding) = source();
+    let (definition, binding, request) = source();
     let event = SourceEventV1::new(binding.immutable_identity().unwrap(), digest('b')).unwrap();
     let seed = ExternalSourceAcquisitionOwnerV1::new(
         state.clone(),
@@ -690,7 +928,7 @@ async fn remote_refresh_change_is_blocked_before_commit() {
         .unwrap(),
     )
     .unwrap();
-    seed.admit_event(&definition, &binding, event, UtcMicros(10))
+    seed.admit_event(&definition, &binding, &request, event, UtcMicros(10))
         .await
         .unwrap();
     let task = pending_task(&state, &binding).await;
@@ -737,7 +975,7 @@ async fn remote_refresh_change_is_blocked_before_commit() {
 #[tokio::test]
 async fn unavailable_refetch_uses_bounded_backoff_and_cancellation_preserves_replay() {
     let state = Arc::new(MemoryStatePort::default());
-    let (definition, binding) = source();
+    let (definition, binding, request) = source();
     let event = SourceEventV1::new(binding.immutable_identity().unwrap(), digest('b')).unwrap();
     let unavailable = Arc::new(ScriptedPort::new(
         [
@@ -766,7 +1004,7 @@ async fn unavailable_refetch_uses_bounded_backoff_and_cancellation_preserves_rep
     )
     .unwrap();
     owner
-        .admit_event(&definition, &binding, event, UtcMicros(1_000))
+        .admit_event(&definition, &binding, &request, event, UtcMicros(1_000))
         .await
         .unwrap();
     assert_eq!(
