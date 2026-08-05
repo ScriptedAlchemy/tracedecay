@@ -43,15 +43,22 @@ where
     });
     tokio::pin!(join);
     loop {
-        control.check()?;
         tokio::select! {
             biased;
             result = &mut join => {
-                control.check()?;
-                return result
+                let completed = result
                     .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                return match completed {
+                    Err(error) => Err(error),
+                    Ok(value) => {
+                        control.check()?;
+                        Ok(value)
+                    }
+                };
             }
-            () = tokio::time::sleep(CONTROL_POLL_INTERVAL) => {}
+            () = tokio::time::sleep(CONTROL_POLL_INTERVAL) => {
+                control.check()?;
+            }
         }
     }
 }
