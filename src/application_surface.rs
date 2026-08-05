@@ -110,10 +110,7 @@ mod wire_schema;
 mod workflow;
 
 use multi_root_http::MultiRootExecutorOwner;
-use wire_schema::{
-    build_configuration_wire_schema_registry, is_configuration_operation,
-    validate_configuration_outcome,
-};
+use wire_schema::{build_application_wire_schema_registry, validate_application_outcome};
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
@@ -437,13 +434,7 @@ fn application_invoker_for_surface(
         }
     })?);
     let resolver = CatalogBindingResolver::new(composition.snapshot());
-    let configuration_schemas = (surface == BindingSurface::Http
-        || required_operations
-            .iter()
-            .copied()
-            .any(is_configuration_operation))
-    .then(|| build_configuration_wire_schema_registry(composition.snapshot()))
-    .transpose()?;
+    let wire_schemas = build_application_wire_schema_registry(composition.snapshot())?;
     if surface == BindingSurface::Http {
         for operation in HttpApplicationOperation::ALL {
             if !operation.is_http_exposed() {
@@ -452,12 +443,7 @@ fn application_invoker_for_surface(
             let Some(binding) = resolve_application_binding(&resolver, surface, operation) else {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             };
-            if is_configuration_operation(operation)
-                && configuration_schemas
-                    .as_ref()
-                    .and_then(|schemas| schemas.get(&binding.binding_id))
-                    .is_none()
-            {
+            if wire_schemas.get(&binding.binding_id).is_none() {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             }
         }
@@ -466,12 +452,7 @@ fn application_invoker_for_surface(
             let Some(binding) = resolve_application_binding(&resolver, surface, *operation) else {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             };
-            if is_configuration_operation(*operation)
-                && configuration_schemas
-                    .as_ref()
-                    .and_then(|schemas| schemas.get(&binding.binding_id))
-                    .is_none()
-            {
+            if wire_schemas.get(&binding.binding_id).is_none() {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             }
         }
@@ -2787,11 +2768,25 @@ pub async fn execute_application_surface(
                 )
             }),
             Err(error) => Err(ApplicationProblemEnvelope::new(
-                result_contract,
-                request_id,
+                result_contract.clone(),
+                request_id.clone(),
                 invocation_contract_problem(error)?,
             )),
         };
+        let result = result.and_then(|envelope| {
+            if validate_application_outcome(operation, &envelope.outcome) {
+                Ok(envelope)
+            } else {
+                Err(ApplicationProblemEnvelope::new(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    ApplicationProblem::unavailable(SafeDiagnostic::new(
+                        "application.surface.invalid_response",
+                        "The application executor returned a result that did not match its canonical wire contract",
+                    )?),
+                ))
+            }
+        });
         return Ok(ApplicationSurfaceInvocationResult {
             operation,
             binding_id,
@@ -3072,23 +3067,12 @@ pub async fn execute_application_surface(
             ))
         }
         crate::daemon_contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
-            if validate_configuration_outcome(operation, &outcome) {
-                Ok(ApplicationEnvelope {
-                    contract: result_contract.clone(),
-                    request_id: request_id.clone(),
-                    scope,
-                    outcome,
-                })
-            } else {
-                Err(ApplicationProblemEnvelope::new(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    ApplicationProblem::unavailable(SafeDiagnostic::new(
-                        "application.surface.invalid_configuration_response",
-                        "The daemon returned a configuration result that did not match its wire contract",
-                    )?),
-                ))
-            }
+            Ok(ApplicationEnvelope {
+                contract: result_contract.clone(),
+                request_id: request_id.clone(),
+                scope,
+                outcome,
+            })
         }
         crate::daemon_contract::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
             Ok(ApplicationEnvelope {
@@ -3117,6 +3101,21 @@ pub async fn execute_application_surface(
             )?),
         )),
     };
+
+    let result = result.and_then(|envelope| {
+        if validate_application_outcome(operation, &envelope.outcome) {
+            Ok(envelope)
+        } else {
+            Err(ApplicationProblemEnvelope::new(
+                result_contract.clone(),
+                request_id.clone(),
+                ApplicationProblem::unavailable(SafeDiagnostic::new(
+                    "application.surface.invalid_response",
+                    "The daemon returned a result that did not match its canonical wire contract",
+                )?),
+            ))
+        }
+    });
 
     Ok(ApplicationSurfaceInvocationResult {
         operation,

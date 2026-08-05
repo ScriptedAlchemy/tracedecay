@@ -59,7 +59,7 @@ impl CodeQueryScope {
 /// Generation-bound page returned by every callable code query. Coverage,
 /// omissions, scoring, and terminal state remain in the enclosing
 /// [`crate::result::RetrievalEvidence`].
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeQueryPage<T> {
     pub generation: CodeGenerationId,

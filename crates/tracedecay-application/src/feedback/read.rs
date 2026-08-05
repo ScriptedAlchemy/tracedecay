@@ -153,7 +153,7 @@ impl FeedbackListRequestV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackFindingReadV1 {
     pub result_id: FeedbackResultId,
@@ -168,26 +168,26 @@ pub struct FeedbackFindingReadV1 {
     pub expand_handle: Option<OpaqueCursor>,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackDiagnosticsReadResultV1 {
     pub cycle: FeedbackCycleResultV1,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackGetResultV1 {
     pub finding: FeedbackFindingReadV1,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackExpandResultV1 {
     pub finding: FeedbackFindingReadV1,
     pub expansion: AnchorExpandResult,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackListResultV1 {
     pub findings: Vec<FeedbackFindingReadV1>,
