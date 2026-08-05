@@ -40,6 +40,7 @@ pub mod sdk_catalog;
 pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
+pub mod wire;
 pub mod work;
 pub mod work_catalog;
 pub mod work_dispatch;
@@ -241,6 +242,7 @@ pub use tracedecay_domain::framed_log::{
     read_bounded, replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
     truncate_file, validate_regular_or_missing, with_owned_temp_publish,
 };
+pub use wire::{ApplicationOwnerKind, ApplicationWireOperation};
 pub use work::*;
 pub use work_catalog::*;
 pub use work_dispatch::*;
