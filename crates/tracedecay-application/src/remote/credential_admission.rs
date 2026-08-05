@@ -240,6 +240,24 @@ impl RemoteAuthenticatedSessionV1 {
         self.admitted_at
     }
 
+    /// Returns the durable, secret-free enrollment proof that authorized this
+    /// request. Grant credentials can never reach recovery operations.
+    pub fn enrollment_commit_receipt(&self) -> Option<&RemoteEnrollmentCommitReceiptV1> {
+        match &self.record {
+            RemoteCredentialAuthorityRecordV1::Enrollment { receipt, .. } => Some(receipt),
+            RemoteCredentialAuthorityRecordV1::Grant { .. } => None,
+        }
+    }
+
+    pub fn enrollment_expires_at(&self) -> Option<UtcMicros> {
+        match &self.record {
+            RemoteCredentialAuthorityRecordV1::Enrollment { enrollment, .. } => {
+                Some(enrollment.expires_at)
+            }
+            RemoteCredentialAuthorityRecordV1::Grant { .. } => None,
+        }
+    }
+
     /// Binds post-deserialization protocol metadata to the identity admitted
     /// before the body was read.
     pub fn bind_protocol<T>(
@@ -308,6 +326,10 @@ impl RemoteAuthenticatedSessionV1 {
             .map_err(|_| RemoteCredentialAdmissionErrorV1::BindingMismatch)?;
         if self.use_case != RemoteCredentialUseV1::CreateBackup
             || request.body.expected.brain_id != self.record.brain_id().as_str()
+            || !request
+                .expected_authority
+                .as_ref()
+                .is_some_and(|writer| request.body.expected.matches_writer(writer))
         {
             return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
         }
@@ -323,7 +345,13 @@ impl RemoteAuthenticatedSessionV1 {
             .body
             .validate()
             .map_err(|_| RemoteCredentialAdmissionErrorV1::BindingMismatch)?;
-        if self.use_case != RemoteCredentialUseV1::PublishRestore {
+        if self.use_case != RemoteCredentialUseV1::PublishRestore
+            || !request.expected_authority.as_ref().is_some_and(|writer| {
+                writer.brain_id == *self.record.brain_id()
+                    && writer.authority_epoch.0 == request.body.expected_authority_epoch
+                    && writer.placement_revision.get() == request.body.expected_placement_revision
+            })
+        {
             return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
         }
         Ok(())
@@ -338,7 +366,13 @@ impl RemoteAuthenticatedSessionV1 {
             .body
             .validate()
             .map_err(|_| RemoteCredentialAdmissionErrorV1::BindingMismatch)?;
-        if self.use_case != RemoteCredentialUseV1::Promote {
+        if self.use_case != RemoteCredentialUseV1::Promote
+            || !request.expected_authority.as_ref().is_some_and(|writer| {
+                writer.brain_id == *self.record.brain_id()
+                    && writer.authority_epoch.0 == request.body.expected_authority_epoch
+                    && writer.placement_revision.get() == request.body.expected_placement_revision
+            })
+        {
             return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
         }
         Ok(())
