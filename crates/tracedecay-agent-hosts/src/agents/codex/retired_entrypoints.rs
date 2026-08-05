@@ -4,19 +4,7 @@ use sha2::{Digest, Sha256};
 /// shipped plugin bundles. Cleanup is deliberately closed over these
 /// path-and-content pairs: a name, frontmatter field, or TraceDecay tool
 /// reference is not ownership evidence.
-const CODEX_RETIRED_ENTRYPOINT_IDENTITIES: &[(&str, &str)] = &[
-    (
-        "skills/curating-project-memory/SKILL.md",
-        "06eeb9b654516e880bd9f4e2a4887b5e4b89f0542068de58ebe5a4a71344cc5c",
-    ),
-    (
-        "skills/recalling-project-memory/SKILL.md",
-        "27373ccba172c2577c7c870f26c39ec3b1e7681794d54c30daee8163ab394741",
-    ),
-    (
-        "skills/recalling-session-context/SKILL.md",
-        "9831eadc387bc7830f5886932ab4b9d59eedae0df6dd151e715f86af4160624d",
-    ),
+pub(super) const CODEX_RETIRED_ENTRYPOINT_IDENTITIES: &[(&str, &str)] = &[
     (
         "skills/recalling-session-context/SKILL.md",
         "8baea6f4050fdecbd273eab8ff4131179ffb3ae8c9d6bfe64a88a73ce62acbb7",

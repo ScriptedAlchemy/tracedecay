@@ -596,6 +596,15 @@ fn every_published_retired_discovery_identity_converges_on_redeploy() {
     )))
     .unwrap();
     assert_eq!(variants.len(), 30);
+    let published_identities = variants
+        .iter()
+        .map(|variant| (variant.path.as_str(), variant.digest.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let production_identities = retired_entrypoints::CODEX_RETIRED_ENTRYPOINT_IDENTITIES
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(production_identities, published_identities);
 
     for variant in variants {
         let observed_digest = hex::encode(Sha256::digest(variant.contents.as_bytes()));
