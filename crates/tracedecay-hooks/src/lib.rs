@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admission_ledger;
+pub mod capture;
 pub mod config;
 pub mod core_events;
 pub mod native;
@@ -19,6 +20,9 @@ pub use admission_ledger::{
     HookAdmissionDecisionV1, HookAdmissionLedgerError, HookAdmissionLedgerLimitsV1,
     HookAdmissionLedgerOpenReportV1, HookAdmissionLedgerReceiptV1, HookAdmissionLedgerV1,
     hook_admission_digest,
+};
+pub use capture::{
+    NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1, capture_native_event_for_replay,
 };
 pub use config::{
     HOOK_CONFIGURATION_SCHEMA_VERSION, HookConfigurationFileReaderV1,
