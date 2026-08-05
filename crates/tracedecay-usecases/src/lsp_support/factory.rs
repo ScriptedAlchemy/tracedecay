@@ -260,10 +260,9 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
     }
 
     fn supports_workspace_diagnostics(&self) -> bool {
-        let routes = self.routes.load();
-        !routes.diagnostics.is_empty()
-            && routes
-                .diagnostics
+        !self.roots.is_empty()
+            && self
+                .roots
                 .values()
                 .all(|port| port.supports_workspace_diagnostics())
     }
@@ -274,7 +273,7 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> WorkspaceDiagnosticSnapshotOutcome {
-        self.routes.load().diagnostics.get(root.uri()).map_or(
+        self.roots.get(root.uri()).map_or(
             WorkspaceDiagnosticSnapshotOutcome::Failed {
                 code_generation_id: None,
                 failure_class: "root-not-authorized".to_owned(),
@@ -289,7 +288,7 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> DiagnosticRefreshAdmission {
-        self.routes.load().diagnostics.get(root.uri()).map_or(
+        self.roots.get(root.uri()).map_or(
             DiagnosticRefreshAdmission::Rejected {
                 failure_class: "root-not-authorized".to_owned(),
             },
@@ -482,6 +481,91 @@ mod tests {
                 SemanticProviderOutcome::Unavailable
             }
         }
+    }
+
+    struct RootWorkspaceDiagnostics;
+
+    impl DiagnosticSnapshotPort for RootWorkspaceDiagnostics {
+        fn document_diagnostics(
+            &self,
+            _root: &AdmittedRoot,
+            _document_uri: &str,
+            _overlay: Option<&OverlaySnapshot>,
+        ) -> DiagnosticSnapshotOutcome {
+            DiagnosticSnapshotOutcome::Failed {
+                source_generation: None,
+                failure_class: "document-diagnostics-unused".to_owned(),
+            }
+        }
+
+        fn supports_workspace_diagnostics(&self) -> bool {
+            true
+        }
+
+        fn workspace_diagnostics(
+            &self,
+            _workspace: &AuthorizedLspWorkspace,
+            root: &AdmittedRoot,
+            _overlays: &[OverlaySnapshot],
+        ) -> WorkspaceDiagnosticSnapshotOutcome {
+            WorkspaceDiagnosticSnapshotOutcome::Partial {
+                code_generation_id: None,
+                coverage: root.uri().to_owned(),
+            }
+        }
+
+        fn request_workspace_refresh(
+            &self,
+            _workspace: &AuthorizedLspWorkspace,
+            root: &AdmittedRoot,
+            _overlays: &[OverlaySnapshot],
+        ) -> DiagnosticRefreshAdmission {
+            DiagnosticRefreshAdmission::Rejected {
+                failure_class: root.uri().to_owned(),
+            }
+        }
+    }
+
+    #[test]
+    fn federated_workspace_diagnostics_route_only_to_the_exact_root_provider() {
+        let primary = AdmittedRoot::new("file:///primary");
+        let secondary = AdmittedRoot::new("file:///secondary");
+        let provider = FederatedDiagnostics {
+            roots: BTreeMap::from([
+                (
+                    primary.uri().to_owned(),
+                    Arc::new(RootWorkspaceDiagnostics)
+                        as Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
+                ),
+                (
+                    secondary.uri().to_owned(),
+                    Arc::new(RootWorkspaceDiagnostics)
+                        as Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
+                ),
+            ]),
+        };
+        let workspace = AuthorizedLspWorkspace::single(secondary.clone());
+
+        assert!(provider.supports_workspace_diagnostics());
+        assert!(matches!(
+            provider.workspace_diagnostics(&workspace, &secondary, &[]),
+            WorkspaceDiagnosticSnapshotOutcome::Partial { coverage, .. }
+                if coverage == secondary.uri()
+        ));
+        assert!(matches!(
+            provider.request_workspace_refresh(&workspace, &secondary, &[]),
+            DiagnosticRefreshAdmission::Rejected { failure_class }
+                if failure_class == secondary.uri()
+        ));
+        assert!(matches!(
+            provider.workspace_diagnostics(
+                &workspace,
+                &AdmittedRoot::new("file:///unregistered"),
+                &[],
+            ),
+            WorkspaceDiagnosticSnapshotOutcome::Failed { failure_class, .. }
+                if failure_class == "root-not-authorized"
+        ));
     }
 
     #[test]
