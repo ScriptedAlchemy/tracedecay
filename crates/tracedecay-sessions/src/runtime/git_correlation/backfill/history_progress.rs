@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::GitCorrelationError;
 
-const MAX_CONSULTED_REF_SEAL_JSON_BYTES: usize = 64 * 1024;
+const MAX_CONSULTED_REF_SEAL_JSON_BYTES: usize = 256 * 1024;
 pub(super) const MAX_PENDING_PAGE_ROWS: usize = 128;
 const INITIAL_REFLOG_CONTENT_CHAIN: &str =
     "sha256:ada855f318c248e40b2bb191bbe42fad3ec6300cc470ecca8d2e2322a6d82ae3";
@@ -218,7 +219,7 @@ pub(super) struct GitHistoryProgressRow {
     pub segment_tip_oid: String,
     pub segment_cursor: u64,
     pub emitted_count: u64,
-    pub consulted_refs: BTreeMap<String, Option<String>>,
+    pub consulted_refs: BTreeMap<Vec<u8>, Option<String>>,
 }
 
 /// One immutable reflog-derived segment and its independent apply/scan state.
@@ -764,10 +765,17 @@ fn validate_progress(progress: &GitHistoryProgressRow) -> Result<(), GitCorrelat
     }
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ConsultedRefSealEntry {
+    name_hex: String,
+    oid: Option<String>,
+}
+
 fn encode_consulted_refs(
-    consulted_refs: &BTreeMap<String, Option<String>>,
+    consulted_refs: &BTreeMap<Vec<u8>, Option<String>>,
 ) -> Result<String, GitCorrelationError> {
-    let json = serde_json::to_string(consulted_refs).map_err(|error| {
+    let json = canonical_consulted_refs_json(consulted_refs).map_err(|error| {
         GitCorrelationError::InvalidArgument(format!(
             "could not encode git history consulted-ref seal: {error}"
         ))
@@ -782,17 +790,34 @@ fn encode_consulted_refs(
 
 fn decode_consulted_refs(
     json: &str,
-) -> Result<BTreeMap<String, Option<String>>, GitCorrelationError> {
+) -> Result<BTreeMap<Vec<u8>, Option<String>>, GitCorrelationError> {
     if json.len() > MAX_CONSULTED_REF_SEAL_JSON_BYTES {
         return Err(GitCorrelationError::Db(format!(
             "git history consulted-ref seal exceeds {MAX_CONSULTED_REF_SEAL_JSON_BYTES} bytes"
         )));
     }
-    let consulted_refs: BTreeMap<String, Option<String>> =
-        serde_json::from_str(json).map_err(|error| {
-            GitCorrelationError::Db(format!("invalid git history consulted-ref seal: {error}"))
+    let entries: Vec<ConsultedRefSealEntry> = serde_json::from_str(json).map_err(|error| {
+        GitCorrelationError::Db(format!("invalid git history consulted-ref seal: {error}"))
+    })?;
+    let mut consulted_refs = BTreeMap::new();
+    for entry in entries {
+        let name = hex::decode(&entry.name_hex).map_err(|error| {
+            GitCorrelationError::Db(format!(
+                "invalid git history consulted-ref name hex: {error}"
+            ))
         })?;
-    let canonical = serde_json::to_string(&consulted_refs).map_err(|error| {
+        if hex::encode(&name) != entry.name_hex {
+            return Err(GitCorrelationError::Db(
+                "git history consulted-ref name hex is not canonical".to_string(),
+            ));
+        }
+        if consulted_refs.insert(name, entry.oid).is_some() {
+            return Err(GitCorrelationError::Db(
+                "git history consulted-ref seal contains a duplicate name".to_string(),
+            ));
+        }
+    }
+    let canonical = canonical_consulted_refs_json(&consulted_refs).map_err(|error| {
         GitCorrelationError::Db(format!(
             "could not canonicalize git history consulted-ref seal: {error}"
         ))
@@ -803,6 +828,20 @@ fn decode_consulted_refs(
         ));
     }
     Ok(consulted_refs)
+}
+
+fn canonical_consulted_refs_json(
+    consulted_refs: &BTreeMap<Vec<u8>, Option<String>>,
+) -> serde_json::Result<String> {
+    serde_json::to_string(
+        &consulted_refs
+            .iter()
+            .map(|(name, oid)| ConsultedRefSealEntry {
+                name_hex: hex::encode(name),
+                oid: oid.clone(),
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 const fn bool_value(value: bool) -> i64 {

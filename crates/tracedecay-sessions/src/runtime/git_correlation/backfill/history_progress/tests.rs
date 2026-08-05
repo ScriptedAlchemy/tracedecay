@@ -34,8 +34,8 @@ fn progress(key: GitHistoryProgressKey) -> GitHistoryProgressRow {
         segment_cursor: 0,
         emitted_count: 0,
         consulted_refs: BTreeMap::from([
-            ("refs/heads/main".to_string(), Some("aaaaaaaa".to_string())),
-            ("refs/tags/missing".to_string(), None),
+            (b"refs/heads/main".to_vec(), Some("aaaaaaaa".to_string())),
+            (b"refs/tags/\xffbinary".to_vec(), None),
         ]),
     }
 }
@@ -50,6 +50,26 @@ fn segment(key: GitHistoryProgressKey) -> GitHistorySegmentRow {
         tip_oid: "aaaaaaaa".to_string(),
         applied: true,
         completed: false,
+    }
+}
+
+#[test]
+fn consulted_ref_seal_is_byte_exact_canonical_and_rejects_bad_entries() {
+    let refs = BTreeMap::from([(b"a".to_vec(), Some("oid".to_string())), (vec![0xff], None)]);
+    let json = encode_consulted_refs(&refs).unwrap();
+    assert_eq!(
+        json,
+        r#"[{"name_hex":"61","oid":"oid"},{"name_hex":"ff","oid":null}]"#
+    );
+    assert_eq!(decode_consulted_refs(&json).unwrap(), refs);
+    for invalid in [
+        r#"[{"name_hex":"zz","oid":null}]"#,
+        r#"[{"name_hex":"61","oid":null},{"name_hex":"61","oid":"oid"}]"#,
+        r#"[{"name_hex":"62","oid":null},{"name_hex":"61","oid":null}]"#,
+        r#"[{"name_hex":"FF","oid":null}]"#,
+        r#"[{"name_hex":"61","oid":null,"extra":true}]"#,
+    ] {
+        assert!(decode_consulted_refs(invalid).is_err(), "{invalid}");
     }
 }
 
