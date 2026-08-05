@@ -81,6 +81,34 @@ class WholeRunDeadlineTests(unittest.TestCase):
             {"tool_sweep.whole_run_deadline_exceeded"},
         )
 
+    def test_phase_environment_creates_the_temp_root_before_wrappers_run(self) -> None:
+        orchestrator = load_orchestrator()
+        with tempfile.TemporaryDirectory() as raw:
+            environment = orchestrator._phase_environment(Path(raw) / "phase")
+
+            self.assertTrue(Path(environment["TMPDIR"]).is_dir())
+            self.assertEqual(environment["TMPDIR"], environment["TMP"])
+            self.assertEqual(environment["TMPDIR"], environment["TEMP"])
+
+    def test_junit_preserves_row_and_fatal_problem_codes(self) -> None:
+        orchestrator = load_orchestrator()
+        report = {
+            "entries": [{
+                "kind": "tool", "name": "tracedecay_read", "verdict": "FAIL",
+                "note": "typed failure", "problem_code": "store.offline",
+                "elapsed_ms": 0, "deadline_ms": 1,
+            }],
+            "fatal": "discovery failed",
+            "fatal_problem_code": "tool_sweep.discovery_failed",
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw)
+            orchestrator.write_final_report(out, report)
+            junit = (out / "junit.xml").read_text()
+
+        self.assertIn("store.offline", junit)
+        self.assertIn("tool_sweep.discovery_failed", junit)
+
 
 if __name__ == "__main__":
     unittest.main()

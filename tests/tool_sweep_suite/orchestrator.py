@@ -107,6 +107,7 @@ def cancelled_report(manifest: dict[str, Any], reason: str) -> dict[str, Any]:
         "entries": entries,
         "summary": {"discovered": len(entries), "completed": 0, "failed": 0, "cancelled": len(entries)},
         "fatal": reason,
+        "fatal_problem_code": PROBLEM_DEADLINE,
     }
 
 
@@ -119,19 +120,31 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
-def _write_junit(out: Path, rows: list[dict[str, Any]]) -> None:
+def _write_junit(
+    out: Path, rows: list[dict[str, Any]], *, fatal: str | None = None,
+    fatal_problem_code: str | None = None,
+) -> None:
     cases: list[str] = []
     for row in rows:
         name = escape(f"{row['kind']}:{row['name']}", {'"': "&quot;"})
         note = escape(str(row["note"]), {'"': "&quot;"})
+        problem_code = row.get("problem_code")
+        code = escape(str(problem_code), {'"': "&quot;"}) if isinstance(problem_code, str) else ""
+        message = f"{code}: {note}" if code else note
         seconds = int(row.get("elapsed_ms", 0)) / 1_000
         if row["verdict"] == "PASS":
             detail = ""
         elif row["verdict"] == "CANCELLED":
-            detail = f'<skipped message="{note}" />'
+            detail = f'<skipped message="{message}" type="{code}" />'
         else:
-            detail = f'<failure message="{note}" />'
+            detail = f'<failure message="{message}" type="{code}" />'
         cases.append(f'<testcase name="{name}" time="{seconds:.3f}">{detail}</testcase>')
+    if fatal is not None:
+        code = escape(fatal_problem_code or "tool_sweep.fatal", {'"': "&quot;"})
+        note = escape(fatal, {'"': "&quot;"})
+        cases.append(
+            f'<testcase name="fatal:aggregate" time="0.000"><error message="{code}: {note}" type="{code}" /></testcase>'
+        )
     failures = sum(1 for row in rows if row["verdict"] == "FAIL")
     skipped = sum(1 for row in rows if row["verdict"] == "CANCELLED")
     (out / "junit.xml").write_text(
@@ -145,7 +158,15 @@ def write_final_report(out: Path, report: dict[str, Any]) -> None:
     out.mkdir(parents=True, exist_ok=True)
     (out / "results.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     rows = report.get("entries")
-    _write_junit(out, rows if isinstance(rows, list) else [])
+    fatal = report.get("fatal")
+    _write_junit(
+        out,
+        rows if isinstance(rows, list) else [],
+        fatal=fatal if isinstance(fatal, str) else None,
+        fatal_problem_code=report.get("fatal_problem_code")
+        if isinstance(report.get("fatal_problem_code"), str)
+        else None,
+    )
 
 
 def load_report(path: Path) -> dict[str, Any]:
@@ -225,6 +246,11 @@ def _phase_environment(root: Path) -> dict[str, str]:
     for value in environment.values():
         if value.startswith(str(root)):
             Path(value).parent.mkdir(parents=True, exist_ok=True)
+    for variable in (
+        "HOME", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+        "TMPDIR", "TMP", "TEMP", "TRACEDECAY_PROFILE_DIR", "TRACEDECAY_DATA_DIR",
+    ):
+        Path(environment[variable]).mkdir(parents=True, exist_ok=True)
     return environment
 
 
@@ -355,8 +381,10 @@ def merge_phase_reports(
     }
     if errors:
         report["fatal"] = "; ".join(errors)
+        report["fatal_problem_code"] = "tool_sweep.phase_fatal"
     elif deadline_expired:
         report["fatal"] = "whole run deadline exceeded"
+        report["fatal_problem_code"] = PROBLEM_DEADLINE
     return report
 
 
@@ -396,7 +424,10 @@ def run(args: argparse.Namespace) -> int:
         manifest = _catalog_from_phase(read_phase)
         if manifest is None:
             reason = "whole run deadline exceeded before catalog discovery" if deadline.expired() else "read phase did not emit a canonical catalog"
-            report.update({"fatal": reason})
+            report.update({
+                "fatal": reason,
+                "fatal_problem_code": PROBLEM_DEADLINE if deadline.expired() else "tool_sweep.discovery_failed",
+            })
         else:
             effect_reports: dict[str, dict[str, Any] | None] = {}
             catalog = read_phase.root / "catalog.json"
@@ -415,8 +446,10 @@ def run(args: argparse.Namespace) -> int:
         if execution_errors:
             existing = report.get("fatal")
             report["fatal"] = "; ".join(([existing] if isinstance(existing, str) and existing else []) + execution_errors)
+            report["fatal_problem_code"] = "tool_sweep.phase_execution_failed"
     except Exception as error:
         report["fatal"] = str(error)
+        report["fatal_problem_code"] = "tool_sweep.orchestration_failed"
     finally:
         report["started_at"] = report.get("started_at", _utc_now())
         report["finished_at"] = _utc_now()
