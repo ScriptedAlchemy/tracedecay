@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinition, WorkflowStepId, WorktreeId,
+    WorkProviderRouteV1, WorkflowDefinition, WorkflowDefinitionId, WorkflowStepId, WorktreeId,
     canonical_sha256,
 };
 use tracedecay_tool_catalog::OperationId;

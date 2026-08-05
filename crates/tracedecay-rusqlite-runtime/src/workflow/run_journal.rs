@@ -6,9 +6,10 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ManifestDigest, RunId, WorkflowRunProjection, canonical_sha256};
 
-use crate::migration_sql::{
-    MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, MigrationSqlTransaction,
-    MigrationSqlValue,
+use crate::exact_sql::{
+    ExactSqlError as MigrationSqlError, ExactSqlRows as MigrationSqlRows,
+    ExactSqlStatement as MigrationSqlStatement, ExactSqlTransaction as MigrationSqlTransaction,
+    ExactSqlValue as MigrationSqlValue,
 };
 
 use super::{WorkflowSqliteAuthority, sql_integer, sql_text};
@@ -57,10 +58,7 @@ fn row_projection(
 }
 
 impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
-    fn projection(
-        &self,
-        run_id: &RunId,
-    ) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
+    fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
         let rows = self
             .storage
             .handle

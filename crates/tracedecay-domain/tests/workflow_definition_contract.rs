@@ -6,13 +6,12 @@ use tracedecay_domain::{
     AttemptId, MAX_WORKFLOW_FAN_OUT, MAX_WORKFLOW_INPUTS, MAX_WORKFLOW_OUTPUTS,
     MAX_WORKFLOW_PREDECESSORS, MAX_WORKFLOW_STEPS, ManifestDigest, ProjectId, ProviderId, RunId,
     TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId,
-    WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionError,
-    WorkflowDefinitionId, WorkflowDefinition, WorkflowFanOut, WorkflowOperationRef,
-    WorkflowOutputArtifact, WorkflowOutputName, WorkflowOutputReference,
-    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEventContext,
-    WorkflowRunEvent, WorkflowRunProjection, WorkflowRunStateError, WorkflowRunStatus,
-    WorkflowStepEffectOutcome, WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepOutput,
-    WorkflowStep,
+    WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinition,
+    WorkflowDefinitionError, WorkflowDefinitionId, WorkflowFanOut, WorkflowOperationRef,
+    WorkflowOutputArtifact, WorkflowOutputName, WorkflowOutputReference, WorkflowPlacementReceipt,
+    WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext, WorkflowRunProjection,
+    WorkflowRunStateError, WorkflowRunStatus, WorkflowStep, WorkflowStepEffectOutcome,
+    WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepOutput,
 };
 
 fn id<T>(value: &str) -> T
@@ -393,11 +392,7 @@ fn attempt(child: &str) -> WorkAttemptIdentityV1 {
     .unwrap()
 }
 
-fn step_output(
-    output_name: &str,
-    child: &str,
-    artifact: WorkArtifactRefV1,
-) -> WorkflowStepOutput {
+fn step_output(output_name: &str, child: &str, artifact: WorkArtifactRefV1) -> WorkflowStepOutput {
     WorkflowStepOutput::new(
         id(output_name),
         vec![WorkflowOutputArtifact::new(attempt(child), artifact)],

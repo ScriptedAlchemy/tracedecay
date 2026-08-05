@@ -178,6 +178,60 @@ CREATE TABLE IF NOT EXISTS work_attempt_terminal_evidence_v1 (
         task_id, run_id, attempt_id
     )
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS workflow_definitions (
+    definition_id TEXT NOT NULL,
+    definition_version INTEGER NOT NULL CHECK (definition_version > 0),
+    payload TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    PRIMARY KEY (definition_id, definition_version)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS workflow_activations (
+    definition_id TEXT NOT NULL PRIMARY KEY,
+    active_version INTEGER NOT NULL CHECK (active_version > 0)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS workflow_handoffs (
+    token_digest TEXT NOT NULL PRIMARY KEY,
+    scope_payload TEXT NOT NULL,
+    issued_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK (expires_at > issued_at),
+    consumed INTEGER NOT NULL CHECK (consumed IN (0, 1))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS workflow_run_events (
+    run_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    command_id TEXT NOT NULL,
+    input_digest TEXT NOT NULL,
+    occurred_at INTEGER NOT NULL,
+    event_payload TEXT NOT NULL,
+    event_digest TEXT NOT NULL,
+    PRIMARY KEY (run_id, sequence),
+    UNIQUE (run_id, command_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS workflow_run_heads (
+    run_id TEXT NOT NULL PRIMARY KEY,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    projection_payload TEXT NOT NULL,
+    projection_digest TEXT NOT NULL,
+    last_event_digest TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS workflow_schema (
+    singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    definition_digest TEXT NOT NULL
+) STRICT;
+
+INSERT OR IGNORE INTO workflow_schema (singleton, schema_version, definition_digest)
+VALUES (
+    1,
+    1,
+    'sha256:8e61c252fbcb854975c11b29b52d04a1d9209a16e036237c21a54d3b21ad5190'
+);
 ";
 
 pub fn install_work_schema(connection: &Connection) -> rusqlite::Result<()> {
