@@ -1,6 +1,6 @@
 //! What version this binary reports, and which value is safe to compare.
 //!
-//! [`PACKAGE_VERSION`] is the released `SemVer` that release-plz owns. It is the
+//! [`PACKAGE_VERSION`] is the released `SemVer` that Release Please owns. It is the
 //! only value with defined precedence, so upgrade checks, plugin staleness
 //! stamps, and anything ordering releases must keep using it.
 //!
@@ -10,8 +10,8 @@
 //! uncommitted changes). `SemVer` requires build metadata to be ignored when
 //! determining precedence, so a locally built checkout binary is
 //! traceable to an exact tree without touching the `version` field in
-//! `Cargo.toml`. A build with no git checkout — a published crate, a registry
-//! install — has no commit to name and reports bare [`PACKAGE_VERSION`].
+//! `Cargo.toml`. A build with no git checkout has no commit to name and reports
+//! bare [`PACKAGE_VERSION`].
 
 use std::sync::LazyLock;
 
@@ -22,7 +22,7 @@ use std::sync::LazyLock;
 /// code these tests exercise rather than a second copy that can drift.
 pub mod build_identity;
 
-/// The released version release-plz owns. Compare precedence against this, not
+/// The released version Release Please owns. Compare precedence against this, not
 /// against [`build_version()`].
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -97,8 +97,8 @@ mod tests {
         );
     }
 
-    /// A published crate has no `.git`, so there is no commit to name and no
-    /// dangling `+` for a `SemVer` parser to choke on.
+    /// An archive build can have no `.git`, so there is no commit to name and
+    /// no dangling `+` for a `SemVer` parser to choke on.
     #[test]
     fn a_build_without_git_reports_bare_package_version() {
         assert_eq!(compose_build_version("0.0.66", None, false), "0.0.66");
@@ -106,7 +106,7 @@ mod tests {
     }
 
     /// Build metadata never changes precedence, so whatever this build reports
-    /// still begins with the version release-plz published.
+    /// still begins with the version Release Please assigned.
     #[test]
     fn this_binary_reports_its_own_build_identity() {
         let version = build_version();

@@ -388,11 +388,7 @@ or SQLite-bound. Key concurrency points:
 
 ## Build and Distribution
 
-- **Cargo**: `cargo install tracedecay`
-- **Homebrew**: custom tap with prebuilt bottles (macOS ARM64, Linux x86_64)
-- **Scoop**: custom bucket with prebuilt Windows x86_64 zip
-- **GitHub Releases**: prebuilt archives for all platforms
+- **GitHub Releases**: checksummed prebuilt archives and `install.sh`
 
-The release workflow (`release.yml`) builds binaries for 4 targets, packages them
-as archives and Homebrew bottles, then updates the Homebrew tap and Scoop bucket
-repos automatically.
+The release workflow (`release.yml`) builds reproducible binary archives for
+four targets and publishes them only as GitHub Release assets.
