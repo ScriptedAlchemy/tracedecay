@@ -190,29 +190,13 @@ async fn count_before(
         .max(0) as u64)
 }
 
-/// Legacy session windows still obey the current projection-durability
-/// authority. Age alone never makes lossless content eligible.
+/// Legacy session windows have no relation-graph reader. Age alone never
+/// makes lossless content eligible, so retain rows until the graph-owned
+/// retention path supplies explicit coverage.
 fn retention_eligibility(table: RetentionTable) -> &'static str {
     match table {
         RetentionTable::AnalyticsEvents => "1 = 1",
-        RetentionTable::SessionMessages => {
-            "EXISTS (
-                SELECT 1
-                FROM lcm_raw_messages AS raw
-                JOIN lcm_summary_sources AS source
-                  ON source.source_kind = 'raw_message'
-                 AND source.source_id = CAST(raw.store_id AS TEXT)
-                WHERE raw.provider = session_messages.provider
-                  AND raw.message_id = session_messages.message_id
-            )"
-        }
-        RetentionTable::LcmRawMessages => {
-            "EXISTS (
-                SELECT 1 FROM lcm_summary_sources AS source
-                WHERE source.source_kind = 'raw_message'
-                  AND source.source_id = CAST(lcm_raw_messages.store_id AS TEXT)
-            )"
-        }
+        RetentionTable::SessionMessages | RetentionTable::LcmRawMessages => "0",
     }
 }
 
@@ -510,7 +494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_windows_require_durable_summary_lineage() {
+    async fn legacy_windows_do_not_infer_relation_coverage_from_sqlite() {
         let directory = tempfile::tempdir().unwrap();
         let conn = test_conn(&directory);
         let now = 1_000_000_000;
@@ -526,17 +510,12 @@ mod tests {
                 message_id TEXT NOT NULL,
                 timestamp INTEGER
              );
-             CREATE TABLE lcm_summary_sources (
-                source_kind TEXT NOT NULL,
-                source_id TEXT NOT NULL
-             );
              INSERT INTO session_messages VALUES
                 ('claude', 'durable', 1),
                 ('claude', 'live', 1);
              INSERT INTO lcm_raw_messages VALUES
                 (1, 'claude', 'durable', 1),
-                (2, 'claude', 'live', 1);
-             INSERT INTO lcm_summary_sources VALUES ('raw_message', '1');",
+                (2, 'claude', 'live', 1);",
         )
         .await
         .unwrap();
@@ -561,8 +540,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(count_message(&conn, "session_messages", "durable").await, 0);
-        assert_eq!(count_message(&conn, "lcm_raw_messages", "durable").await, 0);
+        assert_eq!(count_message(&conn, "session_messages", "durable").await, 1);
+        assert_eq!(count_message(&conn, "lcm_raw_messages", "durable").await, 1);
         assert_eq!(count_message(&conn, "session_messages", "live").await, 1);
         assert_eq!(count_message(&conn, "lcm_raw_messages", "live").await, 1);
     }

@@ -160,7 +160,6 @@ const SUMMARY_FTS_CHECK_SQL: &str = "SELECT
 
 const REQUIRED_BASE_TABLES: &[&str] = &[
     "lcm_summary_nodes",
-    "lcm_summary_sources",
     "observations",
     "retrieval_anchors",
     "sanitization_receipts",

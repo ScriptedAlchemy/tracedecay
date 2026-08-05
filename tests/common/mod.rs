@@ -1080,17 +1080,6 @@ impl LcmTestRuntime {
         self.runtime.lcm_session_boundary_for_test(request).await
     }
 
-    pub async fn replace_lcm_summary_source_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        node_id: &str,
-        source_node_id: &str,
-    ) -> tracedecay::errors::Result<()> {
-        self.runtime
-            .replace_lcm_summary_source_for_test(scope, node_id, source_node_id)
-            .await
-    }
-
     pub fn lcm_store(&self, _storage_root: impl AsRef<Path>) -> LcmTestStore<'_> {
         LcmTestStore {
             runtime: &self.runtime,

@@ -116,16 +116,6 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
                       ) <> 'codex_app_server'
                 ELSE 0
               END = 1
-          AND EXISTS (
-                SELECT 1
-                FROM lcm_summary_sources AS source
-                JOIN lcm_raw_messages AS raw
-                  ON source.source_kind = 'raw_message'
-                 AND CAST(source.source_id AS INTEGER) = raw.store_id
-                 AND raw.provider = candidate.provider
-                 AND raw.session_id = candidate.session_id
-                WHERE source.node_id = candidate.node_id
-              )
           AND candidate.session_id = 'session-one'
         ORDER BY candidate.depth DESC, candidate.created_at DESC, candidate.node_id
         LIMIT 10";
@@ -149,16 +139,6 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
                       ) <> 'codex_app_server'
                 ELSE 0
               END = 1
-          AND EXISTS (
-                SELECT 1
-                FROM lcm_summary_sources AS source
-                JOIN lcm_raw_messages AS raw
-                  ON source.source_kind = 'raw_message'
-                 AND CAST(source.source_id AS INTEGER) = raw.store_id
-                 AND raw.provider = candidate.provider
-                 AND raw.session_id = candidate.session_id
-                WHERE source.node_id = candidate.node_id
-              )
         ORDER BY candidate.created_at DESC, candidate.depth DESC, candidate.node_id
         LIMIT 10";
 

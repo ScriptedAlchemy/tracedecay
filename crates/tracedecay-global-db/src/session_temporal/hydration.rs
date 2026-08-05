@@ -1745,15 +1745,13 @@ mod tests {
 
             let summary_payload = "non-empty summary payload";
             let publication = CanonicalPublicationManifest {
-                version: 1,
+                version: 2,
                 provider: provider.to_string(),
                 conversation_id: "session-1".to_string(),
                 session_id: "session-1".to_string(),
                 depth: 1,
                 summary_text: summary_payload.to_string(),
                 summary_hash: hash(summary_payload.as_bytes()),
-                source_refs: Vec::new(),
-                canonical_sources: Vec::new(),
                 source_token_count: 1,
                 summary_token_count: 1,
                 source_time_start: None,
@@ -1764,7 +1762,6 @@ mod tests {
                 owner_json: serde_json::to_string(summary_anchor.owner()).expect("owner json"),
                 summary_anchor_id: summary_anchor.anchor_id().to_string(),
                 receipt_id: "summary-receipt".to_string(),
-                predecessor_summary_id: None,
                 logical_identity_digest: digest('a'),
                 payloads: Vec::new(),
                 model_route: "snapshot-test".to_string(),

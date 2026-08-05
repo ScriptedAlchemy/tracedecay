@@ -71,6 +71,60 @@ async fn fresh_temporal_schema_omits_legacy_relation_projection_objects() {
 }
 
 #[tokio::test]
+async fn same_v3_legacy_relation_catalog_requires_reset() {
+    for (name, legacy_object) in [
+        (
+            "table",
+            "CREATE TABLE session_summary_sources (summary_id TEXT NOT NULL);",
+        ),
+        (
+            "index",
+            "CREATE INDEX idx_session_summary_sources_anchor
+             ON session_summary_nodes(summary_anchor_id);",
+        ),
+        (
+            "trigger",
+            "CREATE TRIGGER session_summary_sources_immutable_delete_v1
+             BEFORE DELETE ON session_summary_nodes
+             BEGIN SELECT RAISE(FAIL, 'legacy relation projection'); END;",
+        ),
+        (
+            "LCM summary-source table",
+            "CREATE TABLE lcm_summary_sources (node_id TEXT NOT NULL);",
+        ),
+        (
+            "LCM summary-source index",
+            "CREATE INDEX idx_lcm_summary_sources_source
+             ON lcm_summary_nodes(summary_text);",
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+        let db = open_global_db(&db_path)
+            .await
+            .expect("fresh temporal schema initialization should not error");
+        drop(db);
+
+        let raw_db = TestConnection::open(&db_path);
+        let conn = (*raw_db).clone();
+        conn.execute_batch(legacy_object).await.unwrap();
+        drop(conn);
+        drop(raw_db);
+
+        let error = open_global_db(&db_path)
+            .await
+            .expect_err("a same-v3 legacy {name} must require a reset");
+        assert!(
+            matches!(
+                error,
+                tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { .. }
+            ),
+            "legacy {name} must be typed ResetRequired, got {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn temporal_payload_manifest_schema_is_payload_global() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");

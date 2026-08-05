@@ -1225,7 +1225,7 @@ impl DaemonSessionRetrievalService {
             Err(error) => return expand_execution_error(error, self.empty_temporal()),
         };
         if let Err(error) = executor
-            .hydrate_lcm_summary_sources(
+            .hydrate_lcm_summary_relations(
                 &result.snapshot,
                 command.provider(),
                 command.session_id(),

@@ -115,11 +115,13 @@ impl RegisteredGlobalDbTestRuntime {
     pub async fn remount_profile_database_for_test(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
-        open_registered_test_database(
+        let database = open_registered_test_database(
             self.profile_registered.db_path(),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
         )
-        .await
+        .await?;
+        bind_test_session_relation_graph(&database)?;
+        Ok(database)
     }
 
     pub fn project_database(&self) -> tracedecay_runtime_core::errors::Result<&RegisteredGlobalDb> {
@@ -692,12 +694,7 @@ impl HostAdmissionTestRuntimeV1 {
                     'canonical parent summary', 'summary-parent-hash', 3, 6,
                     11, 12, NULL, NULL, 14
                  );
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
-                 VALUES ('summary-child', 'raw_message', '11', 0);
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
-                 VALUES ('summary-parent', 'summary_node', 'summary-child', 0);
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
-                 VALUES ('summary-parent', 'raw_message', '12', 1);",
+                 ",
                 byte_count = external_content.len(),
                 char_count = external_content.chars().count(),
             ))

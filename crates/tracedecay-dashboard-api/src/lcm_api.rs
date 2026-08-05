@@ -1,7 +1,7 @@
 //! LCM dashboard API, backed by tracedecay's LCM session store.
 //!
 //! Serves Hermes-compatible LCM routes from `lcm_raw_messages`,
-//! `lcm_summary_nodes`, and `lcm_summary_sources`. The store is selected by
+//! `lcm_summary_nodes`. The store is selected by
 //! [`super::resolve_lcm_store`], and every payload reports it via `path` and
 //! `storage_scope`.
 //!
@@ -11,7 +11,7 @@
 //! - `summary_nodes`          → `lcm_summary_nodes` (`summary` ←
 //!   `summary_text`, `token_count` ← `summary_token_count`, `latest_at` ←
 //!   `source_time_end`; node ids are strings, not ints)
-//! - `summary_nodes.source_ids` JSON → `lcm_summary_sources` rows
+//! - summary-source topology is served by the native relation graph
 //! - FTS mirrors → `lcm_raw_messages_fts` / `lcm_summary_nodes_fts`
 
 use std::collections::BTreeMap;

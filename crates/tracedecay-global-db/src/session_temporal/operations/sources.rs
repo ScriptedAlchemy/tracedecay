@@ -15,9 +15,10 @@ use tracedecay_sessions::runtime::lcm::types::{
 };
 
 use super::{
-    CanonicalPublicationManifest, CanonicalSourceBinding, PUBLICATION_ROUTE, PreparedPayload,
-    PreparedSource, normalize_timestamp, unixepoch,
+    CanonicalPublicationManifest, PUBLICATION_ROUTE, PreparedPayload, PreparedSource,
+    normalize_timestamp, unixepoch,
 };
+use crate::session_temporal::relations::SummarySourceRef;
 
 const SOURCE_UNAVAILABLE_STATES: &[&str] = &[
     "redacted",
@@ -113,9 +114,9 @@ async fn prepare_raw_source(
         source_timestamp,
     ));
     Ok(PreparedSource {
-        canonical: CanonicalSourceBinding {
-            kind: "anchor".to_string(),
-            id: canonical_id,
+        relation_source: SummarySourceRef::Anchor {
+            anchor_id: tracedecay_domain::RetrievalAnchorId::new(canonical_id)
+                .map_err(|error| LcmError::Db(error.to_string()))?,
         },
         compatibility_anchor,
         timestamp,
@@ -173,9 +174,8 @@ async fn prepare_summary_source(
         .and_then(|value| value.get("knowledge_through").and_then(Value::as_i64))
         .unwrap_or_default();
     Ok(PreparedSource {
-        canonical: CanonicalSourceBinding {
-            kind: "summary".to_string(),
-            id: node_id.to_string(),
+        relation_source: SummarySourceRef::Summary {
+            summary_id: node_id.to_string(),
         },
         compatibility_anchor: false,
         timestamp,
@@ -441,12 +441,17 @@ pub(super) async fn insert_compatibility_source_anchors(
 ) -> Result<(), LcmError> {
     let mut seen = BTreeSet::new();
     for source in sources.iter().filter(|source| source.compatibility_anchor) {
-        if !seen.insert(source.canonical.id.as_str()) {
+        let SummarySourceRef::Anchor { anchor_id } = &source.relation_source else {
+            return Err(LcmError::Db(
+                "compatibility source was not bound to a retrieval anchor".to_string(),
+            ));
+        };
+        if !seen.insert(anchor_id.as_str()) {
             continue;
         }
         let anchor_json = json!({
             "kind": "legacy_lcm_raw_message",
-            "anchor_id": source.canonical.id,
+            "anchor_id": anchor_id,
             "owner": serde_json::from_str::<Value>(owner_json).unwrap_or(Value::Null),
             "ingested_at": source.timestamp,
             "payload_access": "eligible",
@@ -458,7 +463,7 @@ pub(super) async fn insert_compatibility_source_anchors(
                 anchor_id, anchor_json, owner_json, projection_generation
              ) VALUES (?1, ?2, ?3, ?4)",
             params![
-                source.canonical.id.as_str(),
+                anchor_id.as_str(),
                 anchor_json.as_str(),
                 owner_json,
                 PUBLICATION_ROUTE,
@@ -467,10 +472,10 @@ pub(super) async fn insert_compatibility_source_anchors(
         .await?;
         verify_anchor(
             conn,
-            &source.canonical.id,
+            anchor_id.as_str(),
             &anchor_json,
             owner_json,
-            &source.canonical.id,
+            anchor_id.as_str(),
         )
         .await?;
     }
@@ -485,10 +490,13 @@ pub(super) async fn build_summary_anchor(
 ) -> Result<Option<RetrievalAnchorRecord>, LcmError> {
     let mut retained_source = None;
     for source in sources {
+        let SummarySourceRef::Anchor { anchor_id } = &source.relation_source else {
+            continue;
+        };
         let mut rows = conn
             .query(
                 "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
-                params![source.canonical.id.as_str()],
+                params![anchor_id.as_str()],
             )
             .await?;
         let Some(row) = rows.next().await? else {

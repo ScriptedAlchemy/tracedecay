@@ -59,6 +59,19 @@ const REGISTRY_SCHEMA: &str = "
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
+    -- A graph-effect journal, not a relation query projection. The receipt is
+    -- intentionally identity-only; this row is the bounded, durable work
+    -- item that lets daemon convergence finish a graph write after SQLite has
+    -- committed and the process exits before the separate graph transaction.
+    CREATE TABLE IF NOT EXISTS session_relation_effect_journal (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK(generation > 0),
+        projection_json TEXT NOT NULL CHECK(json_valid(projection_json)),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(session_id, generation),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_relation_receipts(session_id, generation) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS store_instances (
         store_id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
@@ -97,6 +110,8 @@ const REGISTRY_SCHEMA: &str = "
         ON project_aliases(project_id);
     CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_pending
         ON session_relation_receipts(state, created_at, session_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_relation_effect_journal_created
+        ON session_relation_effect_journal(created_at, session_id, generation);
     CREATE INDEX IF NOT EXISTS idx_store_instances_project_id
         ON store_instances(project_id);
     CREATE INDEX IF NOT EXISTS idx_graph_scopes_project_store
@@ -341,7 +356,12 @@ pub async fn ensure_registered_schema_for_admission(
 
         tracedecay_sessions::runtime::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
             .await
-            .map_err(|error| global_db_operation_error("initialize LCM schema", error))?;
+            .map_err(|error| match error {
+                tracedecay_sessions::runtime::lcm::LcmError::ResetRequired { message } => {
+                    tracedecay_runtime_core::errors::TraceDecayError::reset_required(message)
+                }
+                error => global_db_operation_error("initialize LCM schema", error),
+            })?;
         tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_schema_in_transaction(
             &transaction,
         )

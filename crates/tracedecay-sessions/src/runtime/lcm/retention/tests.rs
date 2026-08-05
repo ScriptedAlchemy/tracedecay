@@ -140,30 +140,12 @@ async fn insert_message(
     Ok(store_id)
 }
 
-/// Marks a raw row projection-durable by adding a summary node whose lineage
-/// covers `store_id`.
+/// Generic session storage cannot attest native relation coverage. Tests use
+/// this compatibility helper to make that absence explicit.
 async fn make_projection_durable(
-    conn: &(impl Executor + ?Sized),
-    store_id: i64,
+    _conn: &(impl Executor + ?Sized),
+    _store_id: i64,
 ) -> Result<(), String> {
-    let node_id = format!("node-{store_id}");
-    conn.execute(
-        "INSERT INTO lcm_summary_nodes(
-            node_id, provider, conversation_id, session_id, depth, summary_text,
-            summary_hash, summary_token_count, source_token_count
-         )
-         VALUES (?1, ?2, 'conv', ?3, 0, 'summary', 'h', 1, 1)",
-        params![node_id.as_str(), PROVIDER, SESSION],
-    )
-    .await
-    .map_err(|err| format!("insert summary node: {err}"))?;
-    conn.execute(
-        "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
-         VALUES (?1, 'raw_message', ?2, 0)",
-        params![node_id.as_str(), store_id.to_string()],
-    )
-    .await
-    .map_err(|err| format!("insert summary source: {err}"))?;
     Ok(())
 }
 
@@ -269,10 +251,10 @@ async fn authority_loss_before_commit_rolls_back_retention_mutations() -> Result
     Ok(())
 }
 
-// (a)+(d) drop acts only on projection-durable rows; un-projected live evidence
-// is never deleted, even when older than the window.
+// Generic storage cannot infer native relation coverage, so it never drops
+// evidence merely because a row is old.
 #[tokio::test]
-async fn drop_reaps_only_projection_durable_rows() -> Result<(), String> {
+async fn drop_keeps_rows_without_native_relation_coverage() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
     let durable = insert_message(conn, 1, 90, "durable old content").await?;
@@ -281,29 +263,22 @@ async fn drop_reaps_only_projection_durable_rows() -> Result<(), String> {
 
     let report = run_apply(conn, &store.storage_root, &drop_config(30)).await?;
 
-    assert_eq!(
-        report.dropped.eligible, 1,
-        "only the durable row is eligible"
-    );
-    assert_eq!(report.dropped.acted, 1);
+    assert_eq!(report.dropped.eligible, 0);
+    assert_eq!(report.dropped.acted, 0);
     assert_eq!(
         count(conn, "lcm_raw_messages").await?,
-        1,
-        "live row retained"
+        2,
+        "all rows are retained without graph coverage"
     );
-    // The surviving raw row is the un-projected live one.
-    let survivor: i64 = fetch_i64(conn, "SELECT store_id FROM lcm_raw_messages", ()).await?;
-    assert_ne!(survivor, durable, "durable row dropped, live row kept");
-    // Projected twin of the dropped row is gone; the live twin remains.
-    assert_eq!(count(conn, "session_messages").await?, 1);
-    assert!(report.dropped.bytes_reclaimed > 0, "reclaim is measurable");
+    assert_eq!(count(conn, "session_messages").await?, 2);
+    assert_eq!(report.dropped.bytes_reclaimed, 0);
     Ok(())
 }
 
-// (b) retention window is honored: a projection-durable row inside the window
-// is not dropped.
+// The generic path is fail-closed even when rows are outside the retention
+// window, pending graph-owned coverage.
 #[tokio::test]
-async fn drop_honors_retention_window() -> Result<(), String> {
+async fn drop_does_not_infer_coverage_from_age() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
     let recent = insert_message(conn, 1, 10, "recent durable").await?;
@@ -313,15 +288,14 @@ async fn drop_honors_retention_window() -> Result<(), String> {
 
     let report = run_apply(conn, &store.storage_root, &drop_config(30)).await?;
 
-    assert_eq!(report.dropped.acted, 1, "only the >30d row is dropped");
-    let survivor: i64 = fetch_i64(conn, "SELECT store_id FROM lcm_raw_messages", ()).await?;
-    assert_eq!(survivor, recent, "row inside the window is retained");
+    assert_eq!(report.dropped.acted, 0);
+    assert_eq!(count(conn, "lcm_raw_messages").await?, 2);
     Ok(())
 }
 
-// (b) dry run counts eligible reclaim without mutating anything.
+// Dry runs are also fail-closed without native relation coverage.
 #[tokio::test]
-async fn dry_run_counts_without_mutating() -> Result<(), String> {
+async fn dry_run_reports_no_eligibility_without_native_relation_coverage() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
     let durable = insert_message(conn, 1, 90, "durable old content").await?;
@@ -340,20 +314,20 @@ async fn dry_run_counts_without_mutating() -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    assert_eq!(report.dropped.eligible, 1);
+    assert_eq!(report.dropped.eligible, 0);
     assert_eq!(report.dropped.acted, 0, "dry run acts on nothing");
     assert_eq!(
-        report.dropped.oldest_eligible_at,
-        Some(NOW - 90 * DAY),
-        "backlog age comes from the oldest real eligible row"
+        report.dropped.oldest_eligible_at, None,
+        "the generic store has no graph coverage to report"
     );
-    assert!(report.dropped.bytes_reclaimed > 0, "dry run still measures");
+    assert_eq!(report.dropped.bytes_reclaimed, 0);
     assert_eq!(count(conn, "lcm_raw_messages").await?, 1, "no mutation");
     Ok(())
 }
 
 #[tokio::test]
-async fn backlog_read_reports_real_eligible_bytes_and_watermark() -> Result<(), String> {
+async fn backlog_read_reports_no_eligibility_without_native_relation_coverage() -> Result<(), String>
+{
     let store = test_store().await?;
     let durable = insert_message(&store.conn, 1, 90, "retention backlog bytes").await?;
     make_projection_durable(&store.conn, durable).await?;
@@ -370,10 +344,10 @@ async fn backlog_read_reports_real_eligible_bytes_and_watermark() -> Result<(), 
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].table.as_str(), "lcm_raw_messages");
-    assert!(records[0].past_window_bytes.get() > 0);
+    assert_eq!(records[0].past_window_bytes.get(), 0);
     assert_eq!(
         records[0].oldest_past_window_at,
-        tracedecay_domain::UtcMicros((NOW - 90 * DAY) * 1_000_000)
+        tracedecay_domain::UtcMicros((NOW - 30 * DAY) * 1_000_000)
     );
     assert_eq!(
         records[0].window_watermark_at,
@@ -401,10 +375,9 @@ async fn backlog_read_emits_clean_zero_record_for_configured_window() -> Result<
     Ok(())
 }
 
-// (c)-analogue for one-content-copy: the projected twin obeys the window while
-// the raw copy is retained — proving raw and projected do not both persist.
+// Generic retention never dedupes the projected copy without graph coverage.
 #[tokio::test]
-async fn dedupe_drops_projected_duplicate_and_keeps_raw() -> Result<(), String> {
+async fn dedupe_keeps_projected_copy_without_native_relation_coverage() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
     let store_id = insert_message(conn, 1, 90, "duplicated content").await?;
@@ -415,23 +388,19 @@ async fn dedupe_drops_projected_duplicate_and_keeps_raw() -> Result<(), String> 
         dedupe_projected_after_days: Some(30),
         ..LcmRetentionConfig::default()
     };
-    let fts_before = count(conn, "session_messages_fts").await?;
     let report = run_apply(conn, &store.storage_root, &config).await?;
 
-    assert_eq!(report.projected_deduped.acted, 1);
+    assert_eq!(report.projected_deduped.acted, 0);
     assert_eq!(
         count(conn, "session_messages").await?,
-        0,
-        "projected twin dropped"
+        1,
+        "projected twin remains until graph coverage is available"
     );
     assert_eq!(
         count(conn, "lcm_raw_messages").await?,
         1,
         "raw copy retained"
     );
-    // The projected FTS shadow obeys the same window (trigger cleaned it).
-    let fts_after = count(conn, "session_messages_fts").await?;
-    assert!(fts_after < fts_before, "projected FTS shadow shrank");
     Ok(())
 }
 
@@ -498,11 +467,9 @@ async fn dedupe_never_touches_sole_projected_copy() -> Result<(), String> {
     Ok(())
 }
 
-// (a) offload only externalizes projection-durable rows AFTER durability; the
-// bulky inline content leaves the raw column, replaced by a recoverable
-// content-addressed placeholder (§4 one content copy).
+// Generic retention never offloads content without graph coverage.
 #[tokio::test]
-async fn offload_externalizes_durable_content_after_durability() -> Result<(), String> {
+async fn offload_keeps_content_without_native_relation_coverage() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
     let content = "x".repeat(4096);
@@ -518,29 +485,27 @@ async fn offload_externalizes_durable_content_after_durability() -> Result<(), S
     let report = run_apply(conn, &store.storage_root, &config).await?;
 
     assert_eq!(
-        report.offloaded.acted, 1,
-        "only the durable row is offloaded"
+        report.offloaded.acted, 0,
+        "the generic store has no graph coverage"
     );
-    assert!(report.offloaded.bytes_reclaimed >= 4096);
+    assert_eq!(report.offloaded.bytes_reclaimed, 0);
 
-    // Durable row: inline content cleared, now external with a payload_ref.
     let kind: String = fetch_str(
         conn,
         "SELECT storage_kind FROM lcm_raw_messages WHERE store_id = ?1",
         params![durable],
     )
     .await?;
-    assert_eq!(kind, "external");
+    assert_eq!(kind, "inline");
     let payload_present = fetch_i64(conn, "SELECT COUNT(*) FROM lcm_external_payloads", ()).await?;
-    assert_eq!(payload_present, 1, "content stored once, addressed by hash");
-    // The un-projected live row is untouched (still inline).
+    assert_eq!(payload_present, 0);
     let live_kind: i64 = fetch_i64(
         conn,
         "SELECT COUNT(*) FROM lcm_raw_messages WHERE storage_kind = 'inline'",
         (),
     )
     .await?;
-    assert_eq!(live_kind, 1, "live un-projected row stays inline");
+    assert_eq!(live_kind, 2, "all rows stay inline without graph coverage");
     Ok(())
 }
 
@@ -608,9 +573,10 @@ async fn offload_cas_preserves_revived_row_and_rolls_back_payload() -> Result<()
     Ok(())
 }
 
-// (e) reclaimed space is measurable via row and page/free-list metrics.
+// Generic retention reports zero reclamation while native relation coverage is
+// unavailable.
 #[tokio::test]
-async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
+async fn reports_no_reclaim_without_native_relation_coverage() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
     for ordinal in 1..=8 {
@@ -620,13 +586,13 @@ async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
     let report = run_apply(conn, &store.storage_root, &drop_config(30)).await?;
 
     assert_eq!(report.raw_rows_before, 8);
-    assert_eq!(report.raw_rows_after, 0, "row-count delta is measurable");
+    assert_eq!(report.raw_rows_after, 8);
     assert!(report.page_count_before > 0, "page_count observed");
     assert!(
-        report.freelist_after >= report.freelist_before,
-        "deleted rows freed pages"
+        report.freelist_after == report.freelist_before,
+        "no rows are deleted"
     );
-    assert!(report.bytes_reclaimed() >= 8 * 2048);
+    assert_eq!(report.bytes_reclaimed(), 0);
     Ok(())
 }
 

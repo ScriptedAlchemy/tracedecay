@@ -10,19 +10,15 @@ use serde_json::Value;
 use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use tracedecay_sessions::compatibility::projected_content_hash;
-use tracedecay_sessions::runtime::lcm::types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft};
+use tracedecay_sessions::runtime::lcm::types::{LcmError, LcmSummaryNodeDraft};
+
+use crate::session_temporal::relations::SummarySourceRef;
 
 pub use publication::{GlobalDbLcmSummaryPublication, publish_immutable_summary};
 
 pub(super) const PUBLICATION_ROUTE: &str = "lcm_summary_lineage_v1";
 pub const SANITIZER_VERSION: &str = "tracedecay.lcm-summary-publication.v1";
 pub(super) const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct CanonicalSourceBinding {
-    pub kind: String,
-    pub id: String,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct PreparedPayload {
@@ -33,7 +29,7 @@ pub(super) struct PreparedPayload {
 
 #[derive(Clone, Debug)]
 pub(super) struct PreparedSource {
-    pub canonical: CanonicalSourceBinding,
+    pub relation_source: SummarySourceRef,
     pub compatibility_anchor: bool,
     pub timestamp: i64,
     pub payload: Option<PreparedPayload>,
@@ -48,8 +44,6 @@ pub(super) struct CanonicalPublicationManifest {
     pub depth: i64,
     pub summary_text: String,
     pub summary_hash: String,
-    pub source_refs: Vec<LcmSourceRef>,
-    pub canonical_sources: Vec<CanonicalSourceBinding>,
     pub source_token_count: i64,
     pub summary_token_count: i64,
     pub source_time_start: Option<i64>,
@@ -60,7 +54,6 @@ pub(super) struct CanonicalPublicationManifest {
     pub owner_json: String,
     pub summary_anchor_id: String,
     pub receipt_id: String,
-    pub predecessor_summary_id: Option<String>,
     pub logical_identity_digest: String,
     pub payloads: Vec<PreparedPayload>,
     pub model_route: String,
@@ -79,7 +72,6 @@ impl CanonicalPublicationManifest {
         owner_json: String,
         summary_anchor_id: String,
         receipt_id: String,
-        predecessor_summary_id: Option<String>,
         logical_identity_digest: String,
     ) -> Self {
         let metadata = draft
@@ -106,18 +98,13 @@ impl CanonicalPublicationManifest {
             .into_values()
             .collect();
         Self {
-            version: 1,
+            version: 2,
             provider: draft.provider.clone(),
             conversation_id: draft.conversation_id.clone(),
             session_id: draft.session_id.clone(),
             depth: draft.depth,
             summary_text: draft.summary_text.clone(),
             summary_hash: summary_hash.clone(),
-            source_refs: draft.source_refs.clone(),
-            canonical_sources: sources
-                .iter()
-                .map(|source| source.canonical.clone())
-                .collect(),
             source_token_count: draft.source_token_count,
             summary_token_count: draft.summary_token_count,
             source_time_start: draft.source_time_start,
@@ -128,7 +115,6 @@ impl CanonicalPublicationManifest {
             owner_json,
             summary_anchor_id,
             receipt_id: receipt_id.clone(),
-            predecessor_summary_id,
             logical_identity_digest,
             payloads,
             model_route,
@@ -139,14 +125,13 @@ impl CanonicalPublicationManifest {
     }
 
     pub(super) fn matches_draft(&self, draft: &LcmSummaryNodeDraft) -> bool {
-        self.version == 1
+        self.version == 2
             && self.provider == draft.provider
             && self.conversation_id == draft.conversation_id
             && self.session_id == draft.session_id
             && self.depth == draft.depth
             && self.summary_text == draft.summary_text
             && self.summary_hash == projected_content_hash(&draft.summary_text)
-            && self.source_refs == draft.source_refs
             && self.source_token_count == draft.source_token_count
             && self.summary_token_count == draft.summary_token_count
             && self.source_time_start == draft.source_time_start

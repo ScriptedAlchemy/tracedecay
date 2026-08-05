@@ -18,10 +18,7 @@ pub const NODE_COLUMNS: &str = "n.node_id,
            END,
            'general'
        ) AS category,
-       CASE WHEN EXISTS (
-           SELECT 1 FROM lcm_summary_sources s
-           WHERE s.node_id = n.node_id AND s.source_kind = 'summary_node'
-       ) THEN 'nodes' ELSE 'messages' END AS source_type,
+       'unavailable' AS source_type,
        n.summary_token_count AS token_count,
        n.source_token_count,
        n.source_time_end AS latest_at,
@@ -45,9 +42,7 @@ pub fn message_columns() -> String {
        (SELECT sm.tool_names FROM session_messages sm
         WHERE sm.provider = m.provider AND sm.message_id = m.message_id) AS tool_name,
        0 AS pinned,
-       (SELECT json_group_array(s.node_id) FROM lcm_summary_sources s
-        WHERE s.source_kind = 'raw_message'
-          AND s.source_id = CAST(m.store_id AS TEXT)) AS summary_node_ids"
+       NULL AS summary_node_ids"
     )
 }
 
@@ -397,18 +392,13 @@ pub async fn node_row(
 }
 
 pub async fn node_source_rows(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
+    _conn: &(impl QueryExecutor + ?Sized),
+    _node_id: &str,
 ) -> Result<Vec<Value>, String> {
-    query_rows(
-        conn,
-        "SELECT source_kind, source_id
-         FROM lcm_summary_sources
-         WHERE node_id = ?1
-         ORDER BY ordinal ASC",
-        params![node_id.to_string()],
+    Err(
+        "summary source relationships are unavailable until native relation recovery completes"
+            .to_string(),
     )
-    .await
 }
 
 pub async fn child_summary_nodes(

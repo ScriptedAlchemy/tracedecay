@@ -168,16 +168,6 @@ async fn merge_snapshot_in_transaction(
     rows_copied += copy_table(
         source,
         target,
-        "lcm_summary_sources",
-        &[],
-        |columns, values| remap_summary_source(columns, values, &raw_id_map),
-    )
-    .await?;
-    fail_after("lcm_summary_sources", fail_after_table)?;
-
-    rows_copied += copy_table(
-        source,
-        target,
         "lcm_lifecycle_state",
         &[],
         |columns, values| {

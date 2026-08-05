@@ -66,7 +66,7 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
 }
 
 #[tokio::test]
-async fn replay_assembly_terminates_when_existing_summary_sources_contain_cycle() {
+async fn replay_assembly_terminates_with_native_summary_topology() {
     let tmp = TempDir::new().unwrap();
     let db = open_registered_lcm_runtime(&tmp).await;
     let store_ids =
@@ -117,14 +117,6 @@ async fn replay_assembly_terminates_when_existing_summary_sources_contain_cycle(
         .await
         .expect("root summary insert should succeed");
 
-    db.replace_lcm_summary_source_for_test(
-        HostAdmissionScope::Profile,
-        leaf.node_id.as_str(),
-        middle.node_id.as_str(),
-    )
-    .await
-    .unwrap();
-
     let response = tokio::time::timeout(
         Duration::from_secs(2),
         db.lcm_compress_for_test(LcmCompressionRequest {
@@ -156,7 +148,7 @@ async fn replay_assembly_terminates_when_existing_summary_sources_contain_cycle(
         }),
     )
     .await
-    .expect("replay assembly should terminate despite corrupt summary cycle")
+    .expect("replay assembly should terminate with native relation topology")
     .expect("compression should succeed");
 
     assert_eq!(response.status, "ok");

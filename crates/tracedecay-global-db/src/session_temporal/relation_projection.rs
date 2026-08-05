@@ -10,12 +10,10 @@ use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_store::SessionStoreResult;
 
-use super::operations::CanonicalPublicationManifest;
 use super::query::{generation_i64, storage, storage_message};
 use super::relations::{
     AgentHierarchyRelation, LogicalCopyRelation, SessionRelationError, SessionRelationProjection,
-    SessionRelationScope, SummaryRelationNode, SummaryRelationRead, SummarySourceRef,
-    WorkflowAgentMembership,
+    SessionRelationScope, SummaryRelationNode, SummaryRelationRead, WorkflowAgentMembership,
 };
 use crate::RegisteredGlobalDb;
 
@@ -55,7 +53,7 @@ impl RegisteredGlobalDb {
             generation.value(),
             summary_ids,
             max_relations,
-            Arc::clone(&cancellation),
+            cancellation,
         ) {
             Ok(relations) => relations,
             Err(SessionRelationError::NotFound) => {
@@ -305,7 +303,7 @@ async fn reconstruct_summaries(
 ) -> SessionStoreResult<Vec<SummaryRelationNode>> {
     let mut rows = conn
         .query(
-            "SELECT node.summary_id, node.publication_json
+            "SELECT node.summary_id
              FROM session_summary_availability AS availability
              JOIN session_summary_nodes AS node
                ON node.summary_id = availability.summary_id
@@ -322,50 +320,23 @@ async fn reconstruct_summaries(
         )
         .await
         .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-    let mut summaries = Vec::new();
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
     {
         require_not_cancelled(cancellation)?;
-        if summaries.len() == max_relations {
-            return Err(storage(
-                RECONSTRUCT_OPERATION,
-                SessionRelationError::BudgetExhausted,
-            ));
-        }
         let summary_id: String = row
             .get(0)
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let encoded: String = row
-            .get(1)
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let manifest: CanonicalPublicationManifest = serde_json::from_str(&encoded)
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let sources = manifest
-            .canonical_sources
-            .into_iter()
-            .map(|source| match source.kind.as_str() {
-                "summary" => Ok(SummarySourceRef::Summary {
-                    summary_id: source.id,
-                }),
-                "anchor" => RetrievalAnchorId::new(source.id)
-                    .map(|anchor_id| SummarySourceRef::Anchor { anchor_id })
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error)),
-                _ => Err(storage_message(
-                    RECONSTRUCT_OPERATION,
-                    "canonical summary manifest has an invalid source kind",
-                )),
-            })
-            .collect::<SessionStoreResult<Vec<_>>>()?;
-        summaries.push(SummaryRelationNode {
-            summary_id,
-            sources,
-            predecessor_summary_id: manifest.predecessor_summary_id,
-        });
+        return Err(storage_message(
+            RECONSTRUCT_OPERATION,
+            format!(
+                "summary relation topology for {summary_id} is unavailable outside the native graph effect journal"
+            ),
+        ));
     }
-    Ok(summaries)
+    Ok(Vec::new())
 }
 
 async fn reconstruct_occurrences(
@@ -786,5 +757,108 @@ fn require_not_cancelled(cancellation: &Arc<dyn GraphCancellation>) -> SessionSt
         ))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tempfile::tempdir;
+    use tracedecay_domain::{RetrievalAnchorId, SessionId};
+    use tracedecay_graph_db::NeverCancelled;
+    use tracedecay_runtime_core::db::engine::{Executor, params};
+
+    use super::super::relation_receipts::record_relation_receipt;
+    use super::super::relations::{
+        SessionRelationProjection, SummaryRelationNode, SummarySourceRef,
+    };
+    use crate::tests::harness::RegisteredGlobalDbTestRuntime;
+
+    #[tokio::test]
+    async fn committed_relation_receipt_recovers_after_remount_without_read_side_writes() {
+        let directory = tempdir().expect("temporary profile root");
+        let runtime = RegisteredGlobalDbTestRuntime::profile(directory.path())
+            .await
+            .expect("registered profile runtime");
+        let database = runtime.profile_database();
+        let session_id = SessionId::new("receipt-recovery-session").expect("session id");
+        let scope = database
+            .session_relation_store()
+            .expect("mounted relation graph")
+            .0
+            .clone();
+        let projection = SessionRelationProjection {
+            scope,
+            session_id: session_id.clone(),
+            generation: 1,
+            summaries: vec![SummaryRelationNode {
+                summary_id: "receipt-recovery-summary".to_string(),
+                sources: vec![SummarySourceRef::Anchor {
+                    anchor_id: RetrievalAnchorId::new("receipt-recovery-anchor")
+                        .expect("anchor id"),
+                }],
+                predecessor_summary_id: None,
+            }],
+            logical_copies: Vec::new(),
+            thread_hierarchy: Vec::new(),
+            agent_hierarchy: Vec::new(),
+            parent_session_id: None,
+            workflow_agents: Vec::new(),
+        };
+        let transaction = database
+            .begin_write_transaction()
+            .await
+            .expect("write transaction");
+        transaction
+            .execute(
+                "INSERT INTO session_temporal_generations (
+                     session_id, generation, state, frozen_watermarks_json,
+                     created_at, ready_at, activated_at, completed_at
+                 ) VALUES (?1, 1, 'active', '{}', 1, 1, 1, NULL)",
+                params![session_id.as_str()],
+            )
+            .await
+            .expect("active generation");
+        record_relation_receipt(&transaction, &projection, 1)
+            .await
+            .expect("durable pending relation receipt");
+        transaction.commit().await.expect("sqlite commit");
+
+        let unavailable = database
+            .active_session_summary_relations(
+                &session_id,
+                &["receipt-recovery-summary".to_string()],
+                8,
+                Arc::new(NeverCancelled),
+            )
+            .await
+            .expect_err("a relation read must not rebuild from SQLite");
+        assert!(
+            unavailable.to_string().contains("unavailable"),
+            "the pending graph effect is surfaced as unavailable before daemon convergence"
+        );
+
+        let remounted = runtime
+            .remount_profile_database_for_test()
+            .await
+            .expect("restart remount");
+        assert_eq!(
+            remounted
+                .recover_pending_session_relation_projections(8, Arc::new(NeverCancelled))
+                .await
+                .expect("bounded recovery after restart"),
+            1
+        );
+        let (_, relations) = remounted
+            .active_session_summary_relations(
+                &session_id,
+                &["receipt-recovery-summary".to_string()],
+                8,
+                Arc::new(NeverCancelled),
+            )
+            .await
+            .expect("relation read after recovery");
+        assert_eq!(relations.len(), 1);
     }
 }

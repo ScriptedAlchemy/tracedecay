@@ -2,9 +2,7 @@ use std::future::Future;
 use std::sync::Mutex;
 
 use serde_json::{Value, json};
-use tracedecay_domain::{
-    EntityKind, RetrievalAnchorId, RetrievalAnchorRecord, RetrievalAnchorTargetV2,
-};
+use tracedecay_domain::{EntityKind, RetrievalAnchorRecord, RetrievalAnchorTargetV2};
 use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use tracedecay_sessions::compatibility::projected_content_hash;
@@ -21,9 +19,7 @@ use super::{
     compatibility, generation, load_manifest, logical_identity_digest, receipt_id, sources,
     unixepoch,
 };
-use crate::session_temporal::relations::{
-    SessionRelationProjection, SummaryRelationNode, SummarySourceRef,
-};
+use crate::session_temporal::relations::{SessionRelationProjection, SummaryRelationNode};
 
 pub struct GlobalDbLcmSummaryPublication<'a, E> {
     conn: &'a E,
@@ -63,10 +59,7 @@ where
             let receipt =
                 publish_immutable_summary(self.conn, publication.clone(), &projection).await?;
             if receipt.disposition == LcmSummaryPublicationDisposition::ExactReplay {
-                let (manifest, _) = load_manifest(self.conn, &publication.summary_id)
-                    .await?
-                    .ok_or(LcmError::SummaryNodeNotFound)?;
-                verify_projection_summary(&projection, &publication, &manifest)?;
+                verify_projection_summary(self.conn, &projection, &publication).await?;
                 return Ok(receipt);
             }
             append_summary_relation(
@@ -85,25 +78,15 @@ where
     }
 }
 
-fn relation_node(
+async fn relation_node(
+    conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
-    manifest: &CanonicalPublicationManifest,
 ) -> Result<SummaryRelationNode, LcmError> {
-    let sources = manifest
-        .canonical_sources
+    let sources = sources::prepare_sources(conn, publication)
+        .await?
         .iter()
-        .map(|source| match source.kind.as_str() {
-            "summary" => Ok(SummarySourceRef::Summary {
-                summary_id: source.id.clone(),
-            }),
-            "anchor" => RetrievalAnchorId::new(source.id.clone())
-                .map(|anchor_id| SummarySourceRef::Anchor { anchor_id })
-                .map_err(|error| LcmError::Db(error.to_string())),
-            _ => Err(LcmError::ImmutableSummaryConflict {
-                summary_id: publication.summary_id.clone(),
-            }),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|source| source.relation_source.clone())
+        .collect();
     Ok(SummaryRelationNode {
         summary_id: publication.summary_id.clone(),
         sources,
@@ -111,12 +94,12 @@ fn relation_node(
     })
 }
 
-fn verify_projection_summary(
+async fn verify_projection_summary(
+    conn: &impl Executor,
     projection: &SessionRelationProjection,
     publication: &LcmImmutableSummaryPublication,
-    manifest: &CanonicalPublicationManifest,
 ) -> Result<(), LcmError> {
-    let expected = relation_node(publication, manifest)?;
+    let expected = relation_node(conn, publication).await?;
     if projection
         .summaries
         .iter()
@@ -142,12 +125,9 @@ async fn append_summary_relation(
     }
     projection.generation = u64::try_from(generation)
         .map_err(|error| LcmError::Db(format!("invalid relation generation: {error}")))?;
-    let (manifest, _) = load_manifest(conn, &publication.summary_id)
-        .await?
-        .ok_or(LcmError::SummaryNodeNotFound)?;
     projection
         .summaries
-        .push(relation_node(publication, &manifest)?);
+        .push(relation_node(conn, publication).await?);
     crate::session_temporal::relations::validate_projection(projection)
         .map_err(|error| LcmError::Db(error.to_string()))?;
     crate::session_temporal::relation_receipts::record_relation_receipt(
@@ -211,7 +191,6 @@ pub async fn publish_immutable_summary(
         owner_json.clone(),
         summary_anchor_id.clone(),
         receipt_id.clone(),
-        publication.predecessor_summary_id.clone(),
         logical_identity,
     );
     let publication_json = serde_json::to_string(&manifest)
@@ -267,7 +246,7 @@ pub async fn publish_immutable_summary(
     compatibility::project_canonical_summary(conn, summary_id, &manifest, created_at).await?;
 
     Ok(LcmSummaryPublicationReceipt {
-        summary: summary_node(summary_id, &manifest, created_at),
+        summary: summary_node(summary_id, &manifest, draft, created_at),
         disposition: LcmSummaryPublicationDisposition::Published,
         generation,
         frozen_watermarks_json,
@@ -343,7 +322,6 @@ async fn exact_replay_receipt(
         &projected_content_hash(&publication.draft.summary_text),
     );
     if !manifest.matches_draft(&publication.draft)
-        || manifest.predecessor_summary_id != publication.predecessor_summary_id
         || manifest.logical_identity_digest != expected_identity
         || manifest.receipt_id != expected_receipt
     {
@@ -354,7 +332,7 @@ async fn exact_replay_receipt(
     let receipt = load_and_verify_receipt(conn, summary_id, &manifest, created_at).await?;
     sources::verify_payload_manifests(conn, summary_id, &manifest, created_at).await?;
     Ok(LcmSummaryPublicationReceipt {
-        summary: summary_node(summary_id, &manifest, created_at),
+        summary: summary_node(summary_id, &manifest, &publication.draft, created_at),
         disposition: LcmSummaryPublicationDisposition::ExactReplay,
         generation: receipt.generation,
         frozen_watermarks_json: receipt.frozen_watermarks_json,
@@ -577,6 +555,7 @@ async fn load_and_verify_receipt(
 fn summary_node(
     summary_id: &str,
     manifest: &CanonicalPublicationManifest,
+    draft: &tracedecay_sessions::runtime::lcm::types::LcmSummaryNodeDraft,
     created_at: i64,
 ) -> LcmSummaryNode {
     LcmSummaryNode {
@@ -587,7 +566,7 @@ fn summary_node(
         depth: manifest.depth,
         summary_text: manifest.summary_text.clone(),
         summary_hash: manifest.summary_hash.clone(),
-        source_refs: manifest.source_refs.clone(),
+        source_refs: draft.source_refs.clone(),
         summary_token_count: manifest.summary_token_count,
         source_token_count: manifest.source_token_count,
         source_time_start: manifest.source_time_start,

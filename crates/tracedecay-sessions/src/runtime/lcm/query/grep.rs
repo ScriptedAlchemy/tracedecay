@@ -484,20 +484,8 @@ fn push_summary_grep_filters(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        filters.push(
-            "EXISTS (
-                SELECT 1
-                FROM lcm_summary_sources ss
-                JOIN lcm_raw_messages sr
-                  ON ss.source_kind = 'raw_message'
-                 AND sr.store_id = CAST(ss.source_id AS INTEGER)
-                WHERE ss.node_id = n.node_id
-                  AND (json_extract(sr.metadata_json, '$.source') = ? OR sr.metadata_json LIKE ?)
-             )"
-            .to_string(),
-        );
-        values.push(Value::Text(source.to_string()));
-        values.push(Value::Text(format!("%\"source\":\"{source}\"%")));
+        let _ = source;
+        filters.push("0".to_string());
     }
     push_grep_relationship_scope_filter(
         retrieval_filters.relationship_scope,

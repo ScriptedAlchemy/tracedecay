@@ -43,12 +43,9 @@ pub(super) async fn summary_overviews(
 ) -> Result<Vec<LcmSummaryNodeOverview>, LcmError> {
     let mut rows = conn
         .query(
-            "SELECT n.node_id, n.conversation_id, n.depth, n.summary_text, n.created_at,
-                    COUNT(s.source_id)
+            "SELECT n.node_id, n.conversation_id, n.depth, n.summary_text, n.created_at
              FROM lcm_summary_nodes n
-             LEFT JOIN lcm_summary_sources s ON s.node_id = n.node_id
              WHERE n.provider = ?1 AND n.session_id = ?2
-             GROUP BY n.node_id, n.conversation_id, n.depth, n.summary_text, n.created_at
              ORDER BY n.depth, n.created_at, n.node_id
              LIMIT 20",
             params![provider, session_id],
@@ -58,13 +55,12 @@ pub(super) async fn summary_overviews(
     let mut overviews = Vec::new();
     while let Some(row) = rows.next().await? {
         let summary_text: String = row.get(3)?;
-        let source_count: i64 = row.get(5)?;
         overviews.push(LcmSummaryNodeOverview {
             node_id: row.get(0)?,
             conversation_id: row.get(1)?,
             depth: row.get(2)?,
             summary_preview: raw::derived_text_for_snippet(&summary_text),
-            source_count: source_count.max(0) as usize,
+            source_count: 0,
             created_at: row.get(4)?,
         });
     }
@@ -106,83 +102,15 @@ pub(super) async fn describe_summary_node(
 }
 
 async fn describe_summary_sources(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
+    _conn: &(impl QueryExecutor + ?Sized),
+    _provider: &str,
+    _session_id: &str,
     node_id: &str,
 ) -> Result<Vec<LcmDescribeSourceOverview>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT source_kind, source_id
-             FROM lcm_summary_sources
-             WHERE node_id = ?1
-             ORDER BY ordinal",
-            params![node_id],
-        )
-        .await?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let source_kind: String = row.get(0)?;
-        let source_id: String = row.get(1)?;
-        match source_kind.as_str() {
-            "raw_message" => {
-                let store_id = source_id
-                    .parse::<i64>()
-                    .map_err(|err| LcmError::Db(format!("invalid raw source id: {err}")))?;
-                let mut raw_rows = conn
-                    .query(
-                        "SELECT role, storage_kind
-                         FROM lcm_raw_messages
-                         WHERE provider = ?1 AND session_id = ?2 AND store_id = ?3",
-                        params![provider, session_id, store_id],
-                    )
-                    .await?;
-                let Some(raw_row) = raw_rows.next().await? else {
-                    continue;
-                };
-                let storage_kind_text: String = raw_row.get(1)?;
-                out.push(LcmDescribeSourceOverview {
-                    source_kind,
-                    source_ref: LcmSourceRef::RawMessage { store_id },
-                    store_id: Some(store_id),
-                    node_id: None,
-                    role: Some(raw_row.get(0)?),
-                    storage_kind: LcmStorageKind::from_db(&storage_kind_text),
-                    summary_token_count: None,
-                    source_token_count: None,
-                    expand_hint: None,
-                });
-            }
-            "summary_node" => {
-                let mut summary_rows = conn
-                    .query(
-                        "SELECT summary_token_count, source_token_count, expand_hint
-                         FROM lcm_summary_nodes
-                         WHERE provider = ?1 AND session_id = ?2 AND node_id = ?3",
-                        params![provider, session_id, source_id.as_str()],
-                    )
-                    .await?;
-                let Some(summary_row) = summary_rows.next().await? else {
-                    continue;
-                };
-                out.push(LcmDescribeSourceOverview {
-                    source_kind,
-                    source_ref: LcmSourceRef::SummaryNode {
-                        node_id: source_id.clone(),
-                    },
-                    store_id: None,
-                    node_id: Some(source_id),
-                    role: None,
-                    storage_kind: None,
-                    summary_token_count: Some(summary_row.get(0)?),
-                    source_token_count: Some(summary_row.get(1)?),
-                    expand_hint: summary_row.get(2)?,
-                });
-            }
-            _ => {}
-        }
-    }
-    Ok(out)
+    Err(LcmError::SummarySourceUnavailable {
+        source_id: node_id.to_string(),
+        reason: "summary topology is owned by the native session relation graph".to_string(),
+    })
 }
 
 pub(super) async fn describe_external_payload(

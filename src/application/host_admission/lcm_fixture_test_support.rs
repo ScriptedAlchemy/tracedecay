@@ -77,39 +77,6 @@ impl HostAdmissionTestRuntimeV1 {
 
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-transport"))]
-    pub async fn inject_lcm_orphan_summary_source_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        store_id: i64,
-    ) -> Result<()> {
-        let database = self.session_database_for_test(scope)?;
-        let connection = rusqlite::Connection::open(database.db_path()).map_err(|error| {
-            TraceDecayError::Database {
-                operation: "open out-of-band orphan summary fixture".to_owned(),
-                message: error.to_string(),
-            }
-        })?;
-        connection
-            .pragma_update(None, "foreign_keys", "OFF")
-            .map_err(|error| TraceDecayError::Database {
-                operation: "disable foreign keys out of band for orphan summary fixture".to_owned(),
-                message: error.to_string(),
-            })?;
-        connection
-            .execute(
-                "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
-                 VALUES ('missing-summary-owner', 'raw_message', ?1, 0)",
-                [store_id.to_string()],
-            )
-            .map_err(|error| TraceDecayError::Database {
-                operation: "insert orphan summary source fixture".to_owned(),
-                message: error.to_string(),
-            })?;
-        Ok(())
-    }
-
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-transport"))]
     pub async fn inject_lcm_foreign_orphan_debt_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -404,54 +371,6 @@ impl HostAdmissionTestRuntimeV1 {
             .await
             .map_err(|error| TraceDecayError::Database {
                 operation: "configure late LCM summary projection failure".to_owned(),
-                message: error.to_string(),
-            })
-    }
-
-    #[doc(hidden)]
-    pub async fn replace_lcm_summary_source_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        node_id: &str,
-        source_node_id: &str,
-    ) -> Result<()> {
-        let database = self.session_database_for_test(scope)?;
-        let transaction = database.begin_write_transaction().await?;
-        transaction
-            .execute(
-                "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
-                (node_id,),
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "delete LCM summary source fixture".to_owned(),
-                message: error.to_string(),
-            })?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "delete LCM summary source fixture".to_owned(),
-                message: error.to_string(),
-            })?;
-
-        let transaction = database.begin_write_transaction().await?;
-        transaction
-            .execute(
-                "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
-                 VALUES (?1, 'summary_node', ?2, 0)",
-                (node_id, source_node_id),
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "replace LCM summary source fixture".to_owned(),
-                message: error.to_string(),
-            })?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "replace LCM summary source fixture".to_owned(),
                 message: error.to_string(),
             })
     }

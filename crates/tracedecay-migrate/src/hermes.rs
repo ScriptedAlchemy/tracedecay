@@ -24,7 +24,7 @@ pub use candidates::{
 };
 pub use copy::{
     copy_external_payload_files, copy_raw_messages, copy_table, remap_store_id_columns,
-    remap_summary_source, remove_created_payloads,
+    remove_created_payloads,
 };
 use pipeline::{migrate_candidate, migrate_legacy_state_store};
 pub use resolution::same_path;
@@ -36,7 +36,6 @@ const COPIED_TABLES: &[&str] = &[
     "lcm_external_payloads",
     "lcm_raw_messages",
     "lcm_summary_nodes",
-    "lcm_summary_sources",
     "lcm_lifecycle_state",
     "lcm_maintenance_debt",
 ];

@@ -268,34 +268,6 @@ pub fn remap_store_id_columns(
     Ok(())
 }
 
-pub fn remap_summary_source(
-    columns: &[String],
-    values: &mut [Value],
-    id_map: &HashMap<i64, i64>,
-) -> Result<(), String> {
-    let kind_index = columns
-        .iter()
-        .position(|column| column == "source_kind")
-        .ok_or_else(|| "summary source has no source_kind".to_string())?;
-    let id_index = columns
-        .iter()
-        .position(|column| column == "source_id")
-        .ok_or_else(|| "summary source has no source_id".to_string())?;
-    if matches!(&values[kind_index], Value::Text(kind) if kind == "raw_message") {
-        let Value::Text(source_id) = &values[id_index] else {
-            return Err("raw summary source has a non-text source_id".to_string());
-        };
-        let source_id = source_id
-            .parse::<i64>()
-            .map_err(|_| "raw summary source has an invalid store_id".to_string())?;
-        let target_id = id_map
-            .get(&source_id)
-            .ok_or_else(|| format!("raw summary source {source_id} was not copied"))?;
-        values[id_index] = Value::Text(target_id.to_string());
-    }
-    Ok(())
-}
-
 pub async fn copy_raw_messages<S, T>(
     source: &S,
     target: &T,

@@ -218,11 +218,9 @@ pub fn session_authority_table_class(table: &str) -> StoreDurabilityClass {
         // Receipts of the sanitization pass over raw messages; re-running
         // sanitization over re-ingested raw content reproduces them.
         | "sanitization_receipts" => StoreDurabilityClass::Recoverable,
-        // Deliberately NOT listed despite their measured size (129MB/62MB in
-        // the plan-38 profile): `lcm_summary_sources` and `lcm_summary_nodes`
-        // are LCM compaction output produced by paid model calls. They are
-        // expensive to regenerate, not mechanically re-derivable, so they
-        // stay Durable by the default arm.
+        // LCM summaries are paid-model output. They are expensive to
+        // regenerate, not mechanically re-derivable, so they stay Durable by
+        // the default arm.
         _ => StoreDurabilityClass::Durable,
     }
 }
@@ -407,7 +405,6 @@ mod tests {
             "some_future_table_nobody_classified_yet",
             // LCM summaries are paid-model output: expensive to regenerate,
             // not mechanically re-derivable. Deliberately Durable.
-            "lcm_summary_sources",
             "lcm_summary_nodes",
             // A `_data` suffix without an `_fts` base is NOT an FTS shadow
             // and must not sneak through the shadow rule.

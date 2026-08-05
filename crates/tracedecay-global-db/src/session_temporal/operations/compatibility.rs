@@ -1,6 +1,6 @@
 use tracedecay_runtime_core::db::engine::{Executor, params};
 
-use tracedecay_sessions::lcm::contracts::{LcmError, LcmSourceRef};
+use tracedecay_sessions::lcm::contracts::LcmError;
 
 use super::CanonicalPublicationManifest;
 
@@ -39,17 +39,5 @@ pub(super) async fn project_canonical_summary(
         ],
     )
     .await?;
-    for (ordinal, source) in manifest.source_refs.iter().enumerate() {
-        let (kind, id) = match source {
-            LcmSourceRef::RawMessage { store_id } => ("raw_message", store_id.to_string()),
-            LcmSourceRef::SummaryNode { node_id } => ("summary_node", node_id.clone()),
-        };
-        conn.execute(
-            "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![summary_id, kind, id.as_str(), ordinal as i64],
-        )
-        .await?;
-    }
     Ok(())
 }

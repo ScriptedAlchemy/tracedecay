@@ -88,13 +88,6 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
         .unwrap();
     raw_conn
         .execute(
-            "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
-             VALUES ('summary.rebuild-store-id', 'raw_message', ?1, 0)",
-            rusqlite::params![anchor_store_id.to_string()],
-        )
-        .unwrap();
-    raw_conn
-        .execute(
             "INSERT INTO lcm_lifecycle_state (
                 provider, conversation_id, current_session_id, current_frontier_store_id
              ) VALUES ('claude', 'session-rebuild', 'session-rebuild', ?1)",
@@ -115,20 +108,17 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(rows_after, rows_before);
     assert_eq!(projected_raw_store_ids(&tmp).await, raw_store_ids_before);
     let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
-    let identity = raw_conn
+    let frontier_store_id = raw_conn
         .query_row(
-            "SELECT source.source_id, lifecycle.current_frontier_store_id
-             FROM lcm_summary_sources AS source
-             JOIN lcm_lifecycle_state AS lifecycle
-               ON lifecycle.provider = 'claude'
-              AND lifecycle.conversation_id = 'session-rebuild'
-             WHERE source.node_id = 'summary.rebuild-store-id'",
+            "SELECT lifecycle.current_frontier_store_id
+             FROM lcm_lifecycle_state AS lifecycle
+             WHERE lifecycle.provider = 'claude'
+               AND lifecycle.conversation_id = 'session-rebuild'",
             (),
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            |row| row.get::<_, i64>(0),
         )
         .unwrap();
-    assert_eq!(identity.0, anchor_store_id.to_string());
-    assert_eq!(identity.1, anchor_store_id);
+    assert_eq!(frontier_store_id, anchor_store_id);
     drop(raw_conn);
     assert_eq!(projection_provenance_rows(&tmp).await, provenance_before);
     assert_eq!(projection_counts(&tmp).await, counts_before);

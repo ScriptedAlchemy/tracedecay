@@ -6,6 +6,26 @@ const OPERATION: &str = "initialize session temporal schema";
 const MIGRATION_NAME: &str = "session-temporal";
 pub(super) const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 3;
 
+const LEGACY_RELATION_PROJECTION_OBJECTS: &[&str] = &[
+    "session_logical_copy_edges",
+    "session_thread_hierarchy_edges",
+    "session_agent_hierarchy_edges",
+    "session_summary_sources",
+    "session_summary_successors",
+    "idx_session_logical_copy_edges_target",
+    "idx_session_thread_hierarchy_edges_child",
+    "idx_session_agent_hierarchy_edges_child",
+    "idx_session_summary_sources_anchor",
+    "idx_session_summary_sources_summary",
+    "idx_session_summary_successors_successor",
+    "session_summary_sources_immutable_delete_v1",
+    "session_summary_sources_immutable_update_v1",
+    "session_summary_sources_owner_guard_v1",
+    "session_summary_successors_immutable_delete_v1",
+    "session_summary_successors_immutable_update_v1",
+    "session_summary_successors_owner_guard_v1",
+];
+
 const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
     (
         "session_occurrences_fts",
@@ -955,6 +975,9 @@ pub async fn ensure_session_temporal_schema(
             ),
         ));
     }
+    if version == Some(SESSION_TEMPORAL_SCHEMA_VERSION) {
+        ensure_no_legacy_relation_projection_objects(conn).await?;
+    }
 
     let rebuild_fts = version.is_none() || temporal_fts_is_missing(conn).await?;
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
@@ -978,6 +1001,53 @@ pub async fn ensure_session_temporal_schema(
     .await
     .map_err(|error| global_db_operation_error(OPERATION, error))?;
     Ok(())
+}
+
+async fn ensure_no_legacy_relation_projection_objects(
+    conn: &impl Executor,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    let placeholders = std::iter::repeat_n("?", LEGACY_RELATION_PROJECTION_OBJECTS.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT type, name
+         FROM sqlite_schema
+         WHERE type IN ('table', 'index', 'trigger')
+           AND name IN ({placeholders})
+         ORDER BY type, name"
+    );
+    let mut rows = conn
+        .query(
+            &sql,
+            tracedecay_runtime_core::db::engine::params_from_iter(
+                LEGACY_RELATION_PROJECTION_OBJECTS.iter().copied(),
+            ),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut objects = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        let object_type = row
+            .get::<String>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let name = row
+            .get::<String>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        objects.push(format!("{object_type} {name}"));
+    }
+    if objects.is_empty() {
+        return Ok(());
+    }
+    Err(
+        tracedecay_runtime_core::errors::TraceDecayError::reset_required(format!(
+            "session temporal v{SESSION_TEMPORAL_SCHEMA_VERSION} contains removed relation projection objects: {}",
+            objects.join(", ")
+        )),
+    )
 }
 
 pub async fn repair_session_temporal_state(

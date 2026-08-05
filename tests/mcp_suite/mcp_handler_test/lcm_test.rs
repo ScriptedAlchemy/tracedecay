@@ -497,44 +497,6 @@ async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-doctor-orphan-owner",
-        "lcm-doctor-orphan-owner-message",
-        "orphan owner source text",
-        1,
-    )
-    .await;
-    let store_id = lcm_raw_store_id(&cg, "lcm-doctor-orphan-owner-message").await;
-    project_lcm_conn(&cg)
-        .await
-        .inject_lcm_orphan_summary_source_for_test(HostAdmissionScope::Project, store_id)
-        .await
-        .unwrap();
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_doctor",
-        json!({
-            "provider": "cursor",
-            "session_id": "lcm-doctor-orphan-owner",
-            "mode": "diagnose"
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-
-    assert_eq!(payload["status"], "issues_found");
-    assert_eq!(payload["diagnostics"]["summaries"]["broken_sources"], 1);
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
 async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
     let (cg, _env, _dir) = setup_empty_project().await;
     seed_lcm_session_message(
@@ -2927,7 +2889,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn lcm_compress_handler_honors_incremental_max_depth_override() {
+async fn lcm_compress_handler_does_not_condense_from_sqlite_summary_topology() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let mut store_ids = Vec::new();
     for index in 1..=6 {
@@ -3013,22 +2975,12 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
 
-    assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["reason"], "condensed_summary_nodes");
-    assert_eq!(payload["summary_nodes_created"], 1);
-    assert_eq!(payload["summary_nodes"][0]["depth"], 2);
-    assert_eq!(
-        payload["summary_nodes"][0]["summary_text"],
-        "exact Cursor depth condensation summary"
-    );
+    assert_eq!(payload["status"], "ok", "{payload}");
+    assert_eq!(payload["reason"], "no_active_messages", "{payload}");
+    assert_eq!(payload["summary_nodes_created"], 0, "{payload}");
+    assert_eq!(payload["summary_nodes"], json!([]), "{payload}");
     assert_eq!(payload["fallback_used"], false);
-    assert_eq!(payload["relation_projection_status"], "pending");
-    assert!(
-        payload["context_recovery_hint"]
-            .as_str()
-            .unwrap()
-            .contains("tracedecay_lcm_expand_query")
-    );
+    assert_eq!(payload["relation_projection_status"], "not_applicable");
 }
 
 #[cfg(feature = "test-transport")]

@@ -12,6 +12,8 @@ pub const LCM_SCHEMA_VERSION: i64 = 7;
 
 const MIGRATION_NAME: &str = "lcm";
 const TRUNCATION_MARKER: &str = "\n[truncated by tracedecay]";
+const LEGACY_SUMMARY_SOURCE_OBJECTS: &[&str] =
+    &["lcm_summary_sources", "idx_lcm_summary_sources_source"];
 
 /// Raw-message FTS structure (schema v3): index only `index_text`, matching
 /// hermes-lcm `build_message_fts_spec` (store.py:173-204), which indexes
@@ -165,6 +167,7 @@ pub async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
 pub async fn ensure_lcm_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), LcmError> {
+    ensure_no_legacy_summary_source_objects(conn).await?;
     // Mirrors hermes-lcm `run_versioned_migrations`: version steps are
     // monotonic, so a database written by a newer release is left untouched
     // (no marker downgrade, no carry-forward re-run against newer data).
@@ -255,14 +258,6 @@ pub async fn ensure_lcm_schema_in_transaction(
             FOREIGN KEY(provider, session_id)
                 REFERENCES sessions(provider, session_id) ON DELETE CASCADE
         );
-        CREATE TABLE IF NOT EXISTS lcm_summary_sources (
-            node_id TEXT NOT NULL,
-            source_kind TEXT NOT NULL CHECK(source_kind IN ('raw_message', 'summary_node')),
-            source_id TEXT NOT NULL,
-            ordinal INTEGER NOT NULL,
-            PRIMARY KEY(node_id, ordinal),
-            FOREIGN KEY(node_id) REFERENCES lcm_summary_nodes(node_id) ON DELETE CASCADE
-        );
         CREATE INDEX IF NOT EXISTS idx_lcm_summary_nodes_session_depth_time
             ON lcm_summary_nodes(
                 provider, session_id, depth, source_time_start, source_time_end, created_at
@@ -306,8 +301,6 @@ pub async fn ensure_lcm_schema_in_transaction(
                 session_id
             )
             WHERE provider = 'codex';
-        CREATE INDEX IF NOT EXISTS idx_lcm_summary_sources_source
-            ON lcm_summary_sources(source_kind, source_id);
         CREATE TABLE IF NOT EXISTS lcm_lifecycle_state (
             provider TEXT NOT NULL,
             conversation_id TEXT NOT NULL,
@@ -410,6 +403,44 @@ pub async fn ensure_lcm_schema_in_transaction(
     )
     .await?;
     Ok(())
+}
+
+async fn ensure_no_legacy_summary_source_objects(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<(), LcmError> {
+    let placeholders = std::iter::repeat_n("?", LEGACY_SUMMARY_SOURCE_OBJECTS.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT type, name
+         FROM sqlite_schema
+         WHERE type IN ('table', 'index', 'trigger')
+           AND name IN ({placeholders})
+         ORDER BY type, name"
+    );
+    let mut rows = conn
+        .query(
+            &sql,
+            tracedecay_runtime_core::db::engine::params_from_iter(
+                LEGACY_SUMMARY_SOURCE_OBJECTS.iter().copied(),
+            ),
+        )
+        .await?;
+    let mut objects = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let object_type: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        objects.push(format!("{object_type} {name}"));
+    }
+    if objects.is_empty() {
+        return Ok(());
+    }
+    Err(LcmError::ResetRequired {
+        message: format!(
+            "LCM v{LCM_SCHEMA_VERSION} contains removed summary-source objects: {}",
+            objects.join(", ")
+        ),
+    })
 }
 
 pub async fn schema_version(conn: &(impl QueryExecutor + ?Sized)) -> Option<i64> {

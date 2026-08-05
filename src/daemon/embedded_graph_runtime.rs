@@ -290,6 +290,40 @@ async fn run_relation_effect_scheduler(
     }
 }
 
+/// Starts bounded, best-effort convergence only after the exact session graph
+/// has been mounted. Admission and ordinary non-relation reads never wait for
+/// a pending SQLite-to-graph effect.
+pub(super) fn recover_pending_session_relation_effects(
+    database: Arc<tracedecay_global_db::RegisteredGlobalDb>,
+) {
+    tokio::spawn(async move {
+        match database
+            .recover_pending_session_relation_projections(
+                RELATION_EFFECT_RECOVERY_LIMIT,
+                Arc::new(tracedecay_graph_db::NeverCancelled),
+            )
+            .await
+        {
+            Ok(recovered) => crate::daemon::log_daemon_event(
+                "session_relation_effect_recovery",
+                &[
+                    ("outcome", "complete".to_owned()),
+                    ("database", database.db_path().display().to_string()),
+                    ("recovered", recovered.to_string()),
+                ],
+            ),
+            Err(error) => crate::daemon::log_daemon_event(
+                "session_relation_effect_recovery",
+                &[
+                    ("outcome", "degraded".to_owned()),
+                    ("database", database.db_path().display().to_string()),
+                    ("error", error.to_string()),
+                ],
+            ),
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;

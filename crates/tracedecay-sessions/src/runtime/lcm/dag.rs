@@ -1,16 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
-use tracedecay_domain::HydrationStateV1;
-
 use crate::compatibility::projected_content_hash;
-use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
-use super::{
-    LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmSourceRef, LcmSummaryExpansion,
-    LcmSummaryNode, LcmSummaryNodeDraft, raw,
-};
+use super::{LcmError, LcmSourceRef, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft};
 
 pub trait LcmSummaryPublicationPort {
     fn publish_immutable_summary(
@@ -58,74 +52,13 @@ async fn expand_summary_node_with_content(
     node_id: &str,
     include_content: bool,
 ) -> Result<LcmSummaryExpansion, LcmError> {
-    let summary =
+    let _summary =
         load_summary_node_with_content(conn, provider, session_id, node_id, include_content)
             .await?;
-    let mut raw_store_ids = Vec::new();
-    let mut child_node_ids = Vec::new();
-    for source_ref in &summary.source_refs {
-        match source_ref {
-            LcmSourceRef::RawMessage { store_id } => raw_store_ids.push(*store_id),
-            LcmSourceRef::SummaryNode { node_id } => child_node_ids.push(node_id.clone()),
-        }
-    }
-    let raw_sources = load_raw_messages_by_store_ids(conn, &raw_store_ids, include_content).await?;
-    let child_sources = load_summary_nodes_by_ids(conn, &child_node_ids, include_content).await?;
-
-    let mut sources = Vec::with_capacity(summary.source_refs.len());
-
-    for source_ref in &summary.source_refs {
-        match source_ref {
-            LcmSourceRef::RawMessage { store_id } => {
-                let raw = raw_sources
-                    .get(store_id)
-                    .cloned()
-                    .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-                if raw.provider != provider || raw.session_id != session_id {
-                    return Err(LcmError::SummarySourceNotOwnedBySession);
-                }
-                sources.push(LcmExpandedSummarySource {
-                    source_ref: source_ref.clone(),
-                    state: if include_content {
-                        HydrationStateV1::Available
-                    } else {
-                        HydrationStateV1::RetainedButUnavailable
-                    },
-                    content: raw.content.clone(),
-                    content_range: None,
-                    content_truncated: false,
-                    raw_message: Some(raw),
-                    summary_node: None,
-                });
-            }
-            LcmSourceRef::SummaryNode {
-                node_id: child_node_id,
-            } => {
-                let child = child_sources
-                    .get(child_node_id)
-                    .cloned()
-                    .ok_or(LcmError::SummaryNodeNotFound)?;
-                if child.provider != provider || child.session_id != session_id {
-                    return Err(LcmError::SummarySourceNotOwnedBySession);
-                }
-                sources.push(LcmExpandedSummarySource {
-                    source_ref: source_ref.clone(),
-                    state: if include_content {
-                        HydrationStateV1::Available
-                    } else {
-                        HydrationStateV1::RetainedButUnavailable
-                    },
-                    content: child.summary_text.clone(),
-                    content_range: None,
-                    content_truncated: false,
-                    raw_message: None,
-                    summary_node: Some(Box::new(child)),
-                });
-            }
-        }
-    }
-
-    Ok(LcmSummaryExpansion { summary, sources })
+    Err(LcmError::SummarySourceUnavailable {
+        source_id: node_id.to_string(),
+        reason: "summary topology is owned by the native session relation graph".to_string(),
+    })
 }
 
 /// One uncondensed summary node plus the earliest raw-message store id in its
@@ -141,100 +74,11 @@ pub struct LcmUncondensedSummaryNode {
 /// collapsed across all depths in one query; replay assembly consumes the
 /// result ordered by lineage position (then depth, highest first).
 pub async fn load_uncondensed_summary_nodes(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
+    _conn: &(impl QueryExecutor + ?Sized),
+    _provider: &str,
+    _session_id: &str,
 ) -> Result<Vec<LcmUncondensedSummaryNode>, LcmError> {
-    let mut rows = conn
-        .query(
-            "WITH RECURSIVE unparented AS (
-               SELECT n.node_id, n.provider, n.conversation_id, n.session_id, n.depth,
-                      n.summary_text, n.summary_hash, n.summary_token_count,
-                      n.source_token_count, n.source_time_start, n.source_time_end,
-                      n.expand_hint, n.metadata_json, n.created_at
-               FROM lcm_summary_nodes n
-               WHERE n.provider = ?1 AND n.session_id = ?2
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM lcm_summary_sources s
-                   WHERE s.source_kind = 'summary_node'
-                     AND s.source_id = n.node_id
-                 )
-             ),
-             lineage(root_id, source_kind, source_id, path, depth) AS (
-               SELECT s.node_id,
-                      s.source_kind,
-                      s.source_id,
-                      '|' || s.node_id || CASE
-                          WHEN s.source_kind = 'summary_node' THEN '|' || s.source_id || '|'
-                          ELSE '|'
-                      END,
-                      0
-               FROM lcm_summary_sources s
-               JOIN unparented u ON u.node_id = s.node_id
-               UNION ALL
-               SELECT l.root_id,
-                      s.source_kind,
-                      s.source_id,
-                      l.path || CASE
-                          WHEN s.source_kind = 'summary_node' THEN s.source_id || '|'
-                          ELSE ''
-                      END,
-                      l.depth + 1
-               FROM lineage l
-               JOIN lcm_summary_sources s
-                 ON l.source_kind = 'summary_node' AND s.node_id = l.source_id
-               WHERE l.depth < 128
-                 AND (
-                   s.source_kind != 'summary_node'
-                   OR instr(l.path, '|' || s.source_id || '|') = 0
-                 )
-             ),
-             first_raw AS (
-               SELECT root_id, MIN(CAST(source_id AS INTEGER)) AS first_source_store_id
-               FROM lineage
-               WHERE source_kind = 'raw_message'
-               GROUP BY root_id
-             )
-             SELECT u.node_id, u.provider, u.conversation_id, u.session_id, u.depth,
-                    u.summary_text, u.summary_hash, u.summary_token_count,
-                    u.source_token_count, u.source_time_start, u.source_time_end,
-                    u.expand_hint, u.metadata_json, u.created_at,
-                    first_raw.first_source_store_id
-             FROM unparented u
-             LEFT JOIN first_raw ON first_raw.root_id = u.node_id
-             ORDER BY first_raw.first_source_store_id IS NULL,
-                      first_raw.first_source_store_id,
-                      u.depth DESC,
-                      u.source_time_start IS NULL, u.source_time_start,
-                      u.created_at, u.node_id",
-            params![provider, session_id],
-        )
-        .await?;
-    let mut nodes = Vec::new();
-    while let Some(row) = rows.next().await? {
-        nodes.push(LcmUncondensedSummaryNode {
-            node: LcmSummaryNode {
-                node_id: row.get(0)?,
-                provider: row.get(1)?,
-                conversation_id: row.get(2)?,
-                session_id: row.get(3)?,
-                depth: row.get(4)?,
-                summary_text: row.get(5)?,
-                summary_hash: row.get(6)?,
-                summary_token_count: row.get(7)?,
-                source_token_count: row.get(8)?,
-                source_time_start: row.get(9)?,
-                source_time_end: row.get(10)?,
-                expand_hint: row.get(11)?,
-                metadata_json: row.get(12)?,
-                created_at: row.get(13)?,
-                source_refs: Vec::new(),
-            },
-            first_source_store_id: row.get(14)?,
-        });
-    }
-    Ok(nodes)
+    Ok(Vec::new())
 }
 
 pub fn summary_node_id(
@@ -288,7 +132,6 @@ async fn load_summary_node_by_id(
     );
     let mut rows = conn.query(&sql, params![node_id]).await?;
     let row = rows.next().await?.ok_or(LcmError::SummaryNodeNotFound)?;
-    let source_refs = load_summary_source_refs(conn, node_id).await?;
     Ok(LcmSummaryNode {
         node_id: row.get(0)?,
         provider: row.get(1)?,
@@ -304,164 +147,6 @@ async fn load_summary_node_by_id(
         expand_hint: row.get(11)?,
         metadata_json: row.get(12)?,
         created_at: row.get(13)?,
-        source_refs,
+        source_refs: Vec::new(),
     })
-}
-
-async fn load_summary_source_refs(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-) -> Result<Vec<LcmSourceRef>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT source_kind, source_id
-             FROM lcm_summary_sources
-             WHERE node_id = ?1
-             ORDER BY ordinal",
-            params![node_id],
-        )
-        .await?;
-    let mut source_refs = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let source_kind: String = row.get(0)?;
-        let source_id: String = row.get(1)?;
-        source_refs.push(source_ref_from_db(&source_kind, &source_id)?);
-    }
-    Ok(source_refs)
-}
-
-async fn load_raw_messages_by_store_ids(
-    conn: &(impl QueryExecutor + ?Sized),
-    store_ids: &[i64],
-    include_content: bool,
-) -> Result<BTreeMap<i64, LcmRawMessage>, LcmError> {
-    let unique_store_ids = store_ids
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if unique_store_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let placeholders = std::iter::repeat_n("?", unique_store_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let select_columns = if include_content {
-        raw::RAW_MESSAGE_SELECT_COLUMNS
-    } else {
-        raw::RAW_MESSAGE_METADATA_SELECT_COLUMNS
-    };
-    let sql = format!(
-        "SELECT {select_columns}
-         FROM lcm_raw_messages
-         WHERE store_id IN ({placeholders})"
-    );
-    let mut rows = conn
-        .query(
-            &sql,
-            unique_store_ids
-                .iter()
-                .map(|store_id| Value::Integer(*store_id))
-                .collect::<Vec<_>>(),
-        )
-        .await?;
-    let mut out = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let raw = raw::raw_message_from_row(&row)?;
-        out.insert(raw.store_id, raw);
-    }
-    Ok(out)
-}
-
-async fn load_summary_nodes_by_ids(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_ids: &[String],
-    include_content: bool,
-) -> Result<BTreeMap<String, LcmSummaryNode>, LcmError> {
-    let unique_node_ids = node_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if unique_node_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let placeholders = std::iter::repeat_n("?", unique_node_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let summary_text = if include_content {
-        "summary_text"
-    } else {
-        "'' AS summary_text"
-    };
-    let node_sql = format!(
-        "SELECT node_id, provider, conversation_id, session_id, depth, {summary_text},
-                summary_hash, summary_token_count, source_token_count, source_time_start,
-                source_time_end, expand_hint, metadata_json, created_at
-         FROM lcm_summary_nodes
-         WHERE node_id IN ({placeholders})"
-    );
-    let values = unique_node_ids
-        .iter()
-        .map(|node_id| Value::Text(node_id.clone()))
-        .collect::<Vec<_>>();
-    let mut node_rows = conn.query(&node_sql, values.clone()).await?;
-    let mut nodes = BTreeMap::new();
-    while let Some(row) = node_rows.next().await? {
-        let node_id: String = row.get(0)?;
-        nodes.insert(
-            node_id.clone(),
-            LcmSummaryNode {
-                node_id,
-                provider: row.get(1)?,
-                conversation_id: row.get(2)?,
-                session_id: row.get(3)?,
-                depth: row.get(4)?,
-                summary_text: row.get(5)?,
-                summary_hash: row.get(6)?,
-                summary_token_count: row.get(7)?,
-                source_token_count: row.get(8)?,
-                source_time_start: row.get(9)?,
-                source_time_end: row.get(10)?,
-                expand_hint: row.get(11)?,
-                metadata_json: row.get(12)?,
-                created_at: row.get(13)?,
-                source_refs: Vec::new(),
-            },
-        );
-    }
-    let source_sql = format!(
-        "SELECT node_id, source_kind, source_id
-         FROM lcm_summary_sources
-         WHERE node_id IN ({placeholders})
-         ORDER BY node_id, ordinal"
-    );
-    let mut source_rows = conn.query(&source_sql, values).await?;
-    while let Some(row) = source_rows.next().await? {
-        let node_id: String = row.get(0)?;
-        let source_kind: String = row.get(1)?;
-        let source_id: String = row.get(2)?;
-        if let Some(node) = nodes.get_mut(&node_id) {
-            node.source_refs
-                .push(source_ref_from_db(&source_kind, &source_id)?);
-        }
-    }
-    Ok(nodes)
-}
-
-fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef, LcmError> {
-    match source_kind {
-        "raw_message" => source_id
-            .parse::<i64>()
-            .map(|store_id| LcmSourceRef::RawMessage { store_id })
-            .map_err(|err| LcmError::Db(err.to_string())),
-        "summary_node" => Ok(LcmSourceRef::SummaryNode {
-            node_id: source_id.to_string(),
-        }),
-        _ => Err(LcmError::Db(format!(
-            "invalid summary source_kind: {source_kind}"
-        ))),
-    }
 }

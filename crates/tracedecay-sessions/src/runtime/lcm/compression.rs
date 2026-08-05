@@ -1654,83 +1654,13 @@ async fn condense_summary_nodes_if_ready(
 }
 
 async fn load_condensation_candidates(
-    conn: &impl QueryExecutor,
-    provider: &str,
-    session_id: &str,
-    fan_in: usize,
-    incremental_max_depth: i64,
+    _conn: &impl QueryExecutor,
+    _provider: &str,
+    _session_id: &str,
+    _fan_in: usize,
+    _incremental_max_depth: i64,
 ) -> Result<Vec<LcmSummaryNode>, LcmError> {
-    let mut rows = conn
-        .query(
-            "WITH source_order AS (
-               SELECT lcm_summary_sources.node_id, MIN(CAST(source_id AS INTEGER)) AS first_source_id
-               FROM lcm_summary_sources
-               WHERE source_kind = 'raw_message'
-               GROUP BY lcm_summary_sources.node_id
-             ),
-             unparented AS (
-               SELECT n.node_id, n.provider, n.conversation_id, n.session_id, n.depth, n.summary_text,
-                      n.summary_hash, n.summary_token_count, n.source_token_count, n.source_time_start,
-                      n.source_time_end, n.expand_hint, n.metadata_json, n.created_at,
-                      source_order.first_source_id
-               FROM lcm_summary_nodes n
-               LEFT JOIN source_order ON source_order.node_id = n.node_id
-               WHERE n.provider = ?1 AND n.session_id = ?2
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM lcm_summary_sources s
-                   WHERE s.source_kind = 'summary_node'
-                     AND s.source_id = n.node_id
-                 )
-             ),
-             eligible_depth AS (
-               SELECT depth
-               FROM unparented
-               WHERE depth < ?4
-               GROUP BY depth
-               HAVING COUNT(*) >= ?3
-               ORDER BY depth
-               LIMIT 1
-             )
-             SELECT node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count, source_time_start,
-                    source_time_end, expand_hint, metadata_json, created_at
-             FROM unparented
-             WHERE depth = (SELECT depth FROM eligible_depth)
-             ORDER BY source_time_start IS NULL, source_time_start,
-                      first_source_id IS NULL, first_source_id,
-                      created_at, node_id
-             LIMIT ?3",
-            params![
-                provider,
-                session_id,
-                fan_in as i64,
-                incremental_max_depth
-            ],
-        )
-        .await
-        ?;
-    let mut nodes = Vec::new();
-    while let Some(row) = rows.next().await? {
-        nodes.push(LcmSummaryNode {
-            node_id: row.get(0)?,
-            provider: row.get(1)?,
-            conversation_id: row.get(2)?,
-            session_id: row.get(3)?,
-            depth: row.get(4)?,
-            summary_text: row.get(5)?,
-            summary_hash: row.get(6)?,
-            summary_token_count: row.get(7)?,
-            source_token_count: row.get(8)?,
-            source_time_start: row.get(9)?,
-            source_time_end: row.get(10)?,
-            expand_hint: row.get(11)?,
-            metadata_json: row.get(12)?,
-            created_at: row.get(13)?,
-            source_refs: Vec::new(),
-        });
-    }
-    Ok(nodes)
+    Ok(Vec::new())
 }
 
 async fn ingest_active_messages(

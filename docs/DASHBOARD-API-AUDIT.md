@@ -39,7 +39,7 @@ MCP can never diverge. Preserve one router builder.
   (`memory_facts`/`memory_entities`/`memory_fact_entities`/`memory_banks`/
   `memory_oplog`).
 - `lcm_conn: Option<Connection>` — LCM session store (`lcm_raw_messages`,
-  `lcm_summary_nodes`, `lcm_summary_sources` + FTS mirrors). Resolved by
+  `lcm_summary_nodes`, native relation graph + FTS mirrors). Resolved by
   `resolve_lcm_store` (`mod.rs:117`): project-local `.tracedecay/sessions.db`
   by default; `TRACEDECAY_GLOBAL_DB` override wins (legacy `TRACEDECAY_GLOBAL_DB`
   still accepted); global DB is the fallback. `lcm_scope` ∈
@@ -131,7 +131,7 @@ Json), _>`); query errors propagate as HTTP 500 via `query_error`.
 | 1 | GET | `/api/plugins/hermes-lcm/overview` | `overview` | `q`, `limit`(25/200) | `{…, overview:{messages_total, sessions_total, summary_nodes_total, …, role_counts, source_counts, depth_counts, compression}, latest_sessions, latest_summary_nodes, matches:{messages, summary_nodes}}` | ~12 count/aggregate queries; `ensure_valid_summary_metadata` gate. `q` adds LIKE matches. |
 | 2 | GET | `/api/plugins/hermes-lcm/search` | `search` | `q`, `limit`, `offset`, `role`, `source`, `session_id`, `since`, `until` | `{…, engine, engine_detail:{messages, summary_nodes}, total:{messages, summary_nodes}, filters, matches}` | **FTS-then-LIKE fallback** for both messages and summary nodes. Reports `engine:"fts"` only if *both* sections used FTS. |
 | 3 | GET | `/api/plugins/hermes-lcm/session/{session_id}` | `session` | path `session_id`, `limit`(200/1000), `offset`, `order`(asc\|desc) | `{…, counts, messages, summary_nodes, has_more, has_more_messages, has_more_summary_nodes}` | **404** if both message & summary-node counts are 0. Orders by `ordinal` (ingest order), timestamp as tiebreak. |
-| 4 | GET | `/api/plugins/hermes-lcm/node/{node_id}` | `node` | path `node_id` | `{node, sources:{type, ids, messages, nodes}}` | Lossless expand of a summary node; resolves `lcm_summary_sources` rows to raw messages or child nodes. **404** if missing. |
+| 4 | GET | `/api/plugins/hermes-lcm/node/{node_id}` | `node` | path `node_id` | `{node, sources:{type, ids, messages, nodes}}` | Summary-source topology comes from the native relation graph; unavailable graph recovery is surfaced truthfully. |
 | 5 | GET | `/api/plugins/hermes-lcm/timeline` | `timeline` | `bucket`(hour\|day), `session_id`, `limit`(400/2000) | `{buckets, node_buckets, undated:{count, token_estimate}}` | `strftime` buckets; NULL timestamps excluded from dated buckets and reported via `undated`. |
 | 6 | GET | `/api/plugins/hermes-lcm/compression` | `compression` | `by`(node\|session), `limit`(50/500) | `{overall:{source_token_count, token_count, ratio, node_count}, groups}` | Per-group `ratio` computed in Rust. |
 

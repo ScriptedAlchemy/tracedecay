@@ -19,11 +19,9 @@
 //!
 //! # Projection durability is the safety invariant
 //!
-//! A raw row is *projection-durable* when a summary node's lineage covers it —
-//! i.e. its `store_id` appears as a `raw_message` source in
-//! `lcm_summary_sources` (see
-//! `global_db::session_temporal::operations::compatibility`, which persists
-//! `LcmSourceRef::RawMessage { store_id }` as `('raw_message', store_id)`).
+//! A raw row is *projection-durable* only after the daemon-owned native graph
+//! attests its summary lineage. This storage-only port has no graph authority,
+//! so it conservatively leaves raw rows untouched.
 //! Only projection-durable rows are ever acted on. Rows with no summary lineage
 //! are live, un-projected evidence and are **never** touched — this is the
 //! plan's non-goal ("no lossy deletion of live, referenced evidence") expressed
@@ -71,14 +69,9 @@ use super::{LcmError, payload, schema, util};
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 
-/// SQL predicate (over an aliased `lcm_raw_messages` row `r`) that is true when
-/// the raw row's `store_id` is covered by a durable summary node's lineage.
-/// `source_id` for a `raw_message` source is the `store_id` rendered as text.
-const PROJECTION_DURABLE: &str = "EXISTS (
-        SELECT 1 FROM lcm_summary_sources s
-        WHERE s.source_kind = 'raw_message'
-          AND s.source_id = CAST(r.store_id AS TEXT)
-    )";
+/// This storage-only port cannot infer graph lineage. Treat every raw row as
+/// live until graph-owned retention supplies coverage.
+const PROJECTION_DURABLE: &str = "0";
 
 /// Externalization kind recorded on retention-offloaded payloads.
 const OFFLOAD_KIND: &str = "retention_offload";

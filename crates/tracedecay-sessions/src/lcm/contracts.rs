@@ -374,6 +374,9 @@ pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LcmError {
+    ResetRequired {
+        message: String,
+    },
     InvalidPayloadRef,
     PayloadNotFound,
     PayloadNotOwnedBySession,
@@ -418,6 +421,7 @@ pub enum LcmError {
 impl std::fmt::Display for LcmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ResetRequired { message } => write!(f, "reset required: {message}"),
             Self::InvalidPayloadRef => write!(f, "invalid payload ref"),
             Self::PayloadNotFound => write!(f, "payload not found"),
             Self::PayloadNotOwnedBySession => write!(f, "payload not owned by session"),

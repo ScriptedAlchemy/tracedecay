@@ -12,6 +12,9 @@ struct HookRuntimeErrorContext {
 /// Errors that can occur during code graph operations.
 #[derive(Error, Debug)]
 pub enum TraceDecayError {
+    #[error("reset required: {message}")]
+    ResetRequired { message: String },
+
     #[error("file error: {message} (path: {path})")]
     File { message: String, path: String },
 
@@ -106,6 +109,12 @@ fn flatten_error_chain(source: &(dyn std::error::Error + 'static)) -> String {
 }
 
 impl TraceDecayError {
+    pub fn reset_required(message: impl Into<String>) -> Self {
+        Self::ResetRequired {
+            message: message.into(),
+        }
+    }
+
     pub fn project_route(
         reason_code: impl Into<String>,
         retryable: bool,

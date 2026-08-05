@@ -282,7 +282,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         Ok(relations)
     }
 
-    pub async fn hydrate_lcm_summary_sources(
+    pub async fn hydrate_lcm_summary_relations(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         provider: &str,

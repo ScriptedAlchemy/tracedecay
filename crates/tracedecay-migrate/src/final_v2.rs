@@ -360,7 +360,6 @@ impl ReleasedSchemaFixture {
                     "lcm_raw_messages_fts",
                     "lcm_summary_nodes",
                     "lcm_summary_nodes_fts",
-                    "lcm_summary_sources",
                     "session_messages",
                     "session_schema_migrations",
                     "sessions",

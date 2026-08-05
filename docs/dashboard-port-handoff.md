@@ -79,7 +79,7 @@ that reuses it, never a fork.
    │ .tracedecay/          │ ~/.tracedecay/global.db    │
    │   tracedecay.db       │  lcm_raw_messages,        │
    │  memory_facts,       │  lcm_summary_nodes,       │
-   │  memory_entities,    │  lcm_summary_sources (+   │
+   │  memory_entities,    │  native relation graph +  │
    │  memory_banks, ...   │  FTS mirrors)             │
    └──────────────────────┴───────────────────────────┘
 ```
@@ -167,7 +167,7 @@ as fallbacks). Old backend was `$HERMES_HOME/lcm.db`
 | `GET /overview` | working | `messages`→`lcm_raw_messages`, `source`←`provider`, compression from `lcm_summary_nodes` token counts |
 | `GET /search` | working (FTS + LIKE fallback, role/source/session/since/until facets) | `messages_fts`→`lcm_raw_messages_fts(index_text)`, `nodes_fts`→`lcm_summary_nodes_fts`; `since`/`until` accept epoch only (UI never sends them) |
 | `GET /session/{id}` | working | `token_estimate` ≈ chars/4 (not stored); `pinned`=0, `tool_name`=null (not tracked) |
-| `GET /node/{id}` | working | node ids are **strings** (old API: ints); `source_ids` JSON → `lcm_summary_sources` rows (`raw_message` source_id = store_id, `summary_node` = node_id) |
+| `GET /node/{id}` | relation graph | node ids are **strings** (old API: ints); source topology is served by the native relation graph |
 | `GET /timeline` | working | `strftime(..., 'unixepoch')` buckets; node recency = `COALESCE(source_time_end, created_at)` |
 | `GET /compression` | working | `token_count` ← `summary_token_count` |
 
