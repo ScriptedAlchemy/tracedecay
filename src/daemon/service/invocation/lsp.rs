@@ -3,6 +3,10 @@
 use super::*;
 use tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS;
 
+mod workspace_diagnostics;
+
+pub(super) use workspace_diagnostics::PublishedCodeIndexWorkspaceDocuments;
+
 pub(super) fn admit_lsp_control(
     request_id: String,
     deadline: &Deadline,

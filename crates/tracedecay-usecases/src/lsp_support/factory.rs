@@ -15,6 +15,7 @@ use tracedecay_lsp::{
     FeedbackCycleRequest, FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayCapabilities,
     LspAnalyzerCancellationAuthority, LspRequestId, OverlaySnapshot, SemanticProviderOutcome,
     SemanticProviderPort, SemanticRequest, SemanticResponse, UpstreamCapabilities,
+    WorkspaceDiagnosticSnapshotOutcome,
 };
 
 use super::runtime_adapters::runtime_spawner;
@@ -44,6 +45,9 @@ impl DaemonLspSessionFactory {
         gateway_capabilities: GatewayCapabilities,
         upstream_capabilities: UpstreamCapabilities,
     ) -> Self {
+        let mut gateway_capabilities = gateway_capabilities;
+        gateway_capabilities.supports_workspace_diagnostics =
+            diagnostics.supports_workspace_diagnostics();
         let feedback = Arc::new(FeedbackCycleAdapter::new(
             runtime_spawner(runtime.clone()),
             feedback,
@@ -136,8 +140,37 @@ impl DaemonLspSessionFactory {
                     factory.context.clone(),
                 )) as Arc<dyn ContextProjectionPort + Send + Sync>,
             );
-            gateway_capabilities.get_or_insert_with(|| factory.gateway_capabilities.clone());
-            upstream_capabilities.get_or_insert_with(|| factory.upstream_capabilities.clone());
+            if let Some(capabilities) = gateway_capabilities.as_mut() {
+                capabilities.supports_publish_diagnostics &=
+                    factory.gateway_capabilities.supports_publish_diagnostics;
+                capabilities.supports_document_diagnostics &=
+                    factory.gateway_capabilities.supports_document_diagnostics;
+                capabilities.supports_managed_diagnostics &=
+                    factory.gateway_capabilities.supports_managed_diagnostics;
+                capabilities.supports_workspace_folders &=
+                    factory.gateway_capabilities.supports_workspace_folders;
+                capabilities.supports_workspace_diagnostics &=
+                    factory.gateway_capabilities.supports_workspace_diagnostics;
+                capabilities.supports_context_expansion &=
+                    factory.gateway_capabilities.supports_context_expansion;
+                capabilities.semantic.retain(|capability| {
+                    factory.gateway_capabilities.semantic.contains(capability)
+                });
+                capabilities.context_projections.retain(|kind, revision| {
+                    factory.gateway_capabilities.context_projections.get(kind) == Some(revision)
+                });
+            } else {
+                gateway_capabilities = Some(factory.gateway_capabilities.clone());
+            }
+            if let Some(capabilities) = upstream_capabilities.as_mut() {
+                capabilities.supports_diagnostics &=
+                    factory.upstream_capabilities.supports_diagnostics;
+                capabilities.semantic.retain(|capability| {
+                    factory.upstream_capabilities.semantic.contains(capability)
+                });
+            } else {
+                upstream_capabilities = Some(factory.upstream_capabilities.clone());
+            }
         }
         let bundle = DaemonLspProviderBundle::from_shared(
             Arc::new(FederatedFeedback { roots: feedback }),
@@ -220,6 +253,42 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
                 failure_class: "root-not-authorized".to_owned(),
             },
             |port| port.request_document_refresh(root, document_uri, overlay, source_generation),
+        )
+    }
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        let routes = self.routes.load();
+        !routes.diagnostics.is_empty()
+            && routes
+                .diagnostics
+                .values()
+                .all(|port| port.supports_workspace_diagnostics())
+    }
+
+    fn workspace_diagnostics(
+        &self,
+        root: &AdmittedRoot,
+        overlays: &[OverlaySnapshot],
+    ) -> WorkspaceDiagnosticSnapshotOutcome {
+        self.routes.load().diagnostics.get(root.uri()).map_or(
+            WorkspaceDiagnosticSnapshotOutcome::Failed {
+                code_generation_id: None,
+                failure_class: "root-not-authorized".to_owned(),
+            },
+            |port| port.workspace_diagnostics(root, overlays),
+        )
+    }
+
+    fn request_workspace_refresh(
+        &self,
+        root: &AdmittedRoot,
+        overlays: &[OverlaySnapshot],
+    ) -> DiagnosticRefreshAdmission {
+        self.routes.load().diagnostics.get(root.uri()).map_or(
+            DiagnosticRefreshAdmission::Rejected {
+                failure_class: "root-not-authorized".to_owned(),
+            },
+            |port| port.request_workspace_refresh(root, overlays),
         )
     }
 }

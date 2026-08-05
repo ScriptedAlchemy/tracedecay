@@ -15,6 +15,7 @@ use crate::gateway::{
 };
 use crate::overlay::OverlaySnapshot;
 use crate::session::LspRequestId;
+use crate::workspace_diagnostics::WorkspaceDiagnosticSnapshotOutcome;
 
 /// Restart exhaustion is a stable health state, not an invitation for a
 /// bridge or client to start its own analyzer.
@@ -296,6 +297,31 @@ pub trait DiagnosticSnapshotPort {
             failure_class: "refresh-unsupported".to_owned(),
         }
     }
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        false
+    }
+
+    fn workspace_diagnostics(
+        &self,
+        _root: &AdmittedRoot,
+        _overlays: &[OverlaySnapshot],
+    ) -> WorkspaceDiagnosticSnapshotOutcome {
+        WorkspaceDiagnosticSnapshotOutcome::Failed {
+            code_generation_id: None,
+            failure_class: "workspace-diagnostics-unsupported".to_owned(),
+        }
+    }
+
+    fn request_workspace_refresh(
+        &self,
+        _root: &AdmittedRoot,
+        _overlays: &[OverlaySnapshot],
+    ) -> DiagnosticRefreshAdmission {
+        DiagnosticRefreshAdmission::Rejected {
+            failure_class: "workspace-diagnostics-unsupported".to_owned(),
+        }
+    }
 }
 
 impl<T> DiagnosticSnapshotPort for Arc<T>
@@ -319,6 +345,26 @@ where
         source_generation: Option<u64>,
     ) -> DiagnosticRefreshAdmission {
         (**self).request_document_refresh(root, document_uri, overlay, source_generation)
+    }
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        (**self).supports_workspace_diagnostics()
+    }
+
+    fn workspace_diagnostics(
+        &self,
+        root: &AdmittedRoot,
+        overlays: &[OverlaySnapshot],
+    ) -> WorkspaceDiagnosticSnapshotOutcome {
+        (**self).workspace_diagnostics(root, overlays)
+    }
+
+    fn request_workspace_refresh(
+        &self,
+        root: &AdmittedRoot,
+        overlays: &[OverlaySnapshot],
+    ) -> DiagnosticRefreshAdmission {
+        (**self).request_workspace_refresh(root, overlays)
     }
 }
 

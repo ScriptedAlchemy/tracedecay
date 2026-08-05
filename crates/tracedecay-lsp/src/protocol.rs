@@ -77,6 +77,7 @@ mod diagnostics_controller;
 mod lifecycle_controller;
 mod outbound_controller;
 mod semantic_controller;
+mod workspace_diagnostics_controller;
 
 use context_controller::ContextController;
 #[cfg(test)]
@@ -216,6 +217,8 @@ where
             .overlays
             .open(uri.clone(), language_id, version, text)
             .map_err(|error| self.close_for_overlay_error(error))?;
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         // A close followed by a reopen starts a new document incarnation; LSP
         // versions need not remain monotone across that boundary. Remove any
         // queued/acknowledged publication ordering state before publishing the
@@ -272,6 +275,8 @@ where
             .overlays
             .change(&uri, version, &changes)
             .map_err(|error| self.close_for_overlay_error(error))?;
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         self.discard_document_context(&uri);
         self.diagnostics.native_upstream.remove(&uri);
         self.lifecycle
@@ -300,6 +305,8 @@ where
             .overlays
             .close(&uri)
             .map_err(overlay_failure)?;
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         self.discard_document_context(&uri);
         self.diagnostics.native_upstream.remove(&uri);
         self.lifecycle
@@ -323,6 +330,8 @@ where
         self.require_ready()?;
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
         self.require_document_root(&uri)?;
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         self.discard_document_context(&uri);
         if matches!(
             self.lifecycle.gateway.document_saved(uri.clone()),

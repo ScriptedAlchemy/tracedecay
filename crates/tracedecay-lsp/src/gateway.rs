@@ -2643,7 +2643,14 @@ where
     }
 
     pub fn workspace_diagnostics(&self) -> GatewayResponse<()> {
-        Self::explicitly_unavailable(GatewayMethod::WorkspaceDiagnostic)
+        if self.capabilities.workspace_diagnostics_supported {
+            GatewayResponse::Value(())
+        } else {
+            GatewayResponse::unavailable(
+                GatewayMethod::WorkspaceDiagnostic,
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            )
+        }
     }
 
     pub fn execute_command(&self) -> GatewayResponse<()> {

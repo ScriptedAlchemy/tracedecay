@@ -253,6 +253,9 @@ where
         self.diagnostics.refresh_request = None;
         self.diagnostics.refresh_needed = false;
         self.diagnostics.active_refreshes.clear();
+        self.diagnostics.workspace_results.clear();
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         self.context.subscriptions.clear();
         self.context.currentness.clear();
         self.context.pending_requests.clear();
