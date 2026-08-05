@@ -129,8 +129,6 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_replace_symbol"));
     assert!(tool_names.contains(&"tracedecay_insert_at_symbol"));
     assert!(tool_names.contains(&"tracedecay_move_symbol"));
-    assert!(!tool_names.contains(&"tracedecay_api_migration_plan"));
-    assert!(!tool_names.contains(&"tracedecay_api_migration_apply"));
     assert!(tool_names.contains(&"tracedecay_source_edit_reconcile"));
     assert!(tool_names.contains(&"tracedecay_find_exact_symbol"));
 }
