@@ -36,6 +36,8 @@ pub(crate) const SOURCE_GENERATION_PROPERTY: &str = "__tracedecay_graph_db_sourc
 pub(crate) const WATERMARK_PROPERTY: &str = "__tracedecay_graph_db_watermark";
 pub(crate) const DIGEST_PROPERTY: &str = "__tracedecay_graph_db_digest";
 pub(crate) const PUBLICATION_DIGEST_PROPERTY: &str = "__tracedecay_graph_db_publication_digest";
+pub(crate) const PUBLICATION_INPUT_DIGEST_PROPERTY: &str =
+    "__tracedecay_graph_db_publication_input_digest";
 pub(crate) const IDEMPOTENCY_KEY_PROPERTY: &str = "__tracedecay_graph_db_idempotency_key";
 pub(crate) const COMMIT_SEQUENCE_PROPERTY: &str = "__tracedecay_graph_db_commit_sequence";
 
@@ -381,6 +383,7 @@ pub(crate) fn publication_properties(
     namespace: &GraphNamespace,
     key: &GraphIdempotencyKey,
     publication_digest: &str,
+    input_digest: &str,
     commit: &GraphCommit,
 ) -> Result<Vec<(String, Value)>, GraphDbError> {
     let mut properties = vec![
@@ -399,6 +402,10 @@ pub(crate) fn publication_properties(
         (
             PUBLICATION_DIGEST_PROPERTY.to_owned(),
             Value::from(publication_digest),
+        ),
+        (
+            PUBLICATION_INPUT_DIGEST_PROPERTY.to_owned(),
+            Value::from(input_digest),
         ),
     ];
     properties.extend(commit_properties(commit)?);

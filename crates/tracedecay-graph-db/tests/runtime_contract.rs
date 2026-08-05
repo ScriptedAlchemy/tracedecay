@@ -5,14 +5,18 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
-    GraphEntity, GraphEntityId, GraphFormatVersion, GraphIdempotencyKey, GraphLabel, GraphMutation,
-    GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphPublication,
-    GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphVector,
+    GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity, GraphEntityId,
+    GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace, GraphProjectionId,
+    GraphProperty, GraphPropertyName, GraphPublication, GraphPublicationInputDigest, GraphRelation,
+    GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphVector,
     GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark, GraphWriteBatch,
     NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest, VectorMetric,
     VectorSearchRequest,
 };
+
+mod support;
+
+use support::{RegisteredGraph, graph_path};
 
 #[derive(Debug)]
 struct Cancelled;
@@ -72,14 +76,20 @@ fn watermark(value: &str) -> GraphWatermark {
     GraphWatermark::new(value).unwrap()
 }
 
-fn memory_db() -> GraphDb {
-    GraphDb::open(GraphDbOpenOptions {
-        location: GraphDbLocation::Memory,
-        expected_format: GraphFormatVersion::new(2).unwrap(),
-        durability: GraphDurability::Memory,
-        cancellation: live(),
-    })
-    .unwrap()
+fn memory_db() -> Arc<GraphDb> {
+    GraphDbOwner::memory(live()).unwrap().handle()
+}
+
+#[test]
+fn only_the_owner_can_close_shared_operation_handles() {
+    let owner = GraphDbOwner::memory(live()).unwrap();
+    let handle = owner.handle();
+    let peer = handle.clone();
+
+    assert!(handle.snapshot().is_ok());
+    owner.close().unwrap();
+    assert_eq!(handle.snapshot().unwrap_err(), GraphDbError::Closed);
+    assert_eq!(peer.snapshot().unwrap_err(), GraphDbError::Closed);
 }
 
 fn entity(value: &str) -> GraphEntity {
@@ -188,13 +198,7 @@ fn opens_memory_and_accepts_exact_format() {
 
 #[test]
 fn open_honors_cancellation() {
-    let error = GraphDb::open(GraphDbOpenOptions {
-        location: GraphDbLocation::Memory,
-        expected_format: GraphFormatVersion::new(2).unwrap(),
-        durability: GraphDurability::Memory,
-        cancellation: Arc::new(Cancelled),
-    })
-    .unwrap_err();
+    let error = GraphDbOwner::memory(Arc::new(Cancelled)).unwrap_err();
     assert_eq!(error, GraphDbError::Cancelled);
 }
 
@@ -279,37 +283,6 @@ fn apply_rechecks_cancellation_immediately_before_commit() {
 }
 
 #[test]
-fn rejects_persistent_path_without_grafeo_extension() {
-    let temp = TempDir::new().unwrap();
-    let error = GraphDb::open(GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(temp.path().join("graph.db")),
-        expected_format: GraphFormatVersion::new(2).unwrap(),
-        durability: GraphDurability::Sync,
-        cancellation: live(),
-    })
-    .unwrap_err();
-    assert!(matches!(error, GraphDbError::InvalidRequest { .. }));
-}
-
-#[test]
-fn cancellation_after_file_creation_leaves_reopenable_initialized_store() {
-    let temp = TempDir::new().unwrap();
-    let path = temp.path().join("graph.grafeo");
-    let error = GraphDb::open(GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(path.clone()),
-        expected_format: GraphFormatVersion::new(2).unwrap(),
-        durability: GraphDurability::Sync,
-        cancellation: Arc::new(CancelOnPoll::new(2)),
-    })
-    .unwrap_err();
-    assert_eq!(error, GraphDbError::Cancelled);
-    GraphDb::open(persistent_options(path))
-        .unwrap()
-        .close()
-        .unwrap();
-}
-
-#[test]
 fn invalid_late_mutation_rolls_back_whole_batch_and_sequence() {
     let db = memory_db();
     let error = db
@@ -380,7 +353,7 @@ fn snapshot_is_immutable_after_live_write() {
 
 #[test]
 fn traversal_is_deterministic_across_mutation_order() {
-    fn populated(order: [&str; 2]) -> GraphDb {
+    fn populated(order: [&str; 2]) -> Arc<GraphDb> {
         let db = memory_db();
         let mut mutations = vec![
             GraphMutation::UpsertEntity(entity("a")),
@@ -1032,6 +1005,8 @@ fn publication(key: &str, expected: Option<&str>) -> GraphPublication {
     GraphPublication {
         namespace: namespace(),
         idempotency_key: GraphIdempotencyKey::new(key).unwrap(),
+        input_digest: GraphPublicationInputDigest::new(format!("sha256:{}", "a".repeat(64)))
+            .unwrap(),
         source_generation: generation("g1"),
         expected_watermark: expected.map(watermark),
         next_watermark: watermark("w1"),
@@ -1088,8 +1063,40 @@ fn invalid_projection_replacement_preserves_prior_graph() {
 fn publication_replay_returns_original_commit() {
     let db = memory_db();
     let first = db.publish(publication("event-1", None)).unwrap();
+    let receipt = db
+        .publication_receipt(
+            &namespace(),
+            &GraphIdempotencyKey::new("event-1").unwrap(),
+            live(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.commit, first);
+    assert_eq!(receipt.digest.as_str().len(), 64);
+    assert_eq!(
+        receipt.input_digest.as_str(),
+        format!("sha256:{}", "a".repeat(64))
+    );
     let second = db.publish(publication("event-1", None)).unwrap();
     assert_eq!(first, second);
+    assert!(
+        db.publication_receipt(
+            &namespace(),
+            &GraphIdempotencyKey::new("missing-event").unwrap(),
+            live(),
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        db.publication_receipt(
+            &namespace(),
+            &GraphIdempotencyKey::new("event-1").unwrap(),
+            Arc::new(Cancelled),
+        )
+        .unwrap_err(),
+        GraphDbError::Cancelled
+    );
 }
 
 #[test]
@@ -1107,20 +1114,10 @@ fn publication_changed_input_and_stale_watermark_conflict() {
     );
 }
 
-fn persistent_options(path: std::path::PathBuf) -> GraphDbOpenOptions {
-    GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(path),
-        expected_format: GraphFormatVersion::new(2).unwrap(),
-        durability: GraphDurability::Sync,
-        cancellation: live(),
-    }
-}
-
 #[test]
 fn persistent_close_and_reopen_preserves_graph_and_vector() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("graph.grafeo");
-    let db = GraphDb::open(persistent_options(path.clone())).unwrap();
+    let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
     db.apply(batch(
         "vectors",
         "g1",
@@ -1132,9 +1129,10 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
         ],
     ))
     .unwrap();
-    db.close().unwrap();
+    drop(db);
+    registered.close().unwrap();
 
-    let reopened = GraphDb::open(persistent_options(path)).unwrap();
+    let reopened = registered.reopen().unwrap();
     assert_eq!(reopened.traverse(traversal("a")).unwrap().visits.len(), 2);
     let index = GraphVectorIndexRequest {
         namespace: namespace(),
@@ -1166,8 +1164,7 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
 #[test]
 fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("large-vector-graph.grafeo");
-    let db = GraphDb::open(persistent_options(path.clone())).unwrap();
+    let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
     let vectors = (0..2_049)
         .map(|ordinal| {
             GraphMutation::UpsertEntity(vector_entity(
@@ -1178,10 +1175,11 @@ fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
         })
         .collect();
     db.apply(batch("vectors", "g1", "w1", vectors)).unwrap();
-    db.close().unwrap();
+    drop(db);
+    registered.close().unwrap();
 
     let admission_started = Instant::now();
-    let reopened = GraphDb::open(persistent_options(path)).unwrap();
+    let reopened = registered.reopen().unwrap();
     let admission_elapsed = admission_started.elapsed();
     assert!(
         admission_elapsed < Duration::from_secs(5),
@@ -1206,8 +1204,7 @@ fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
 #[test]
 fn vector_write_after_reopen_leaves_index_activation_to_background_owner() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("background-vector-index.grafeo");
-    let db = GraphDb::open(persistent_options(path.clone())).unwrap();
+    let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
     db.apply(batch(
         "vectors",
         "g1",
@@ -1219,9 +1216,10 @@ fn vector_write_after_reopen_leaves_index_activation_to_background_owner() {
         ))],
     ))
     .unwrap();
-    db.close().unwrap();
+    drop(db);
+    registered.close().unwrap();
 
-    let reopened = GraphDb::open(persistent_options(path)).unwrap();
+    let reopened = registered.reopen().unwrap();
     let index = GraphVectorIndexRequest {
         namespace: namespace(),
         projection: projection("vectors"),
@@ -1269,11 +1267,11 @@ fn vector_write_after_reopen_leaves_index_activation_to_background_owner() {
 #[test]
 fn publication_state_survives_reopen() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("graph.grafeo");
-    let db = GraphDb::open(persistent_options(path.clone())).unwrap();
+    let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
     let first = db.publish(publication("event-1", None)).unwrap();
-    db.close().unwrap();
-    let reopened = GraphDb::open(persistent_options(path)).unwrap();
+    drop(db);
+    registered.close().unwrap();
+    let reopened = registered.reopen().unwrap();
     assert_eq!(
         reopened.publish(publication("event-1", None)).unwrap(),
         first
@@ -1283,7 +1281,8 @@ fn publication_state_survives_reopen() {
 #[test]
 fn valid_foreign_grafeo_store_requires_reset() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("graph.grafeo");
+    std::fs::create_dir(temp.path().join("graph")).unwrap();
+    let path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
             .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
@@ -1291,14 +1290,15 @@ fn valid_foreign_grafeo_store_requires_reset() {
     .unwrap();
     raw.session().create_node(&["foreign"]);
     raw.close().unwrap();
-    let error = GraphDb::open(persistent_options(path)).unwrap_err();
+    let error = RegisteredGraph::open(temp.path()).err().unwrap();
     assert!(matches!(error, GraphDbError::ResetRequired { .. }));
 }
 
 #[test]
 fn wrong_tracedecay_format_requires_reset() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("graph.grafeo");
+    std::fs::create_dir(temp.path().join("graph")).unwrap();
+    let path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
             .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
@@ -1311,14 +1311,15 @@ fn wrong_tracedecay_format_requires_reset() {
         )
         .unwrap();
     raw.close().unwrap();
-    let error = GraphDb::open(persistent_options(path)).unwrap_err();
+    let error = RegisteredGraph::open(temp.path()).err().unwrap();
     assert!(matches!(error, GraphDbError::ResetRequired { .. }));
 }
 
 #[test]
 fn closed_handle_fails_typed() {
-    let db = memory_db();
-    db.close().unwrap();
+    let owner = GraphDbOwner::memory(live()).unwrap();
+    let db = owner.handle();
+    owner.close().unwrap();
     assert_eq!(
         db.apply(batch("code", "g1", "w1", Vec::new())).unwrap_err(),
         GraphDbError::Closed

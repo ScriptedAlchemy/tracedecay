@@ -17,6 +17,11 @@ pub enum GraphDbLocation {
 pub struct GraphFormatVersion(u32);
 
 impl GraphFormatVersion {
+    #[must_use]
+    pub const fn current() -> Self {
+        Self(2)
+    }
+
     pub fn new(value: u32) -> Result<Self, GraphDbError> {
         if value == 0 {
             return Err(GraphDbError::invalid(

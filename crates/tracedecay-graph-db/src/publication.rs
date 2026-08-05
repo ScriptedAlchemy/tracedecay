@@ -4,14 +4,80 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    GraphCancellation, GraphDbError, GraphIdempotencyKey, GraphNamespace, GraphWatermark,
-    GraphWriteBatch, SourceGeneration,
+    GraphCancellation, GraphCommit, GraphDbError, GraphIdempotencyKey, GraphNamespace,
+    GraphWatermark, GraphWriteBatch, SourceGeneration,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphPublicationDigest(String);
+
+impl GraphPublicationDigest {
+    pub(crate) fn from_persisted(value: String) -> Result<Self, GraphDbError> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(GraphDbError::Corrupt {
+                message: "publication digest is not a canonical SHA-256 digest".to_owned(),
+            });
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphPublicationInputDigest(String);
+
+impl GraphPublicationInputDigest {
+    pub fn new(value: impl Into<String>) -> Result<Self, GraphDbError> {
+        let value = value.into();
+        let Some(hex) = value.strip_prefix("sha256:") else {
+            return Err(GraphDbError::invalid(
+                "publication input digest must use the sha256 scheme",
+            ));
+        };
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(GraphDbError::invalid(
+                "publication input digest must contain 64 lowercase hexadecimal characters",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn from_persisted(value: String) -> Result<Self, GraphDbError> {
+        Self::new(value).map_err(|error| GraphDbError::Corrupt {
+            message: format!("persisted publication input digest is invalid: {error}"),
+        })
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphPublicationReceipt {
+    pub digest: GraphPublicationDigest,
+    pub input_digest: GraphPublicationInputDigest,
+    pub commit: GraphCommit,
+}
 
 #[derive(Clone)]
 pub struct GraphPublication {
     pub namespace: GraphNamespace,
     pub idempotency_key: GraphIdempotencyKey,
+    pub input_digest: GraphPublicationInputDigest,
     pub source_generation: SourceGeneration,
     pub expected_watermark: Option<GraphWatermark>,
     pub next_watermark: GraphWatermark,
@@ -25,6 +91,7 @@ impl fmt::Debug for GraphPublication {
             .debug_struct("GraphPublication")
             .field("namespace", &self.namespace)
             .field("idempotency_key", &self.idempotency_key)
+            .field("input_digest", &self.input_digest)
             .field("source_generation", &self.source_generation)
             .field("expected_watermark", &self.expected_watermark)
             .field("next_watermark", &self.next_watermark)
@@ -50,6 +117,7 @@ impl GraphPublication {
         let canonical = serde_json::to_vec(&(
             &self.namespace,
             &self.idempotency_key,
+            &self.input_digest.as_str(),
             &self.source_generation,
             &self.expected_watermark,
             &self.next_watermark,

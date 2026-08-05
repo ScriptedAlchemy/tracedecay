@@ -1,26 +1,19 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_graph_db::{
-    GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphEntityId,
-    GraphFormatVersion, GraphNamespace, NeverCancelled,
-};
+use tracedecay_graph_db::{GraphDbError, GraphEntityId, GraphNamespace, NeverCancelled};
 
-fn persistent_options(path: std::path::PathBuf) -> GraphDbOpenOptions {
-    GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(path),
-        expected_format: GraphFormatVersion::new(2).unwrap(),
-        durability: GraphDurability::Sync,
-        cancellation: Arc::new(NeverCancelled),
-    }
-}
+mod support;
+
+use support::{RegisteredGraph, graph_path};
 
 #[test]
 fn malformed_persistent_file_is_corrupt() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("graph.grafeo");
+    std::fs::create_dir(temp.path().join("graph")).unwrap();
+    let path = graph_path(temp.path());
     std::fs::write(&path, b"not a grafeo database").unwrap();
-    let error = GraphDb::open(persistent_options(path)).unwrap_err();
+    let error = RegisteredGraph::open(temp.path()).err().unwrap();
     assert!(
         matches!(error, GraphDbError::Corrupt { .. }),
         "unexpected error: {error:?}"
@@ -30,9 +23,14 @@ fn malformed_persistent_file_is_corrupt() {
 #[test]
 fn lock_contention_is_unavailable_not_corrupt() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("graph.grafeo");
-    let first = GraphDb::open(persistent_options(path.clone())).unwrap();
-    let error = GraphDb::open(persistent_options(path)).unwrap_err();
+    std::fs::create_dir(temp.path().join("graph")).unwrap();
+    let path = graph_path(temp.path());
+    let first = grafeo_engine::GrafeoDB::with_config(
+        grafeo_engine::Config::persistent(&path)
+            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
+    )
+    .unwrap();
+    let error = RegisteredGraph::open(temp.path()).err().unwrap();
     assert!(matches!(error, GraphDbError::Unavailable { .. }));
     first.close().unwrap();
 }
@@ -40,7 +38,8 @@ fn lock_contention_is_unavailable_not_corrupt() {
 #[test]
 fn persisted_scalar_identity_mismatch_is_corrupt_on_point_read() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("graph.grafeo");
+    std::fs::create_dir(temp.path().join("graph")).unwrap();
+    let path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
             .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
@@ -76,7 +75,7 @@ fn persisted_scalar_identity_mismatch_is_corrupt_on_point_read() {
         .unwrap();
     session.commit().unwrap();
     raw.close().unwrap();
-    let db = GraphDb::open(persistent_options(path)).unwrap();
+    let (_, db) = RegisteredGraph::open(temp.path()).unwrap();
     assert!(matches!(
         db.entity(
             &GraphNamespace::new("workspace").unwrap(),

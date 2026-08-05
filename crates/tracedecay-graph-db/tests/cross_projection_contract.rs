@@ -3,12 +3,15 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphDb, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphEntity, GraphEntityId,
-    GraphFormatVersion, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
-    GraphPublication, GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
-    GraphWatermark, GraphWriteBatch, NeverCancelled, ProjectionReplacement, SourceGeneration,
-    TraversalRequest,
+    GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphNamespace,
+    GraphProjectionId, GraphPublication, GraphPublicationInputDigest, GraphRelation,
+    GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch,
+    NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
 };
+
+mod support;
+
+use support::RegisteredGraph;
 
 fn identity(value: &str) -> GraphEntityId {
     GraphEntityId::new(value).unwrap()
@@ -75,14 +78,7 @@ fn visit_identities(
 #[test]
 fn replacing_entity_owner_preserves_foreign_edge_in_live_snapshot_and_reopen() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("cross-projection.grafeo");
-    let options = || GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(path.clone()),
-        expected_format: GraphFormatVersion::new(2).unwrap(),
-        durability: GraphDurability::Sync,
-        cancellation: Arc::new(NeverCancelled),
-    };
-    let db = GraphDb::open(options()).unwrap();
+    let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
     db.apply(batch(
         "facts",
         "facts-g1",
@@ -123,8 +119,9 @@ fn replacing_entity_owner_preserves_foreign_edge_in_live_snapshot_and_reopen() {
         expected
     );
     drop(snapshot);
-    db.close().unwrap();
-    let reopened = GraphDb::open(options()).unwrap();
+    drop(db);
+    registered.close().unwrap();
+    let reopened = registered.reopen().unwrap();
     assert_eq!(
         visit_identities(reopened.traverse(traversal("source")).unwrap()),
         expected
@@ -134,14 +131,7 @@ fn replacing_entity_owner_preserves_foreign_edge_in_live_snapshot_and_reopen() {
 #[test]
 fn direct_apply_delete_then_upsert_preserves_foreign_edge_through_reopen() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("apply-cross-projection.grafeo");
-    let options = || GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(path.clone()),
-        expected_format: GraphFormatVersion::new(2).unwrap(),
-        durability: GraphDurability::Sync,
-        cancellation: Arc::new(NeverCancelled),
-    };
-    let db = GraphDb::open(options()).unwrap();
+    let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
     db.apply(batch(
         "facts",
         "facts-g1",
@@ -182,8 +172,9 @@ fn direct_apply_delete_then_upsert_preserves_foreign_edge_through_reopen() {
         expected
     );
     drop(snapshot);
-    db.close().unwrap();
-    let reopened = GraphDb::open(options()).unwrap();
+    drop(db);
+    registered.close().unwrap();
+    let reopened = registered.reopen().unwrap();
     assert_eq!(
         visit_identities(reopened.traverse(traversal("source")).unwrap()),
         expected
@@ -193,14 +184,7 @@ fn direct_apply_delete_then_upsert_preserves_foreign_edge_through_reopen() {
 #[test]
 fn publish_delete_then_upsert_preserves_foreign_edge_through_reopen() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("publish-cross-projection.grafeo");
-    let options = || GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(path.clone()),
-        expected_format: GraphFormatVersion::new(2).unwrap(),
-        durability: GraphDurability::Sync,
-        cancellation: Arc::new(NeverCancelled),
-    };
-    let db = GraphDb::open(options()).unwrap();
+    let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
     db.apply(batch(
         "facts",
         "facts-g1",
@@ -231,6 +215,8 @@ fn publish_delete_then_upsert_preserves_foreign_edge_through_reopen() {
     db.publish(GraphPublication {
         namespace: GraphNamespace::new("workspace").unwrap(),
         idempotency_key: GraphIdempotencyKey::new("facts-event-g2").unwrap(),
+        input_digest: GraphPublicationInputDigest::new(format!("sha256:{}", "a".repeat(64)))
+            .unwrap(),
         source_generation: SourceGeneration::new("facts-g2").unwrap(),
         expected_watermark: Some(GraphWatermark::new("facts-w1").unwrap()),
         next_watermark: GraphWatermark::new("facts-w2").unwrap(),
@@ -250,8 +236,9 @@ fn publish_delete_then_upsert_preserves_foreign_edge_through_reopen() {
         expected
     );
     drop(snapshot);
-    db.close().unwrap();
-    let reopened = GraphDb::open(options()).unwrap();
+    drop(db);
+    registered.close().unwrap();
+    let reopened = registered.reopen().unwrap();
     assert_eq!(
         visit_identities(reopened.traverse(traversal("source")).unwrap()),
         expected

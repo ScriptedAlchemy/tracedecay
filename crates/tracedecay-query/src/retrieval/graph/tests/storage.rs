@@ -1,4 +1,14 @@
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use tempfile::TempDir;
+use tracedecay_graph_db::{
+    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, NeverCancelled,
+};
+use tracedecay_store::{
+    BrainId, LocatorDigest, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+};
 
 use super::*;
 
@@ -30,9 +40,33 @@ fn graph_projection_reopens_with_identical_ordered_output() {
     let cancellation =
         CancellationSignal::active("cancellation.code-graph.reopen").expect("valid token");
     let temp = TempDir::new().expect("temporary graph directory");
-    let path = temp.path().join("code.grafeo");
-    let store =
-        CodeGraphProjectionStore::open(&path, &cancellation).expect("open persistent graph");
+    let registry =
+        GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).expect("valid registry");
+    let binding = StoreRuntimeBindingV1::new(
+        StoreShardIdV1::project(
+            BrainId::try_from("brain.query-test".to_owned()).expect("valid brain"),
+            UserProfileId::try_from("profile.query-test".to_owned()).expect("valid profile"),
+            ProjectId::try_from("project.query-test".to_owned()).expect("valid project"),
+        ),
+        StoreIncarnationV1::new(1).expect("valid incarnation"),
+        StoreAuthorityEpochV1::new(1).expect("valid epoch"),
+    );
+    let registration = GraphDbRegistration {
+        verified_locator: VerifiedStoreLocatorV1::new(
+            binding.shard_id.clone(),
+            binding.incarnation,
+            LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).expect("valid locator digest"),
+        ),
+        binding: binding.clone(),
+        store_root: temp.path().to_path_buf(),
+        cancellation: Arc::new(NeverCancelled),
+        lifecycle_cancellation: Arc::new(NeverCancelled),
+        deadline: Instant::now() + Duration::from_secs(30),
+    };
+    let database = registry
+        .resolve(registration.clone())
+        .expect("open persistent graph");
+    let store = CodeGraphProjectionStore::from_graph_db(database);
     publish_projection(
         &store,
         &request,
@@ -40,10 +74,16 @@ fn graph_projection_reopens_with_identical_ordered_output() {
         &["symbol.seed", "symbol.middle", "symbol.target"],
     );
     let before = read_projection(&store, &request, &cancellation);
-    store.close().expect("close persistent graph");
+    drop(store);
+    registry
+        .close(&registration)
+        .expect("close persistent graph");
 
-    let reopened =
-        CodeGraphProjectionStore::open(&path, &cancellation).expect("reopen persistent graph");
+    let reopened = CodeGraphProjectionStore::from_graph_db(
+        registry
+            .reopen(registration)
+            .expect("reopen persistent graph"),
+    );
     let after = read_projection(&reopened, &request, &cancellation);
 
     assert_eq!(after, before);

@@ -7,11 +7,11 @@ use grafeo_engine::GrafeoDB;
 use crate::schema::{
     COMMIT_SEQUENCE_PROPERTY, DIGEST_PROPERTY, ENTITY_ID_PROPERTY, ENTITY_LABEL, FORMAT_LABEL,
     IDEMPOTENCY_KEY_PROPERTY, NAMESPACE_PROPERTY, PROJECTION_LABEL, PROJECTION_PROPERTY,
-    PUBLICATION_DIGEST_PROPERTY, PUBLICATION_LABEL, RELATION_EDGE_PROPERTY, RELATION_LABEL,
-    SEQUENCE_PROPERTY, SOURCE_GENERATION_PROPERTY, WATERMARK_PROPERTY, decode_entity,
-    decode_relation, entity_key_label, entity_projection_label, projection_state_label,
-    publication_key_label, relation_edge_label, relation_key_label, relation_projection_label,
-    required_i64, required_string,
+    PUBLICATION_DIGEST_PROPERTY, PUBLICATION_INPUT_DIGEST_PROPERTY, PUBLICATION_LABEL,
+    RELATION_EDGE_PROPERTY, RELATION_LABEL, SEQUENCE_PROPERTY, SOURCE_GENERATION_PROPERTY,
+    WATERMARK_PROPERTY, decode_entity, decode_relation, entity_key_label, entity_projection_label,
+    projection_state_label, publication_key_label, relation_edge_label, relation_key_label,
+    relation_projection_label, required_i64, required_string,
 };
 use crate::{
     GraphCommit, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphNamespace,
@@ -37,6 +37,7 @@ pub(crate) struct StoredRelation {
 #[derive(Clone, Debug)]
 pub(crate) struct StoredPublication {
     pub(crate) digest: String,
+    pub(crate) input_digest: String,
     pub(crate) commit: GraphCommit,
 }
 
@@ -353,6 +354,10 @@ pub(crate) fn publication(
         digest: required_string(
             record.get_property(PUBLICATION_DIGEST_PROPERTY),
             "publication digest",
+        )?,
+        input_digest: required_string(
+            record.get_property(PUBLICATION_INPUT_DIGEST_PROPERTY),
+            "publication input digest",
         )?,
         commit: decode_commit(&record)?,
     }))

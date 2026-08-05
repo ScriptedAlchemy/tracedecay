@@ -3,7 +3,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::path::Path;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -16,18 +15,16 @@ use tracedecay_domain::{
     RepositoryId, SourceFreshness, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
-    GraphEntity, GraphEntityId, GraphFormatVersion, GraphLabel, GraphNamespace, GraphProjectionId,
-    GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphSnapshot, GraphTraversalDirection, GraphWatermark, NeverCancelled, ProjectionReplacement,
-    SourceGeneration, TraversalRequest,
+    GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity, GraphEntityId, GraphLabel,
+    GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphRelation,
+    GraphRelationId, GraphRelationKind, GraphSnapshot, GraphTraversalDirection, GraphWatermark,
+    NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
 };
 
 mod traversal;
 
 use self::traversal::{FrontierPath, admit_frontier_path, best_frontier_path, compare_paths};
 
-const GRAPH_FORMAT_VERSION: u32 = 2;
 const CODE_NAMESPACE: &str = "code-graph";
 const CODE_PROJECTION: &str = "code-generation";
 const CURRENT_GENERATION_ENTITY: &str = "code-current-generation";
@@ -50,6 +47,8 @@ pub enum CodeGraphProjectionError {
     Cancelled,
     #[error("code graph operation budget exhausted")]
     BudgetExhausted,
+    #[error("code graph operation deadline exceeded")]
+    DeadlineExceeded,
     #[error("code graph database conflict")]
     Conflict,
     #[error("code graph database reset required: {0}")]
@@ -71,6 +70,7 @@ impl From<GraphDbError> for CodeGraphProjectionError {
             GraphDbError::InvalidRequest { message } => Self::Contract(message),
             GraphDbError::Conflict => Self::Conflict,
             GraphDbError::BudgetExhausted => Self::BudgetExhausted,
+            GraphDbError::DeadlineExceeded => Self::DeadlineExceeded,
             GraphDbError::ResetRequired { message } => Self::ResetRequired(message),
             GraphDbError::Corrupt { message } => Self::Corrupt(message),
             GraphDbError::Unavailable { message } => Self::Unavailable(message),
@@ -128,7 +128,8 @@ pub trait CodeGraphProjectionPublisher {
 
 #[derive(Clone)]
 pub struct CodeGraphProjectionStore {
-    database: GraphDb,
+    database: Arc<GraphDb>,
+    _owner: Option<Arc<GraphDbOwner>>,
 }
 
 impl fmt::Debug for CodeGraphProjectionStore {
@@ -140,37 +141,27 @@ impl fmt::Debug for CodeGraphProjectionStore {
 }
 
 impl CodeGraphProjectionStore {
+    #[must_use]
+    pub fn from_graph_db(database: Arc<GraphDb>) -> Self {
+        Self {
+            database,
+            _owner: None,
+        }
+    }
+
     pub fn memory(cancellation: &CancellationSignal) -> Result<Self, CodeGraphProjectionError> {
-        Self::open_location(
-            GraphDbLocation::Memory,
-            GraphDurability::Memory,
-            application_cancellation(cancellation),
-        )
+        Self::open_memory(application_cancellation(cancellation))
     }
 
-    pub fn open(
-        path: &Path,
-        cancellation: &CancellationSignal,
-    ) -> Result<Self, CodeGraphProjectionError> {
-        Self::open_location(
-            GraphDbLocation::Persistent(path.to_path_buf()),
-            GraphDurability::Sync,
-            application_cancellation(cancellation),
-        )
-    }
-
-    fn open_location(
-        location: GraphDbLocation,
-        durability: GraphDurability,
+    fn open_memory(
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Self, CodeGraphProjectionError> {
-        let database = GraphDb::open(GraphDbOpenOptions {
-            location,
-            expected_format: GraphFormatVersion::new(GRAPH_FORMAT_VERSION)?,
-            durability,
-            cancellation,
-        })?;
-        Ok(Self { database })
+        let owner = Arc::new(GraphDbOwner::memory(cancellation)?);
+        let database = owner.handle();
+        Ok(Self {
+            database,
+            _owner: Some(owner),
+        })
     }
 
     pub fn evidence_reader(
@@ -198,10 +189,6 @@ impl CodeGraphProjectionStore {
             projection_node_count: current.projection_node_count,
             cancellation,
         })
-    }
-
-    pub fn close(&self) -> Result<(), CodeGraphProjectionError> {
-        self.database.close().map_err(Into::into)
     }
 
     fn publish_with_cancellation(
@@ -277,11 +264,7 @@ impl CodeGraphEvidenceReader {
         chunks: &[CodeSearchChunkV1],
     ) -> Result<Self, CodeGraphProjectionError> {
         let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
-        let store = CodeGraphProjectionStore::open_location(
-            GraphDbLocation::Memory,
-            GraphDurability::Memory,
-            Arc::clone(&cancellation),
-        )?;
+        let store = CodeGraphProjectionStore::open_memory(Arc::clone(&cancellation))?;
         store.publish_with_cancellation(&generation, edges, chunks, Arc::clone(&cancellation))?;
         validate_reader_metadata(repository_id.as_ref(), &freshness)?;
         let snapshot = Arc::new(store.database.snapshot()?);

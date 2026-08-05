@@ -18,17 +18,21 @@ use crate::state::{
     FormatState, latest_projection, projection_entities, projection_relations, publication,
 };
 use crate::{
-    GraphCancellation, GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability,
-    GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
-    GraphProperty, GraphPublication, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWriteBatch, ProjectionReplacement,
-    TraversalRequest, TraversalResult, VectorSearchRequest, VectorSearchResult, mutation,
-    traversal, vector,
+    GraphCancellation, GraphCommit, GraphDbError, GraphDbLocation, GraphDbOpenOptions,
+    GraphDurability, GraphEntityId, GraphFormatVersion, GraphIdempotencyKey, GraphMutation,
+    GraphNamespace, GraphProjectionId, GraphProperty, GraphPublication, GraphPublicationDigest,
+    GraphPublicationInputDigest, GraphPublicationReceipt, GraphRelation, GraphRelationId,
+    GraphRelationKind, GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWriteBatch,
+    ProjectionReplacement, TraversalRequest, TraversalResult, VectorSearchRequest,
+    VectorSearchResult, mutation, traversal, vector,
 };
 
-#[derive(Clone)]
 pub struct GraphDb {
     pub(crate) inner: Arc<Inner>,
+}
+
+pub struct GraphDbOwner {
+    database: Arc<GraphDb>,
 }
 
 pub(crate) struct Inner {
@@ -41,8 +45,15 @@ pub(crate) struct Inner {
 }
 
 pub struct GraphSnapshot {
-    pub(crate) database: GraphDb,
+    pub(crate) database: Arc<GraphDb>,
     _lease: ArcRwLockReadGuard<RawRwLock, ()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphDbRuntimeState {
+    Ready,
+    Closed,
+    DurabilityUncertain,
 }
 
 impl std::fmt::Debug for GraphDb {
@@ -55,6 +66,15 @@ impl std::fmt::Debug for GraphDb {
     }
 }
 
+impl std::fmt::Debug for GraphDbOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GraphDbOwner")
+            .field("state", &self.runtime_state())
+            .finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Debug for GraphSnapshot {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -63,18 +83,51 @@ impl std::fmt::Debug for GraphSnapshot {
     }
 }
 
+impl GraphDbOwner {
+    pub fn memory(cancellation: Arc<dyn GraphCancellation>) -> Result<Self, GraphDbError> {
+        Self::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Memory,
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::Memory,
+            cancellation,
+        })
+    }
+
+    pub(crate) fn open(options: GraphDbOpenOptions) -> Result<Self, GraphDbError> {
+        GraphDb::open(options).map(|database| Self { database })
+    }
+
+    #[must_use]
+    pub fn handle(&self) -> Arc<GraphDb> {
+        Arc::clone(&self.database)
+    }
+
+    #[must_use]
+    pub fn runtime_state(&self) -> GraphDbRuntimeState {
+        self.database.runtime_state()
+    }
+
+    pub fn close(&self) -> Result<(), GraphDbError> {
+        self.database.close()
+    }
+
+    pub(crate) fn is_unleased(&self) -> bool {
+        Arc::strong_count(&self.database) == 1
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.database.inner.closed.load(Ordering::Acquire)
+    }
+}
+
 impl GraphDb {
-    pub fn open(options: GraphDbOpenOptions) -> Result<Self, GraphDbError> {
-        let cancellation = Arc::clone(&options.cancellation);
+    fn open(options: GraphDbOpenOptions) -> Result<Arc<Self>, GraphDbError> {
         let validated = options.validate()?;
         let database = GrafeoDB::with_config(validated.config.clone())
             .map_err(|error| map_open_error(error, validated.preexisting_file))?;
         validate_or_initialize_format(&database, &validated)?;
         let state = FormatState::load(&database)?;
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        Ok(Self {
+        Ok(Arc::new(Self {
             inner: Arc::new(Inner {
                 database: RwLock::new(Some(database)),
                 state: RwLock::new(state),
@@ -83,16 +136,27 @@ impl GraphDb {
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
-        })
+        }))
     }
 
-    pub fn snapshot(&self) -> Result<GraphSnapshot, GraphDbError> {
+    #[must_use]
+    pub fn runtime_state(&self) -> GraphDbRuntimeState {
+        if self.inner.poisoned.load(Ordering::Acquire) {
+            GraphDbRuntimeState::DurabilityUncertain
+        } else if self.inner.closed.load(Ordering::Acquire) {
+            GraphDbRuntimeState::Closed
+        } else {
+            GraphDbRuntimeState::Ready
+        }
+    }
+
+    pub fn snapshot(self: &Arc<Self>) -> Result<GraphSnapshot, GraphDbError> {
         let lease = self.inner.snapshot_gate.read_arc();
         let guard = self.read_guard()?;
         guard.as_ref().ok_or(GraphDbError::Closed)?;
         drop(guard);
         Ok(GraphSnapshot {
-            database: self.clone(),
+            database: Arc::clone(self),
             _lease: lease,
         })
     }
@@ -202,7 +266,11 @@ impl GraphDb {
         if current.as_ref() != publication_request.expected_watermark.as_ref() {
             return Err(GraphDbError::Conflict);
         }
-        let publication_record = (publication_request.idempotency_key, publication_digest);
+        let publication_record = (
+            publication_request.idempotency_key,
+            publication_digest,
+            publication_request.input_digest.as_str().to_owned(),
+        );
         let mut state = self.state_write_guard()?;
         self.apply_locked(
             database,
@@ -211,6 +279,31 @@ impl GraphDb {
             batch_digest,
             Some(publication_record),
         )
+    }
+
+    pub fn publication_receipt(
+        &self,
+        namespace: &GraphNamespace,
+        idempotency_key: &GraphIdempotencyKey,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<GraphPublicationReceipt>, GraphDbError> {
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        publication(database, namespace, idempotency_key)?
+            .map(|stored| {
+                Ok(GraphPublicationReceipt {
+                    digest: GraphPublicationDigest::from_persisted(stored.digest)?,
+                    input_digest: GraphPublicationInputDigest::from_persisted(stored.input_digest)?,
+                    commit: stored.commit,
+                })
+            })
+            .transpose()
     }
 
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
@@ -344,13 +437,15 @@ impl GraphDb {
         Ok(GraphVectorIndexStatus::Available)
     }
 
-    pub fn close(&self) -> Result<(), GraphDbError> {
+    fn close(&self) -> Result<(), GraphDbError> {
         let _snapshot_gate = self.inner.snapshot_gate.write();
-        if self.inner.poisoned.load(Ordering::Acquire) {
-            return Err(durability_uncertain());
-        }
+        let was_uncertain = self.inner.poisoned.load(Ordering::Acquire);
         if self.inner.closed.swap(true, Ordering::AcqRel) {
-            return Ok(());
+            return if was_uncertain {
+                Err(durability_uncertain())
+            } else {
+                Ok(())
+            };
         }
         let mut guard = self
             .inner
@@ -358,7 +453,11 @@ impl GraphDb {
             .write()
             .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         let Some(database) = guard.take() else {
-            return Ok(());
+            return if was_uncertain {
+                Err(durability_uncertain())
+            } else {
+                Ok(())
+            };
         };
         if let Err(error) = database.close() {
             self.inner.poisoned.store(true, Ordering::Release);
@@ -366,7 +465,11 @@ impl GraphDb {
                 message: error.to_string(),
             });
         }
-        Ok(())
+        if was_uncertain {
+            Err(durability_uncertain())
+        } else {
+            Ok(())
+        }
     }
 
     fn apply_locked(
@@ -375,7 +478,7 @@ impl GraphDb {
         state: &mut FormatState,
         batch: GraphWriteBatch,
         digest: String,
-        publication_record: Option<(GraphIdempotencyKey, String)>,
+        publication_record: Option<(GraphIdempotencyKey, String, String)>,
     ) -> Result<GraphCommit, GraphDbError> {
         ensure_initial_vector_indexes(database, &batch)?;
         let vector_updates = batch
