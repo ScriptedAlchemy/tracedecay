@@ -61,7 +61,7 @@ struct AnalyticsUsageSummaryV1 {
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
-pub(super) struct AnalyticsOverviewPayloadV1 {
+pub struct AnalyticsOverviewPayloadV1 {
     available: bool,
     db: String,
     scope: String,
@@ -82,31 +82,51 @@ struct HintCounts {
 }
 
 /// `GET /api/plugins/analytics/overview`
-pub async fn overview(State(state): State<DashboardState>) -> Response {
+pub async fn overview(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<AnalyticsOverviewPayloadV1>>> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
     let observatory = Some(observatory_model(&state).await);
     let hints = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
     let usage = match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await
     {
         Ok(usage) => usage,
-        Err(response) => return response,
+        Err(error) => {
+            return Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                error,
+            ));
+        }
     };
     let agents = agent_usage_summary(state.lcm_db.as_deref()).await;
     let diagnostics = diagnostics_summary(&state, durable_events.as_deref()).await;
     let underused = underused_tool_families(state.lcm_db.as_deref()).await;
 
-    Json(AnalyticsOverviewPayloadV1 {
+    let payload = AnalyticsOverviewPayloadV1 {
         available: state.lcm_db.is_some() || durable_events.is_some(),
-        db: state.lcm_db_path,
-        scope: state.lcm_scope,
+        db: state.lcm_db_path.clone(),
+        scope: state.lcm_scope.clone(),
         hints,
         usage,
         agents,
         diagnostics,
         underused_tool_families: underused,
         observatory,
-    })
-    .into_response()
+    };
+    if payload.available {
+        Json(DashboardEnvelopeV1::ready(
+            scope_from_state(&state),
+            DashboardCoverageV1::unknown(),
+            Some(payload),
+        ))
+    } else {
+        Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            Some(payload),
+            "analytics_sources_unavailable",
+        ))
+    }
 }
 
 /// Canonical Plan 26 Observatory read model. CLI/MCP call the same application
@@ -266,7 +286,14 @@ pub async fn usage(State(state): State<DashboardState>) -> Response {
     let durable_events = durable_analytics_rows_for_state(&state).await;
     match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
         Ok(usage) => Json(usage).into_response(),
-        Err(response) => response,
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "contract_invalid",
+                "error": error,
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -697,18 +724,10 @@ fn increment_usage_count(counts: &mut BTreeMap<(String, String), i64>, kind: &st
 async fn typed_usage_summary(
     db: Option<&RegisteredGlobalDb>,
     durable_events: Option<&[Value]>,
-) -> Result<AnalyticsUsageSummaryV1, Response> {
+) -> Result<AnalyticsUsageSummaryV1, String> {
     let usage = usage_summary(db, durable_events).await;
-    serde_json::from_value::<AnalyticsUsageSummaryV1>(usage).map_err(|error| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "contract_invalid",
-                "error": format!("analytics usage summary did not match its contract: {error}"),
-            })),
-        )
-            .into_response()
-    })
+    serde_json::from_value::<AnalyticsUsageSummaryV1>(usage)
+        .map_err(|error| format!("analytics usage summary did not match its contract: {error}"))
 }
 
 async fn usage_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[Value]>) -> Value {
