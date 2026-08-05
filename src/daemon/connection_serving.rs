@@ -325,13 +325,8 @@ async fn serve_broker_socket_client(
             }
         }
         .await;
-        let cleanup = cleanup_connection_lsp_sessions(&engine.invocation, owned_lsp_sessions).await;
-        return match cleanup {
-            Ok(()) => result,
-            Err(problem) => Err(TraceDecayError::Config {
-                message: format!("LSP connection cleanup failed: {problem:?}"),
-            }),
-        };
+        cleanup_connection_lsp_sessions(&engine.invocation, owned_lsp_sessions).await;
+        return result;
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let initialized_project_server_ready =
@@ -744,13 +739,8 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             }
         }
         .await;
-        let cleanup = cleanup_connection_lsp_sessions(&invocation, owned_lsp_sessions).await;
-        return match cleanup {
-            Ok(()) => result,
-            Err(problem) => Err(TraceDecayError::Config {
-                message: format!("LSP connection cleanup failed: {problem:?}"),
-            }),
-        };
+        cleanup_connection_lsp_sessions(&invocation, owned_lsp_sessions).await;
+        return result;
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let initialized_project_server_ready =

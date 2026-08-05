@@ -601,7 +601,7 @@ impl DaemonInvocationState {
         deadline: &tracedecay_application::Deadline,
         cancellation: &tracedecay_application::CancellationContext,
         now_ms: u64,
-    ) -> Result<(), service::invocation::DaemonInvocationProblem> {
+    ) -> std::result::Result<(), service::invocation::DaemonInvocationProblem> {
         let apply = async {
             if cancellation.is_cancelled()
                 || deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
