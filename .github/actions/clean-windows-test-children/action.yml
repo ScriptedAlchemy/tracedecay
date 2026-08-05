@@ -34,6 +34,6 @@ runs:
           }
         }
         foreach ($process in $stale) {
-          Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId) command=$($process.CommandLine)"
+          Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId)"
           Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
         }
