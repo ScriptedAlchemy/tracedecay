@@ -856,6 +856,7 @@ fn message_metadata(provider: &str, entry: &Value, location_cwd: &Path) -> Value
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+    use crate::runtime::snapshot_observation::SnapshotAdmissionRecord;
 
     fn write_checked_in_native_task(tasks: &Path, project: &Path, api_filename: &str) -> PathBuf {
         let task = tasks.join("checked-in-native");
