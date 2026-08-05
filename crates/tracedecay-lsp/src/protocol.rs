@@ -207,14 +207,14 @@ where
         self.require_ready()?;
         let text_document = text_document(params)?;
         let uri = required_nonempty_string(text_document, "uri")?;
-        self.require_document_root(&uri)?;
+        let root = self.document_root(&uri)?;
         let language_id = required_nonempty_string(text_document, "languageId")?;
         let version = required_i64(text_document, "version")?;
         let text = required_string(text_document, "text")?;
         let snapshot = self
             .lifecycle
             .overlays
-            .open(uri.clone(), language_id, version, text)
+            .open(&root, uri.clone(), language_id, version, text)
             .map_err(|error| self.close_for_overlay_error(error))?;
         // A close followed by a reopen starts a new document incarnation; LSP
         // versions need not remain monotone across that boundary. Remove any

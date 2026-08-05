@@ -5995,6 +5995,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracedecay-code-extraction",
  "tracedecay-domain",
  "url",
 ]

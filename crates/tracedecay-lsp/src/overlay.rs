@@ -16,7 +16,15 @@ use crate::provider::{
     DiagnosticSnapshotPort, GenerationDiagnostics,
 };
 use crate::request_sequence::ProcessLocalRequestSequence;
-use tracedecay_domain::ContentDigest;
+use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseInputEdit, ParsePoint};
+#[cfg(test)]
+use tracedecay_code_extraction::incremental::{ParseReport, ParseReuse};
+use tracedecay_domain::{ContentDigest, ManifestDigest, canonical_sha256};
+
+mod retained_parse;
+
+use retained_parse::RetainedOverlayParse;
+pub use retained_parse::{OverlayParseState, OverlayParseUnavailable};
 
 /// A single unsaved document cannot consume more than two MiB of the daemon.
 pub const MAX_OVERLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -51,6 +59,7 @@ pub struct OverlaySnapshot {
     pub version: i64,
     pub text: String,
     pub ephemeral: bool,
+    pub parse_state: OverlayParseState,
 }
 
 /// Failure while admitting or applying an overlay update.
@@ -64,17 +73,20 @@ pub enum OverlayError {
     RangeLengthWithoutRange,
     TooManyDocuments { limit: usize },
     TooLarge { size: usize, limit: usize },
+    IdentityUnavailable,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct DocumentOverlay {
+    scope_identity: ManifestDigest,
+    document_identity: ManifestDigest,
     language_id: String,
     version: i64,
     text: String,
+    retained_parse: RetainedOverlayParse,
 }
 
 /// In-memory overlays owned by exactly one LSP client session.
-#[derive(Clone, Debug, Default)]
+#[derive(Default)]
 pub struct OverlayStore {
     documents: BTreeMap<String, DocumentOverlay>,
 }
@@ -82,6 +94,7 @@ pub struct OverlayStore {
 impl OverlayStore {
     pub fn open(
         &mut self,
+        root: &AdmittedRoot,
         uri: impl Into<String>,
         language_id: impl Into<String>,
         version: i64,
@@ -98,10 +111,33 @@ impl OverlayStore {
         }
         let text = text.into();
         ensure_size(&text)?;
+        let scope_identity = root
+            .scope_digest()
+            .cloned()
+            .map_or_else(
+                || canonical_sha256(&("tracedecay.lsp.overlay.scope.v1", root.uri())),
+                Ok,
+            )
+            .map_err(|_| OverlayError::IdentityUnavailable)?;
+        let document_identity =
+            canonical_sha256(&("tracedecay.lsp.overlay.document.v1", uri.as_str()))
+                .map_err(|_| OverlayError::IdentityUnavailable)?;
+        let language_id = language_id.into();
+        let identity = session_overlay_identity(
+            scope_identity.clone(),
+            document_identity.clone(),
+            version,
+            &text,
+            &uri,
+        );
+        let retained_parse = RetainedOverlayParse::open(identity, &language_id, &text);
         let document = DocumentOverlay {
-            language_id: language_id.into(),
+            scope_identity,
+            document_identity,
+            language_id,
             version,
             text,
+            retained_parse,
         };
         let snapshot = snapshot(&uri, &document);
         self.documents.insert(uri, document);
@@ -129,10 +165,27 @@ impl OverlayStore {
         // Apply to a temporary value so an invalid later edit cannot leave a
         // partially modified overlay behind.
         let mut text = document.text.clone();
+        let mut edits = Vec::with_capacity(changes.len());
+        let mut full_replacement = false;
         for change in changes {
-            apply_change(&mut text, change)?;
+            full_replacement |= change.range.is_none();
+            edits.push(apply_change(&mut text, change)?);
             ensure_size(&text)?;
         }
+        let next_identity = session_overlay_identity(
+            document.scope_identity.clone(),
+            document.document_identity.clone(),
+            version,
+            &text,
+            uri,
+        );
+        document.retained_parse.update(
+            next_identity,
+            &document.language_id,
+            &edits,
+            &text,
+            full_replacement,
+        );
         document.version = version;
         document.text = text;
         Ok(snapshot(uri, document))
@@ -169,16 +222,25 @@ fn snapshot(uri: &str, document: &DocumentOverlay) -> OverlaySnapshot {
         version: document.version,
         text: document.text.clone(),
         ephemeral: true,
+        parse_state: document.retained_parse.state().clone(),
     }
 }
 
-fn apply_change(text: &mut String, change: &OverlayChange) -> Result<(), OverlayError> {
+fn apply_change(text: &mut String, change: &OverlayChange) -> Result<ParseInputEdit, OverlayError> {
     let Some(range) = change.range else {
         if change.range_length.is_some() {
             return Err(OverlayError::RangeLengthWithoutRange);
         }
+        let edit = ParseInputEdit {
+            start_byte: 0,
+            old_end_byte: text.len(),
+            new_end_byte: change.text.len(),
+            start_position: ParsePoint { row: 0, column: 0 },
+            old_end_position: parse_point_at(text, text.len()),
+            new_end_position: parse_point_at(&change.text, change.text.len()),
+        };
         text.clone_from(&change.text);
-        return Ok(());
+        return Ok(edit);
     };
     let start =
         utf16_position_to_byte_offset(text, range.start).map_err(OverlayError::InvalidRange)?;
@@ -194,8 +256,60 @@ fn apply_change(text: &mut String, change: &OverlayChange) -> Result<(), Overlay
             return Err(OverlayError::InvalidRangeLength { expected, received });
         }
     }
+    let start_position = parse_point_at(text, start);
+    let edit = ParseInputEdit {
+        start_byte: start,
+        old_end_byte: end,
+        new_end_byte: start.saturating_add(change.text.len()),
+        start_position,
+        old_end_position: parse_point_at(text, end),
+        new_end_position: replacement_end_point(start_position, &change.text),
+    };
     text.replace_range(start..end, &change.text);
-    Ok(())
+    Ok(edit)
+}
+
+fn parse_point_at(text: &str, byte_offset: usize) -> ParsePoint {
+    let prefix = &text.as_bytes()[..byte_offset];
+    let row = prefix.iter().filter(|byte| **byte == b'\n').count();
+    let column = prefix
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(prefix.len(), |last_newline| {
+            prefix.len().saturating_sub(last_newline + 1)
+        });
+    ParsePoint { row, column }
+}
+
+fn replacement_end_point(start: ParsePoint, replacement: &str) -> ParsePoint {
+    let end = parse_point_at(replacement, replacement.len());
+    if end.row == 0 {
+        ParsePoint {
+            row: start.row,
+            column: start.column.saturating_add(end.column),
+        }
+    } else {
+        ParsePoint {
+            row: start.row.saturating_add(end.row),
+            column: end.column,
+        }
+    }
+}
+
+fn session_overlay_identity(
+    scope_identity: ManifestDigest,
+    document_identity: ManifestDigest,
+    version: i64,
+    text: &str,
+    logical_path: &str,
+) -> ParseDocumentIdentity {
+    ParseDocumentIdentity::SessionOverlay {
+        scope_identity,
+        document_identity,
+        version,
+        content_digest: ContentDigest::of_bytes(text.as_bytes()),
+        logical_path: logical_path.to_owned(),
+    }
 }
 
 fn ensure_size(text: &str) -> Result<(), OverlayError> {
@@ -543,11 +657,15 @@ mod tests {
         }
     }
 
+    fn admitted_root() -> AdmittedRoot {
+        AdmittedRoot::new("file:///root")
+    }
+
     #[test]
     fn incremental_edits_are_utf16_ordered_and_ephemeral() {
         let mut overlays = OverlayStore::default();
         let opened = overlays
-            .open("file:///root/a.rs", "rust", 3, "a🦀b")
+            .open(&admitted_root(), "file:///root/a.rs", "rust", 3, "a🦀b")
             .unwrap();
         assert!(opened.ephemeral);
         let changed = overlays
@@ -574,11 +692,134 @@ mod tests {
     }
 
     #[test]
+    fn ordered_utf16_changes_reuse_one_retained_tree_with_exact_input_edits() {
+        let mut overlays = OverlayStore::default();
+        let opened = overlays
+            .open(&admitted_root(), "file:///root/a.rs", "rust", 1, "a🦀b")
+            .unwrap();
+        assert!(matches!(
+            opened.parse_state,
+            OverlayParseState::Ready(ParseReport {
+                reuse: ParseReuse::Initial,
+                ..
+            })
+        ));
+
+        let changed = overlays
+            .change(
+                "file:///root/a.rs",
+                2,
+                &[
+                    OverlayChange {
+                        range: Some(range(1, 3)),
+                        range_length: Some(2),
+                        text: "cat".into(),
+                    },
+                    OverlayChange {
+                        range: Some(range(1, 4)),
+                        range_length: Some(3),
+                        text: "dog".into(),
+                    },
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(changed.text, "adogb");
+        let OverlayParseState::Ready(report) = changed.parse_state else {
+            panic!("expected retained incremental parse");
+        };
+        assert_eq!(report.reuse, ParseReuse::Incremental);
+        assert_eq!(report.metrics.input_edit_count, 2);
+        assert!(report.metrics.reused_prior_tree);
+        assert!(
+            report
+                .changed_ranges
+                .iter()
+                .all(|range| range.end_byte <= changed.text.len())
+        );
+    }
+
+    #[test]
+    fn unsupported_language_preserves_text_with_typed_parse_unavailable_state() {
+        let mut overlays = OverlayStore::default();
+        let opened = overlays
+            .open(
+                &admitted_root(),
+                "file:///root/a.txt",
+                "plaintext",
+                1,
+                "original",
+            )
+            .unwrap();
+        assert_eq!(
+            opened.parse_state,
+            OverlayParseState::Unavailable(OverlayParseUnavailable::UnsupportedLanguage)
+        );
+
+        let changed = overlays
+            .change(
+                "file:///root/a.txt",
+                2,
+                &[OverlayChange {
+                    range: None,
+                    range_length: None,
+                    text: "changed".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(changed.text, "changed");
+        assert_eq!(
+            changed.parse_state,
+            OverlayParseState::Unavailable(OverlayParseUnavailable::UnsupportedLanguage)
+        );
+    }
+
+    #[test]
+    fn full_replacement_resets_instead_of_claiming_incremental_reuse() {
+        let mut overlays = OverlayStore::default();
+        overlays
+            .open(
+                &admitted_root(),
+                "file:///root/a.rs",
+                "rust",
+                1,
+                "fn before() {}",
+            )
+            .unwrap();
+
+        let changed = overlays
+            .change(
+                "file:///root/a.rs",
+                2,
+                &[OverlayChange {
+                    range: None,
+                    range_length: None,
+                    text: "fn after() {}".into(),
+                }],
+            )
+            .unwrap();
+
+        let OverlayParseState::Ready(report) = changed.parse_state else {
+            panic!("expected retained replacement parse");
+        };
+        assert_eq!(
+            report.reuse,
+            ParseReuse::Reset {
+                reason: tracedecay_code_extraction::incremental::ParseResetReason::FullReplacement,
+            }
+        );
+        assert!(!report.metrics.reused_prior_tree);
+    }
+
+    #[test]
     fn invalid_later_change_does_not_partially_mutate_document() {
         let mut overlays = OverlayStore::default();
         overlays
-            .open("file:///root/a.rs", "rust", 1, "abc")
+            .open(&admitted_root(), "file:///root/a.rs", "rust", 1, "abc")
             .unwrap();
+        let before = overlays
+            .snapshot("file:///root/a.rs")
+            .expect("open overlay");
         let result = overlays.change(
             "file:///root/a.rs",
             2,
@@ -596,14 +837,19 @@ mod tests {
             ],
         );
         assert!(matches!(result, Err(OverlayError::InvalidRange(_))));
-        assert_eq!(overlays.snapshot("file:///root/a.rs").unwrap().text, "abc");
+        assert_eq!(
+            overlays
+                .snapshot("file:///root/a.rs")
+                .expect("retained overlay"),
+            before
+        );
     }
 
     #[test]
     fn full_replacement_rejects_range_length_without_mutating_document() {
         let mut overlays = OverlayStore::default();
         overlays
-            .open("file:///root/a.rs", "rust", 1, "abc")
+            .open(&admitted_root(), "file:///root/a.rs", "rust", 1, "abc")
             .unwrap();
         assert_eq!(
             overlays.change(
@@ -625,7 +871,7 @@ mod tests {
         let mut overlays = OverlayStore::default();
         let oversized = "x".repeat(MAX_OVERLAY_BYTES + 1);
         assert_eq!(
-            overlays.open("file:///root/a.rs", "rust", 1, oversized),
+            overlays.open(&admitted_root(), "file:///root/a.rs", "rust", 1, oversized,),
             Err(OverlayError::TooLarge {
                 size: MAX_OVERLAY_BYTES + 1,
                 limit: MAX_OVERLAY_BYTES,
@@ -638,11 +884,17 @@ mod tests {
         let mut overlays = OverlayStore::default();
         for index in 0..MAX_OPEN_DOCUMENTS {
             overlays
-                .open(format!("file:///root/{index}.rs"), "rust", 1, "")
+                .open(
+                    &admitted_root(),
+                    format!("file:///root/{index}.rs"),
+                    "rust",
+                    1,
+                    "",
+                )
                 .unwrap();
         }
         assert_eq!(
-            overlays.open("file:///root/overflow.rs", "rust", 1, ""),
+            overlays.open(&admitted_root(), "file:///root/overflow.rs", "rust", 1, "",),
             Err(OverlayError::TooManyDocuments {
                 limit: MAX_OPEN_DOCUMENTS,
             })
@@ -745,6 +997,7 @@ mod tests {
             version: 3,
             text: "fn main() {}".to_owned(),
             ephemeral: true,
+            parse_state: OverlayParseState::Unavailable(OverlayParseUnavailable::ParseFailed),
         };
         assert_eq!(
             adapter.request_document_refresh(&root, "file:///root/a.rs", Some(&overlay), None,),
