@@ -1,5 +1,6 @@
 use std::path::{Component, PathBuf};
 
+use tracedecay_application::ResolvedScope;
 use tracedecay_domain::SnapshotFileDispositionV1;
 use tracedecay_lsp::{
     AdmittedRoot, IndexedWorkspaceDocument, IndexedWorkspaceDocuments, LspRuntimeFailure,
@@ -13,17 +14,37 @@ use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 #[derive(Clone)]
 pub(super) struct PublishedCodeIndexWorkspaceDocuments {
     registry: CodeIndexSchedulerRegistryV1,
+    scope: ResolvedScope,
+    project_root: Option<PathBuf>,
+    mounted: bool,
 }
 
 impl PublishedCodeIndexWorkspaceDocuments {
-    pub(super) fn new(registry: CodeIndexSchedulerRegistryV1) -> Self {
-        Self { registry }
+    pub(super) async fn mount(
+        registry: CodeIndexSchedulerRegistryV1,
+        scope: ResolvedScope,
+        project_root: PathBuf,
+    ) -> Self {
+        let project_root = project_root.canonicalize().ok();
+        let mounted = match project_root.as_ref() {
+            Some(project_root) => registry
+                .latest_complete_ready_decoded_for_root_scope(project_root, &scope)
+                .await
+                .is_some(),
+            None => false,
+        };
+        Self {
+            registry,
+            scope,
+            project_root,
+            mounted,
+        }
     }
 }
 
 impl LspWorkspaceDocumentIndexPort for PublishedCodeIndexWorkspaceDocuments {
     fn is_mounted(&self) -> bool {
-        true
+        self.mounted
     }
 
     fn indexed_documents(
@@ -32,7 +53,18 @@ impl LspWorkspaceDocumentIndexPort for PublishedCodeIndexWorkspaceDocuments {
         maximum_documents: usize,
     ) -> LspRuntimeFuture<Result<IndexedWorkspaceDocuments, LspRuntimeFailure>> {
         let registry = self.registry.clone();
+        let scope = self.scope.clone();
+        let project_root = self.project_root.clone();
+        let mounted = self.mounted;
         Box::pin(async move {
+            if !mounted {
+                return Err(LspRuntimeFailure::new(
+                    "workspace-code-generation-unavailable",
+                ));
+            }
+            if root.scope_digest() != Some(&scope.scope_digest) {
+                return Err(LspRuntimeFailure::new("workspace-root-scope-mismatch"));
+            }
             if maximum_documents == 0 || maximum_documents > MAX_WORKSPACE_DIAGNOSTIC_RESULTS {
                 return Err(LspRuntimeFailure::new(
                     "workspace-diagnostic-document-bound-invalid",
@@ -49,10 +81,13 @@ impl LspWorkspaceDocumentIndexPort for PublishedCodeIndexWorkspaceDocuments {
                 .map_err(|()| LspRuntimeFailure::new("workspace-root-uri-invalid"))?
                 .canonicalize()
                 .map_err(|_| LspRuntimeFailure::new("workspace-root-unavailable"))?;
+            if project_root.as_ref() != Some(&root_path) {
+                return Err(LspRuntimeFailure::new("workspace-root-scope-mismatch"));
+            }
             let latest = registry
-                .latest_complete_fresh(&root_path)
+                .latest_complete_ready_decoded_for_root_scope(&root_path, &scope)
                 .await
-                .ok_or_else(|| LspRuntimeFailure::new("workspace-code-generation-unavailable"))?;
+                .ok_or_else(|| LspRuntimeFailure::new("workspace-code-generation-warming"))?;
             let generation = latest.generation();
             let snapshot = generation.snapshot();
             let mut documents = Vec::new();
