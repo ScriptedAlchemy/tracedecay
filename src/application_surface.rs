@@ -94,10 +94,8 @@ use crate::daemon_contract::{
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
-mod multi_root_http;
 mod workflow;
 
-use multi_root_http::MultiRootExecutorOwner;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
@@ -1384,9 +1382,6 @@ pub fn http_application_router_with_executor(
     let event_executor = Arc::clone(&executor);
     let work_router = work_application_router_with_executor(Arc::clone(&executor))?;
     let workflow_router = workflow_application_router_with_executor(Arc::clone(&executor))?;
-    let multi_root_router = tracedecay_api::multi_root_application_router(
-        MultiRootExecutorOwner::new(Arc::clone(&executor)),
-    );
     Ok(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
@@ -1395,7 +1390,6 @@ pub fn http_application_router_with_executor(
         )?)
         .merge(work_router)
         .merge(workflow_router)
-        .merge(multi_root_router)
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cancellations),
             application_http_context,

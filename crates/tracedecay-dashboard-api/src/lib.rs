@@ -1660,21 +1660,10 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "standalone_backend"
     };
     let standalone_automation = automation_mode == "standalone_backend";
-    // Multi-root reads are served by the daemon, never by the dashboard's own
-    // stores. Report the transport the UI would actually have to use rather
-    // than a fixed string: without an admitted application executor there is
-    // no way to reach a scope set at all.
-    let multi_root_available = state.application_invocation_executor.is_some();
-    let multi_root = if multi_root_available {
-        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(format!(
-            "no authorized scope set is selected; use /api/application{}",
-            tracedecay_application::MultiRootApplicationOperation::Execute.route_path(),
-        ))
-    } else {
-        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
-            "the daemon application transport is not admitted for this dashboard",
-        )
-    };
+    let multi_root_available = false;
+    let multi_root = tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
+        "multi-root application routes are not mounted in this build",
+    );
     Json(json!({
         "name": "tracedecay-dashboard",
         "version": crate::version::build_version(),
@@ -1907,7 +1896,7 @@ mod authority_tests {
         assert_eq!(capabilities["multi_root"]["status"], "unavailable");
         assert_eq!(
             capabilities["multi_root"]["reason"],
-            "the daemon application transport is not admitted for this dashboard"
+            "multi-root application routes are not mounted in this build"
         );
         assert_eq!(capabilities["features"]["multi_root"], false);
         assert!(
@@ -1917,7 +1906,7 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn admitted_application_runtime_advertises_the_multi_root_route() {
+    async fn admitted_application_runtime_does_not_imply_a_multi_root_route() {
         let mut fixture = DashboardStateFixture::open("project.dashboard-multi-root").await;
         fixture.state.application_invocation_executor = Some(Arc::new(AdmittedApplicationRuntime));
 
@@ -1926,9 +1915,9 @@ mod authority_tests {
         assert_eq!(capabilities["multi_root"]["status"], "unavailable");
         assert_eq!(
             capabilities["multi_root"]["reason"],
-            "no authorized scope set is selected; use /api/application/multi-root/execute"
+            "multi-root application routes are not mounted in this build"
         );
-        assert_eq!(capabilities["features"]["multi_root"], true);
+        assert_eq!(capabilities["features"]["multi_root"], false);
     }
 
     #[tokio::test]

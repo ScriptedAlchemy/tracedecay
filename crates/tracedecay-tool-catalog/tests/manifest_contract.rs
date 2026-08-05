@@ -129,6 +129,16 @@ fn index_effects_require_effect_receipt_revalidation_and_cancellation_contracts(
     invalid.receipt = ReceiptContract::Operation;
     assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(invalid).is_err());
 
+    let mut unavailable = input.clone();
+    unavailable.availability = AvailabilityContract::Unavailable {
+        reason: tracedecay_tool_catalog::UnavailabilityReason::NotImplemented,
+    };
+    unavailable.cancellation =
+        CancellationContract::cooperative(vec![CancellationPoint::BeforeAdmission]).unwrap();
+    assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(unavailable.clone()).is_ok());
+    unavailable.availability = AvailabilityContract::Available;
+    assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(unavailable).is_err());
+
     let mut missing_inverse_contract = input;
     missing_inverse_contract.inverse = tracedecay_tool_catalog::InverseContract::NotApplicable;
     assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(missing_inverse_contract).is_err());

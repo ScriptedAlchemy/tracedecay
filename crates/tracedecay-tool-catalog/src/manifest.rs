@@ -798,10 +798,11 @@ impl CapabilityManifestV1 {
                 )
                 || self.deadline.behavior() != DeadlineBehavior::ReturnEffectReceipt
                 || !self.terminal_states.contains(TerminalState::EffectUnknown)
-                || !self.cancellation.observes(CancellationPoint::BeforeEffect)
-                || !self
-                    .cancellation
-                    .observes(CancellationPoint::EffectInFlight)
+                || (self.availability.is_callable()
+                    && (!self.cancellation.observes(CancellationPoint::BeforeEffect)
+                        || !self
+                            .cancellation
+                            .observes(CancellationPoint::EffectInFlight)))
             {
                 return Err(self.invalid(
                     "effects require durable receipt, idempotency, revalidation, reconciliation, effect deadline behavior, and effect cancellation states",

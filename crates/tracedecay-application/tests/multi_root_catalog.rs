@@ -1,21 +1,22 @@
 use tracedecay_application::{
     MultiRootApplicationOperation, multi_root_executable_binding_registry,
 };
-use tracedecay_tool_catalog::{OperationId, RouteExposureV1};
+use tracedecay_tool_catalog::{
+    ExecutableBindingAvailabilityV1, ExecutableUnavailableDispositionV1, OperationId,
+};
 
 #[test]
-fn multi_root_catalog_binds_every_canonical_http_route() {
+fn multi_root_catalog_keeps_unmounted_routes_typed_unavailable() {
     let registry = multi_root_executable_binding_registry().expect("multi-root catalog");
 
     for operation in MultiRootApplicationOperation::ALL {
         let operation_id = OperationId::new(operation.operation_id()).expect("operation id");
-        let binding = registry
-            .get(&operation_id)
-            .and_then(|availability| availability.binding())
-            .expect("available multi-root binding");
-        let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
-            panic!("multi-root binding must be public");
-        };
-        assert_eq!(route_path, operation.route_path());
+        assert!(matches!(
+            registry.get(&operation_id),
+            Some(ExecutableBindingAvailabilityV1::Unavailable {
+                disposition: ExecutableUnavailableDispositionV1::CapabilityDisabled,
+                ..
+            })
+        ));
     }
 }

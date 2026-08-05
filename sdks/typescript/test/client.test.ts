@@ -378,7 +378,7 @@ describe("TraceDecayClient generated operation bindings", () => {
     }).operations;
     for (const operation of quarantined) {
       expect(available).not.toContain(operation);
-      expect(unavailable).not.toContain(operation);
+      expect(unavailable).toContain(operation);
       expect(operation in clientOperations).toBe(false);
     }
   });

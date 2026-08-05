@@ -95,7 +95,10 @@ fn sdk_method_name(operation_id: &OperationId) -> Result<String, CatalogValidati
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_tool_catalog::{OperationId, SdkTransportBindingV1};
+    use tracedecay_tool_catalog::{
+        ExecutableUnavailableDispositionV1, OperationId, SdkExecutableBindingAvailabilityV1,
+        SdkTransportBindingV1,
+    };
 
     use super::sdk_executable_binding_registry;
 
@@ -131,13 +134,13 @@ mod tests {
 
         let multi_root = registry
             .get(&OperationId::new("operation.multi_root.execute").expect("operation ID"))
-            .and_then(|availability| availability.binding())
-            .expect("mounted multi-root execute");
-        assert_eq!(multi_root.sdk_method().as_str(), "multi_root_execute");
+            .expect("typed multi-root availability");
         assert!(matches!(
-            multi_root.transport(),
-            SdkTransportBindingV1::Http { route_path }
-                if route_path == "/multi-root/execute"
+            multi_root,
+            SdkExecutableBindingAvailabilityV1::Unavailable {
+                disposition: ExecutableUnavailableDispositionV1::CapabilityDisabled,
+                ..
+            }
         ));
     }
 }
