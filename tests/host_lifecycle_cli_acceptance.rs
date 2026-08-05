@@ -273,18 +273,6 @@ fn latest_receipt(cli: &IsolatedCli, host: HostKindV1) -> HostComponentSetReceip
         .expect("host lifecycle receipt")
 }
 
-fn pending_registration_backup(cli: &IsolatedCli, integration_id: &str) -> PathBuf {
-    let root = cli
-        .lifecycle_root()
-        .join(".tracedecay-host-bundle-v1/registration-backups");
-    let entries = fs::read_dir(root)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect::<Vec<_>>();
-    assert_eq!(entries.len(), 1, "expected one pending registration backup");
-    entries.into_iter().next().unwrap().join(integration_id)
-}
-
 fn assert_receipt_digests(cli: &IsolatedCli, receipt: &HostComponentSetReceiptV1) {
     assert!(
         receipt
