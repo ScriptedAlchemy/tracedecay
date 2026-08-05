@@ -1,3 +1,5 @@
+//! Workflow HTTP adapter over the daemon-owned application invocation.
+
 use std::sync::Arc;
 
 use axum::response::Response;
@@ -6,7 +8,10 @@ use tracedecay_application::{
     TaskHandoffIssueRequest, TaskHandoffRedeemRequest, WorkflowDefinitionActivateRequest,
     WorkflowDefinitionRegisterRequest, WorkflowFanOutRequest,
 };
+use tracedecay_tool_catalog::RouteExposureV1;
 
+use super::{ApplicationSurfaceAdapterError, invoke_registered_http};
+use crate::daemon_client::DaemonInvocationExecutor;
 use crate::daemon_contract::{WorkflowApplicationInvocation, WorkflowApplicationOutcome};
 
 pub(super) fn router_with_executor(
@@ -138,77 +143,11 @@ async fn invoke_operation(
             )
             .await
         }
-        WorkflowOperation::HandoffIssue => {
-            let Ok(decoded) = serde_json::from_value::<TaskHandoffIssueRequestV1>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::workflow_application(
-                request_id.as_str(),
-                WorkflowApplicationInvocationV1::HandoffIssue(decoded),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
-            invoke_registered_http::<TaskHandoffGrantV1, _>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::WorkflowApplication {
-                        scope,
-                        outcome:
-                            WorkflowApplicationOutcomeV1::HandoffIssue(
-                                tracedecay_application::ApplicationOutcome::Effect(outcome),
-                            ),
-                    } => Some((
-                        scope,
-                        tracedecay_application::ApplicationOutcome::Effect(outcome),
-                    )),
-                    _ => None,
-                },
-            )
-            .await
-        }
-        WorkflowOperation::HandoffRedeem => {
-            let Ok(decoded) = serde_json::from_value::<TaskHandoffRedeemRequestV1>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::workflow_application(
-                request_id.as_str(),
-                WorkflowApplicationInvocationV1::HandoffRedeem(decoded),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
-            invoke_registered_http::<TaskHandoffRedeemedV1, _>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::WorkflowApplication {
-                        scope,
-                        outcome:
-                            WorkflowApplicationOutcomeV1::HandoffRedeem(
-                                tracedecay_application::ApplicationOutcome::Effect(outcome),
-                            ),
-                    } => Some((
-                        scope,
-                        tracedecay_application::ApplicationOutcome::Effect(outcome),
-                    )),
-                    _ => None,
-                },
-            )
-            .await
-        }
     }
 }
 
 async fn invoke<T>(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: Arc<dyn DaemonInvocationExecutor>,
     operation: WorkflowOperation,
     request_id: tracedecay_application::RequestId,
     controls: tracedecay_api::HttpApplicationControls,

@@ -1266,6 +1266,12 @@ where
                 crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
                 }
+                crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "work.reset_required".to_owned(),
+                        message: "The Work store requires an explicit reset".to_owned(),
+                    })
+                }
                 crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                     ApplicationProblem::unavailable(SafeDiagnostic {
                         code: "work.unavailable".to_owned(),
@@ -4105,6 +4111,12 @@ fn invocation_problem(
         }
         crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+        }
+        crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+            ApplicationProblem::unavailable(SafeDiagnostic::new(
+                "application.surface.reset_required",
+                "The application store requires an explicit reset",
+            )?)
         }
         crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic::new(
