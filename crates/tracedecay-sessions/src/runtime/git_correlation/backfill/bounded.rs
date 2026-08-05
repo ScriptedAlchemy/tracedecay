@@ -17,8 +17,8 @@ mod state;
 
 use blocking::run as run_blocking;
 use progress::{
-    copy_cursor_to_progress, cursor_from_progress, progress_from_cursor, progress_frontier,
-    repository_seal_from_progress, session_row_from_progress,
+    canonical_worktree_path, copy_cursor_to_progress, cursor_from_progress, progress_from_cursor,
+    progress_frontier, repository_seal_from_progress, session_row_from_progress,
 };
 use state::{
     advance_graph, advance_publish, advance_reflog_capture, advance_reflog_verification,
@@ -65,10 +65,38 @@ pub enum BoundedBackfillInterruption {
     CommandTimedOut,
     HistoryLimitReached,
     DryRunFrontierLimitReached,
+    HistoryTraversalBudgetReached,
     UnsupportedSourceFraming,
     UnsupportedCanonicalWorktreeEncoding,
     SourceChanged,
     SourceUnavailable,
+}
+
+const MAX_GRAPH_PAGE_EXAMINED_NODES: usize = 128;
+const MAX_GRAPH_PAGE_EXAMINED_BYTES: usize = 256 * 1024;
+
+#[derive(Default)]
+struct GraphPageBudget {
+    examined_nodes: usize,
+    examined_bytes: usize,
+}
+
+impl GraphPageBudget {
+    fn remaining(&self) -> Result<(usize, usize), BoundedBackfillInterruption> {
+        let nodes = MAX_GRAPH_PAGE_EXAMINED_NODES.saturating_sub(self.examined_nodes);
+        let bytes = MAX_GRAPH_PAGE_EXAMINED_BYTES.saturating_sub(self.examined_bytes);
+        if nodes == 0 || bytes == 0 {
+            return Err(BoundedBackfillInterruption::HistoryTraversalBudgetReached);
+        }
+        Ok((nodes, bytes))
+    }
+
+    fn record(&mut self, nodes: usize, bytes: usize) -> bool {
+        self.examined_nodes = self.examined_nodes.saturating_add(nodes);
+        self.examined_bytes = self.examined_bytes.saturating_add(bytes);
+        self.examined_nodes >= MAX_GRAPH_PAGE_EXAMINED_NODES
+            || self.examined_bytes >= MAX_GRAPH_PAGE_EXAMINED_BYTES
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -492,6 +520,7 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
     stats: &mut BackfillStats,
     committed: &mut bool,
 ) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
+    let mut graph_budget = GraphPageBudget::default();
     loop {
         let snapshot = session_store
             .read_snapshot()
@@ -504,7 +533,7 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
         let Some(progress) = progress else {
             return Ok(StreamGitEvidenceOutcome::Progressed);
         };
-        let project_path = std::path::PathBuf::from(progress.project_path.trim());
+        let project_path = canonical_worktree_path(&progress)?;
         let row = session_row_from_progress(&progress);
         let candidate_frontier = progress_frontier(&progress);
         let result = match progress.scan_mode {
@@ -528,6 +557,7 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
                     &project_path,
                     &progress,
                     opts,
+                    &mut graph_budget,
                     control,
                     committed,
                 )
@@ -549,12 +579,13 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
         };
         let result = match result {
             Err(
-                BoundedBackfillInterruption::UnsupportedSourceFraming
-                | BoundedBackfillInterruption::UnsupportedCanonicalWorktreeEncoding,
+                interruption @ (BoundedBackfillInterruption::UnsupportedSourceFraming
+                | BoundedBackfillInterruption::UnsupportedCanonicalWorktreeEncoding),
             ) => {
                 return history_failures::record_progress(
                     session_store,
                     &progress,
+                    interruption,
                     control,
                     committed,
                 )
@@ -594,9 +625,10 @@ async fn dry_run_native_history(
     })
     .await?;
     let initial_cursor = cursor.clone();
+    let canonical_worktree = cursor.worktree.clone();
     let source_length = cursor.byte_offset;
     loop {
-        let path = project_path.to_owned();
+        let path = canonical_worktree.clone();
         let native_control = control.clone();
         let scan_cursor = cursor;
         let chunk = run_blocking(control, move || {
@@ -620,7 +652,7 @@ async fn dry_run_native_history(
         content_chain: history_progress::initial_reflog_content_chain().to_owned(),
     };
     loop {
-        let path = project_path.to_owned();
+        let path = canonical_worktree.clone();
         let source = cursor.clone();
         let native_control = control.clone();
         let chunk = run_blocking(control, move || {
@@ -644,7 +676,7 @@ async fn dry_run_native_history(
     let mut emitted = 0_usize;
     let mut spans = 0_usize;
     loop {
-        let path = project_path.to_owned();
+        let path = canonical_worktree.clone();
         let native_control = control.clone();
         let replay_cursor = replay;
         let chunk = run_blocking(control, move || {
@@ -659,7 +691,7 @@ async fn dry_run_native_history(
         .await?;
         for segment in chunk.segments {
             emitted = dry_run_segment(
-                project_path,
+                &canonical_worktree,
                 segment.start,
                 segment.end,
                 &repository_seal,
@@ -724,6 +756,8 @@ async fn dry_run_segment(
                 &source,
                 page,
                 remaining,
+                MAX_GRAPH_PAGE_EXAMINED_NODES,
+                MAX_GRAPH_PAGE_EXAMINED_BYTES,
                 &native_control,
             )
         })

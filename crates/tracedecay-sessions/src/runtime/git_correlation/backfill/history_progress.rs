@@ -6,7 +6,11 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use super::GitCorrelationError;
 
 mod staged;
-pub(super) use staged::*;
+pub(super) use staged::{
+    GitHistoryStagedCommitRow, GitHistoryStagedSpanRow, MAX_STAGED_PAGE_ROWS, delete_staged_commit,
+    delete_staged_span, read_staged_commit_page, read_staged_span_page, upsert_staged_commit,
+    upsert_staged_span,
+};
 
 const MAX_CONSULTED_REF_SEAL_JSON_BYTES: usize = 256 * 1024;
 pub(super) const MAX_PENDING_PAGE_ROWS: usize = 128;

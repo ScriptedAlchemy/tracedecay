@@ -128,6 +128,9 @@ pub(in super::super) struct GraphChunk {
     pub pending: Vec<GraphPending>,
     pub newly_seen: Vec<String>,
     pub commits: Vec<GraphCommit>,
+    pub examined_nodes: usize,
+    pub examined_bytes: usize,
+    pub budget_exhausted: bool,
 }
 
 pub(in super::super) fn initialize_reflog_cursor(
@@ -376,9 +379,14 @@ pub(in super::super) fn scan_graph_chunk(
     repository_seal: &RepositorySeal,
     pending: Vec<GraphPending>,
     remaining_commit_cap: usize,
+    remaining_examined_nodes: usize,
+    remaining_examined_bytes: usize,
     control: &BoundedGitControl,
 ) -> Result<GraphChunk, BoundedBackfillInterruption> {
     control.check()?;
+    if remaining_examined_nodes == 0 || remaining_examined_bytes == 0 {
+        return Err(BoundedBackfillInterruption::HistoryTraversalBudgetReached);
+    }
     let mut repository =
         gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     repository.object_cache_size_if_unset(4 * 1024 * 1024);
@@ -391,12 +399,15 @@ pub(in super::super) fn scan_graph_chunk(
     let mut commits = Vec::new();
     let mut bytes_read = 0_usize;
     let mut items_read = 0_usize;
+    let mut budget_exhausted = false;
     let input_oids = carry.keys().cloned().collect::<Vec<_>>();
     for current_oid in input_oids {
-        if items_read >= MAX_GRAPH_CHUNK_ITEMS
-            || bytes_read >= MAX_GRAPH_CHUNK_BYTES
+        if items_read >= MAX_GRAPH_CHUNK_ITEMS.min(remaining_examined_nodes)
+            || bytes_read >= MAX_GRAPH_CHUNK_BYTES.min(remaining_examined_bytes)
             || (items_read > 0 && control.should_soft_stop(COMPLETION_RESERVE)?)
         {
+            budget_exhausted =
+                items_read >= remaining_examined_nodes || bytes_read >= remaining_examined_bytes;
             break;
         }
         control.check()?;
@@ -418,6 +429,10 @@ pub(in super::super) fn scan_graph_chunk(
         let commit_bytes = commit.data.len();
         if commit_bytes > MAX_GRAPH_CHUNK_BYTES {
             return Err(BoundedBackfillInterruption::UnsupportedSourceFraming);
+        }
+        if bytes_read.saturating_add(commit_bytes) > remaining_examined_bytes {
+            budget_exhausted = true;
+            break;
         }
         if items_read > 0 && bytes_read.saturating_add(commit_bytes) > MAX_GRAPH_CHUNK_BYTES {
             break;
@@ -455,6 +470,9 @@ pub(in super::super) fn scan_graph_chunk(
         pending: carry.into_values().collect(),
         newly_seen,
         commits,
+        examined_nodes: items_read,
+        examined_bytes: bytes_read,
+        budget_exhausted,
     })
 }
 

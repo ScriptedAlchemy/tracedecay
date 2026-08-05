@@ -4,6 +4,7 @@ use super::super::history_progress::{
     GitHistoryScanMode,
 };
 use super::{BoundedBackfillInterruption, GitHistoryIndexFrontier, native};
+use crate::runtime::git_correlation::normalize_worktree;
 
 pub(super) fn session_row_from_progress(progress: &GitHistoryProgressRow) -> SessionActivityRow {
     SessionActivityRow {
@@ -122,6 +123,22 @@ pub(super) fn repository_seal_from_progress(
         common_dir: native::decode_path(&progress.common_dir)?,
         common_dir_identity: progress.common_dir_identity.clone(),
     })
+}
+
+pub(super) fn canonical_worktree_path(
+    progress: &GitHistoryProgressRow,
+) -> Result<std::path::PathBuf, BoundedBackfillInterruption> {
+    native::decode_path(&progress.worktree)
+}
+
+pub(super) fn canonical_worktree_evidence(
+    progress: &GitHistoryProgressRow,
+) -> Result<String, BoundedBackfillInterruption> {
+    let worktree = canonical_worktree_path(progress)?;
+    let exact = worktree
+        .to_str()
+        .ok_or(BoundedBackfillInterruption::UnsupportedCanonicalWorktreeEncoding)?;
+    Ok(normalize_worktree(exact))
 }
 
 pub(super) fn copy_cursor_to_progress(

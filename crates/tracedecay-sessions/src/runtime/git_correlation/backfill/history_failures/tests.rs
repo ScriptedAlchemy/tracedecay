@@ -52,6 +52,7 @@ fn failure(activity_timestamp: i64) -> GitHistoryFailureRow {
         project_path: "/repo".to_string(),
         window_start: 100,
         window_end: activity_timestamp,
+        reason: GitHistoryFailureReason::UnsupportedSourceFraming,
         source_generation: None,
         reflog_digest: None,
     }

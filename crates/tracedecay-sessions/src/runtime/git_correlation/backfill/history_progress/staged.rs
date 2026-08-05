@@ -15,8 +15,8 @@ pub(super) async fn install_schema(
             branch TEXT,
             timestamp INTEGER NOT NULL,
             PRIMARY KEY(source_rowid, segment_ordinal, boundary),
-            FOREIGN KEY(source_rowid)
-                REFERENCES git_history_index_progress(source_rowid)
+            FOREIGN KEY(source_rowid, segment_ordinal)
+                REFERENCES git_history_index_segments(source_rowid, ordinal)
                 ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS git_history_index_staged_commits (
@@ -26,8 +26,8 @@ pub(super) async fn install_schema(
             branch TEXT,
             committed_at INTEGER NOT NULL,
             PRIMARY KEY(source_rowid, segment_ordinal, oid),
-            FOREIGN KEY(source_rowid)
-                REFERENCES git_history_index_progress(source_rowid)
+            FOREIGN KEY(source_rowid, segment_ordinal)
+                REFERENCES git_history_index_segments(source_rowid, ordinal)
                 ON DELETE CASCADE
         );",
     )
