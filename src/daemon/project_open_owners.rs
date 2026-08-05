@@ -1,4 +1,4 @@
-//! Project-open registration for PR11–PR13 production owners.
+//! Project-open registration for feedback, advisory, and Context Scout production owners.
 //!
 //! After Scout bootstrap and successful cache publication, the daemon mounts
 //! concrete feedback, cycle, primitive, LSP, advisory, and Hook/Scout host-
@@ -34,8 +34,8 @@ use tracedecay_domain::feedback::{
     GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
-    ActorId, CapabilityId as DomainCapabilityId, CommitId, LocatorDigest, ProjectId, ProviderId,
-    RefId, UtcMicros, canonical_sha256,
+    ActorId, CapabilityId as DomainCapabilityId, CommitId, LocatorDigest, ManifestDigest,
+    ProjectId, ProviderId, RefId, UtcMicros, canonical_sha256,
 };
 use tracedecay_hooks::{HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, HookHostV1};
 use tracedecay_lsp::{
@@ -45,12 +45,13 @@ use tracedecay_lsp::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{
-    BoundedPr13HookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
-    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
-    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrationError,
-    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
-    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError, Pr13HookOrchestrationRequestV1,
-    Pr13HookOrchestrationTriggerV1, advisory_cycle_invocation_result,
+    AdvisoryHookOrchestrationPortV1, AdvisoryHookOrchestrationRequestV1,
+    AdvisoryHookOrchestrationTriggerV1, BoundedAdvisoryHookOrchestratorV1,
+    DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
+    DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
+    DaemonAdvisoryRuntimeRegistrationError, DaemonContextScoutRuntimeRegistrationError,
+    DaemonFeedbackRuntimeRegistrationError, DaemonInvocationState,
+    DaemonPrimitiveRuntimeRegistrationError, advisory_cycle_invocation_result,
 };
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
@@ -81,6 +82,7 @@ use crate::application::advisory::{
     Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryRuntimeOpenV1,
     ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, register_pr13_advisory_hook_notice_queue,
+    unregister_pr13_advisory_hook_notice_queue,
 };
 use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::application::feedback::observations::{
@@ -141,6 +143,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         &self,
         request: FeedbackCycleRequest,
         deadline: MonotonicDeadline,
+        cancellation: CancellationToken,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecution, LspRuntimeFailure> {
         let registration = Arc::clone(&self.registration);
         let lsp_input = Arc::clone(&self.lsp_input);
@@ -167,6 +170,8 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                     &invocation.context,
                     config,
                     &feedback_scope,
+                    deadline,
+                    &cancellation,
                 )
                 .await
             }
@@ -230,6 +235,7 @@ impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
                 .run_cycle(
                     request,
                     MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+                    CancellationToken::new(),
                 )
                 .await?;
             Ok(())
@@ -261,6 +267,7 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
                     MonotonicDeadline::at(
                         Instant::now() + Duration::from_micros(remaining_micros as u64),
                     ),
+                    CancellationToken::new(),
                 )
                 .await
                 .map_err(|_| {
@@ -896,6 +903,16 @@ async fn install_project_open_context_scout_configuration(
         })
 }
 
+fn context_scout_execution_pin(
+    current: &crate::application::configuration::ConfigurationCurrentStateV1,
+    expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
+    expected_digest: &ManifestDigest,
+) -> Option<ContextScoutConfigurationPinV1> {
+    ContextScoutConfigurationPinV1::from_current(current).filter(|pin| {
+        pin.revision_id() == expected_revision && pin.configuration_digest() == expected_digest
+    })
+}
+
 /// State retained after independent owners publish and consumed only after the
 /// durable code-index generation has mounted.
 pub(crate) struct ProjectOpenDependentOwnerState {
@@ -1308,23 +1325,32 @@ pub(super) async fn register_project_open_dependent_owners(
     );
 
     if let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle {
-        // P3: the advisory owner (Context Scout config install, GitHub provider
-        // resolution — potentially network — CI stores, and code-index-coupled
-        // anchors) is NOT required for the project to be servable: when the
-        // feedback cycle above resolves to `None`, advisory is skipped entirely
-        // and the project still fully publishes and answers queries. Awaiting it
-        // on the open critical path coupled open to the starved reconcile lane
-        // and to network stalls (observed 924 s). Register it as a background
-        // upgrade so open returns as soon as the graph is mounted; the advisory
-        // registrars are idempotent (AlreadyRegistered) and self-contained.
+        // Network-backed advisory setup is optional for serving and once
+        // blocked project open for 924 seconds. The retained deferred gateway
+        // coalesces and cancels this background upgrade.
         let advisory_invocation = invocation.clone();
         let advisory_project_root = project_root.to_path_buf();
         let advisory_session_db = Arc::clone(&session_db);
         let advisory_graph = Arc::clone(&graph);
         let advisory_scope = scope.clone();
         let advisory_scout_configuration = scout_configuration.clone();
-        tokio::spawn(async move {
-            let outcome = register_production_advisory_owner(
+        let (hook_project_id, hook_worktree_id) =
+            crate::hooks::hook_v2_scope_locators(&advisory_scope);
+        let deferred = invocation
+            .advisory_runtime_registrar()
+            .register_deferred_hook_orchestrator(
+                advisory_project_root.clone(),
+                hook_project_id,
+                hook_worktree_id,
+            )
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open deferred advisory registration failed: {error}"),
+            })?;
+        let setup_project_root = advisory_project_root.clone();
+        let setup_cancellation = deferred.cancellation();
+        let setup = async move {
+            register_production_advisory_owner(
                 &advisory_invocation,
                 &advisory_project_root,
                 database,
@@ -1340,23 +1366,23 @@ pub(super) async fn register_project_open_dependent_owners(
                 advisory_scout_configuration,
                 admitted_root_uri,
                 indexed_files,
+                setup_cancellation,
             )
-            .await;
-            match outcome {
-                Ok(_) => tracing::info!(
-                    event = "project_open_owner_phase",
-                    project = %advisory_project_root.display(),
-                    phase = "advisory_owner_registered",
-                    deferred = true,
-                ),
-                Err(error) => tracing::warn!(
-                    event = "project_open_owner_phase",
-                    project = %advisory_project_root.display(),
-                    phase = "advisory_owner_deferred_failed",
-                    error = %error,
-                ),
-            }
-        });
+            .await
+        };
+        if !crate::daemon::project_open_advisory::schedule_bounded_post_open_advisory_setup(
+            setup_project_root,
+            deferred,
+            setup,
+        )
+        .await
+        {
+            tracing::info!(
+                event = "project_open_owner_phase",
+                project = %project_root.display(),
+                phase = "advisory_owner_setup_joined",
+            );
+        }
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
@@ -1703,6 +1729,45 @@ fn production_lsp_registration(
     )
 }
 
+struct AdvisoryOwnerPublicationGuardV1 {
+    hook_project_id: [u8; 16],
+    hook_worktree_id: [u8; 16],
+    sessions: Arc<crate::global_db::RegisteredGlobalDb>,
+    lifecycle_registered: bool,
+    hook_notices: Arc<Pr13AdvisoryHookNoticeQueueV1>,
+    hook_notices_registered: bool,
+    committed: bool,
+}
+
+impl AdvisoryOwnerPublicationGuardV1 {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for AdvisoryOwnerPublicationGuardV1 {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if self.hook_notices_registered {
+            let _ = unregister_pr13_advisory_hook_notice_queue(
+                self.hook_project_id,
+                self.hook_worktree_id,
+                &self.hook_notices,
+            );
+        }
+        if self.lifecycle_registered {
+            let _ =
+                crate::daemon::context_scout_lifecycle::unregister_context_scout_lifecycle_authority(
+                    self.hook_project_id,
+                    self.hook_worktree_id,
+                    &self.sessions,
+                );
+        }
+    }
+}
+
 async fn register_production_advisory_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -1719,11 +1784,16 @@ async fn register_production_advisory_owner(
     scout_configuration: crate::application::configuration::ConfigurationCurrentStateV1,
     root_uri: String,
     indexed_files: Vec<String>,
-) -> Result<Option<()>> {
+    setup_cancellation: CancellationToken,
+) -> Result<crate::daemon::project_open_advisory::PreparedAdvisoryRuntimeV1> {
     let scout_configuration = ContextScoutConfigurationPinV1::from_current(&scout_configuration)
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open Context Scout configuration is unavailable".to_owned(),
         })?;
+    // Setup retains identity only. Mutating the Scout owner here would escape
+    // rollback if deferred publication times out, is cancelled, or conflicts;
+    // published work installs the exact current pin before advisory effects.
+    let scout_configuration_revision = scout_configuration.revision_id().clone();
     let scout_owner =
         graph
             .context_scout_owner()
@@ -1731,21 +1801,6 @@ async fn register_production_advisory_owner(
             .ok_or_else(|| TraceDecayError::Config {
                 message: "project-open Context Scout owner is unavailable".to_owned(),
             })?;
-    let profile_root =
-        graph
-            .open_options()
-            .profile_root
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "project-open Context Scout model requires exact profile authority"
-                    .to_owned(),
-            })?;
-    install_project_open_context_scout_configuration(
-        scout_owner.as_ref(),
-        scout_configuration.clone(),
-        &profile_root,
-        &graph.store_layout().dashboard_root,
-    )
-    .await?;
     let remote = resolve_production_github_provider_config(
         invocation,
         project_root,
@@ -1754,6 +1809,7 @@ async fn register_production_advisory_owner(
         resolved_scope.clone(),
         &source_access,
         feedback_scope.clone(),
+        setup_cancellation.clone(),
     )
     .await;
     let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
@@ -1771,7 +1827,7 @@ async fn register_production_advisory_owner(
             })?,
     ) as _;
     let ci_code_anchors = Arc::new(
-        ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+        ProjectCiCodeAnchorStoreV1::new(
             graph.clone(),
             feedback_scope.clone(),
             Arc::new(invocation.code_index_schedulers.clone()),
@@ -1792,8 +1848,9 @@ async fn register_production_advisory_owner(
             feedback_scope.worktree_id.clone(),
             &project_runtime_db,
         );
-    match lifecycle_registration {
-        AuthorityRegistrationV1::Registered | AuthorityRegistrationV1::AlreadyRegistered => {}
+    let lifecycle_registered = match lifecycle_registration {
+        AuthorityRegistrationV1::Registered => true,
+        AuthorityRegistrationV1::AlreadyRegistered => false,
         // A live authority already owns this hook locator pair under a
         // *different* native identity: the incumbent keeps serving lookups,
         // so this open must fail rather than silently route Scout lifecycle
@@ -1820,12 +1877,22 @@ async fn register_production_advisory_owner(
                 ),
             });
         }
-    }
+    };
+    let mut publication_guard = AdvisoryOwnerPublicationGuardV1 {
+        hook_project_id,
+        hook_worktree_id,
+        sessions: Arc::clone(&project_runtime_db),
+        lifecycle_registered,
+        hook_notices: Arc::clone(&hook_notices),
+        hook_notices_registered: false,
+        committed: false,
+    };
     if !register_pr13_advisory_hook_notice_queue(hook_project_id, hook_worktree_id, &hook_notices) {
         return Err(TraceDecayError::Config {
             message: "project-open advisory Hook notice queue registration failed".to_owned(),
         });
     }
+    publication_guard.hook_notices_registered = true;
     let feedback_runtime = feedback_cycle.feedback_runtime();
     let feedback_scope_for_work = feedback_scope.clone();
     let input = Pr13AdvisoryRuntimeOpenV1 {
@@ -1853,16 +1920,21 @@ async fn register_production_advisory_owner(
     };
     let registration = match invocation
         .advisory_runtime_registrar()
-        .register_production(
+        .prepare_production(
             project_root.to_path_buf(),
             input,
             production,
-            lsp_session_factory,
+            Arc::clone(&lsp_session_factory),
         )
         .await
     {
         Ok(registration) => registration,
-        Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered) => return Ok(Some(())),
+        Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered) => {
+            return Err(TraceDecayError::Config {
+                message: "project-open advisory runtime already registered without its retained deferred owner"
+                    .to_owned(),
+            });
+        }
         Err(error) => {
             return Err(TraceDecayError::Config {
                 message: format!("project-open advisory runtime registration failed: {error}"),
@@ -1877,29 +1949,24 @@ async fn register_production_advisory_owner(
         github_pull_request_id: github_pull_request_id.clone(),
         ci_discovery_config: ci_discovery_config.clone(),
     });
-    invocation
-        .feedback_runtime_registrar()
-        .install_advisory_cycle_input(project_root, advisory_cycle.clone())
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open advisory LSP cycle registration failed: {error}"),
-        })?;
-    invocation
-        .feedback_runtime_registrar()
-        .install_advisory_cycle_invocation(
-            project_root,
+    let publication_lease = invocation
+        .advisory_runtime_registrar()
+        .publish_production(
+            project_root.to_path_buf(),
+            Arc::clone(&registration),
             DaemonAdvisoryCycleInvocationOwner::new(
                 feedback_scope_for_work.project_id.clone(),
-                advisory_cycle,
+                advisory_cycle.clone(),
             ),
+            advisory_cycle,
+            lsp_session_factory,
         )
         .await
         .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open advisory cycle registration failed: {error}"),
+            message: format!("project-open advisory owner publication failed: {error}"),
         })?;
-    let registered_root = project_root.to_path_buf();
-    let work_root = registered_root.clone();
-    let work = move |request: Pr13HookOrchestrationRequestV1| {
+    let work_root = project_root.to_path_buf();
+    let work = move |request: AdvisoryHookOrchestrationRequestV1| {
         let registration = Arc::clone(&registration);
         let feedback_lsp_input = Arc::clone(&feedback_lsp_input);
         let graph = Arc::clone(&scout_claim_graph);
@@ -1912,8 +1979,9 @@ async fn register_production_advisory_owner(
         let project_root = work_root.clone();
         let root_uri = root_uri.clone();
         let indexed_files = indexed_files.clone();
+        let scout_configuration_revision = scout_configuration_revision.clone();
         async move {
-            run_production_pr13_hook_cycle(
+            run_daemon_owned_advisory_work(
                 request,
                 registration,
                 feedback_lsp_input,
@@ -1927,32 +1995,30 @@ async fn register_production_advisory_owner(
                 project_root,
                 root_uri,
                 indexed_files,
+                scout_configuration_revision,
             )
             .await;
         }
     };
     let orchestrator =
-        BoundedPr13HookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {
-            message: "project-open PR13 Hook orchestration capacity is invalid".to_owned(),
+        BoundedAdvisoryHookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {
+            message: "project-open advisory Hook orchestration capacity is invalid".to_owned(),
         })?;
-    invocation
-        .advisory_runtime_registrar()
-        .register_hook_orchestrator(
-            registered_root,
-            hook_project_id,
-            hook_worktree_id,
+    let orchestrator: Arc<dyn AdvisoryHookOrchestrationPortV1> = orchestrator;
+    Ok(
+        crate::daemon::project_open_advisory::PreparedAdvisoryRuntimeV1::new(
             orchestrator,
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open PR13 Hook orchestration failed: {error}"),
-        })?;
-    Ok(Some(()))
+            move || {
+                publication_guard.commit();
+                publication_lease.commit();
+            },
+        ),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_production_pr13_hook_cycle(
-    request: Pr13HookOrchestrationRequestV1,
+async fn run_daemon_owned_advisory_work(
+    request: AdvisoryHookOrchestrationRequestV1,
     registration: Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
     feedback_lsp_input: Pr12FeedbackCycleLspInput,
     graph: Arc<crate::tracedecay::TraceDecay>,
@@ -1965,6 +2031,7 @@ async fn run_production_pr13_hook_cycle(
     project_root: std::path::PathBuf,
     root_uri: String,
     indexed_files: Vec<String>,
+    scout_configuration_revision: tracedecay_domain::configuration::ConfigurationRevisionId,
 ) {
     let Some(document_uri) = hook_feedback_document_uri_or_observe(
         &project_root,
@@ -1975,8 +2042,8 @@ async fn run_production_pr13_hook_cycle(
         return;
     };
     let diagnostic_trigger = match request.trigger {
-        Pr13HookOrchestrationTriggerV1::SavedEdit => DiagnosticTrigger::DocumentSave,
-        Pr13HookOrchestrationTriggerV1::Stop | Pr13HookOrchestrationTriggerV1::Explicit => {
+        AdvisoryHookOrchestrationTriggerV1::SavedEdit => DiagnosticTrigger::DocumentSave,
+        AdvisoryHookOrchestrationTriggerV1::Stop | AdvisoryHookOrchestrationTriggerV1::Explicit => {
             DiagnosticTrigger::ExplicitDocumentDiagnostics
         }
     };
@@ -1997,7 +2064,7 @@ async fn run_production_pr13_hook_cycle(
             return;
         }
     };
-    if request.trigger == Pr13HookOrchestrationTriggerV1::Stop {
+    if request.trigger == AdvisoryHookOrchestrationTriggerV1::Stop {
         invocation.request.input.request.trigger = FeedbackTriggerV1::AgentStopGate;
         let Ok(validated) =
             Pr12FeedbackCycleInvocation::new(invocation.context, invocation.request)
@@ -2010,6 +2077,41 @@ async fn run_production_pr13_hook_cycle(
             return;
         };
         invocation = validated;
+    }
+    let feedback_configuration_digest = invocation
+        .request
+        .input
+        .request
+        .configuration_digest
+        .clone();
+    let current_scout_configuration = match graph.configuration_runtime().client().current().await {
+        Ok(current) => crate::application::configuration::ConfigurationCurrentStateV1 {
+            revision_id: current.revision_id,
+            snapshot: current.snapshot,
+        },
+        Err(_) => return,
+    };
+    let Some(scout_configuration) = context_scout_execution_pin(
+        &current_scout_configuration,
+        &scout_configuration_revision,
+        &feedback_configuration_digest,
+    ) else {
+        return;
+    };
+    let open_options = graph.open_options();
+    let Some(profile_root) = open_options.profile_root.as_deref() else {
+        return;
+    };
+    if install_project_open_context_scout_configuration(
+        scout_owner.as_ref(),
+        scout_configuration.clone(),
+        profile_root,
+        &graph.store_layout().dashboard_root,
+    )
+    .await
+    .is_err()
+    {
+        return;
     }
     let observed_at = invocation.request.input.observed_at;
     let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
@@ -2029,10 +2131,18 @@ async fn run_production_pr13_hook_cycle(
         );
         return;
     };
+    let cycle_deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(5));
+    let cycle_cancellation = CancellationToken::new();
     let ci = match ci_discovery_config.as_ref() {
         Some(config) => {
-            discover_production_ci_failure_request_v1(&invocation.context, config, &feedback_scope)
-                .await
+            discover_production_ci_failure_request_v1(
+                &invocation.context,
+                config,
+                &feedback_scope,
+                cycle_deadline,
+                &cycle_cancellation,
+            )
+            .await
         }
         None => crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
     };
@@ -2053,8 +2163,6 @@ async fn run_production_pr13_hook_cycle(
             expires_at,
         },
     };
-    let feedback_configuration_digest =
-        advisory.feedback.input.request.configuration_digest.clone();
     let host = host_kind_for_hook(request.hook.envelope().producer);
     let rollback = HookFeedbackRollbackSwitchV1 {
         configuration_revision: request.hook_configuration_revision,
@@ -2065,7 +2173,7 @@ async fn run_production_pr13_hook_cycle(
             &invocation.context,
             AdvisoryCycleControl {
                 operation,
-                deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+                deadline: cycle_deadline,
             },
             advisory,
             host,
@@ -2079,35 +2187,6 @@ async fn run_production_pr13_hook_cycle(
             &request,
             Plan26FeedbackOutcomeV1::Unavailable,
         );
-        return;
-    }
-    let Ok(pinned_configuration) = graph.configuration_runtime().client().current().await else {
-        return;
-    };
-    let current_configuration = crate::application::configuration::ConfigurationCurrentStateV1 {
-        revision_id: pinned_configuration.revision_id,
-        snapshot: pinned_configuration.snapshot,
-    };
-    let Some(scout_configuration) =
-        ContextScoutConfigurationPinV1::from_current(&current_configuration)
-    else {
-        return;
-    };
-    let Some(profile_root) = graph.open_options().profile_root else {
-        return;
-    };
-    if scout_configuration.configuration_digest() != &feedback_configuration_digest {
-        return;
-    }
-    if install_project_open_context_scout_configuration(
-        scout_owner.as_ref(),
-        scout_configuration.clone(),
-        &profile_root,
-        &graph.store_layout().dashboard_root,
-    )
-    .await
-    .is_err()
-    {
         return;
     }
     let Some(lifecycle) = request.lifecycle else {
@@ -2138,9 +2217,9 @@ async fn run_production_pr13_hook_cycle(
         return;
     };
     let trigger = match request.trigger {
-        Pr13HookOrchestrationTriggerV1::SavedEdit => ContextScoutTriggerV1::SavedEdit,
-        Pr13HookOrchestrationTriggerV1::Stop => ContextScoutTriggerV1::StopBoundary,
-        Pr13HookOrchestrationTriggerV1::Explicit => ContextScoutTriggerV1::ExplicitRequest,
+        AdvisoryHookOrchestrationTriggerV1::SavedEdit => ContextScoutTriggerV1::SavedEdit,
+        AdvisoryHookOrchestrationTriggerV1::Stop => ContextScoutTriggerV1::StopBoundary,
+        AdvisoryHookOrchestrationTriggerV1::Explicit => ContextScoutTriggerV1::ExplicitRequest,
     };
     let recent = scout_owner.recent_exact(canonical.address, 32).await.ok();
     let has_recent_delivery = recent
@@ -2207,14 +2286,14 @@ async fn run_production_pr13_hook_cycle(
 
 fn observe_hook_feedback_cycle_terminal(
     observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
-    request: &Pr13HookOrchestrationRequestV1,
+    request: &AdvisoryHookOrchestrationRequestV1,
     outcome: Plan26FeedbackOutcomeV1,
 ) {
     let envelope = request.hook.envelope();
     let trigger = match request.trigger {
-        Pr13HookOrchestrationTriggerV1::SavedEdit => "saved_edit",
-        Pr13HookOrchestrationTriggerV1::Stop => "stop",
-        Pr13HookOrchestrationTriggerV1::Explicit => "explicit",
+        AdvisoryHookOrchestrationTriggerV1::SavedEdit => "saved_edit",
+        AdvisoryHookOrchestrationTriggerV1::Stop => "stop",
+        AdvisoryHookOrchestrationTriggerV1::Explicit => "explicit",
     };
     let Ok(subject) = canonical_sha256(&(
         "tracedecay.feedback.accepted-hook-cycle.v1",
@@ -2243,7 +2322,7 @@ fn observe_hook_feedback_cycle_terminal(
 fn hook_feedback_document_uri_or_observe(
     project_root: &Path,
     indexed_files: &[String],
-    request: &Pr13HookOrchestrationRequestV1,
+    request: &AdvisoryHookOrchestrationRequestV1,
     observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
 ) -> Option<String> {
     let document_uri = hook_feedback_document_uri(project_root, indexed_files, request);
@@ -2264,7 +2343,7 @@ fn hook_feedback_document_uri_or_observe(
 fn hook_feedback_document_uri(
     project_root: &Path,
     indexed_files: &[String],
-    request: &Pr13HookOrchestrationRequestV1,
+    request: &AdvisoryHookOrchestrationRequestV1,
 ) -> Option<String> {
     let logical_path = match &request.hook.envelope().event {
         tracedecay_hooks::HookEventV2::SavedEdit { file_id, .. } => {
@@ -2337,6 +2416,7 @@ async fn resolve_production_github_provider_config(
     resolved_scope: ResolvedScope,
     project_source_access: &ProjectSourceAccessSnapshot,
     feedback_scope: FeedbackScopeV1,
+    setup_cancellation: CancellationToken,
 ) -> Option<ProductionGitHubProviderConfigV1> {
     let (owner, repository) =
         github_repository_from_remote(&crate::tracedecay::git_remote_url(project_root)?)?;
@@ -2399,7 +2479,7 @@ async fn resolve_production_github_provider_config(
         Some((authorization_context, discovery_request)) => {
             discover_github_pull_request_after_authorization(
                 || source_access.authorize(authorization_context, discovery_request),
-                move || {
+                move || async move {
                     discover_exact_commit_pull_request_v1(
                         &owner,
                         &repository,
@@ -2407,7 +2487,9 @@ async fn resolve_production_github_provider_config(
                         &discovery_http,
                         &discovery_credential,
                     )
+                    .await
                 },
+                setup_cancellation,
             )
             .await
         }
@@ -2452,19 +2534,26 @@ async fn resolve_production_github_provider_config(
     })
 }
 
-async fn discover_github_pull_request_after_authorization<A, AF, F>(
+async fn discover_github_pull_request_after_authorization<A, AF, F, DF>(
     authorize: A,
     discover: F,
+    cancellation: CancellationToken,
 ) -> Option<GitHubExactCommitDiscoveryOutcomeV1>
 where
     A: FnOnce() -> AF,
     AF: std::future::Future<Output = GitHubProviderLifecycleV1>,
-    F: FnOnce() -> GitHubExactCommitDiscoveryOutcomeV1 + Send + 'static,
+    F: FnOnce() -> DF,
+    DF: std::future::Future<Output = GitHubExactCommitDiscoveryOutcomeV1>,
 {
     if authorize().await != GitHubProviderLifecycleV1::Ready {
         return None;
     }
-    tokio::task::spawn_blocking(discover).await.ok()
+    let discovery = discover();
+    tokio::pin!(discovery);
+    tokio::select! {
+        result = &mut discovery => Some(result),
+        () = cancellation.cancelled() => None,
+    }
 }
 
 fn github_discovery_source_access_request(
@@ -3043,7 +3132,7 @@ mod tests {
         }
     }
 
-    fn saved_edit_hook_request(file_id: [u8; 16]) -> Pr13HookOrchestrationRequestV1 {
+    fn saved_edit_hook_request(file_id: [u8; 16]) -> AdvisoryHookOrchestrationRequestV1 {
         let capabilities = vec![tracedecay_hooks::HookCapabilityV1 {
             family: tracedecay_hooks::HookEventFamily::SavedEdit,
             support: tracedecay_hooks::stock_event_support(
@@ -3060,7 +3149,7 @@ mod tests {
             binding_token: [6; 32],
             capabilities,
         };
-        Pr13HookOrchestrationRequestV1::from_envelope(
+        AdvisoryHookOrchestrationRequestV1::from_envelope(
             tracedecay_hooks::HookEventEnvelopeV2 {
                 schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
                 event_id: [1; 16],
@@ -3094,22 +3183,30 @@ mod tests {
         }
     }
 
-    fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
+    fn configured_model_current(
+        state: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
+        mode: tracedecay_domain::configuration::ContextScoutConfigurationModeV1,
+        revision_name: &str,
+    ) -> crate::application::configuration::ConfigurationCurrentStateV1 {
         let setting_key = tracedecay_domain::configuration::SettingKey::new(
             tracedecay_domain::configuration::CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
         )
         .expect("Scout setting key");
         let revision =
-            tracedecay_domain::configuration::ConfigurationRevisionId::new("revision.scout.model")
+            tracedecay_domain::configuration::ConfigurationRevisionId::new(revision_name)
                 .expect("configuration revision");
         let settings = tracedecay_domain::configuration::ContextScoutSettingsV1 {
             schema_version:
                 tracedecay_domain::configuration::ContextScoutSettingsV1::SCHEMA_VERSION,
-            state: tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active,
-            mode: tracedecay_domain::configuration::ContextScoutConfigurationModeV1::ConfiguredModel,
+            state,
+            mode,
             limits:
                 tracedecay_domain::configuration::ContextScoutConfigurationLimitsV1::bounded_defaults(),
-            model_path: Some(
+            model_path: matches!(
+                mode,
+                tracedecay_domain::configuration::ContextScoutConfigurationModeV1::ConfiguredModel
+            )
+            .then_some(
                 tracedecay_domain::configuration::ContextScoutConfiguredModelPathV1::CodexAppServer,
             ),
         };
@@ -3131,13 +3228,83 @@ mod tests {
             )]),
         )
         .expect("configuration snapshot");
-        ContextScoutConfigurationPinV1::from_current(
-            &crate::application::configuration::ConfigurationCurrentStateV1 {
-                revision_id: revision,
-                snapshot,
-            },
-        )
+        crate::application::configuration::ConfigurationCurrentStateV1 {
+            revision_id: revision,
+            snapshot,
+        }
+    }
+
+    fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
+        ContextScoutConfigurationPinV1::from_current(&configured_model_current(
+            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active,
+            tracedecay_domain::configuration::ContextScoutConfigurationModeV1::ConfiguredModel,
+            "revision.scout.model",
+        ))
         .expect("configured-model pin")
+    }
+
+    #[test]
+    fn scout_execution_rejects_mid_cycle_disable_and_mode_change() {
+        let admitted = configured_model_current(
+            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active,
+            tracedecay_domain::configuration::ContextScoutConfigurationModeV1::ConfiguredModel,
+            "revision.scout.admitted",
+        );
+        let expected =
+            ContextScoutConfigurationPinV1::from_current(&admitted).expect("admitted pin");
+        let disabled = configured_model_current(
+            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Disabled,
+            tracedecay_domain::configuration::ContextScoutConfigurationModeV1::ConfiguredModel,
+            "revision.scout.disabled",
+        );
+        let changed = configured_model_current(
+            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active,
+            tracedecay_domain::configuration::ContextScoutConfigurationModeV1::Deterministic,
+            "revision.scout.changed",
+        );
+        let revision_changed = configured_model_current(
+            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active,
+            tracedecay_domain::configuration::ContextScoutConfigurationModeV1::ConfiguredModel,
+            "revision.scout.replaced",
+        );
+        assert_ne!(revision_changed.revision_id, admitted.revision_id);
+        assert_eq!(
+            revision_changed.snapshot.effective_behavior_digest,
+            admitted.snapshot.effective_behavior_digest
+        );
+
+        assert!(
+            context_scout_execution_pin(
+                &admitted,
+                expected.revision_id(),
+                expected.configuration_digest(),
+            )
+            .is_some()
+        );
+        assert!(
+            context_scout_execution_pin(
+                &disabled,
+                expected.revision_id(),
+                expected.configuration_digest(),
+            )
+            .is_none()
+        );
+        assert!(
+            context_scout_execution_pin(
+                &changed,
+                expected.revision_id(),
+                expected.configuration_digest(),
+            )
+            .is_none()
+        );
+        assert!(
+            context_scout_execution_pin(
+                &revision_changed,
+                expected.revision_id(),
+                expected.configuration_digest(),
+            )
+            .is_none()
+        );
     }
 
     async fn test_scout_owner(
@@ -3336,16 +3503,48 @@ mod tests {
 
             let discovery = discover_github_pull_request_after_authorization(
                 || async { lifecycle },
-                move || {
+                move || async move {
                     calls_for_discovery.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     GitHubExactCommitDiscoveryOutcomeV1::Unavailable
                 },
+                CancellationToken::new(),
             )
             .await;
 
             assert!(discovery.is_none());
             assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_github_setup_discovery_drops_owned_read() {
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let discovery_dropped = Arc::clone(&dropped);
+        let discovery = tokio::spawn(async move {
+            discover_github_pull_request_after_authorization(
+                || async { GitHubProviderLifecycleV1::Ready },
+                move || async move {
+                    struct ReadGuard(Arc<std::sync::atomic::AtomicBool>);
+                    impl Drop for ReadGuard {
+                        fn drop(&mut self) {
+                            self.0.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    }
+                    let _guard = ReadGuard(discovery_dropped);
+                    started_tx.send(()).unwrap();
+                    std::future::pending().await
+                },
+                task_cancellation,
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+        cancellation.cancel();
+        assert!(discovery.await.unwrap().is_none());
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[tokio::test]

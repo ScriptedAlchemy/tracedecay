@@ -246,7 +246,7 @@ pub(super) async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Resu
     let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
     Ok(orchestration_response(
         "hook_v2_scout_prepare",
-        crate::daemon::admit_registered_pr13_hook_orchestration(
+        crate::daemon::admit_registered_advisory_hook_orchestration(
             envelope.clone(),
             snapshot.binding,
             lifecycle,
@@ -259,11 +259,16 @@ pub(super) async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Resu
 
 fn orchestration_response(
     action: &str,
-    outcome: crate::daemon::Pr13HookOrchestrationAdmissionV1,
+    outcome: crate::daemon::AdvisoryHookOrchestrationAdmissionV1,
 ) -> Value {
-    use crate::daemon::Pr13HookOrchestrationAdmissionV1 as Admission;
+    use crate::daemon::AdvisoryHookOrchestrationAdmissionV1 as Admission;
     match outcome {
         Admission::Enqueued => json!({ "action": action, "status": "accepted" }),
+        Admission::Warming => json!({
+            "action": action,
+            "status": "warming",
+            "reason": "orchestration_warming",
+        }),
         Admission::Backpressured => json!({ "action": action, "status": "deferred" }),
         Admission::UnsupportedTrigger => json!({ "action": action, "status": "unsupported" }),
         Admission::Unavailable => json!({

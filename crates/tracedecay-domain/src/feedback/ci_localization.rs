@@ -71,6 +71,7 @@ impl CiFailureRateLimitCheckpointV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CiFailureSourceDegradationV1 {
+    Stale,
     RateLimited(CiFailureRateLimitCheckpointV1),
     Failed(CiFailureSourceFailureV1),
 }
@@ -78,6 +79,7 @@ pub enum CiFailureSourceDegradationV1 {
 impl CiFailureSourceDegradationV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         match self {
+            Self::Stale => Ok(()),
             Self::RateLimited(checkpoint) => checkpoint.validate(),
             Self::Failed(_) => Ok(()),
         }

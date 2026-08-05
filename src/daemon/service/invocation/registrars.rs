@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod advisory_background;
+
 #[derive(Clone)]
 pub(super) struct DaemonConfigurationGrantAuthority {
     actor: ActorId,
@@ -523,30 +525,6 @@ impl DaemonFeedbackRuntimeRegistrar {
             .map_err(DaemonFeedbackRuntimeRegistrationError::from)?;
         Ok(runtime)
     }
-
-    pub(crate) async fn install_advisory_cycle_input(
-        &self,
-        project_root: &Path,
-        input: Arc<dyn FeedbackCycleRuntimePort>,
-    ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
-        self.service
-            .project_runtimes
-            .replace_feedback_cycle_input_atomically(project_root, input)
-            .await
-            .map_err(DaemonFeedbackRuntimeRegistrationError::from)
-    }
-
-    pub(crate) async fn install_advisory_cycle_invocation(
-        &self,
-        project_root: &Path,
-        owner: DaemonAdvisoryCycleInvocationOwner,
-    ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
-        self.service
-            .project_runtimes
-            .register(project_root.to_path_buf(), owner)
-            .await
-            .map_err(DaemonFeedbackRuntimeRegistrationError::from)
-    }
 }
 
 impl crate::dashboard::feedback_api::FeedbackStatusRuntime for DaemonFeedbackRuntimeRegistrar {
@@ -1019,27 +997,18 @@ impl DaemonAdvisoryRuntimeRegistrar {
         }
     }
 
-    pub(crate) async fn register<GR, GA, CS, CE, PE, PC>(
+    pub(crate) async fn prepare_production(
         &self,
         project_root: PathBuf,
         input: Pr13AdvisoryRuntimeOpenV1,
-        providers: Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
+        production: Pr13AdvisoryProductionOpenV1,
         lsp_session_factory: Arc<DaemonLspSessionFactory>,
-        hook_delivery_port: Arc<
-            dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync,
-        >,
     ) -> Result<
-        Arc<Pr13AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>>,
+        Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
         DaemonAdvisoryRuntimeRegistrationError,
-    >
-    where
-        GR: GitHubCurrentBranchRemapper + Send + Sync + 'static,
-        GA: GitHubCanonicalReviewAnchorAuthorityV1 + Clone + Send + Sync + 'static,
-        CS: CiReadOnlyProviderArchiveV1 + Send + Sync + 'static,
-        CE: CiExactEvidenceAuthorityV1<CS::Record> + Send + Sync + 'static,
-        PE: CanonicalProximityEvidenceAuthorityV1 + Send + Sync + 'static,
-        PC: ConfigurationControlStore + Clone + Send + Sync + 'static,
-    {
+    > {
+        let authorities = open_pr13_advisory_production_authorities(production)?;
+        let (providers, hook_delivery_port) = authorities.into_registrar_parts();
         let project_id = input.resolved_scope.project_id.clone();
         let feedback_registered = self
             .service
@@ -1052,107 +1021,38 @@ impl DaemonAdvisoryRuntimeRegistrar {
         if !feedback_registered {
             return Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable);
         }
-        if self
-            .service
-            .project_runtimes
-            .holds::<Arc<dyn Any + Send + Sync>>(&project_root)
-            .await
-        {
-            return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
-        }
-        let registration = Arc::new(register_pr13_advisory_daemon_startup(
-            input,
-            providers,
-            lsp_session_factory.clone(),
-            hook_delivery_port,
-        )?);
-        let registered_root = project_root.clone();
-        let published: Arc<dyn Any + Send + Sync> = registration.clone();
-        self.service
-            .project_runtimes
-            .register(project_root, published)
-            .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
-        self.service
-            .install_lsp_owner(
-                registered_root,
-                DaemonLspInvocationOwner::new(lsp_session_factory),
-            )
-            .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
-        Ok(registration)
-    }
-
-    pub(crate) async fn register_production(
-        &self,
-        project_root: PathBuf,
-        input: Pr13AdvisoryRuntimeOpenV1,
-        production: Pr13AdvisoryProductionOpenV1,
-        lsp_session_factory: Arc<DaemonLspSessionFactory>,
-    ) -> Result<
-        Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
-        DaemonAdvisoryRuntimeRegistrationError,
-    > {
-        let authorities = open_pr13_advisory_production_authorities(production)?;
-        let (providers, hook_delivery_port) = authorities.into_registrar_parts();
-        self.register(
-            project_root,
+        Ok(Arc::new(register_pr13_advisory_daemon_startup(
             input,
             providers,
             lsp_session_factory,
             hook_delivery_port,
-        )
-        .await
+        )?))
     }
 
-    pub(crate) async fn register_hook_orchestrator(
+    pub(crate) async fn publish_production(
         &self,
         project_root: PathBuf,
-        project_id: [u8; 16],
-        worktree_id: [u8; 16],
-        runtime: Arc<dyn Pr13HookOrchestrationPortV1>,
-    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
-        if project_id == [0; 16]
-            || worktree_id == [0; 16]
-            || !self
-                .service
-                .project_runtimes
-                .holds::<Arc<dyn Any + Send + Sync>>(&project_root)
-                .await
-        {
-            return Err(DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime);
-        }
+        registration: Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
+        advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
+        feedback_cycle_input: Arc<dyn FeedbackCycleRuntimePort>,
+        lsp_session_factory: Arc<DaemonLspSessionFactory>,
+    ) -> Result<AdvisoryRuntimePublicationLeaseV1, DaemonAdvisoryRuntimeRegistrationError> {
+        let published: Arc<dyn Any + Send + Sync> = registration;
         self.service
             .project_runtimes
-            .register(project_root.clone(), Arc::clone(&runtime))
+            .publish_advisory_atomically(
+                project_root,
+                published,
+                advisory_cycle,
+                feedback_cycle_input,
+                DaemonLspInvocationOwner::new(lsp_session_factory),
+            )
             .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
-        let runtime_weak: Weak<dyn Pr13HookOrchestrationPortV1> = Arc::downgrade(&runtime);
-        let registered = match pr13_hook_orchestration_registry().lock() {
-            Ok(mut registry) => {
-                registry.retain(|_, runtime| runtime.strong_count() > 0);
-                let key = (project_id, worktree_id);
-                if registry
-                    .get(&key)
-                    .and_then(Weak::upgrade)
-                    .is_some_and(|existing| !Arc::ptr_eq(&existing, &runtime))
-                {
-                    false
-                } else {
-                    registry.insert(key, runtime_weak);
-                    true
+            .map_err(|error| match error {
+                FeedbackCyclePublicationError::Registry(error) => error.into(),
+                FeedbackCyclePublicationError::RouterUnavailable => {
+                    DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime
                 }
-            }
-            Err(_) => false,
-        };
-        if registered {
-            Ok(())
-        } else {
-            self.service
-                .project_runtimes
-                .withdraw::<Arc<dyn Pr13HookOrchestrationPortV1>>(&project_root)
-                .await;
-            Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable)
-        }
+            })
     }
 }

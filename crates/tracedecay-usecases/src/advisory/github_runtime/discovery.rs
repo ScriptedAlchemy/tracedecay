@@ -65,7 +65,7 @@ struct AssociatedRepositoryV1 {
 /// GitHub's commit-associated pull-request endpoint. Anonymous acquisition is
 /// used only for repositories this request proves publicly readable; private
 /// acquisition requires a registered verified read credential.
-pub fn discover_exact_commit_pull_request_v1(
+pub async fn discover_exact_commit_pull_request_v1(
     owner: &str,
     repository: &str,
     head_commit: &CommitId,
@@ -73,12 +73,12 @@ pub fn discover_exact_commit_pull_request_v1(
     credential: &GitHubReadOnlyCredentialV1,
 ) -> GitHubExactCommitDiscoveryOutcomeV1 {
     let first =
-        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential).await;
     if !discovery_outcome_requires_consensus(&first) {
         return first;
     }
     let second =
-        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential).await;
     if !discovery_outcome_requires_consensus(&second) {
         return second;
     }
@@ -86,7 +86,7 @@ pub fn discover_exact_commit_pull_request_v1(
         return agreed;
     }
     let third =
-        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential).await;
     if !discovery_outcome_requires_consensus(&third) {
         return third;
     }
@@ -115,7 +115,7 @@ fn discovery_consensus(
     }
 }
 
-fn scan_exact_commit_pull_request_v1(
+async fn scan_exact_commit_pull_request_v1(
     owner: &str,
     repository: &str,
     head_commit: &CommitId,
@@ -133,16 +133,16 @@ fn scan_exact_commit_pull_request_v1(
         return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
     }
 
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(config.request_timeout))
-        .timeout_connect(Some(config.connect_timeout))
-        .timeout_recv_response(Some(config.socket_timeout))
-        .timeout_recv_body(Some(config.socket_timeout))
-        .https_only(true)
-        .max_redirects(0)
-        .http_status_as_error(false)
+    let client = match reqwest::Client::builder()
+        .timeout(config.request_timeout)
+        .connect_timeout(config.connect_timeout)
+        .read_timeout(config.socket_timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
-        .into();
+    {
+        Ok(client) => client,
+        Err(_) => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
+    };
     let expected_repository = format!("{owner}/{repository}");
     let endpoint = format!(
         "{}/repos/{owner}/{repository}/commits/{}/pulls",
@@ -162,7 +162,7 @@ fn scan_exact_commit_pull_request_v1(
                 Ok(authorization) => authorization,
                 Err(()) => return GitHubExactCommitDiscoveryOutcomeV1::Denied,
             };
-        let mut request = agent
+        let mut request = client
             .get(format!(
                 "{endpoint}?per_page={GITHUB_DISCOVERY_PAGE_SIZE_V1}&page={page}"
             ))
@@ -172,7 +172,7 @@ fn scan_exact_commit_pull_request_v1(
         if let Some(authorization) = authorization.as_ref() {
             request = request.header("Authorization", authorization.as_str());
         }
-        let response = request.call();
+        let response = request.send().await;
         let Ok(mut response) = response else {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
         };
@@ -215,11 +215,8 @@ fn scan_exact_commit_pull_request_v1(
                 Ok(next_page) => next_page,
                 Err(()) => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
             };
-        let Ok(body) = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1 as u64)
-            .read_to_vec()
+        let Some(body) =
+            read_bounded_body(&mut response, MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1).await
         else {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
         };
@@ -300,7 +297,7 @@ fn exact_pull_request(
 }
 
 fn next_page(
-    headers: &ureq::http::HeaderMap,
+    headers: &reqwest::header::HeaderMap,
     rest_base_uri: &str,
     endpoint: &str,
     current_page: u32,
@@ -346,7 +343,7 @@ fn next_page(
 }
 
 fn rate_limit_checkpoint(
-    headers: &ureq::http::HeaderMap,
+    headers: &reqwest::header::HeaderMap,
 ) -> Option<GitHubReviewRateLimitCheckpointV1> {
     let checkpoint = GitHubReviewRateLimitCheckpointV1 {
         limit: header(headers, "x-ratelimit-limit")?.parse().ok()?,
@@ -361,7 +358,7 @@ fn rate_limit_checkpoint(
     checkpoint.validate().is_ok().then_some(checkpoint)
 }
 
-fn retry_at(headers: &ureq::http::HeaderMap) -> Option<UtcMicros> {
+fn retry_at(headers: &reqwest::header::HeaderMap) -> Option<UtcMicros> {
     let retry_seconds = header(headers, "retry-after")?.parse::<i64>().ok()?;
     Some(UtcMicros(
         now_micros()
@@ -370,11 +367,23 @@ fn retry_at(headers: &ureq::http::HeaderMap) -> Option<UtcMicros> {
     ))
 }
 
-fn header(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
+fn header(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+async fn read_bounded_body(response: &mut reqwest::Response, maximum: usize) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        let next_len = body.len().checked_add(chunk.len())?;
+        if next_len > maximum {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
 }
 
 fn valid_rest_base_uri(value: &str) -> bool {

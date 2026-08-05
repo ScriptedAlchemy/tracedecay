@@ -21,6 +21,17 @@ impl ProjectRuntimeRegistryV1 {
         self.begin_shutdown();
         let mut shutdown_complete = self.shutdown_complete.subscribe();
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
+            let deferred_setups = {
+                let runtimes = self.lock_runtimes();
+                runtimes
+                    .values()
+                    .filter_map(|runtime| runtime.advisory_hook_orchestrator.as_ref())
+                    .map(RegisteredAdvisoryHookOrchestrationRuntimeV1::runtime)
+                    .collect::<Vec<_>>()
+            };
+            for deferred in deferred_setups {
+                deferred.cancel_and_join_setup().await;
+            }
             let registry = self.clone();
             self.shutdown_complete.send_replace(ShutdownState::Pending);
             self.shutdown_reaper.submit(move || {

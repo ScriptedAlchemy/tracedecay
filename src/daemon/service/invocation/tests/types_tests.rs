@@ -44,8 +44,8 @@ async fn feedback_cycle_router_upgrades_existing_lsp_sessions_to_advisory_runtim
 }
 
 #[test]
-fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
-    let saved = Pr13HookOrchestrationRequestV1::from_envelope(
+fn advisory_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
+    let saved = AdvisoryHookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SavedEdit {
             file_id: [7; 16],
             changed_range_count: 1,
@@ -56,9 +56,9 @@ fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
         false,
     )
     .unwrap();
-    assert_eq!(saved.trigger, Pr13HookOrchestrationTriggerV1::SavedEdit);
+    assert_eq!(saved.trigger, AdvisoryHookOrchestrationTriggerV1::SavedEdit);
 
-    let stop = Pr13HookOrchestrationRequestV1::from_envelope(
+    let stop = AdvisoryHookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SessionBoundary {
             boundary: HookBoundaryV1::TurnComplete,
         }),
@@ -68,9 +68,9 @@ fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
         false,
     )
     .unwrap();
-    assert_eq!(stop.trigger, Pr13HookOrchestrationTriggerV1::Stop);
+    assert_eq!(stop.trigger, AdvisoryHookOrchestrationTriggerV1::Stop);
 
-    let without_scout_lifecycle = Pr13HookOrchestrationRequestV1::from_envelope(
+    let without_scout_lifecycle = AdvisoryHookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SavedEdit {
             file_id: [7; 16],
             changed_range_count: 1,
@@ -83,12 +83,12 @@ fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
     .unwrap();
     assert_eq!(
         without_scout_lifecycle.trigger,
-        Pr13HookOrchestrationTriggerV1::SavedEdit
+        AdvisoryHookOrchestrationTriggerV1::SavedEdit
     );
     assert!(without_scout_lifecycle.lifecycle.is_none());
 
     assert!(
-        Pr13HookOrchestrationRequestV1::from_envelope(
+        AdvisoryHookOrchestrationRequestV1::from_envelope(
             hook_envelope(HookEventV2::TestLifecycle {
                 test_run_id: [8; 16],
                 test_count: 1,
@@ -103,7 +103,7 @@ fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
         .is_none()
     );
     assert_eq!(
-        Pr13HookOrchestrationRequestV1::from_envelope(
+        AdvisoryHookOrchestrationRequestV1::from_envelope(
             hook_envelope(HookEventV2::SessionBoundary {
                 boundary: HookBoundaryV1::Start,
             }),
@@ -114,24 +114,24 @@ fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
         )
         .unwrap()
         .trigger,
-        Pr13HookOrchestrationTriggerV1::Explicit
+        AdvisoryHookOrchestrationTriggerV1::Explicit
     );
 }
 
 #[tokio::test]
-async fn pr13_hook_orchestration_backpressures_without_waiting() {
+async fn advisory_hook_orchestration_backpressures_without_waiting() {
     let release = Arc::new(tokio::sync::Notify::new());
     let work_release = Arc::clone(&release);
     let work = move |_| {
         let release = Arc::clone(&work_release);
         async move { release.notified().await }
     };
-    let runtime = BoundedPr13HookOrchestratorV1::new(1, work).unwrap();
+    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, work).unwrap();
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_completions = Arc::clone(&completions);
     let completed = Arc::new(tokio::sync::Notify::new());
     let completion_notification = Arc::clone(&completed);
-    let mut request = Pr13HookOrchestrationRequestV1::from_envelope(
+    let mut request = AdvisoryHookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SavedEdit {
             file_id: [7; 16],
             changed_range_count: 1,
@@ -146,14 +146,27 @@ async fn pr13_hook_orchestration_backpressures_without_waiting() {
         observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         completion_notification.notify_one();
     }));
+    let mut other_envelope = hook_envelope(HookEventV2::SavedEdit {
+        file_id: [8; 16],
+        changed_range_count: 1,
+    });
+    other_envelope.event_id = [2; 16];
+    let other_request = AdvisoryHookOrchestrationRequestV1::from_envelope(
+        other_envelope,
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
 
     assert_eq!(
-        runtime.admit(request.clone()),
-        Pr13HookOrchestrationAdmissionV1::Enqueued
+        runtime.admit(request),
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued
     );
     assert_eq!(
-        runtime.admit(request),
-        Pr13HookOrchestrationAdmissionV1::Backpressured
+        runtime.admit(other_request),
+        AdvisoryHookOrchestrationAdmissionV1::Backpressured
     );
     assert_eq!(completions.load(std::sync::atomic::Ordering::Relaxed), 0);
     release.notify_one();
@@ -168,22 +181,28 @@ async fn pr13_hook_orchestration_backpressures_without_waiting() {
 }
 
 #[tokio::test]
-async fn pr13_hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
+async fn advisory_hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
+    let ran_synchronously = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let work_ran_synchronously = Arc::clone(&ran_synchronously);
     let ran = Arc::new(tokio::sync::Notify::new());
     let work_ran = Arc::clone(&ran);
-    let runtime = BoundedPr13HookOrchestratorV1::new(1, move |_| {
+    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
         let ran = Arc::clone(&work_ran);
-        async move { ran.notify_one() }
+        let ran_synchronously = Arc::clone(&work_ran_synchronously);
+        async move {
+            ran_synchronously.store(true, std::sync::atomic::Ordering::Release);
+            ran.notify_one()
+        }
     })
     .unwrap();
-    let runtime: Arc<dyn Pr13HookOrchestrationPortV1> = runtime;
-    pr13_hook_orchestration_registry()
+    let runtime: Arc<dyn AdvisoryHookOrchestrationPortV1> = runtime;
+    advisory_hook_orchestration_registry()
         .lock()
         .unwrap()
         .insert(([3; 16], [5; 16]), Arc::downgrade(&runtime));
 
     assert_eq!(
-        admit_registered_pr13_hook_orchestration(
+        admit_registered_advisory_hook_orchestration(
             hook_envelope(HookEventV2::SavedEdit {
                 file_id: [7; 16],
                 changed_range_count: 1,
@@ -194,13 +213,283 @@ async fn pr13_hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
             false,
             None,
         ),
-        Pr13HookOrchestrationAdmissionV1::Enqueued
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued
+    );
+    assert!(
+        !ran_synchronously.load(std::sync::atomic::Ordering::Acquire),
+        "hook admission must return before daemon-owned provider or model work begins"
     );
     ran.notified().await;
-    pr13_hook_orchestration_registry()
+    advisory_hook_orchestration_registry()
         .lock()
         .unwrap()
         .remove(&([3; 16], [5; 16]));
+}
+
+#[tokio::test]
+async fn advisory_hook_orchestration_coalesces_duplicate_work_and_completes_every_admission() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let work_release = Arc::clone(&release);
+    let work_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_work_calls = Arc::clone(&work_calls);
+    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
+        let release = Arc::clone(&work_release);
+        let work_calls = Arc::clone(&observed_work_calls);
+        async move {
+            work_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            release.notified().await;
+        }
+    })
+    .unwrap();
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let completed = Arc::new(tokio::sync::Notify::new());
+    let mut request = AdvisoryHookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    let first_completions = Arc::clone(&completions);
+    let first_completed = Arc::clone(&completed);
+    request.completion = Some(Arc::new(move || {
+        first_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        first_completed.notify_one();
+    }));
+    let mut duplicate = request.clone();
+    let duplicate_completions = Arc::clone(&completions);
+    let duplicate_completed = Arc::clone(&completed);
+    duplicate.completion = Some(Arc::new(move || {
+        duplicate_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        duplicate_completed.notify_one();
+    }));
+
+    assert_eq!(
+        runtime.admit(request),
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued
+    );
+    tokio::task::yield_now().await;
+    assert_eq!(
+        runtime.admit(duplicate),
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued,
+        "an exact duplicate must join the admitted work instead of consuming capacity"
+    );
+    assert_eq!(work_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while completions.load(std::sync::atomic::Ordering::Relaxed) != 2 {
+            completed.notified().await;
+        }
+    })
+    .await
+    .expect("both joined admissions complete");
+    assert_eq!(work_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn advisory_hook_orchestration_bounds_coalesced_completion_waiters() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let work_release = Arc::clone(&release);
+    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
+        let release = Arc::clone(&work_release);
+        async move {
+            release.notified().await;
+        }
+    })
+    .unwrap();
+    let completion = Arc::new(|| {}) as Arc<dyn Fn() + Send + Sync>;
+    let request = |completion| {
+        let mut request = AdvisoryHookOrchestrationRequestV1::from_envelope(
+            hook_envelope(HookEventV2::SavedEdit {
+                file_id: [7; 16],
+                changed_range_count: 1,
+            }),
+            &hook_binding(),
+            Some(hook_lifecycle()),
+            1,
+            false,
+        )
+        .unwrap();
+        request.completion = Some(completion);
+        request
+    };
+    let first = request(Arc::clone(&completion));
+    assert_eq!(
+        runtime.admit(first),
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued
+    );
+    for _ in 1..super::super::types::MAX_COALESCED_ADVISORY_HOOK_COMPLETIONS {
+        let duplicate = request(Arc::clone(&completion));
+        assert_eq!(
+            runtime.admit(duplicate),
+            AdvisoryHookOrchestrationAdmissionV1::Enqueued
+        );
+    }
+    let overflow = request(completion);
+    assert_eq!(
+        runtime.admit(overflow),
+        AdvisoryHookOrchestrationAdmissionV1::Backpressured
+    );
+    release.notify_one();
+}
+
+#[tokio::test]
+async fn dropping_advisory_hook_orchestrator_cancels_daemon_owned_work_without_false_completion() {
+    struct PendingWork {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl std::future::Future for PendingWork {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for PendingWork {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let work_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_work_drop = Arc::clone(&work_dropped);
+    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| PendingWork {
+        dropped: Arc::clone(&observed_work_drop),
+    })
+    .unwrap();
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_completions = Arc::clone(&completions);
+    let mut request = AdvisoryHookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    request.completion = Some(Arc::new(move || {
+        observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    assert_eq!(
+        runtime.admit(request),
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued
+    );
+    tokio::task::yield_now().await;
+    drop(runtime);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !work_dropped.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retiring the retained owner cancels its worker");
+    assert_eq!(
+        completions.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "cancelled work is not reported as completed"
+    );
+}
+
+#[tokio::test]
+async fn deferred_advisory_owner_reports_stable_warming_ready_and_unavailable_states() {
+    let warming = DeferredAdvisoryHookOrchestratorV1::new(UtcMicros(10));
+    let request = AdvisoryHookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        warming.readiness(),
+        AdvisoryRuntimeReadinessV1::Warming {
+            started_at: UtcMicros(10)
+        }
+    );
+    assert_eq!(
+        warming.admit(request.clone()),
+        AdvisoryHookOrchestrationAdmissionV1::Warming
+    );
+    assert!(warming.claim_setup());
+    assert!(
+        !warming.claim_setup(),
+        "same-route project opens must join one post-open advisory setup"
+    );
+
+    let worker_ran = Arc::new(tokio::sync::Notify::new());
+    let observed_worker = Arc::clone(&worker_ran);
+    let ready = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
+        let worker_ran = Arc::clone(&observed_worker);
+        async move { worker_ran.notify_one() }
+    })
+    .unwrap();
+    assert!(warming.mark_ready(ready, UtcMicros(20)));
+    assert_eq!(
+        warming.readiness(),
+        AdvisoryRuntimeReadinessV1::Ready {
+            started_at: UtcMicros(10),
+            finished_at: UtcMicros(20),
+        }
+    );
+    assert_eq!(
+        warming.admit(request.clone()),
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued
+    );
+    worker_ran.notified().await;
+    assert_eq!(
+        warming.readiness(),
+        AdvisoryRuntimeReadinessV1::Ready {
+            started_at: UtcMicros(10),
+            finished_at: UtcMicros(20),
+        },
+        "readiness reads must not mutate terminal metadata"
+    );
+
+    let unavailable = DeferredAdvisoryHookOrchestratorV1::new(UtcMicros(30));
+    assert!(unavailable.claim_setup());
+    assert!(unavailable.mark_unavailable(
+        AdvisoryRuntimeUnavailableReasonV1::RegistrationFailed,
+        UtcMicros(40),
+    ));
+    assert_eq!(
+        unavailable.readiness(),
+        AdvisoryRuntimeReadinessV1::Unavailable {
+            started_at: UtcMicros(30),
+            finished_at: UtcMicros(40),
+            reason: AdvisoryRuntimeUnavailableReasonV1::RegistrationFailed,
+        }
+    );
+    assert_eq!(
+        unavailable.admit(request),
+        AdvisoryHookOrchestrationAdmissionV1::Unavailable
+    );
+    unavailable.cancel();
+    assert_eq!(
+        unavailable.readiness(),
+        AdvisoryRuntimeReadinessV1::Unavailable {
+            started_at: UtcMicros(30),
+            finished_at: UtcMicros(40),
+            reason: AdvisoryRuntimeUnavailableReasonV1::RegistrationFailed,
+        },
+        "retirement must not rewrite an existing terminal reason or timestamp"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

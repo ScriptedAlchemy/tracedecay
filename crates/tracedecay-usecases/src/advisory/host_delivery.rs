@@ -187,6 +187,25 @@ pub fn register_pr13_advisory_hook_notice_queue(
     true
 }
 
+pub fn unregister_pr13_advisory_hook_notice_queue(
+    project_id: [u8; 16],
+    worktree_id: [u8; 16],
+    queue: &Arc<Pr13AdvisoryHookNoticeQueueV1>,
+) -> bool {
+    let Ok(mut queues) = registered_hook_notice_queues().lock() else {
+        return false;
+    };
+    let key = (project_id, worktree_id);
+    let registered = queues
+        .get(&key)
+        .and_then(Weak::upgrade)
+        .is_some_and(|registered| Arc::ptr_eq(&registered, queue));
+    if registered {
+        queues.remove(&key);
+    }
+    registered
+}
+
 pub fn peek_pr13_advisory_hook_notice(
     project_id: [u8; 16],
     worktree_id: [u8; 16],

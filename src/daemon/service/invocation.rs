@@ -80,8 +80,8 @@ use tracedecay_policy::{
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
 use super::project_runtime::{
-    FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
-    ProjectRuntimeRegistryV1,
+    AdvisoryRuntimePublicationLeaseV1, FeedbackCyclePublicationError,
+    ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,
 };
 use crate::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
@@ -89,20 +89,16 @@ use crate::agents::context_scout_ports::{
 };
 use crate::application::ProjectSourceAccessSnapshot;
 use crate::application::advisory::{
-    AdvisoryCycleOutcome, CanonicalProximityEvidenceAuthorityV1, CiExactEvidenceAuthorityV1,
-    CiReadOnlyProviderArchiveV1, GitHubCanonicalReviewAnchorAuthorityV1,
-    GitHubCurrentBranchRemapper, Pr13AdvisoryDaemonStartupErrorV1,
-    Pr13AdvisoryDaemonStartupRegistrationV1, Pr13AdvisoryHookLookupNoticeV1,
-    Pr13AdvisoryProductionOpenErrorV1, Pr13AdvisoryProductionOpenV1,
-    Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryProviderAuthoritiesV1,
+    AdvisoryCycleOutcome, Pr13AdvisoryDaemonStartupErrorV1, Pr13AdvisoryProductionOpenErrorV1,
+    Pr13AdvisoryProductionOpenV1, Pr13AdvisoryProductionStartupRegistrationV1,
     Pr13AdvisoryRuntimeOpenV1, open_pr13_advisory_production_authorities,
     register_pr13_advisory_daemon_startup,
 };
 use crate::application::configuration::{
-    AuthorizedActor, ConfigurationAuditQuery, ConfigurationControlStore, ConfigurationError,
-    ConfigurationMutationAuthority, ConfigurationMutationGrantAuthority,
-    ConfigurationMutationGrantAuthorityError, ConfigurationMutationGrantAuthorityFuture,
-    ConfigurationRollbackRequest, CredentialWriteHandleV1, DirectConfigurationMutation,
+    AuthorizedActor, ConfigurationAuditQuery, ConfigurationError, ConfigurationMutationAuthority,
+    ConfigurationMutationGrantAuthority, ConfigurationMutationGrantAuthorityError,
+    ConfigurationMutationGrantAuthorityFuture, ConfigurationRollbackRequest,
+    CredentialWriteHandleV1, DirectConfigurationMutation,
     PolicyBackedConfigurationMutationAuthorization, ProjectConfigurationRuntime,
     ScopeResolutionPort, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
     configuration_layer_scope_digest,
@@ -179,10 +175,7 @@ use tracedecay_application::{
     CreateWorkCommand, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
     ReviewProposalRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
-use tracedecay_hooks::{
-    HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookFeedbackDeliveryPortV1,
-    HookScopeBindingV1,
-};
+use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).
@@ -225,9 +218,11 @@ pub(crate) use primitive::{
 };
 pub(in crate::daemon) use types::observe_accepted_feedback_cycle_terminal;
 pub(crate) use types::{
-    BoundedPr13HookOrchestratorV1, DaemonLspInvocationOwner, Pr13HookOrchestrationAdmissionV1,
-    Pr13HookOrchestrationPortV1, Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
-    admit_registered_pr13_hook_orchestration,
+    AdvisoryHookOrchestrationAdmissionV1, AdvisoryHookOrchestrationPortV1,
+    AdvisoryHookOrchestrationRequestV1, AdvisoryHookOrchestrationTriggerV1,
+    AdvisoryRuntimeReadinessV1, AdvisoryRuntimeUnavailableReasonV1,
+    BoundedAdvisoryHookOrchestratorV1, DaemonLspInvocationOwner,
+    DeferredAdvisoryHookOrchestratorV1, admit_registered_advisory_hook_orchestration,
 };
 // `pub(super)` on these shapes, in their original flat-file home, meant
 // "visible to `daemon::service`" (their home's actual parent); nesting them
@@ -242,8 +237,9 @@ pub(crate) use registrars::{
     DoctorConfigurationOutcomeV1,
 };
 pub(in crate::daemon::service) use types::{
-    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    RegisteredAdvisoryHookOrchestrationRuntimeV1, RegisteredCallableCodeRuntime,
+    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredWorkRuntime,
+    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
 #[derive(Clone)]

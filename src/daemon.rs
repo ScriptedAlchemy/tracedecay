@@ -235,6 +235,7 @@ mod memory_repair_scheduler;
 #[cfg(unix)]
 pub mod pr_autotrack;
 mod production_harness;
+mod project_open_advisory;
 #[path = "daemon/git_watch/store_maintenance.rs"]
 mod store_maintenance;
 #[cfg(any(test, feature = "test-transport"))]
@@ -339,7 +340,9 @@ pub(crate) use crate::daemon_contract::{
 use bootstrap::drain_client_tasks;
 pub use bootstrap::run_foreground;
 pub(crate) use service::invocation::{
-    BoundedPr13HookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
+    AdvisoryHookOrchestrationAdmissionV1, AdvisoryHookOrchestrationPortV1,
+    AdvisoryHookOrchestrationRequestV1, AdvisoryHookOrchestrationTriggerV1,
+    BoundedAdvisoryHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
     DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
     DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrar,
     DaemonAdvisoryRuntimeRegistrationError, DaemonConfigurationRuntimeRegistrar,
@@ -348,9 +351,8 @@ pub(crate) use service::invocation::{
     DaemonInvocationService, DaemonLspOwnerRegistrar, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
     DaemonSemanticRuntimeRegistrationError, DaemonWorkRuntimeRegistrar,
-    Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
-    Pr13HookOrchestrationTriggerV1, admit_registered_pr13_hook_orchestration,
-    advisory_cycle_invocation_result, daemon_operation_event_authority,
+    admit_registered_advisory_hook_orchestration, advisory_cycle_invocation_result,
+    daemon_operation_event_authority,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,

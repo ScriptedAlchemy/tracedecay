@@ -13,13 +13,15 @@ use tracedecay_lsp::FeedbackCycleRuntimePort;
 
 use crate::application::feedback::Pr12FeedbackCycleRuntime;
 use crate::application::feedback::concrete::Pr12FeedbackRuntime;
+use crate::application::lsp_runtime::DaemonLspSessionFactory;
 use crate::application::primitives::Pr12PrimitiveProjectRuntime;
 
 use super::invocation::{
-    DaemonAdvisoryCycleInvocationOwner, DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner,
-    Pr13HookOrchestrationPortV1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
-    RegisteredFeedbackRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
-    UnavailableFeedbackCycleRuntimeV1,
+    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
+    DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner,
+    RegisteredAdvisoryHookOrchestrationRuntimeV1, RegisteredCallableCodeRuntime,
+    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredWorkRuntime,
+    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
 mod reaper;
@@ -116,7 +118,7 @@ pub(crate) struct ProjectRuntime {
     work: Option<RegisteredWorkRuntime>,
     lsp_owner: Option<DaemonLspInvocationOwner>,
     advisory: Option<Arc<dyn Any + Send + Sync>>,
-    advisory_hook_orchestrator: Option<Arc<dyn Pr13HookOrchestrationPortV1>>,
+    advisory_hook_orchestrator: Option<RegisteredAdvisoryHookOrchestrationRuntimeV1>,
     semantic: Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
     reservations: Vec<TypeId>,
     #[cfg(test)]
@@ -199,7 +201,7 @@ project_runtime_components!(
     RegisteredWorkRuntime => work,
     DaemonLspInvocationOwner => lsp_owner,
     Arc<dyn Any + Send + Sync> => advisory,
-    Arc<dyn Pr13HookOrchestrationPortV1> => advisory_hook_orchestrator,
+    RegisteredAdvisoryHookOrchestrationRuntimeV1 => advisory_hook_orchestrator,
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
 );
 
@@ -436,6 +438,65 @@ pub(crate) struct ProjectRuntimeRegistryV1 {
     commit_starting: Arc<StdMutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     #[cfg(test)]
     drain_waiting: Arc<StdMutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+}
+
+pub(crate) struct AdvisoryRuntimePublicationLeaseV1 {
+    registry: ProjectRuntimeRegistryV1,
+    project_root: PathBuf,
+    advisory: Arc<dyn Any + Send + Sync>,
+    advisory_cycle: Arc<dyn DaemonAdvisoryCycleInvocationPort>,
+    feedback_cycle_input: Arc<dyn FeedbackCycleRuntimePort>,
+    previous_feedback_cycle_input: Arc<dyn FeedbackCycleRuntimePort>,
+    lsp_factory: Arc<DaemonLspSessionFactory>,
+    previous_lsp_owner: Option<DaemonLspInvocationOwner>,
+    active: bool,
+}
+
+impl AdvisoryRuntimePublicationLeaseV1 {
+    pub(crate) fn commit(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for AdvisoryRuntimePublicationLeaseV1 {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut runtimes = self.registry.lock_runtimes();
+        let Some(runtime) = runtimes.get_mut(&self.project_root) else {
+            return;
+        };
+        let exact_publication = runtime
+            .advisory
+            .as_ref()
+            .is_some_and(|advisory| Arc::ptr_eq(advisory, &self.advisory))
+            && runtime
+                .advisory_cycle
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(&owner.service, &self.advisory_cycle))
+            && runtime
+                .lsp_owner
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner.factory(), &self.lsp_factory));
+        if !exact_publication {
+            return;
+        }
+        if let Some(router) = &runtime.feedback_cycle_input {
+            let current_matches = router
+                .replace_if_same(
+                    &self.feedback_cycle_input,
+                    Arc::clone(&self.previous_feedback_cycle_input),
+                )
+                .is_ok_and(|same| same);
+            if !current_matches {
+                return;
+            }
+        }
+        runtime.advisory = None;
+        runtime.advisory_cycle = None;
+        runtime.lsp_owner = self.previous_lsp_owner.take();
+    }
 }
 
 impl Default for ProjectRuntimeRegistryV1 {
@@ -748,6 +809,7 @@ impl ProjectRuntimeRegistryV1 {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn replace_feedback_cycle_input_atomically(
         &self,
         project_root: &Path,
@@ -773,6 +835,63 @@ impl ProjectRuntimeRegistryV1 {
                         .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?
                         .replace(input)
                         .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable);
+                }
+            }
+            if reservation_changed.changed().await.is_err() {
+                return Err(ProjectRuntimeRegistryError::Closed.into());
+            }
+        }
+    }
+
+    pub(crate) async fn publish_advisory_atomically(
+        &self,
+        project_root: PathBuf,
+        advisory: Arc<dyn Any + Send + Sync>,
+        advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
+        feedback_cycle_input: Arc<dyn FeedbackCycleRuntimePort>,
+        lsp_owner: DaemonLspInvocationOwner,
+    ) -> Result<AdvisoryRuntimePublicationLeaseV1, FeedbackCyclePublicationError> {
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            {
+                let mut runtimes = self.lock_runtimes();
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(ProjectRuntimeRegistryError::Closed.into());
+                }
+                let runtime = runtimes.entry(project_root.clone()).or_default();
+                let reserved = runtime.reservations.iter().any(|type_id| {
+                    *type_id == TypeId::of::<Arc<dyn Any + Send + Sync>>()
+                        || *type_id == TypeId::of::<DaemonAdvisoryCycleInvocationOwner>()
+                        || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
+                        || *type_id == TypeId::of::<DaemonLspInvocationOwner>()
+                });
+                if !reserved {
+                    if runtime.advisory.is_some() || runtime.advisory_cycle.is_some() {
+                        return Err(ProjectRuntimeRegistryError::AlreadyRegistered.into());
+                    }
+                    let router = runtime
+                        .feedback_cycle_input
+                        .as_ref()
+                        .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?;
+                    let previous_feedback_cycle_input = router
+                        .swap(Arc::clone(&feedback_cycle_input))
+                        .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
+                    let lsp_factory = Arc::clone(lsp_owner.factory());
+                    let previous_lsp_owner = runtime.lsp_owner.replace(lsp_owner);
+                    let advisory_cycle_service = Arc::clone(&advisory_cycle.service);
+                    runtime.advisory = Some(Arc::clone(&advisory));
+                    runtime.advisory_cycle = Some(advisory_cycle);
+                    return Ok(AdvisoryRuntimePublicationLeaseV1 {
+                        registry: self.clone(),
+                        project_root,
+                        advisory,
+                        advisory_cycle: advisory_cycle_service,
+                        feedback_cycle_input,
+                        previous_feedback_cycle_input,
+                        lsp_factory,
+                        previous_lsp_owner,
+                        active: true,
+                    });
                 }
             }
             if reservation_changed.changed().await.is_err() {

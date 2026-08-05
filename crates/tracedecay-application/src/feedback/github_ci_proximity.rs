@@ -137,6 +137,7 @@ impl CiFailureLocalizationRequestV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CiFailureLocalizationPortOutcomeV1 {
     Localized(Box<CiFailureLocalizationResultV1>),
+    Stale,
     RateLimited(CiFailureRateLimitCheckpointV1),
     Failed(CiFailureSourceFailureV1),
     Denied,
@@ -159,7 +160,7 @@ impl CiFailureLocalizationPortOutcomeV1 {
                 }
             }
             Self::RateLimited(checkpoint) => checkpoint.validate()?,
-            Self::Failed(_) | Self::Denied | Self::Unavailable => {}
+            Self::Stale | Self::Failed(_) | Self::Denied | Self::Unavailable => {}
         }
         Ok(())
     }

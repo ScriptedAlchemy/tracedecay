@@ -96,12 +96,22 @@ fn scout_read_actions_are_closed_and_read_only() {
 fn hook_v2_scout_prepare_accepts_no_caller_candidates() {
     let response = orchestration_response(
         "hook_v2_scout_prepare",
-        crate::daemon::Pr13HookOrchestrationAdmissionV1::Unavailable,
+        crate::daemon::AdvisoryHookOrchestrationAdmissionV1::Unavailable,
     );
     assert_eq!(response["status"], "unavailable");
     assert_eq!(response["reason"], "orchestration_unavailable");
     assert!(!response.to_string().contains("candidate"));
     assert!(!response.to_string().contains("control"));
+}
+
+#[test]
+fn hook_v2_scout_prepare_preserves_deferred_owner_warming_state() {
+    let response = orchestration_response(
+        "hook_v2_scout_prepare",
+        crate::daemon::AdvisoryHookOrchestrationAdmissionV1::Warming,
+    );
+    assert_eq!(response["status"], "warming");
+    assert_eq!(response["reason"], "orchestration_warming");
 }
 
 #[test]
