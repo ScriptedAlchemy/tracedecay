@@ -663,6 +663,14 @@ pub fn application_problem_response(application: ApplicationProblemEnvelope) -> 
         .into_response()
 }
 
+/// Build the stable HTTP envelope for a problem owned by transport admission.
+///
+/// The executable uses this for failures that occur before an application
+/// router can mint its own request context, such as project-route resolution.
+pub fn adapter_problem_response(request_id: RequestId, problem: ApplicationProblem) -> Response {
+    application_problem_response(adapter_problem(request_id, problem))
+}
+
 pub(crate) fn invalid_request_problem(
     request_id: RequestId,
     code: &'static str,
