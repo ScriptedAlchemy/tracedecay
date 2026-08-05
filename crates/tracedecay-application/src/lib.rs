@@ -73,6 +73,7 @@ pub use configuration::{
     ConfigurationAuditRequestV1, ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1,
     ConfigurationGetRequestV1, ConfigurationListRequestV1, ConfigurationObservedStateRequestV1,
     ConfigurationProtectedApplyRequestV1, ConfigurationProtectedPreviewRequestV1,
+    ConfigurationResetConfirmationV1, ConfigurationResetOutcomeV1, ConfigurationResetRequestV1,
     ConfigurationRollbackApplyRequestV1, ConfigurationRollbackPreviewRequestV1,
     ConfigurationSetRequestV1, ConfigurationUnsetRequestV1, ConfigurationWireRequestV1,
     ConfigurationWriteCredentialRequestV1, configuration_surface_catalog_contribution,

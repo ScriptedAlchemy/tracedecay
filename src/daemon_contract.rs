@@ -747,7 +747,8 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationProtectedApply
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackPreview
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackApply
-            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit => {
+            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit
+            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset => {
                 unreachable!("configuration operations use their typed constructor")
             }
             crate::application_surface::ApplicationSurfaceOperation::ContextScoutStatus
@@ -1529,6 +1530,20 @@ impl DaemonInvocationRequest {
         )
     }
 
+    pub(crate) fn is_configuration_reset(&self) -> bool {
+        self.delivery_route == Some(Plan26DeliveryRouteV1::Cli)
+            && matches!(
+                &self.payload,
+                DaemonInvocationPayload::Configuration {
+                    surface_operation:
+                        crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset,
+                    request: crate::application_surface::ConfigurationSurfaceRequest::Reset(_),
+                    resolved_scope: None,
+                    ..
+                }
+            )
+    }
+
     pub(crate) fn validate(&self) -> Result<(), DaemonInvocationProblem> {
         if self.protocol != DAEMON_INVOCATION_PROTOCOL {
             return Err(DaemonInvocationProblem::InvalidRequest);
@@ -1624,12 +1639,6 @@ impl DaemonInvocationRequest {
                 cancellation,
                 ..
             }
-            | DaemonInvocationPayload::Configuration {
-                observed_at,
-                deadline,
-                cancellation,
-                ..
-            }
             | DaemonInvocationPayload::WorkApplication {
                 observed_at,
                 deadline,
@@ -1659,6 +1668,45 @@ impl DaemonInvocationRequest {
                     || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::Configuration {
+                surface_operation,
+                request,
+                resolved_scope,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+                let reset_operation = *surface_operation
+                    == crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset;
+                let reset_request = matches!(
+                    request,
+                    crate::application_surface::ConfigurationSurfaceRequest::Reset(_)
+                );
+                if reset_operation || reset_request {
+                    if !reset_operation
+                        || !reset_request
+                        || resolved_scope.is_some()
+                        || self.delivery_route != Some(Plan26DeliveryRouteV1::Cli)
+                    {
+                        return Err(DaemonInvocationProblem::InvalidRequest);
+                    }
+                    if let crate::application_surface::ConfigurationSurfaceRequest::Reset(request) =
+                        request
+                        && request
+                            .confirmation
+                            .as_ref()
+                            .is_some_and(|confirmation| confirmation.validate().is_err())
+                    {
+                        return Err(DaemonInvocationProblem::InvalidRequest);
+                    }
                 }
             }
             DaemonInvocationPayload::PrimitiveCode {
@@ -2241,6 +2289,9 @@ pub(crate) enum DaemonInvocationOutcome {
     Configuration {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<serde_json::Value>,
+    },
+    ConfigurationReset {
+        outcome: tracedecay_application::ConfigurationResetOutcomeV1,
     },
     ContextScout {
         scope: ResolvedScope,
