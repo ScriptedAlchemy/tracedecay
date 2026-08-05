@@ -4,25 +4,6 @@ use super::*;
 
 mod page_admission;
 
-impl DaemonInvocationService {
-    pub(in crate::daemon) async fn admit_test_result_page(
-        &self,
-        project_root: &Path,
-        request: tracedecay_application::PageAdmissionRequest,
-        seal: tracedecay_application::PageAdmissionSeal,
-    ) -> Result<
-        tracedecay_application::AdmittedPageRequest,
-        tracedecay_application::PageAdmissionError,
-    > {
-        let dispatch = self
-            .project_runtimes
-            .read(project_root, Pr12PrimitiveProjectRuntime::dispatch)
-            .await
-            .ok_or(tracedecay_application::PageAdmissionError::Unavailable)?;
-        dispatch.admit_page(request, seal).await
-    }
-}
-
 const fn page_admission_problem(
     error: tracedecay_application::PageAdmissionError,
 ) -> DaemonInvocationProblem {
@@ -166,6 +147,7 @@ pub(super) async fn execute_callable_code(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
     wire_request_id: String,
+    binding_id: BindingId,
     surface_operation: crate::application_surface::ApplicationSurfaceOperation,
     request: crate::application_surface::CallableCodeSurfaceRequest,
     page: PageRequest,
@@ -187,49 +169,11 @@ pub(super) async fn execute_callable_code(
         Ok(access) => access,
         Err(problem) => return application_problem(wire_request_id, problem),
     };
-    let kind = match (&request, surface_operation) {
-        (
-            crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence,
-        ) => CallableCodeOperationKind::ExactOccurrence,
-        (
-            crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
-        ) => CallableCodeOperationKind::PhraseSearch,
-        (
-            crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
-        ) => CallableCodeOperationKind::Callees,
-        (
-            crate::application_surface::CallableCodeSurfaceRequest::Facets(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
-        ) => CallableCodeOperationKind::Facets,
-        (
-            crate::application_surface::CallableCodeSurfaceRequest::Timeline(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
-        ) => CallableCodeOperationKind::Timeline,
-        (
-            crate::application_surface::CallableCodeSurfaceRequest::Declaration(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration,
-        ) => CallableCodeOperationKind::Declaration,
-        (
-            crate::application_surface::CallableCodeSurfaceRequest::Definition(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeDefinition,
-        ) => CallableCodeOperationKind::Definition,
-        (
-            crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition,
-        ) => CallableCodeOperationKind::TypeDefinition,
-        (
-            crate::application_surface::CallableCodeSurfaceRequest::References(_),
-            crate::application_surface::ApplicationSurfaceOperation::CodeReferences,
-        ) => CallableCodeOperationKind::References,
-        _ => {
-            return DaemonInvocationResponse::problem(
-                wire_request_id,
-                DaemonInvocationProblem::InvalidRequest,
-            );
-        }
+    let Some(kind) = callable_code_operation_kind(surface_operation, &request) else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
     };
     let Ok(operations) = callable_code_operations() else {
         return application_problem(
@@ -257,19 +201,68 @@ pub(super) async fn execute_callable_code(
         registered.authorization.authorize(access),
         operations,
     );
-    match request {
-        crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(request) => {
-            let Ok(request) = request.into_application_request(page) else {
+    macro_rules! admit_page_or_return {
+        ($request:expr, $kind:expr, $operation:expr, $digest:expr) => {{
+            if $request.validate().is_err() {
+                return invalid_callable_code_request(wire_request_id);
+            }
+            let authorization_admission = match query
+                .admit_authorization(&context, $kind, observed_at)
+                .await
+            {
+                Ok(admission) => admission,
+                Err(problem) => return application_problem(wire_request_id, problem),
+            };
+            let Ok(body_digest) = $digest else {
                 return invalid_callable_code_request(wire_request_id);
             };
+            match admit_callable_page(
+                service,
+                binding_id.clone(),
+                $operation,
+                &context,
+                observed_at,
+                body_digest,
+                $request.meta.page.clone(),
+            )
+            .await
+            {
+                Ok(page) => $request.meta.page = page,
+                Err(error) => {
+                    return callable_page_admission_problem(wire_request_id, error);
+                }
+            }
+            authorization_admission
+        }};
+    }
+    match request {
+        crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(request) => {
+            let Ok(mut request) = request.into_application_request(page) else {
+                return invalid_callable_code_request(wire_request_id);
+            };
+            let authorization_admission = admit_page_or_return!(
+                request,
+                kind,
+                ApplicationWireOperation::CodeExactOccurrence,
+                crate::daemon::code_index_scheduler::callable_page_binding::exact_occurrence_page_body_digest(
+                    &request,
+                )
+            );
             callable_code_response(
                 wire_request_id,
                 &registered.scope,
-                query.exact_occurrence(&context, request, observed_at).await,
+                query
+                    .exact_occurrence_with_admission(
+                        &context,
+                        request,
+                        observed_at,
+                        authorization_admission,
+                    )
+                    .await,
             )
         }
         crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(request) => {
-            let Ok(request) = request.into_application_request(
+            let Ok(mut request) = request.into_application_request(
                 crate::daemon::code_index_scheduler::queries::callable_query_sanitizer_revision(),
                 crate::daemon::code_index_scheduler::queries::callable_query_normalization_revision(
                 ),
@@ -277,201 +270,178 @@ pub(super) async fn execute_callable_code(
             ) else {
                 return invalid_callable_code_request(wire_request_id);
             };
+            let authorization_admission = admit_page_or_return!(
+                request,
+                kind,
+                ApplicationWireOperation::CodePhraseSearch,
+                crate::daemon::code_index_scheduler::callable_page_binding::phrase_search_page_body_digest(
+                    &request,
+                )
+            );
             callable_code_response(
                 wire_request_id,
                 &registered.scope,
-                query.phrase_search(&context, request, observed_at).await,
+                query
+                    .phrase_search_with_admission(
+                        &context,
+                        request,
+                        observed_at,
+                        authorization_admission,
+                    )
+                    .await,
             )
         }
         crate::application_surface::CallableCodeSurfaceRequest::Callees(request) => {
-            let request = request.into_application_request(page);
+            let mut request = request.into_application_request(page);
+            let authorization_admission = admit_page_or_return!(
+                request,
+                kind,
+                ApplicationWireOperation::CodeCallees,
+                crate::daemon::code_index_scheduler::callable_page_binding::callees_page_body_digest(&request)
+            );
             callable_code_response(
                 wire_request_id,
                 &registered.scope,
-                query.callees(&context, request, observed_at).await,
+                query
+                    .callees_with_admission(&context, request, observed_at, authorization_admission)
+                    .await,
             )
         }
         crate::application_surface::CallableCodeSurfaceRequest::Facets(request) => {
-            let request = request.into_application_request(page);
+            let mut request = request.into_application_request(page);
+            let authorization_admission = admit_page_or_return!(
+                request,
+                kind,
+                ApplicationWireOperation::CodeFacets,
+                crate::daemon::code_index_scheduler::callable_page_binding::facets_page_body_digest(
+                    &request
+                )
+            );
             callable_code_response(
                 wire_request_id,
                 &registered.scope,
-                query.facets(&context, request, observed_at).await,
+                query
+                    .facets_with_admission(&context, request, observed_at, authorization_admission)
+                    .await,
             )
         }
         crate::application_surface::CallableCodeSurfaceRequest::Timeline(request) => {
-            let request = request.into_application_request(page);
+            let mut request = request.into_application_request(page);
+            let authorization_admission = admit_page_or_return!(
+                request,
+                kind,
+                ApplicationWireOperation::CodeTimeline,
+                crate::daemon::code_index_scheduler::callable_page_binding::timeline_page_body_digest(&request)
+            );
             callable_code_response(
                 wire_request_id,
                 &registered.scope,
-                query.timeline(&context, request, observed_at).await,
+                query
+                    .timeline_with_admission(
+                        &context,
+                        request,
+                        observed_at,
+                        authorization_admission,
+                    )
+                    .await,
             )
         }
         crate::application_surface::CallableCodeSurfaceRequest::Declaration(request) => {
-            let request = request.into_application_request(page);
+            let mut request = request.into_application_request(page);
+            let authorization_admission = admit_page_or_return!(
+                request,
+                kind,
+                ApplicationWireOperation::CodeDeclaration,
+                crate::daemon::code_index_scheduler::callable_page_binding::navigation_page_body_digest(
+                    "code_declaration",
+                    &request,
+                )
+            );
             callable_code_response(
                 wire_request_id,
                 &registered.scope,
-                query.declaration(&context, request, observed_at).await,
+                query
+                    .declaration_with_admission(
+                        &context,
+                        request,
+                        observed_at,
+                        authorization_admission,
+                    )
+                    .await,
             )
         }
         crate::application_surface::CallableCodeSurfaceRequest::Definition(request) => {
-            let request = request.into_application_request(page);
+            let mut request = request.into_application_request(page);
+            let authorization_admission = admit_page_or_return!(
+                request,
+                kind,
+                ApplicationWireOperation::CodeDefinition,
+                crate::daemon::code_index_scheduler::callable_page_binding::navigation_page_body_digest(
+                    "code_definition",
+                    &request,
+                )
+            );
             callable_code_response(
                 wire_request_id,
                 &registered.scope,
-                query.definition(&context, request, observed_at).await,
+                query
+                    .definition_with_admission(
+                        &context,
+                        request,
+                        observed_at,
+                        authorization_admission,
+                    )
+                    .await,
             )
         }
         crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(request) => {
-            let request = request.into_application_request(page);
+            let mut request = request.into_application_request(page);
+            let authorization_admission = admit_page_or_return!(
+                request,
+                kind,
+                ApplicationWireOperation::CodeTypeDefinition,
+                crate::daemon::code_index_scheduler::callable_page_binding::navigation_page_body_digest(
+                    "code_type_definition",
+                    &request,
+                )
+            );
             callable_code_response(
                 wire_request_id,
                 &registered.scope,
-                query.type_definition(&context, request, observed_at).await,
+                query
+                    .type_definition_with_admission(
+                        &context,
+                        request,
+                        observed_at,
+                        authorization_admission,
+                    )
+                    .await,
             )
         }
         crate::application_surface::CallableCodeSurfaceRequest::References(request) => {
-            let request = request.into_application_request(page);
+            let mut request = request.into_application_request(page);
+            let authorization_admission = admit_page_or_return!(
+                request,
+                kind,
+                ApplicationWireOperation::CodeReferences,
+                crate::daemon::code_index_scheduler::callable_page_binding::navigation_page_body_digest(
+                    "code_references",
+                    &request,
+                )
+            );
             callable_code_response(
                 wire_request_id,
                 &registered.scope,
-                query.references(&context, request, observed_at).await,
+                query
+                    .references_with_admission(
+                        &context,
+                        request,
+                        observed_at,
+                        authorization_admission,
+                    )
+                    .await,
             )
         }
-    }
-}
-
-fn invalid_callable_code_request(wire_request_id: String) -> DaemonInvocationResponse {
-    application_problem(
-        wire_request_id,
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "callable_code.invalid_query".to_owned(),
-                message: "The callable code query is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
-    )
-}
-
-pub(super) fn callable_code_request_context(
-    scope: &ResolvedScope,
-    access: &ProjectSourceAccessSnapshot,
-    wire_request_id: &str,
-    operation: &ApplicationOperation,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-    cancellation: CancellationContext,
-) -> Result<RequestContext, ApplicationProblem> {
-    if scope != &access.scope {
-        return Err(ApplicationProblem::not_found_or_not_authorized(
-            RetryDirective::Never,
-        ));
-    }
-    if cancellation.is_cancelled() {
-        return Err(ApplicationProblem::cancelled_before_admission());
-    }
-    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
-        return Err(ApplicationProblem::timed_out_before_admission());
-    }
-    let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
-    if expires_at.0 <= observed_at.0 {
-        return Err(ApplicationProblem::not_found_or_not_authorized(
-            RetryDirective::Never,
-        ));
-    }
-    let request_id =
-        RequestId::new(wire_request_id).map_err(|_| ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "callable_code.invalid_request_id".to_owned(),
-                message: "The callable code request identifier is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        })?;
-    // Correlation IDs stay on the RequestContext. The route authority is a
-    // function of the access and the operation, so the same authorized call
-    // resolves the same grant from any surface and across durable retries.
-    let grant_digest = canonical_sha256(&(
-        "tracedecay.daemon.callable-code-grant.v1",
-        scope,
-        &access.requester,
-        &access.configuration_digest,
-        operation.capability_id(),
-        operation.use_case_id(),
-    ))
-    .map_err(|_| {
-        ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "callable_code.grant_unavailable".to_owned(),
-            message: "The callable code route grant is unavailable".to_owned(),
-        })
-    })?;
-    let grant_id = CapabilityGrantId::new(format!(
-        "grant.daemon.callable-code.{}",
-        grant_digest.as_str().trim_start_matches("sha256:")
-    ))
-    .map_err(|_| {
-        ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "callable_code.grant_unavailable".to_owned(),
-            message: "The callable code route grant is unavailable".to_owned(),
-        })
-    })?;
-    let grant = CapabilityGrantSnapshot::new(
-        grant_id,
-        1,
-        grant_digest.clone(),
-        access.requester.clone(),
-        observed_at,
-        expires_at,
-        scope.clone(),
-        std::collections::BTreeSet::from([operation.capability_id().clone()]),
-        std::collections::BTreeSet::from([operation.use_case_id().clone()]),
-        DisclosureClass::Evidence,
-    )
-    .map_err(|_| {
-        ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "callable_code.grant_unavailable".to_owned(),
-            message: "The callable code route grant is unavailable".to_owned(),
-        })
-    })?;
-    RequestContext::new(
-        access.requester.clone(),
-        scope.clone(),
-        grant,
-        request_id,
-        Deadline::new(expires_at).map_err(|_| {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "callable_code.deadline_unavailable".to_owned(),
-                message: "The callable code request deadline is unavailable".to_owned(),
-            })
-        })?,
-        cancellation,
-    )
-    .map_err(|_| {
-        ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "callable_code.context_unavailable".to_owned(),
-            message: "The callable code request context is unavailable".to_owned(),
-        })
-    })
-}
-
-fn callable_code_response<T: Serialize>(
-    wire_request_id: String,
-    registered_scope: &ResolvedScope,
-    result: ApplicationResult<T>,
-) -> DaemonInvocationResponse {
-    match feedback_invocation_result(result) {
-        Ok(result) if &result.scope == registered_scope => DaemonInvocationResponse::with_outcome(
-            wire_request_id,
-            DaemonInvocationOutcome::CallableCode {
-                scope: result.scope,
-                result: DaemonFeedbackResult::from_application(result.evidence),
-            },
-        ),
-        Ok(_) => concealed_application_problem(wire_request_id),
-        Err(problem) => application_problem(wire_request_id, problem),
     }
 }
 

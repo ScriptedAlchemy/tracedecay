@@ -28,8 +28,8 @@ pub use callable_code_catalog::{
 };
 pub use callable_code_service::{
     CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
-    CallableCodeAuthorizationPort, CallableCodeQueryFuture, CallableCodeQueryPort,
-    CallableCodeQueryService, UNPINNED_LATEST_GENERATION_SENTINEL,
+    CallableCodeAuthorizationPort, CallableCodeOperationAdmission, CallableCodeQueryFuture,
+    CallableCodeQueryPort, CallableCodeQueryService, UNPINNED_LATEST_GENERATION_SENTINEL,
 };
 pub use callable_code_wire::{
     CallableCodeSurfaceMeta, CodeCalleesSurfaceRequest, CodeCallersSurfaceRequest,

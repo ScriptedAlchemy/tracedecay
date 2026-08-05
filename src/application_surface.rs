@@ -2894,6 +2894,7 @@ pub async fn execute_application_surface(
         ApplicationSurfaceRequest::CallableCode(request) => {
             crate::daemon_contract::DaemonInvocationRequest::callable_code(
                 request_id.as_str(),
+                binding_id.clone(),
                 operation,
                 request,
                 invocation.page,

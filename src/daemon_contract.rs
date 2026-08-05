@@ -44,7 +44,7 @@ use tracedecay_lsp::{
     LspSessionAccess, LspSessionCredential, LspSessionId, MAX_LSP_FRAME_BYTES,
     MAX_LSP_WORKSPACE_ROOTS,
 };
-use tracedecay_tool_catalog::{EffectClass, UseCaseId};
+use tracedecay_tool_catalog::{BindingId, EffectClass, UseCaseId};
 
 use crate::application::feedback::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackSourceEventV1,
@@ -432,6 +432,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     CallableCode {
+        binding_id: BindingId,
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
         request: crate::application_surface::CallableCodeSurfaceRequest,
         page: PageRequest,
@@ -1071,6 +1072,7 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn callable_code(
         request_id: impl Into<String>,
+        binding_id: BindingId,
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
         request: crate::application_surface::CallableCodeSurfaceRequest,
         page: PageRequest,
@@ -1115,6 +1117,7 @@ impl DaemonInvocationRequest {
             request_id: request_id.into(),
             delivery_route: None,
             payload: DaemonInvocationPayload::CallableCode {
+                binding_id,
                 surface_operation,
                 request,
                 page,
@@ -1681,6 +1684,7 @@ impl DaemonInvocationRequest {
                 }
             }
             DaemonInvocationPayload::CallableCode {
+                binding_id: _,
                 surface_operation,
                 request,
                 page,

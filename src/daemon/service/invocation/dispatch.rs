@@ -404,6 +404,7 @@ impl DaemonInvocationService {
                 .await
             }
             DaemonInvocationPayload::CallableCode {
+                binding_id,
                 surface_operation,
                 request,
                 page,
@@ -415,6 +416,7 @@ impl DaemonInvocationService {
                     self,
                     project_root,
                     request_id,
+                    binding_id,
                     surface_operation,
                     request,
                     page,

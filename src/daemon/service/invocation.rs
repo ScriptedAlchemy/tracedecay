@@ -29,21 +29,22 @@ use tracedecay_application::feedback::{
 use tracedecay_application::{
     AffectedTestsRetrievalPort, AnalyzerAdmittedDiagnosticProviderV1, ApplicationContractError,
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
-    ApplicationResult, AuthorityReceipt, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
-    CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryService,
-    CancellationContext, CancellationObservation, CancellationStage, CancellationState,
-    CapabilityGrantId, CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState,
-    Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId, EffectReceipt, EffectResult,
-    EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity,
-    EvidencePacket, GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
-    GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
-    GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
-    GitIndexTransactionPortError, GitIndexTransactionService, IdempotencyKey,
-    MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1,
-    Omission, OmissionReason, OperationBudgetUsage, OperationReceipt, OperationTermination,
-    PageRequest, PageState, PolicyDecisionRef, PolicyEvaluationContextV1,
-    PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
-    ReconciliationState, RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    ApplicationResult, ApplicationWireOperation, AuthorityReceipt, AuthorizedScopeSet,
+    AuthorizedScopeSetAuthority, CallableCodeAuthorizationPort, CallableCodeOperationKind,
+    CallableCodeQueryService, CancellationContext, CancellationObservation, CancellationStage,
+    CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, CoverageCompleteness,
+    CoverageDomainState, Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId,
+    EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
+    EvidenceDomain, EvidenceIdentity, EvidencePacket, GitIndexApplyPortResultV1,
+    GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
+    GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
+    GitIndexTransactionApplicationError, GitIndexTransactionPort, GitIndexTransactionPortError,
+    GitIndexTransactionService, IdempotencyKey, MultiRootScopeSetCasRequestV1,
+    MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, Omission, OmissionReason,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageAdmissionError,
+    PageAdmissionRequest, PageAdmissionService, PageRequest, PageState, PolicyDecisionRef,
+    PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId,
+    PreviewResult, ReconciliationState, RequestAdmission, RequestContext, RequestId, ResolvedScope,
     RetryDirective, SafeDiagnostic, TaskHandoffError, TaskHandoffRedeemedV1, TaskHandoffToken,
     TemporalState, WorkExecutionError, WorkProjectionApplicationError, WorkflowCoordinationError,
     WorkflowFanOutRuntimeError, callable_code_operations,
@@ -77,7 +78,7 @@ use tracedecay_policy::{
     AnalyzerAdmissionInputV1, CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1,
     TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
-use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
+use tracedecay_tool_catalog::{BindingId, CapabilityId, EffectClass, SortContractId, UseCaseId};
 
 use super::project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
@@ -186,6 +187,7 @@ use tracedecay_hooks::{
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).
+mod callable;
 mod configuration;
 mod dispatch;
 mod feedback;
@@ -199,6 +201,7 @@ mod tests;
 mod types;
 mod work;
 
+use callable::*;
 use configuration::*;
 use feedback::*;
 use git::*;

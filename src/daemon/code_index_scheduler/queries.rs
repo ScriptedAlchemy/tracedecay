@@ -36,6 +36,10 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::SortContractId;
 
+use super::callable_page_binding::{
+    callees_page_body_digest, exact_occurrence_page_body_digest, facets_page_body_digest,
+    navigation_page_body_digest, phrase_search_page_body_digest, timeline_page_body_digest,
+};
 use super::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
 use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
@@ -917,6 +921,31 @@ struct PreparedCallableQueryV1 {
 }
 
 macro_rules! prepare_callable_query_or_return {
+    ($registry:expr, $context:expr, $request:expr, $operation:expr, digest = $digest:expr) => {{
+        let Ok(query_binding_digest) = $digest else {
+            return unavailable(query_finished_at());
+        };
+        match $registry
+            .prepare_callable_query(
+                &$context,
+                &$request.scope.generation,
+                &$request.meta.page,
+                $request.meta.temporal,
+                $operation,
+                query_binding_digest.clone(),
+            )
+            .await
+        {
+            Ok(prepared) => (prepared, query_binding_digest),
+            Err(error) => {
+                return rejected_cursor(
+                    query_finished_at(),
+                    $request.scope.generation.clone(),
+                    error,
+                );
+            }
+        }
+    }};
     ($registry:expr, $context:expr, $request:expr, $operation:expr, $binding:expr) => {{
         let Ok(query_binding_digest) = canonical_sha256(&$binding) else {
             return unavailable(query_finished_at());
@@ -1373,14 +1402,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_exact_occurrence",
-                (
-                    "code_exact_occurrence",
-                    &request.literal,
-                    &request.kind,
-                    &request.scope,
-                    &request.meta.projection,
-                    &request.meta.order,
-                )
+                digest = exact_occurrence_page_body_digest(request)
             );
             let latest = &prepared.latest;
             let served_generation = latest.generation.manifest().generation_id.clone();
@@ -1451,16 +1473,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_phrase_search",
-                (
-                    "code_phrase_search",
-                    request.query.as_str(),
-                    &request.phrases,
-                    &request.field_filters,
-                    request.fuzzy_budget,
-                    &request.scope,
-                    &request.meta.projection,
-                    &request.meta.order,
-                )
+                digest = phrase_search_page_body_digest(request)
             );
             let latest = &prepared.latest;
             let served_generation = latest.generation.manifest().generation_id.clone();
@@ -1552,15 +1565,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_callees",
-                (
-                    "code_callees",
-                    &request.node_id,
-                    request.maximum_depth,
-                    request.resolve_trait_dispatch,
-                    &request.scope,
-                    &request.meta.projection,
-                    &request.meta.order,
-                )
+                digest = callees_page_body_digest(request)
             );
             let latest = &prepared.latest;
             let served_generation = latest.generation.manifest().generation_id.clone();
@@ -2147,13 +2152,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_facets",
-                (
-                    "code_facets",
-                    request.dimension,
-                    &request.scope,
-                    &request.meta.projection,
-                    &request.meta.order,
-                )
+                digest = facets_page_body_digest(request)
             );
             let mut counts = std::collections::BTreeMap::<String, u64>::new();
             match request.dimension {
@@ -2219,12 +2218,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_timeline",
-                (
-                    "code_timeline",
-                    &request.scope,
-                    &request.meta.projection,
-                    &request.meta.order,
-                )
+                digest = timeline_page_body_digest(request)
             );
             let generation = prepared.latest.generation.manifest().generation_id.clone();
             let items = vec![CodeTimelineRecord {
@@ -2297,13 +2291,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_references",
-                (
-                    "code_references",
-                    &request.node_id,
-                    &request.scope,
-                    &request.meta.projection,
-                    &request.meta.order,
-                )
+                digest = navigation_page_body_digest("code_references", request)
             );
             let start = resolve_start_symbol!(prepared, request.node_id);
             let items = relation_records(
@@ -2345,13 +2333,7 @@ fn navigation_symbol_query<'a>(
             context,
             request,
             operation,
-            (
-                operation,
-                &request.node_id,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )
+            digest = navigation_page_body_digest(operation, request)
         );
         let start = resolve_start_symbol!(prepared, request.node_id);
         let mut items = Vec::new();

@@ -174,6 +174,8 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
     let request = crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(phrase);
     let invocation = DaemonInvocationRequest::callable_code(
         "request.callable-code.transport",
+        tracedecay_tool_catalog::BindingId::new("binding.http.code_phrase_search.v1")
+            .expect("binding"),
         crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
         request,
         page.clone(),
@@ -189,6 +191,7 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
     assert!(matches!(
         invocation.payload,
         DaemonInvocationPayload::CallableCode {
+            binding_id,
             surface_operation:
                 crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
             request:
@@ -203,7 +206,8 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
             observed_at: UtcMicros(30),
             deadline: carried_deadline,
             cancellation: carried_cancellation,
-        } if query == "daemon invocation"
+        } if binding_id.as_str() == "binding.http.code_phrase_search.v1"
+            && query == "daemon invocation"
             && phrases == ["daemon invocation"]
             && carried_page == page
             && carried_deadline == deadline
@@ -359,6 +363,10 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
                 ),
                 delivery_route: None,
                 payload: DaemonInvocationPayload::CallableCode {
+                    binding_id: tracedecay_tool_catalog::BindingId::new(format!(
+                        "binding.http.callable-code.matrix.{request_index}"
+                    ))
+                    .expect("binding"),
                     surface_operation: *operation,
                     request: request(*request_case),
                     page: page.clone(),

@@ -177,6 +177,17 @@ impl CallableCodeAuthorizationAdmission {
     }
 }
 
+/// Authorization admission bound to exactly one callable-code operation.
+///
+/// Fields remain private so callers cannot reuse a valid admission for a
+/// different operation when sequencing another server-local admission step.
+pub struct CallableCodeOperationAdmission {
+    kind: CallableCodeOperationKind,
+    context: RequestContext,
+    operation: ApplicationOperation,
+    authorization: CallableCodeAuthorizationAdmission,
+}
+
 /// Authorization boundary for callable-code application reads.
 pub trait CallableCodeAuthorizationPort: Send + Sync {
     fn admit<'a>(
@@ -261,13 +272,35 @@ macro_rules! callable_code_service_method {
                 return problem_envelope(context, operation, invalid_code_query_problem());
             }
             let admission = match self
-                .authorization
-                .admit(context, operation, observed_at)
+                .admit_authorization(context, CallableCodeOperationKind::$kind, observed_at)
                 .await
             {
                 Ok(admission) => admission,
                 Err(problem) => return problem_envelope(context, operation, problem),
             };
+            self.$name_with_admission(context, request, observed_at, admission)
+                .await
+        }
+
+        pub async fn $name_with_admission(
+            &self,
+            context: &RequestContext,
+            request: $request,
+            observed_at: UtcMicros,
+            admission: CallableCodeOperationAdmission,
+        ) -> ApplicationResult<CodeQueryPage<$item>> {
+            let operation = self.operations.get(CallableCodeOperationKind::$kind);
+            if request.validate().is_err() || admission.kind != CallableCodeOperationKind::$kind {
+                return problem_envelope(context, operation, invalid_code_query_problem());
+            }
+            if &admission.context != context || &admission.operation != operation {
+                return problem_envelope(
+                    context,
+                    operation,
+                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+                );
+            }
+            let admission = admission.authorization;
             let outcome = self
                 .port
                 .$port_method(
@@ -316,6 +349,24 @@ where
             authorization,
             operations,
         }
+    }
+
+    pub async fn admit_authorization(
+        &self,
+        context: &RequestContext,
+        kind: CallableCodeOperationKind,
+        observed_at: UtcMicros,
+    ) -> Result<CallableCodeOperationAdmission, ApplicationProblem> {
+        let operation = self.operations.get(kind);
+        self.authorization
+            .admit(context, operation, observed_at)
+            .await
+            .map(|authorization| CallableCodeOperationAdmission {
+                kind,
+                context: context.clone(),
+                operation: operation.clone(),
+                authorization,
+            })
     }
 
     callable_code_service_method!(
