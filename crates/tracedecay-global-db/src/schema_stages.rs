@@ -211,7 +211,7 @@ const TRANSCRIPT_SCHEMA: &str = "
         END;
 ";
 
-const CONFIGURATION_OBJECTS: &[(&str, &str)] = &[
+pub(crate) const CONFIGURATION_OBJECTS: &[(&str, &str)] = &[
     ("table", "configuration_revisions"),
     ("table", "configuration_entries"),
     ("table", "configuration_topology_policies"),
@@ -308,7 +308,7 @@ const CONFIGURATION_OBJECTS: &[(&str, &str)] = &[
     ),
 ];
 
-const CONFIGURATION_COLUMNS: &[(&str, &[&str])] = &[
+pub(crate) const CONFIGURATION_COLUMNS: &[(&str, &[&str])] = &[
     (
         "configuration_revisions",
         &[
@@ -354,7 +354,7 @@ const CONFIGURATION_COLUMNS: &[(&str, &[&str])] = &[
     ),
 ];
 
-const TRANSCRIPT_OBJECTS: &[(&str, &str)] = &[
+pub(crate) const TRANSCRIPT_OBJECTS: &[(&str, &str)] = &[
     ("table", "turns"),
     ("table", "parse_offsets"),
     ("table", "savings_ledger"),
@@ -382,7 +382,7 @@ const TRANSCRIPT_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "session_messages_fts_update"),
 ];
 
-const TRANSCRIPT_COLUMNS: &[(&str, &[&str])] = &[
+pub(crate) const TRANSCRIPT_COLUMNS: &[(&str, &[&str])] = &[
     (
         "sessions",
         &[
@@ -421,7 +421,7 @@ const TRANSCRIPT_COLUMNS: &[(&str, &[&str])] = &[
     ),
 ];
 
-const LCM_OBJECTS: &[(&str, &str)] = &[
+pub(crate) const LCM_OBJECTS: &[(&str, &str)] = &[
     ("table", "session_schema_migrations"),
     ("table", "lcm_raw_messages"),
     ("table", "lcm_external_payloads"),
@@ -449,7 +449,7 @@ const LCM_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "lcm_summary_nodes_fts_update"),
 ];
 
-const LCM_COLUMNS: &[(&str, &[&str])] = &[
+pub(crate) const LCM_COLUMNS: &[(&str, &[&str])] = &[
     (
         "session_schema_migrations",
         &["name", "version", "applied_at"],
@@ -493,7 +493,7 @@ const LCM_COLUMNS: &[(&str, &[&str])] = &[
     ),
 ];
 
-const WORKFLOW_OBJECTS: &[(&str, &str)] = &[
+pub(crate) const WORKFLOW_OBJECTS: &[(&str, &str)] = &[
     ("table", "workflow_runs"),
     ("table", "workflow_agents"),
     ("table", "workflow_index_meta"),
@@ -501,7 +501,7 @@ const WORKFLOW_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_workflow_agents_run"),
 ];
 
-const WORKFLOW_COLUMNS: &[(&str, &[&str])] = &[
+pub(crate) const WORKFLOW_COLUMNS: &[(&str, &[&str])] = &[
     (
         "workflow_runs",
         &[

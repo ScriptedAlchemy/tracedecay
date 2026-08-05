@@ -7,6 +7,11 @@ async fn final_database(path: &Path) {
         .unwrap();
 }
 
+async fn final_registered_database(path: &Path) {
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(path);
+    crate::ensure_registered_schema(&connection).await.unwrap();
+}
+
 async fn final_profile(root: &Path) {
     for name in [
         "global.db",
@@ -17,7 +22,9 @@ async fn final_profile(root: &Path) {
         "profile-identity.json",
     ] {
         let path = root.join(name);
-        if name.ends_with(".db") {
+        if name == "global.db" || name == "user-sessions.db" {
+            final_registered_database(&path).await;
+        } else if name.ends_with(".db") {
             final_database(&path).await;
         } else {
             fs::write(&path, format!("final fixture: {name}")).unwrap();
@@ -63,6 +70,33 @@ async fn complete_archive_rehearses_from_restored_isolated_copy() {
 }
 
 #[tokio::test]
+async fn archive_rejects_graph_schema_in_registered_role_without_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().join("profile");
+    let archives = temp.path().join("archives");
+    fs::create_dir(&profile).unwrap();
+    final_profile(&profile).await;
+    fs::remove_file(profile.join("global.db")).unwrap();
+    final_database(&profile.join("global.db")).await;
+    let before = fs::read(profile.join("global.db")).unwrap();
+    let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile,
+        "archive role test",
+    )
+    .unwrap();
+
+    let error = export_final_profile(&profile, &archives, "archive.final", 100, &lease)
+        .expect_err("a graph database must not satisfy the registered role");
+
+    assert!(matches!(
+        error,
+        tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { .. }
+    ));
+    assert_eq!(fs::read(profile.join("global.db")).unwrap(), before);
+    assert!(!archives.join("archive.final").exists());
+}
+
+#[tokio::test]
 async fn rehearsal_rebinds_relocated_store_without_changing_durable_identity() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("final-profile");
@@ -85,7 +119,9 @@ async fn rehearsal_rebinds_relocated_store_without_changing_durable_identity() {
         ),
     ] {
         let path = source_store.join(name);
-        if name.ends_with(".db") {
+        if name == "sessions.db" {
+            final_registered_database(&path).await;
+        } else if name.ends_with(".db") {
             final_database(&path).await;
         } else {
             fs::write(path, contents).unwrap();
@@ -220,7 +256,9 @@ async fn sharded_final_archive(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
         ),
     ] {
         let path = source_store.join(name);
-        if name.ends_with(".db") {
+        if name == "sessions.db" {
+            final_registered_database(&path).await;
+        } else if name.ends_with(".db") {
             final_database(&path).await;
         } else {
             fs::write(path, contents).unwrap();
