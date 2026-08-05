@@ -11,7 +11,10 @@ use tracedecay_tool_catalog::{
     SurfaceOperationName,
 };
 
-use crate::{work_executable_binding_registry, workflow_executable_binding_registry};
+use crate::{
+    multi_root_executable_binding_registry, work_executable_binding_registry,
+    workflow_executable_binding_registry,
+};
 
 /// Canonical SDK bindings for every currently mounted typed application route.
 ///
@@ -22,9 +25,11 @@ pub fn sdk_executable_binding_registry()
 -> Result<SdkExecutableBindingRegistryV1, CatalogValidationError> {
     let work = work_executable_binding_registry()?;
     let workflow = workflow_executable_binding_registry()?;
+    let multi_root = multi_root_executable_binding_registry()?;
     let bindings = work
         .iter()
         .chain(workflow.iter())
+        .chain(multi_root.iter())
         .map(project_http_binding)
         .collect::<Result<Vec<_>, _>>()?;
     SdkExecutableBindingRegistryV1::new(bindings)
@@ -123,5 +128,16 @@ mod tests {
             workflow.sdk_method().as_str(),
             "workflow_register_definition"
         );
+
+        let multi_root = registry
+            .get(&OperationId::new("operation.multi_root.execute").expect("operation ID"))
+            .and_then(|availability| availability.binding())
+            .expect("mounted multi-root execute");
+        assert_eq!(multi_root.sdk_method().as_str(), "multi_root_execute");
+        assert!(matches!(
+            multi_root.transport(),
+            SdkTransportBindingV1::Http { route_path }
+                if route_path == "/multi-root/execute"
+        ));
     }
 }

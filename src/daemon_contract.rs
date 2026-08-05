@@ -948,7 +948,6 @@ impl DaemonInvocationRequest {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn multi_root_scope_set_read(
         request_id: impl Into<String>,
         request: MultiRootScopeSetReadRequestV1,
@@ -970,7 +969,6 @@ impl DaemonInvocationRequest {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn multi_root_scope_set_compare_and_swap(
         request_id: impl Into<String>,
         request: MultiRootScopeSetCasRequestV1,
@@ -992,7 +990,6 @@ impl DaemonInvocationRequest {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn multi_root_execute(
         request_id: impl Into<String>,
         request: MultiRootExecuteRequestV1,

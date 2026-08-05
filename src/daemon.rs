@@ -219,6 +219,7 @@ use invocation_executor::{
     unavailable_root_generation,
 };
 mod invocation_state;
+mod multi_root_continuation;
 use invocation_state::DaemonInvocationState;
 mod lsp_sessions;
 use lsp_sessions::{

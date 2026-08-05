@@ -23,7 +23,7 @@ pub enum CursorKeyError {
 pub struct CursorSignature([u8; 32]);
 
 impl CursorSignature {
-    pub(crate) fn from_hex(encoded: &str) -> Result<Self, CursorKeyError> {
+    pub fn from_hex(encoded: &str) -> Result<Self, CursorKeyError> {
         let decoded = hex::decode(encoded).map_err(|_| CursorKeyError::AuthenticationFailed)?;
         let bytes: [u8; 32] = decoded
             .try_into()
@@ -31,7 +31,7 @@ impl CursorSignature {
         Ok(Self(bytes))
     }
 
-    pub(crate) fn to_hex(&self) -> String {
+    pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
 }

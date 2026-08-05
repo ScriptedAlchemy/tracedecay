@@ -555,6 +555,37 @@ async fn run_authenticated_multi_root_journey() {
         }
     ));
 
+    // Cancellation is observed before any root-local read begins.
+    let observed_at = now();
+    let cancelled = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.cancelled-execute",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                MultiRootOperationV1::Query { request: json!({}) },
+                0,
+                None,
+            )
+            .expect("cancelled execute request"),
+            observed_at,
+            Deadline::new(UtcMicros(observed_at.0.saturating_add(60_000_000)))
+                .expect("cancelled execute deadline"),
+            CancellationContext::cancelled("cancel.multi-root.execute", observed_at)
+                .expect("cancelled execute cancellation"),
+        ),
+    )
+    .await;
+    assert!(matches!(
+        cancelled.outcome,
+        DaemonInvocationOutcome::ApplicationProblem {
+            problem: tracedecay_application::ApplicationProblem::Cancelled { .. }
+        }
+    ));
+
     // Every operation family fans out over the authorized scope set.
     for (index, operation) in [
         MultiRootOperationV1::Work { request: json!({}) },
@@ -597,6 +628,131 @@ async fn run_authenticated_multi_root_journey() {
             response.outcome
         );
     }
+
+    // A real result page resumes only through the durable authenticated cursor.
+    let resumable_operation = MultiRootOperationV1::Work {
+        request: json!({
+            "operation": "snapshot",
+            "request": { "page_size": 100 }
+        }),
+    };
+    let observed_at = now();
+    let (deadline, cancellation) = controls("resumable-execute", observed_at);
+    let first_page = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.resumable-execute",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                resumable_operation.clone(),
+                0,
+                None,
+            )
+            .expect("resumable execute request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootQueryPage {
+        outcome:
+            tracedecay_application::ApplicationOutcome::Evidence(
+                tracedecay_application::EvidencePacket {
+                    payload: Some(first_page),
+                    ..
+                },
+            ),
+        ..
+    } = first_page.outcome
+    else {
+        panic!("real multi-root page must carry resumable evidence");
+    };
+    let continuation = first_page.continuation.clone();
+    let cursor_authenticator = registry
+        .load_session_cursor_key_provider_result()
+        .await
+        .expect("durable multi-root cursor authority");
+    let continuation_state = super::super::multi_root_continuation::open(
+        &continuation,
+        &cursor_authenticator,
+        observed_at,
+    )
+    .expect("authenticated multi-root continuation");
+    assert_eq!(continuation_state.next_page, 1);
+    assert_eq!(
+        continuation_state.root_generations.len(),
+        stored.roots().len()
+    );
+    assert!(
+        continuation_state.last_order_key.is_some(),
+        "a page with emitted evidence must freeze its total-order key"
+    );
+
+    let resumed_at = now();
+    let (deadline, cancellation) = controls("resume-execute", resumed_at);
+    let resumed = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.resume-execute",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                resumable_operation.clone(),
+                1,
+                Some(continuation.clone()),
+            )
+            .expect("resume execute request"),
+            resumed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    assert!(matches!(
+        resumed.outcome,
+        DaemonInvocationOutcome::MultiRootQueryPage { .. }
+    ));
+
+    let mut tampered = continuation.as_str().to_owned();
+    let replacement = if tampered.ends_with('0') { '1' } else { '0' };
+    tampered.pop();
+    tampered.push(replacement);
+    let tampered =
+        tracedecay_application::MultiRootContinuationV1::from_opaque(tampered).expect("opaque");
+    let tampered_at = now();
+    let (deadline, cancellation) = controls("tampered-execute", tampered_at);
+    let tampered = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.tampered-execute",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                resumable_operation,
+                1,
+                Some(tampered),
+            )
+            .expect("tampered execute request"),
+            tampered_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    assert!(matches!(
+        tampered.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+    ));
 
     engine.shutdown_all().await;
 

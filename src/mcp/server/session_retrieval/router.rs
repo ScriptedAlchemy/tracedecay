@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use tracedecay_domain::ProjectId;
 
@@ -20,7 +19,6 @@ pub(crate) struct DaemonProjectSessionRetrievalRouter {
     registry: Arc<RegisteredGlobalDb>,
     resolver: RetainedProjectGraphResolver,
     profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
-    calls: Arc<AtomicU64>,
 }
 
 enum RoutedProjectService {
@@ -37,7 +35,6 @@ pub(crate) fn into_project_session_retrieval_service(
     registry: Option<&Arc<RegisteredGlobalDb>>,
     resolver: Option<&RetainedProjectGraphResolver>,
     profile_identity: Option<&crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    calls: Arc<AtomicU64>,
 ) -> Arc<dyn SessionRetrievalServicePort> {
     match (registry, resolver, profile_identity) {
         (Some(registry), Some(resolver), Some(profile_identity)) => {
@@ -46,7 +43,6 @@ pub(crate) fn into_project_session_retrieval_service(
                 Arc::clone(registry),
                 Arc::clone(resolver),
                 profile_identity.clone(),
-                calls,
             ))
         }
         _ => Arc::new(active),
@@ -62,7 +58,6 @@ pub(crate) struct ProjectSessionRetrievalServiceInputs<'a> {
     pub(crate) resolver: Option<&'a RetainedProjectGraphResolver>,
     pub(crate) profile_identity:
         Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    pub(crate) calls: Arc<AtomicU64>,
 }
 
 pub(crate) fn build_project_session_retrieval_service(
@@ -76,7 +71,6 @@ pub(crate) fn build_project_session_retrieval_service(
         registry,
         resolver,
         profile_identity,
-        calls,
     } = inputs;
     let service = database.zip(root).and_then(|(database, root)| {
         let refresh_status = refresh_status.clone();
@@ -85,19 +79,13 @@ pub(crate) fn build_project_session_retrieval_service(
                 Arc::clone(database),
                 Arc::clone(registered_database),
                 root,
-                Arc::clone(&calls),
                 refresh_status,
             ),
-            None => DaemonSessionRetrievalService::new(
-                Arc::clone(database),
-                root,
-                Arc::clone(&calls),
-                refresh_status,
-            ),
+            None => DaemonSessionRetrievalService::new(Arc::clone(database), root, refresh_status),
         }
     });
     service.map(|service| {
-        into_project_session_retrieval_service(service, registry, resolver, profile_identity, calls)
+        into_project_session_retrieval_service(service, registry, resolver, profile_identity)
     })
 }
 
@@ -107,14 +95,12 @@ impl DaemonProjectSessionRetrievalRouter {
         registry: Arc<RegisteredGlobalDb>,
         resolver: RetainedProjectGraphResolver,
         profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
-        calls: Arc<AtomicU64>,
     ) -> Self {
         Self {
             active,
             registry,
             resolver,
             profile_identity,
-            calls,
         }
     }
 
@@ -247,7 +233,6 @@ impl DaemonProjectSessionRetrievalRouter {
             Arc::clone(&database),
             database,
             root,
-            Arc::clone(&self.calls),
             None,
         ) else {
             return Ok(RoutedProjectService::Unavailable {

@@ -31,6 +31,7 @@ pub mod invocation;
 pub mod lsp_context_catalog;
 pub mod memory;
 pub mod multi_root;
+pub mod multi_root_catalog;
 pub mod observability;
 pub mod operation_events;
 pub mod policy;
@@ -51,6 +52,10 @@ pub mod work_read;
 pub mod workflow_catalog;
 pub mod workflow_coordination;
 pub mod workflow_runtime;
+
+pub use multi_root_catalog::{
+    MultiRootApplicationOperation, multi_root_executable_binding_registry,
+};
 
 mod error;
 mod surface_binding;
@@ -155,10 +160,11 @@ pub use memory::{
 };
 pub use multi_root::{
     AuthorizedMultiRootQueryService, AuthorizedRoot, AuthorizedRootAdmission, AuthorizedScopeSet,
-    AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootContinuationV1,
-    MultiRootExecuteRequestV1, MultiRootOperationV1, MultiRootQueryError, MultiRootQueryPageV1,
-    MultiRootQueryPort, MultiRootQueryRequestV1, MultiRootScopeSetCasRequestV1,
-    MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
+    AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootAuthorizationBindingV1,
+    MultiRootContinuationStateV1, MultiRootContinuationV1, MultiRootExecuteRequestV1,
+    MultiRootOperationV1, MultiRootQueryError, MultiRootQueryPageV1, MultiRootQueryPort,
+    MultiRootQueryRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
+    MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1, MultiRootTotalOrderKeyV1,
     RegisteredRootLocatorV1, RegisteredRootSelectorV1, SharedProfileStoreLocatorV1,
 };
 pub use observability::*;
