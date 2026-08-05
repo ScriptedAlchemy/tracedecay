@@ -312,12 +312,14 @@ pub struct RegisteredProjectLspAuthority {
     project_dir: Arc<Dir>,
     root_uri: Url,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    workspace_index: Arc<dyn crate::lsp_support::LspWorkspaceDocumentIndexPort>,
 }
 
 impl RegisteredProjectLspAuthority {
     pub fn new(
         feedback: Arc<Pr12FeedbackRuntime>,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+        workspace_index: Arc<dyn crate::lsp_support::LspWorkspaceDocumentIndexPort>,
     ) -> Result<Self, LspRuntimeFailure> {
         let project_root = feedback
             .project_root()
@@ -347,6 +349,7 @@ impl RegisteredProjectLspAuthority {
             project_dir: Arc::new(project_dir),
             root_uri,
             code_index,
+            workspace_index,
         })
     }
 
@@ -355,6 +358,9 @@ impl RegisteredProjectLspAuthority {
     }
 
     fn validate_root(&self, root: &AdmittedRoot) -> Result<(), LspRuntimeFailure> {
+        if root.scope_digest() != Some(&self.feedback.scope().scope_digest) {
+            return Err(LspRuntimeFailure::new("registered-project-root-mismatch"));
+        }
         let path = strict_file_url(root.uri())
             .and_then(|url| {
                 url.to_file_path()
@@ -479,13 +485,41 @@ impl LspDiagnosticDocumentPort for RegisteredProjectLspAuthority {
                     (adapter.language, adapter.language_id, text)
                 }
             };
-            Ok(LspDocument {
+            let document = LspDocument {
                 language,
                 language_id,
                 relative_path,
                 text,
-            })
+            };
+            let observed_content_digest = ContentDigest::of_bytes(document.text.as_bytes());
+            if request
+                .expected_content_digest
+                .as_ref()
+                .is_some_and(|expected| expected != &observed_content_digest)
+            {
+                return Err(LspRuntimeFailure::new("document-content-stale"));
+            }
+            Ok(document)
         })
+    }
+}
+
+impl crate::lsp_support::LspWorkspaceDocumentIndexPort for RegisteredProjectLspAuthority {
+    fn is_mounted(&self) -> bool {
+        self.workspace_index.is_mounted()
+    }
+
+    fn indexed_documents(
+        &self,
+        root: AdmittedRoot,
+        maximum_documents: usize,
+    ) -> LspRuntimeFuture<Result<tracedecay_lsp::IndexedWorkspaceDocuments, LspRuntimeFailure>>
+    {
+        if let Err(error) = self.validate_root(&root) {
+            return Box::pin(async move { Err(error) });
+        }
+        self.workspace_index
+            .indexed_documents(root, maximum_documents)
     }
 }
 
@@ -2228,6 +2262,7 @@ pub fn lsp_session_factory<F>(
     feedback_runtime: Arc<Pr12FeedbackRuntime>,
     database: Database,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    workspace_index: Arc<dyn crate::lsp_support::LspWorkspaceDocumentIndexPort>,
     feedback_cycle: F,
     semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
     diagnostic_broker: Arc<AsyncMutex<DiagnosticBroker>>,
@@ -2242,6 +2277,7 @@ where
     let project = Arc::new(RegisteredProjectLspAuthority::new(
         feedback_runtime.clone(),
         code_index,
+        workspace_index,
     )?);
     let test_runs = lsp_test_result_port(project.clone());
     let diagnostic_projection = Arc::new(DiagnosticsStoreLspFeedbackProjection::new(
