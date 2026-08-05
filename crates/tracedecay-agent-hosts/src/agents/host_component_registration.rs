@@ -100,7 +100,7 @@ impl RegistrationBackupIdentityV1 {
     }
 }
 
-pub struct HostComponentRegistrationDelegate {
+pub struct CatalogHostComponentRegistrationAuthority {
     integration: Box<dyn crate::agents::AgentIntegration>,
     context: crate::agents::InstallContext,
     health_context: crate::agents::HealthcheckContext,
@@ -123,17 +123,26 @@ pub struct HostComponentRegistrationDelegate {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CompatibilityRegistrationMode {
+enum CatalogRegistrationMode {
     /// The component artifacts are discovered directly by the host. The
     /// transaction's artifact verification is the complete lifecycle.
     ArtifactOnly,
     /// The host needs only a native registry entry after assets are deployed.
     DeployedActivation,
-    /// Core-only compatibility hosts still use their bounded legacy editor.
-    LegacyIntegration,
+    /// The host exposes a bounded project-scoped registration projection.
+    ProjectRegistration,
 }
 
-impl HostComponentRegistrationDelegate {
+impl CatalogHostComponentRegistrationAuthority {
+    fn validate_catalog_host(
+        &self,
+        component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+    ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        (self.integration.id() == crate::agents::integration_id_for_host(component_set.host))
+            .then_some(())
+            .ok_or(crate::agents::host_bundle_v2::HostBundleError::WrongTarget)
+    }
+
     fn rollback_project_path(&self) -> Option<&Path> {
         self.project_path.as_deref().or_else(|| {
             (self.integration.id() == "claude")
@@ -147,8 +156,7 @@ impl HostComponentRegistrationDelegate {
         lifecycle_root: &Path,
         operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     ) -> crate::errors::Result<Self> {
-        let tracedecay_bin =
-            crate::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let tracedecay_bin = current_tracedecay_binary()?;
         Self::new_with_tracedecay_bin(agent_id, home, lifecycle_root, operation, tracedecay_bin)
     }
 
@@ -198,12 +206,12 @@ impl HostComponentRegistrationDelegate {
     ) -> crate::errors::Result<Self> {
         let integration = crate::agents::get_integration(agent_id)?;
         let registration_path = project_local_registration_path(agent_id, home, project_path);
+        let tracedecay_bin = current_tracedecay_binary()?;
         Ok(Self {
             integration,
             context: crate::agents::InstallContext {
                 home: home.to_path_buf(),
-                tracedecay_bin: crate::agents::which_tracedecay()
-                    .unwrap_or_else(|| "tracedecay".to_string()),
+                tracedecay_bin,
                 tool_permissions: crate::agents::expected_tool_perms(),
                 project_root: Some(project_path.to_path_buf()),
                 dashboard: true,
@@ -316,13 +324,9 @@ impl HostComponentRegistrationDelegate {
     fn registration_mode(
         &self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
-    ) -> CompatibilityRegistrationMode {
-        let includes_core = component_set.components.iter().any(|component| {
-            component.manifest.component
-                == crate::agents::host_bundle_v2::HostBundleComponentV1::Core
-        });
+    ) -> CatalogRegistrationMode {
         if self.project_path.is_some() {
-            CompatibilityRegistrationMode::LegacyIntegration
+            CatalogRegistrationMode::ProjectRegistration
         } else if component_set.host == crate::agents::host_bundle_v2::HostKindV1::ClaudeCode
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Codex
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
@@ -336,16 +340,12 @@ impl HostComponentRegistrationDelegate {
                     )
                 }))
         {
-            CompatibilityRegistrationMode::DeployedActivation
-        } else if matches!(
-            component_set.host,
-            crate::agents::host_bundle_v2::HostKindV1::CursorDesktop
-                | crate::agents::host_bundle_v2::HostKindV1::OpenCode
-        ) || !includes_core
-        {
-            CompatibilityRegistrationMode::ArtifactOnly
+            CatalogRegistrationMode::DeployedActivation
         } else {
-            CompatibilityRegistrationMode::LegacyIntegration
+            // Cursor, Hermes, and component sets without native activation
+            // are fully represented by their catalog artifacts. Unsupported
+            // hosts are refused by the catalog before this authority exists.
+            CatalogRegistrationMode::ArtifactOnly
         }
     }
 
@@ -356,7 +356,7 @@ impl HostComponentRegistrationDelegate {
         &self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
     ) -> bool {
-        self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly
+        self.registration_mode(component_set) == CatalogRegistrationMode::ArtifactOnly
     }
 
     fn requires_competing_analyzer_preflight(
@@ -374,15 +374,16 @@ impl HostComponentRegistrationDelegate {
         &self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
     ) -> Result<[u8; 32], crate::agents::host_bundle_v2::HostBundleError> {
+        self.validate_catalog_host(component_set)?;
         match self.registration_mode(component_set) {
-            CompatibilityRegistrationMode::ArtifactOnly
+            CatalogRegistrationMode::ArtifactOnly
                 if !self.requires_competing_analyzer_preflight(component_set) =>
             {
                 Ok(Sha256::digest(b"tracedecay.host-registration.none.v1").into())
             }
-            CompatibilityRegistrationMode::ArtifactOnly
-            | CompatibilityRegistrationMode::DeployedActivation
-            | CompatibilityRegistrationMode::LegacyIntegration => {
+            CatalogRegistrationMode::ArtifactOnly
+            | CatalogRegistrationMode::DeployedActivation
+            | CatalogRegistrationMode::ProjectRegistration => {
                 self.current_registration_revision(component_set)
             }
         }
@@ -503,15 +504,25 @@ impl HostComponentRegistrationDelegate {
     fn registration_paths(
         &self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
-    ) -> Vec<PathBuf> {
-        if self.project_path.is_some() {
-            return self.registration_path.iter().cloned().collect();
-        }
+    ) -> Result<Vec<PathBuf>, crate::agents::host_bundle_v2::HostBundleError> {
         let components = component_set
             .components
             .iter()
             .map(|component| component.manifest.component)
             .collect::<Vec<_>>();
+        if let Some(project_path) = self.project_path.as_deref() {
+            let mut paths = self
+                .integration
+                .project_host_component_registration_paths(
+                    &components,
+                    &self.context.home,
+                    project_path,
+                )
+                .map_err(Self::registration_error)?;
+            paths.sort();
+            paths.dedup();
+            return Ok(paths);
+        }
         let mut paths = self.integration.host_component_registration_paths_at(
             &components,
             &self.context.home,
@@ -526,7 +537,7 @@ impl HostComponentRegistrationDelegate {
         }
         paths.sort();
         paths.dedup();
-        paths
+        Ok(paths)
     }
 
     fn allowed_registration_directories(&self) -> Vec<PathBuf> {
@@ -553,14 +564,14 @@ impl HostComponentRegistrationDelegate {
     fn registration_directories(
         &self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
-    ) -> Vec<PathBuf> {
+    ) -> Result<Vec<PathBuf>, crate::agents::host_bundle_v2::HostBundleError> {
         let allowed = self.allowed_registration_directories();
         if allowed.is_empty() {
-            return allowed;
+            return Ok(allowed);
         }
-        let registration_paths = self.registration_paths(component_set);
+        let registration_paths = self.registration_paths(component_set)?;
         let claude_root = self.context.home.join(".claude");
-        allowed
+        Ok(allowed
             .into_iter()
             .filter(|directory| {
                 (self.project_path.is_none() && directory == &claude_root)
@@ -568,7 +579,7 @@ impl HostComponentRegistrationDelegate {
                         .iter()
                         .any(|path| path.parent() == Some(directory.as_path()))
             })
-            .collect()
+            .collect())
     }
 
     fn current_registration_revision(
@@ -611,7 +622,7 @@ impl HostComponentRegistrationDelegate {
         digest.update(b"tracedecay.host-registration.revision.v2");
         digest.update((self.integration.id().len() as u64).to_be_bytes());
         digest.update(self.integration.id().as_bytes());
-        let registration_paths = self.registration_paths(component_set);
+        let registration_paths = self.registration_paths(component_set)?;
         if !registration_paths.is_empty() {
             for (index, path) in registration_paths.iter().enumerate() {
                 digest.update((index as u64).to_be_bytes());
@@ -688,10 +699,10 @@ impl HostComponentRegistrationDelegate {
         let identity_bytes =
             serde_json::to_vec(&identity).map_err(|_| host_bundle_storage_failure!())?;
         write_registration_backup(&self.identity_path(operation_id), &identity_bytes)?;
-        let registration_paths = self.registration_paths(component_set);
+        let registration_paths = self.registration_paths(component_set)?;
         let mut registration_directories = Vec::new();
         for path in self
-            .registration_directories(component_set)
+            .registration_directories(component_set)?
             .into_iter()
             .filter(|path| self.registration_directory_in_recovery_scope(path))
         {
@@ -802,7 +813,7 @@ impl HostComponentRegistrationDelegate {
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         operation_id: [u8; 16],
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-        for (index, path) in self.registration_paths(component_set).iter().enumerate() {
+        for (index, path) in self.registration_paths(component_set)?.iter().enumerate() {
             let observed = registration_observed_state(path)?;
             let bytes =
                 serde_json::to_vec(&observed).map_err(|_| host_bundle_storage_failure!())?;
@@ -922,7 +933,7 @@ impl HostComponentRegistrationDelegate {
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         operation_id: [u8; 16],
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-        for (index, path) in self.registration_paths(component_set).iter().enumerate() {
+        for (index, path) in self.registration_paths(component_set)?.iter().enumerate() {
             let expected = fs::read(self.applied_state_marker(operation_id, index))
                 .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
             let expected: RegistrationObservedStateV1 = serde_json::from_slice(&expected)
@@ -1050,7 +1061,7 @@ impl HostComponentRegistrationDelegate {
                 }
             }
         }
-        let current_registration_paths = self.registration_paths(component_set);
+        let current_registration_paths = self.registration_paths(component_set)?;
         let registration_paths = if mutation_plan.schema_version == 1 {
             if mutation_plan
                 .paths
@@ -1447,6 +1458,21 @@ impl HostComponentRegistrationDelegate {
     }
 }
 
+fn current_tracedecay_binary() -> crate::errors::Result<String> {
+    std::env::current_exe()
+        .map_err(|error| crate::errors::TraceDecayError::Config {
+            message: format!("failed to resolve the running tracedecay binary: {error}"),
+        })?
+        .into_os_string()
+        .into_string()
+        .map_err(|path| crate::errors::TraceDecayError::Config {
+            message: format!(
+                "the running tracedecay binary path is not valid UTF-8: {}",
+                PathBuf::from(path).display()
+            ),
+        })
+}
+
 fn project_registration_state(
     integration_id: &str,
     contents: &[u8],
@@ -1463,15 +1489,15 @@ fn project_registration_state(
     let Ok(document) = serde_json::from_slice::<serde_json::Value>(contents) else {
         return State::Corrupt;
     };
-    // Each pointer must name the key that the host's own project-local
-    // installer writes. A pointer that disagrees with the installer makes
+    // Each pointer must name the key that the catalog-selected project
+    // projection writes. A mismatch makes
     // `verify` observe `Missing` immediately after a successful apply, which
     // rolls the whole transaction back and reports it as a storage failure.
     let current = match integration_id {
         "codex" => document.get("name").and_then(serde_json::Value::as_str) == Some("tracedecay"),
         // Kilo registers under `mcp` (not `mcpServers`), same as OpenCode.
         "opencode" | "kilo" => document.pointer("/mcp/tracedecay").is_some(),
-        "kimi" | "roo-code" => document.pointer("/mcpServers/tracedecay").is_some(),
+        "kimi" | "kiro" | "roo-code" => document.pointer("/mcpServers/tracedecay").is_some(),
         _ => false,
     };
     if current {
@@ -1482,7 +1508,7 @@ fn project_registration_state(
 }
 
 impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
-    for HostComponentRegistrationDelegate
+    for CatalogHostComponentRegistrationAuthority
 {
     fn current_revision(
         &self,
@@ -1535,8 +1561,9 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         _request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        self.validate_catalog_host(component_set)?;
         self.refuse_ambiguous_opencode_analyzer(component_set)?;
-        if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
+        if self.registration_mode(component_set) == CatalogRegistrationMode::ArtifactOnly {
             self.should_apply = false;
             return Ok(());
         }
@@ -1581,21 +1608,22 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
             crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
             | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => true,
         };
-        let global_kimi = self.project_path.is_none()
-            && component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode;
-        if global_kimi && all_current {
-            // A native `/plugins install` retry has already completed Kimi's
-            // registration. Repair may record/refresh TraceDecay-owned source
-            // receipts, but it must not demand a nonexistent programmatic
-            // registration action from Kimi.
-            self.should_apply = false;
-        }
-        if global_kimi && self.should_apply {
-            // Kimi's global plugin lifecycle is interactive (`/plugins`) only.
-            // Project-local registration is a separate MCP/prompt integration
-            // implemented by `install_local`, so it remains eligible for this
-            // transaction's legacy-integration path.
-            return Err(crate::agents::host_bundle_v2::HostBundleError::UnsupportedCapability);
+        if self.project_path.is_none()
+            && self.integration.interactive_activation_guidance().is_some()
+        {
+            let native_state_already_matches = match self.operation {
+                crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => all_missing,
+                crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
+                | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
+                | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => all_current,
+            };
+            if native_state_already_matches {
+                self.should_apply = false;
+            } else {
+                // Native-only activation must complete in the host before the
+                // transaction claims or removes any staged artifact.
+                return Err(crate::agents::host_bundle_v2::HostBundleError::UnsupportedCapability);
+            }
         }
         Ok(())
     }
@@ -1605,8 +1633,9 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        self.validate_catalog_host(component_set)?;
         self.refuse_ambiguous_opencode_analyzer(component_set)?;
-        if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
+        if self.registration_mode(component_set) == CatalogRegistrationMode::ArtifactOnly {
             if let Some(expected) = self.confirmed_registration_revision
                 && self.component_registration_revision(component_set)? != expected
             {
@@ -1639,8 +1668,9 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        self.validate_catalog_host(component_set)?;
         let mode = self.registration_mode(component_set);
-        if mode == CompatibilityRegistrationMode::ArtifactOnly {
+        if mode == CatalogRegistrationMode::ArtifactOnly {
             return Ok(());
         }
         // `apply` runs *after* the transaction wrote its declared artifacts,
@@ -1684,69 +1714,67 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         {
             self.prepare_missing_registration_directories(request.operation_id)?;
         }
-        let result =
-            crate::agents::with_host_config_write_intents(
-                self.write_intent_root(request.operation_id),
-                || match mode {
-                    CompatibilityRegistrationMode::ArtifactOnly => unreachable!(),
-                    CompatibilityRegistrationMode::DeployedActivation => {
-                        let components = component_set
-                            .components
-                            .iter()
-                            .map(|component| component.manifest.component)
-                            .collect::<Vec<_>>();
-                        match request.lifecycle.operation {
-                            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => {
-                                self.integration
-                                    .deactivate_deployed_host_component_registration(
-                                        &components,
-                                        &self.context,
-                                    )
-                                    .map_err(Self::registration_error)
-                            }
-                            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
-                            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-                            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => {
-                                self.integration
-                                    .activate_deployed_host_component_registration(
-                                        &components,
-                                        &self.context,
-                                    )
-                                    .map_err(Self::registration_error)
-                            }
-                        }
-                    }
-                    CompatibilityRegistrationMode::LegacyIntegration => {
-                        if let Some(project_path) = &self.project_path {
-                            match request.lifecycle.operation {
+        let result = crate::agents::with_host_config_write_intents(
+            self.write_intent_root(request.operation_id),
+            || match mode {
+                CatalogRegistrationMode::ArtifactOnly => Ok(()),
+                CatalogRegistrationMode::DeployedActivation => {
+                    let components = component_set
+                        .components
+                        .iter()
+                        .map(|component| component.manifest.component)
+                        .collect::<Vec<_>>();
+                    match request.lifecycle.operation {
                         crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
                             .integration
-                            .uninstall_local(&self.context, project_path)
+                            .deactivate_deployed_host_component_registration(
+                                &components,
+                                &self.context,
+                            )
                             .map_err(Self::registration_error),
                         crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
                         | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
                         | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
                             .integration
-                            .install_local(&self.context, project_path)
+                            .activate_deployed_host_component_registration(
+                                &components,
+                                &self.context,
+                            )
                             .map_err(Self::registration_error),
                     }
-                        } else {
-                            match request.lifecycle.operation {
+                }
+                CatalogRegistrationMode::ProjectRegistration => {
+                    let project_path = self.project_path.as_deref().ok_or(
+                        crate::agents::host_bundle_v2::HostBundleError::UnsupportedCapability,
+                    )?;
+                    let components = component_set
+                        .components
+                        .iter()
+                        .map(|component| component.manifest.component)
+                        .collect::<Vec<_>>();
+                    match request.lifecycle.operation {
                         crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
                             .integration
-                            .uninstall(&self.context)
+                            .deactivate_project_host_component_registration(
+                                &components,
+                                &self.context,
+                                project_path,
+                            )
                             .map_err(Self::registration_error),
                         crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
                         | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
                         | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
                             .integration
-                            .install(&self.context)
+                            .activate_project_host_component_registration(
+                                &components,
+                                &self.context,
+                                project_path,
+                            )
                             .map_err(Self::registration_error),
                     }
-                        }
-                    }
-                },
-            );
+                }
+            },
+        );
         let captured = self.capture_applied_registration(component_set, request.operation_id);
         match (result, captured) {
             (_, Err(error)) => Err(error),
@@ -1760,11 +1788,12 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        self.validate_catalog_host(component_set)?;
         #[cfg(feature = "test-transport")]
         if std::env::var_os("TRACEDECAY_TEST_FAIL_HOST_REGISTRATION_VERIFY").is_some() {
             return Err(host_bundle_storage_failure!());
         }
-        if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
+        if self.registration_mode(component_set) == CatalogRegistrationMode::ArtifactOnly {
             return Ok(());
         }
         self.validate_applied_registration(component_set, request.operation_id)?;
@@ -1799,7 +1828,8 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-        if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
+        self.validate_catalog_host(component_set)?;
+        if self.registration_mode(component_set) == CatalogRegistrationMode::ArtifactOnly {
             return Ok(());
         }
         if !self.backup_complete_path(request.operation_id).is_file()
@@ -1950,14 +1980,14 @@ pub fn project_local_registration_path(
 ) -> Option<PathBuf> {
     match agent_id {
         "claude" => Some(project_path.join(".claude/CLAUDE.md")),
-        // `install_local` deploys the Codex repo plugin bundle at the
-        // repository root (`codex_repo_plugin_install_dir`), not under
-        // `.codex/`.
+        // The Codex project projection lives at the repository root, not
+        // under `.codex/`.
         "codex" => Some(project_path.join("plugins/tracedecay/.codex-plugin/plugin.json")),
         // Cursor exposes no project-local registration surface. The shared
         // home plugin must never be inventoried as project-owned state.
         "cursor" => None,
         "kimi" => Some(project_path.join(".kimi-code/mcp.json")),
+        "kiro" => Some(project_path.join(".kiro/settings/mcp.json")),
         "opencode" => Some(project_path.join("opencode.json")),
         "roo-code" => Some(project_path.join(".roo/mcp.json")),
         "kilo" => Some(project_path.join("kilo.json")),
@@ -1977,24 +2007,26 @@ mod tests {
         }
     }
 
-    /// Build a delegate plus an on-disk registration backup whose mutation plan
+    /// Build an authority plus an on-disk registration backup whose mutation plan
     /// declares `directories`, marking every one of them absent at backup time.
     fn missing_directory_fixture(
         home: &Path,
         lifecycle_root: &Path,
         directories: &[PathBuf],
-    ) -> (HostComponentRegistrationDelegate, [u8; 16]) {
-        let delegate = HostComponentRegistrationDelegate::new_with_tracedecay_bin(
+    ) -> (CatalogHostComponentRegistrationAuthority, [u8; 16]) {
+        let authority = CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
             "claude",
             home,
             lifecycle_root,
             crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install,
             "tracedecay".to_string(),
         )
-        .expect("delegate");
+        .expect("catalog registration authority");
         let operation_id = [7u8; 16];
-        fs::create_dir_all(delegate.backup_dir(operation_id)).expect("backup dir");
-        let registration_paths = delegate.registration_paths(&empty_claude_component_set());
+        fs::create_dir_all(authority.backup_dir(operation_id)).expect("backup dir");
+        let registration_paths = authority
+            .registration_paths(&empty_claude_component_set())
+            .expect("registration paths");
         let plan = RegistrationMutationPlanV1 {
             schema_version: 2,
             integration_id: "claude".to_string(),
@@ -2003,18 +2035,18 @@ mod tests {
             directories: directories.to_vec(),
         };
         write_registration_backup(
-            &delegate.mutation_plan_path(operation_id),
+            &authority.mutation_plan_path(operation_id),
             &serde_json::to_vec(&plan).unwrap(),
         )
         .expect("plan");
         for (index, directory) in directories.iter().enumerate() {
             write_registration_backup(
-                &delegate.directory_missing_marker(operation_id, index),
+                &authority.directory_missing_marker(operation_id, index),
                 b"missing",
             )
             .expect("missing marker");
             write_registration_backup(
-                &delegate.directory_path_marker(operation_id, index),
+                &authority.directory_path_marker(operation_id, index),
                 &serde_json::to_vec(directory).unwrap(),
             )
             .expect("directory path marker");
@@ -2024,12 +2056,12 @@ mod tests {
         // record them all as absent.
         for (index, path) in registration_paths.iter().enumerate() {
             write_registration_backup(
-                &delegate.missing_marker_path(operation_id, index),
+                &authority.missing_marker_path(operation_id, index),
                 b"missing",
             )
             .expect("registration missing marker");
             write_registration_backup(
-                &delegate.registration_path_marker(operation_id, index),
+                &authority.registration_path_marker(operation_id, index),
                 &serde_json::to_vec(path).unwrap(),
             )
             .expect("registration path marker");
@@ -2038,15 +2070,15 @@ mod tests {
             "claude",
             home,
             lifecycle_root,
-            delegate.rollback_project_path(),
+            authority.rollback_project_path(),
         )
         .expect("identity");
         write_registration_backup(
-            &delegate.identity_path(operation_id),
+            &authority.identity_path(operation_id),
             &serde_json::to_vec(&identity).unwrap(),
         )
         .expect("identity write");
-        (delegate, operation_id)
+        (authority, operation_id)
     }
 
     /// The transaction writes its declared artifacts *before* `apply` runs, and
@@ -2060,22 +2092,22 @@ mod tests {
         let lifecycle = tempfile::tempdir().unwrap();
         let managed = home.path().join(".claude/agents");
 
-        let (mut delegate, operation_id) = missing_directory_fixture(
+        let (mut authority, operation_id) = missing_directory_fixture(
             home.path(),
             lifecycle.path(),
             std::slice::from_ref(&managed),
         );
-        delegate.declared_artifact_writes = [managed.join("code-explorer.md")].into();
+        authority.declared_artifact_writes = [managed.join("code-explorer.md")].into();
 
         // The artifact writer already created the directory tree.
         fs::create_dir_all(&managed).unwrap();
 
-        delegate
+        authority
             .prepare_missing_registration_directories(operation_id)
             .expect("a directory created by this transaction's own write is not foreign drift");
 
         assert!(
-            delegate
+            authority
                 .directory_applied_metadata_marker(operation_id, 0)
                 .is_file(),
             "adoption must record the applied state that rollback needs to reclaim the directory"
@@ -2091,7 +2123,7 @@ mod tests {
         let lifecycle = tempfile::tempdir().unwrap();
         let foreign = home.path().join(".claude/agents");
 
-        let (delegate, operation_id) = missing_directory_fixture(
+        let (authority, operation_id) = missing_directory_fixture(
             home.path(),
             lifecycle.path(),
             std::slice::from_ref(&foreign),
@@ -2100,7 +2132,7 @@ mod tests {
 
         assert!(
             matches!(
-                delegate.prepare_missing_registration_directories(operation_id),
+                authority.prepare_missing_registration_directories(operation_id),
                 Err(HostBundleError::StalePreview(_))
             ),
             "nothing in this transaction claims the path, so its reappearance is foreign"
@@ -2116,13 +2148,13 @@ mod tests {
         let lifecycle = tempfile::tempdir().unwrap();
         let path = home.path().join(".claude/agents");
 
-        let (mut delegate, operation_id) =
+        let (mut authority, operation_id) =
             missing_directory_fixture(home.path(), lifecycle.path(), std::slice::from_ref(&path));
-        delegate.declared_artifact_writes = [path.clone()].into();
+        authority.declared_artifact_writes = [path.clone()].into();
         fs::create_dir_all(&path).unwrap();
 
         assert!(matches!(
-            delegate.prepare_missing_registration_directories(operation_id),
+            authority.prepare_missing_registration_directories(operation_id),
             Err(HostBundleError::StalePreview(_))
         ));
     }
@@ -2139,7 +2171,7 @@ mod tests {
         let lifecycle = tempfile::tempdir().unwrap();
         let orphaned = home.path().join(".claude/agents");
 
-        let (delegate, operation_id) = missing_directory_fixture(
+        let (authority, operation_id) = missing_directory_fixture(
             home.path(),
             lifecycle.path(),
             std::slice::from_ref(&orphaned),
@@ -2148,14 +2180,14 @@ mod tests {
         // no `directory-0.applied.metadata.json` ever got written.
         fs::create_dir_all(&orphaned).unwrap();
         assert!(
-            !delegate
+            !authority
                 .directory_applied_metadata_marker(operation_id, 0)
                 .is_file()
         );
 
         let component_set = empty_claude_component_set();
 
-        delegate
+        authority
             .restore_registration(&component_set, operation_id)
             .expect("rollback must converge instead of wedging on an unattributable directory");
 
@@ -2173,7 +2205,7 @@ mod tests {
         let lifecycle = tempfile::tempdir().unwrap();
         let orphaned = home.path().join(".claude/agents");
 
-        let (delegate, operation_id) = missing_directory_fixture(
+        let (authority, operation_id) = missing_directory_fixture(
             home.path(),
             lifecycle.path(),
             std::slice::from_ref(&orphaned),
@@ -2183,7 +2215,7 @@ mod tests {
 
         let component_set = empty_claude_component_set();
 
-        delegate
+        authority
             .restore_registration(&component_set, operation_id)
             .expect("rollback still converges");
 
@@ -2211,19 +2243,18 @@ mod tests {
         );
     }
 
-    /// The pointer each host is classified by must match the key its own
-    /// `install_local` writes. When the two disagree, a successful apply is
+    /// The pointer each host is classified by must match its catalog-selected
+    /// project projection. When the two disagree, a successful apply is
     /// observed as `Missing` by `verify`, the transaction rolls back, and the
     /// operator sees "atomic filesystem operation failed" for a host that was
-    /// registered correctly. Driving the real installer keeps the two in step.
+    /// registered correctly.
     #[test]
-    fn project_registration_state_matches_what_each_installer_writes() {
+    fn project_registration_state_matches_catalog_projection() {
         use crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 as State;
 
         let integrations: Vec<Box<dyn crate::agents::AgentIntegration>> = vec![
-            Box::new(crate::agents::KiloIntegration),
             Box::new(crate::agents::KimiIntegration),
-            Box::new(crate::agents::RooCodeIntegration),
+            Box::new(crate::agents::KiroIntegration),
             Box::new(crate::agents::OpenCodeIntegration),
         ];
         for integration in integrations {
@@ -2237,9 +2268,13 @@ mod tests {
                 dashboard: false,
             };
             integration
-                .install_local(&context, project.path())
+                .activate_project_host_component_registration(
+                    &[crate::agents::host_bundle_v2::HostBundleComponentV1::Core],
+                    &context,
+                    project.path(),
+                )
                 .unwrap_or_else(|error| {
-                    panic!("{} local install failed: {error}", integration.id())
+                    panic!("{} project projection failed: {error}", integration.id())
                 });
             let path =
                 project_local_registration_path(integration.id(), home.path(), project.path())
@@ -2259,7 +2294,7 @@ mod tests {
             assert_eq!(
                 project_registration_state(integration.id(), &contents),
                 State::Current,
-                "{} project-local registration must be observed as current after install_local",
+                "{} project-local registration must be observed as current after projection",
                 integration.id()
             );
         }

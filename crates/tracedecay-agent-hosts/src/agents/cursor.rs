@@ -538,12 +538,8 @@ fn write_embedded_plugin(install_dir: &Path, tracedecay_bin: &str) -> Result<()>
     Ok(())
 }
 
-/// Canonical rendered Cursor plugin inventory. The legacy installer and the
-/// receipt-backed first-party host-bundle catalog must produce byte-identical
-/// files: the component-set transaction verifies installed artifact digests
-/// after the compatibility registration adapter re-runs this installer, so
-/// any rendering drift between the two writers fails installs with
-/// `ArtifactContentMismatch`.
+/// Canonical rendered Cursor plugin inventory shared by explicit artifact
+/// refresh and the receipt-backed first-party catalog.
 pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     embedded_plugin_files()
         .into_iter()

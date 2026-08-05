@@ -97,6 +97,50 @@ impl AgentIntegration for ClaudeIntegration {
         uninstall_claude_md_rules(&claude_md_path)
     }
 
+    fn activate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        let claude_md_path = project_path.join(".claude/CLAUDE.md");
+        super::ensure_project_local_safe_path(project_path, &claude_md_path)?;
+        ensure_claude_dir(&project_path.join(".claude"))?;
+        install_claude_md_rules(&claude_md_path)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &claude_md_path,
+            crate::automation::skill_targets::SkillInstallTarget::Claude,
+        )
+    }
+
+    fn project_host_component_registration_paths(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+        project_path: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(vec![
+            project_path.join(".claude/CLAUDE.md"),
+            super::managed_memory_digest_targets_path(home),
+        ])
+    }
+
+    fn deactivate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        let claude_md_path = project_path.join(".claude/CLAUDE.md");
+        super::remove_managed_skill_prompt_index(
+            &ctx.home,
+            &claude_md_path,
+            crate::automation::skill_targets::SkillInstallTarget::Claude,
+        )?;
+        uninstall_claude_md_rules(&claude_md_path)
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         if claude_plugin_is_natively_active(&ctx.home)? {
             return Err(deferred_user_action_error(claude_native_remove_action()));
@@ -441,12 +485,9 @@ fn write_rendered_plugin_bundle(deploy_dir: &Path, tracedecay_bin: &str) -> Resu
     Ok(())
 }
 
-/// Canonical rendered Claude plugin inventory. The legacy installer and the
-/// receipt-backed first-party host-bundle catalog must produce byte-identical
-/// files: the component-set transaction verifies installed artifact digests
-/// after the compatibility registration adapter re-deploys this bundle, so
-/// any rendering drift between the two writers fails installs with
-/// `ArtifactContentMismatch`.
+/// Canonical rendered Claude plugin inventory shared by native-activation
+/// staging and the receipt-backed first-party catalog. One renderer keeps the
+/// staged source byte-identical to the later component transaction.
 pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     claude_embedded_plugin_files()
         .into_iter()

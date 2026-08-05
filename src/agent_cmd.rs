@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use tracedecay::agents::host_component_registration::{
-    HostComponentRegistrationDelegate as CompatibilityAgentRegistrationDelegate,
-    project_local_registration_path,
+    CatalogHostComponentRegistrationAuthority, project_local_registration_path,
 };
 use tracedecay::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
@@ -35,7 +34,31 @@ pub(crate) enum HostBundleCliOperation {
 #[derive(Debug)]
 pub(crate) enum AgentReinstallOutcome {
     Installed,
-    DeferredUserAction(tracedecay::agents::DeferredUserAction),
+}
+
+/// Stage only the host-native source required for an operator activation.
+///
+/// A ready host skips this path entirely and enters the catalog component
+/// transaction without an out-of-band artifact write. A deferred host receives
+/// its verified source and a truthful error, but no lifecycle receipt.
+fn prepare_native_activation_if_needed(
+    integration: &dyn tracedecay::agents::AgentIntegration,
+    context: &tracedecay::agents::InstallContext,
+) -> tracedecay::errors::Result<()> {
+    if matches!(
+        integration.preflight_non_interactive_install(context)?,
+        tracedecay::agents::NonInteractiveInstallOutcome::Ready
+    ) {
+        return Ok(());
+    }
+    match integration.prepare_non_interactive_install(context)? {
+        tracedecay::agents::NonInteractiveInstallOutcome::Ready => Ok(()),
+        tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(deferred) => {
+            Err(tracedecay::errors::TraceDecayError::Config {
+                message: deferred.remediation,
+            })
+        }
+    }
 }
 
 pub(crate) async fn handle_host_bundle_component_command(
@@ -248,7 +271,7 @@ fn ensure_artifact_only_restore_boundary(
     home: &Path,
     lifecycle_root: &Path,
 ) -> tracedecay::errors::Result<()> {
-    let registration = CompatibilityAgentRegistrationDelegate::new(
+    let registration = CatalogHostComponentRegistrationAuthority::new(
         agent_id,
         home,
         lifecycle_root,
@@ -594,7 +617,7 @@ fn preview_canonical_component_set(
     tracedecay::agents::host_bundle_v2::HostComponentSetLifecyclePreviewV1,
 > {
     let request = component_set_request(component_set, operation, options.yes)?;
-    let mut registration = CompatibilityAgentRegistrationDelegate::new(
+    let mut registration = CatalogHostComponentRegistrationAuthority::new(
         agent_id,
         home,
         lifecycle_root,
@@ -630,7 +653,7 @@ fn recover_pending_component_set_journal(
     build_registration: impl FnOnce(
         tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     ) -> tracedecay::errors::Result<
-        CompatibilityAgentRegistrationDelegate,
+        CatalogHostComponentRegistrationAuthority,
     >,
 ) -> tracedecay::errors::Result<()> {
     let Some(operation) = writer
@@ -691,7 +714,7 @@ fn apply_canonical_component_set_with_tracedecay_bin(
         component_set.component_set.host,
         &mut writer,
         |operation| {
-            CompatibilityAgentRegistrationDelegate::new_with_tracedecay_bin(
+            CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
                 agent_id,
                 home,
                 lifecycle_root,
@@ -702,7 +725,7 @@ fn apply_canonical_component_set_with_tracedecay_bin(
     )?;
     let mut transaction =
         tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
-    let mut registration = CompatibilityAgentRegistrationDelegate::new_with_tracedecay_bin(
+    let mut registration = CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
         agent_id,
         home,
         lifecycle_root,
@@ -800,14 +823,6 @@ fn apply_default_canonical_component_set(
     Ok(())
 }
 
-/// `update-plugin` uses the component transaction only when that transaction
-/// owns every deployed asset without taking over a host-native plugin cache.
-/// Claude and Codex stage their source packages and defer the cache refresh to
-/// each host's CLI; Kimi's global plugin is interactive for the same reason.
-fn update_uses_component_transaction(agent_id: &str) -> bool {
-    matches!(agent_id, "cursor" | "opencode")
-}
-
 fn apply_project_local_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -846,7 +861,7 @@ fn apply_project_local_component_set(
         component_set.component_set.host,
         &mut writer,
         |operation| {
-            CompatibilityAgentRegistrationDelegate::new_project_local(
+            CatalogHostComponentRegistrationAuthority::new_project_local(
                 agent_id,
                 home,
                 project_path,
@@ -855,7 +870,7 @@ fn apply_project_local_component_set(
             )
         },
     )?;
-    let mut registration = CompatibilityAgentRegistrationDelegate::new_project_local(
+    let mut registration = CatalogHostComponentRegistrationAuthority::new_project_local(
         agent_id,
         home,
         project_path,
@@ -2636,7 +2651,7 @@ pub(crate) async fn handle_host_bundle_recovery_command(
             .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
                 message: format!("{agent_id}: pending lifecycle journal disappeared"),
             })?;
-        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+        let mut registration = CatalogHostComponentRegistrationAuthority::new(
             agent_id,
             &home,
             &lifecycle_root,
@@ -2846,7 +2861,7 @@ fn codex_daemon_interval_task(interval_secs: u64) -> AutomationTaskPatch {
 pub(crate) async fn handle_install_command(
     agent: Option<String>,
     local: bool,
-    no_dashboard: bool,
+    _no_dashboard: bool,
     automation: Option<CodexAutomationInstall>,
 ) -> tracedecay::errors::Result<()> {
     validate_codex_automation_flags(agent.as_deref(), automation)?;
@@ -2930,24 +2945,14 @@ pub(crate) async fn handle_install_command(
     if let Some(id) = agent {
         let ag = tracedecay::agents::get_integration(&id)?;
         let name = ag.name().to_string();
-        let ctx = tracedecay::agents::InstallContext {
+        let context = tracedecay::agents::InstallContext {
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
             project_root: None,
-            dashboard: !no_dashboard,
+            dashboard: !_no_dashboard,
         };
-        if let tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(deferred) =
-            ag.prepare_non_interactive_install(&ctx)?
-        {
-            if let Some(options) = automation.filter(|_| id == "codex") {
-                let scoped_project_path = validate_codex_automation_project_path()?;
-                install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
-            }
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: deferred.remediation,
-            });
-        }
+        prepare_native_activation_if_needed(ag.as_ref(), &context)?;
         apply_default_canonical_component_set(&id, HostBundleCliOperation::Install, &home)?;
         ag.post_install(project_path.as_deref()).await;
         refreshed_ids.insert(id.clone());
@@ -2976,20 +2981,14 @@ pub(crate) async fn handle_install_command(
         }
         for id in &to_install {
             let ag = tracedecay::agents::get_integration(id)?;
-            let ctx = tracedecay::agents::InstallContext {
+            let context = tracedecay::agents::InstallContext {
                 home: home.clone(),
                 tracedecay_bin: tracedecay_bin.clone(),
                 tool_permissions: tracedecay::agents::expected_tool_perms(),
                 project_root: None,
-                dashboard: !no_dashboard,
+                dashboard: !_no_dashboard,
             };
-            if let tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(deferred) =
-                ag.prepare_non_interactive_install(&ctx)?
-            {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: deferred.remediation,
-                });
-            }
+            prepare_native_activation_if_needed(ag.as_ref(), &context)?;
             apply_default_canonical_component_set(id, HostBundleCliOperation::Install, &home)?;
             ag.post_install(project_path.as_deref()).await;
             refreshed_ids.insert(id.clone());
@@ -3088,14 +3087,6 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
                     message: format!("failed to reinstall agent(s): {}", failed.join("; ")),
                 });
             }
-            crate::update_cmd::ReinstallOutcome::DeferredUserAction { deferred } => {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: format!(
-                        "agent reinstall requires native host action: {}",
-                        deferred.join("; ")
-                    ),
-                });
-            }
         }
         // Advance BOTH markers: `previous_version` is what arms the startup
         // silent reinstall, so recording only `last_installed_version` here
@@ -3117,54 +3108,18 @@ pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result
         }
     })?;
     let user_cfg = tracedecay::user_config::UserConfig::load();
-    let project_path = std::env::current_dir().ok();
 
     for id in &user_cfg.installed_agents {
-        if update_uses_component_transaction(id) {
-            apply_default_canonical_component_set(id, HostBundleCliOperation::Update, &home)?;
-            continue;
-        }
         let integration = tracedecay::agents::get_integration(id)?;
         let context = tracedecay::agents::InstallContext {
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
-            project_root: project_path.clone(),
+            project_root: None,
             dashboard: true,
         };
-        match integration.update_plugin(&context)? {
-            tracedecay::agents::UpdatePluginOutcome::Refreshed(paths) => {
-                for path in paths {
-                    eprintln!(
-                        "\x1b[32m✔\x1b[0m refreshed {} at {}",
-                        integration.name(),
-                        path.display()
-                    );
-                }
-            }
-            tracedecay::agents::UpdatePluginOutcome::NotInstalled => {
-                eprintln!(
-                    "{} is not installed; skipping generated artifact refresh",
-                    integration.name()
-                );
-            }
-            tracedecay::agents::UpdatePluginOutcome::ConfigOnly => {
-                eprintln!(
-                    "{} has no generated artifacts to refresh",
-                    integration.name()
-                );
-            }
-            tracedecay::agents::UpdatePluginOutcome::DeferredUserAction(deferred) => {
-                eprintln!(
-                    "\x1b[33mwarning:\x1b[0m {} plugin activation deferred: {}",
-                    integration.name(),
-                    deferred.remediation
-                );
-                for path in deferred.staged_paths {
-                    eprintln!("  staged: {}", path.display());
-                }
-            }
-        }
+        prepare_native_activation_if_needed(integration.as_ref(), &context)?;
+        apply_default_canonical_component_set(id, HostBundleCliOperation::Update, &home)?;
     }
     Ok(())
 }
@@ -3326,16 +3281,15 @@ fn registration_state_label(
     }
 }
 
-/// Re-runs `install()` + `post_install()` for each tracked agent id, returning
-/// only the ids that resolve to a real integration paired with their install
-/// result.
+/// Reconciles the canonical component transaction and then runs `post_install`
+/// for each tracked agent id.
 ///
 /// An id that does NOT resolve to an integration (a later release renamed or
 /// removed it, or a typo landed in `installed_agents`) is SKIPPED, not failed:
 /// it is logged as a warning and left out of the returned results entirely.
 /// Gating version-marker advancement on such an id would wedge the reinstall
-/// loop forever. Only genuine `install()` failures are reported as `Err` so
-/// they still gate markers.
+/// loop forever. Only genuine component-transaction failures are reported as
+/// `Err` so they still gate markers.
 pub(crate) async fn reinstall_agent_integrations(
     agent_ids: &[String],
     home: &Path,
@@ -3374,26 +3328,16 @@ async fn reinstall_agent_integrations_with_lease(
                 continue;
             }
         };
-        let ctx = tracedecay::agents::InstallContext {
+        let context = tracedecay::agents::InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
             project_root: None,
             dashboard: true,
         };
-        match ag.prepare_non_interactive_install(&ctx) {
-            Ok(tracedecay::agents::NonInteractiveInstallOutcome::Ready) => {}
-            Ok(tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(deferred)) => {
-                results.push((
-                    id.clone(),
-                    Ok(AgentReinstallOutcome::DeferredUserAction(deferred)),
-                ));
-                continue;
-            }
-            Err(error) => {
-                results.push((id.clone(), Err(error)));
-                continue;
-            }
+        if let Err(error) = prepare_native_activation_if_needed(ag.as_ref(), &context) {
+            results.push((id.clone(), Err(error)));
+            continue;
         }
         match apply_default_canonical_component_set(id, HostBundleCliOperation::Repair, home) {
             Ok(()) => {
@@ -3453,7 +3397,7 @@ mod tests {
     };
 
     use super::{
-        AgentReinstallOutcome, CompatibilityAgentRegistrationDelegate, HostBundleCliOperation,
+        AgentReinstallOutcome, CatalogHostComponentRegistrationAuthority, HostBundleCliOperation,
         apply_canonical_component_set, apply_canonical_component_set_with_tracedecay_bin,
         broker_codex_daemon_automation_project, canonical_host_component_set,
         canonical_host_component_set_with_tracedecay_bin, component_set_request,
@@ -3663,7 +3607,7 @@ mod tests {
     }
 
     struct VerifyFailureRegistration {
-        inner: CompatibilityAgentRegistrationDelegate,
+        inner: CatalogHostComponentRegistrationAuthority,
         expected_removed_path: PathBuf,
         injected_after_apply: bool,
     }
@@ -3756,7 +3700,7 @@ mod tests {
         }
     }
 
-    /// Forwards the whole lifecycle to a real delegate but always fails
+    /// Forwards the whole lifecycle to the real authority but always fails
     /// `verify`, which interrupts the transaction after its artifacts are on
     /// disk — the state that leaves a recovery journal behind.
     /// Pinned binary path for the Kiro fixtures. Resolving it from `PATH`
@@ -3765,7 +3709,7 @@ mod tests {
     const KIRO_FIXTURE_BIN: &str = "/usr/local/bin/tracedecay";
 
     struct AlwaysFailVerifyRegistration {
-        inner: CompatibilityAgentRegistrationDelegate,
+        inner: CatalogHostComponentRegistrationAuthority,
     }
 
     impl HostComponentSetRegistrationV1 for AlwaysFailVerifyRegistration {
@@ -4231,7 +4175,7 @@ mod tests {
         };
 
         // Interrupt a real transaction the way a crash would: run it through a
-        // registration adapter that fails `verify` after the artifacts are
+        // registration authority that fails `verify` after the artifacts are
         // already on disk, which is exactly the state that leaves a journal.
         let request =
             component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
@@ -4244,7 +4188,7 @@ mod tests {
         let mut transaction =
             tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
         let mut interrupted_registration = AlwaysFailVerifyRegistration {
-            inner: CompatibilityAgentRegistrationDelegate::new(
+            inner: CatalogHostComponentRegistrationAuthority::new(
                 "kiro",
                 home.path(),
                 lifecycle.path(),
@@ -4314,7 +4258,7 @@ mod tests {
             .unwrap();
         let mut transaction =
             tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
-        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+        let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "kiro",
             home.path(),
             lifecycle.path(),
@@ -4370,7 +4314,7 @@ mod tests {
             .unwrap();
         let request =
             component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
-        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+        let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home.path(),
             lifecycle.path(),
@@ -4448,7 +4392,7 @@ mod tests {
             let request =
                 component_set_request(&component_set, HostBundleCliOperation::Install, true)
                     .unwrap();
-            let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            let mut registration = CatalogHostComponentRegistrationAuthority::new(
                 "opencode",
                 home.path(),
                 lifecycle.path(),
@@ -4517,7 +4461,7 @@ mod tests {
         .unwrap();
         let request =
             component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
-        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+        let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home.path(),
             lifecycle.path(),
@@ -4601,7 +4545,7 @@ mod tests {
         .unwrap();
         let request =
             component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
-        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+        let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home.path(),
             lifecycle.path(),
@@ -4658,7 +4602,7 @@ mod tests {
         .unwrap();
         let request =
             component_set_request(&component_set, HostBundleCliOperation::Repair, true).unwrap();
-        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+        let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home.path(),
             lifecycle.path(),
@@ -4717,7 +4661,7 @@ mod tests {
         let request =
             component_set_request(&component_set, HostBundleCliOperation::Repair, true).unwrap();
         let mut registration = VerifyFailureRegistration {
-            inner: CompatibilityAgentRegistrationDelegate::new(
+            inner: CatalogHostComponentRegistrationAuthority::new(
                 "codex",
                 home.path(),
                 lifecycle.path(),
@@ -5016,7 +4960,7 @@ mod tests {
             let request =
                 component_set_request(&component_set, HostBundleCliOperation::Install, true)
                     .unwrap();
-            let registration = CompatibilityAgentRegistrationDelegate::new(
+            let registration = CatalogHostComponentRegistrationAuthority::new(
                 agent,
                 home.path(),
                 lifecycle.path(),
@@ -5174,7 +5118,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kimi_tracked_reinstall_returns_non_blocking_typed_deferral() {
+    async fn kimi_tracked_reinstall_refuses_before_staging_without_native_activation() {
         let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let code_home = home.path().join(".kimi-code");
@@ -5189,23 +5133,18 @@ mod tests {
             reinstall_agent_integrations(&["kimi".to_string()], home.path(), "new-tracedecay")
                 .await;
 
-        let [(id, Ok(AgentReinstallOutcome::DeferredUserAction(deferred)))] = results.as_slice()
-        else {
-            panic!("tracked Kimi reinstall should return one typed deferral");
+        let [(id, Err(error))] = results.as_slice() else {
+            panic!("tracked Kimi reinstall should return one typed refusal");
         };
         assert_eq!(id, "kimi");
-        let staged = home
-            .path()
-            .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
-        assert_eq!(deferred.staged_paths, vec![staged.clone()]);
-        assert!(
-            deferred
-                .remediation
-                .contains(&format!("/plugins install {}", staged.display()))
-        );
+        assert!(error.to_string().contains("/plugins install"));
         assert_eq!(std::fs::read(&installed_path).unwrap(), original);
         assert!(!code_home.join("plugins/managed/tracedecay").exists());
-        assert!(staged.join(".kimi-plugin/plugin.json").is_file());
+        assert!(
+            home.path()
+                .join(".tracedecay/host-bundle-stage/kimi/tracedecay/.kimi-plugin/plugin.json")
+                .is_file()
+        );
     }
 
     #[tokio::test]
@@ -5472,7 +5411,7 @@ mod tests {
             .unwrap();
         let request =
             component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
-        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+        let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "kimi",
             home.path(),
             lifecycle.path(),
@@ -5532,7 +5471,7 @@ mod tests {
             .unwrap();
         let request =
             component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
-        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+        let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home.path(),
             lifecycle.path(),

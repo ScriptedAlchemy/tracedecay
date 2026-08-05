@@ -153,7 +153,7 @@ pub fn verified_embedded_default_host_component_set(
 }
 
 /// Project-local canonical set. Host-owned project configuration is handled by
-/// the registration adapter; these receipt markers give every selected
+/// the registration authority; these receipt markers give every selected
 /// component an exact project-local ownership path under one transaction.
 pub fn verified_embedded_project_host_component_set(
     host: HostKindV1,
@@ -161,13 +161,10 @@ pub fn verified_embedded_project_host_component_set(
     _now_unix: u64,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
     validate_identifier(agent_id).map_err(|_| HostBundleRegistryError::Incompatible)?;
-    let project_components = match host {
-        // Roo and Kilo have documented project-local MCP files but no
-        // first-party global bundle. Their local transaction therefore owns
-        // only the registration delegate plus its project-scoped Core receipt.
-        HostKindV1::RooCode | HostKindV1::Kilo => vec![HostBundleComponentV1::Core],
-        _ => default_components(host),
-    };
+    if let Some(reason) = unsupported_host_component_set_reason(host) {
+        return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
+    }
+    let project_components = default_components(host);
     if project_components.is_empty() {
         return Err(HostBundleRegistryError::HostComponentSetUnavailable {
             host,
@@ -443,12 +440,8 @@ fn component_assets(
     component: HostBundleComponentV1,
     tracedecay_bin: &str,
 ) -> Result<Vec<(String, Vec<u8>)>, HostBundleRegistryError> {
-    // The managed Hermes plugin package is also written by the legacy installer
-    // that the compatibility registration adapter re-runs during apply, and the
-    // component-set transaction verifies installed digests afterwards. Deploy
-    // the installer's own rendered inventory (same bin resolution as
-    // `InstallContext::tracedecay_bin`) so both writers produce identical
-    // bytes. Rendering the inventory with the `"__TRACEDECAY_BIN__"` sentinel
+    // Use Hermes' canonical rendered inventory with the installed binary path.
+    // Rendering the inventory with the `"__TRACEDECAY_BIN__"` sentinel
     // and then substituting it through `render_compiled_asset` resolved the
     // binary from `std::env::current_exe()` instead, which disagrees with
     // `which_tracedecay()` whenever the running binary lives outside the
@@ -468,13 +461,9 @@ fn component_assets(
             .collect());
     }
 
-    // The Cursor plugin directory is also written by the legacy installer the
-    // compatibility registration adapter re-runs during apply, and the
-    // component-set transaction verifies installed digests afterwards. Use the
-    // installer's own rendered inventory (same bin resolution as
-    // `InstallContext::tracedecay_bin`) so both writers produce identical
-    // bytes. The native-extension Agent component keeps the compiled-asset
-    // path below: the legacy installer never writes it.
+    // Use Cursor's canonical rendered inventory so explicit artifact refresh
+    // and the component transaction cannot drift. The native-extension Agent
+    // component keeps the compiled-asset path below.
     if host == HostKindV1::CursorDesktop
         && matches!(
             component,
@@ -588,7 +577,7 @@ fn component_assets(
             super::plugin_bundle::cursor_native_extension_files(),
         ),
         // Kiro's `settings/mcp.json` is a shared user document: the native
-        // registration adapter merges the TraceDecay server into it (preserving
+        // registration authority merges the TraceDecay server into it (preserving
         // third-party entries) and re-reads it for this component's confirmed
         // registration revision. A managed artifact must therefore never claim
         // that path. Owning it here made the transaction's own artifact write
@@ -810,13 +799,11 @@ mod tests {
         }
     }
 
-    /// The compatibility registration adapter re-runs the legacy Kimi
-    /// installer during apply and the component-set transaction verifies
-    /// installed digests afterwards, so the two writers must agree byte for
-    /// byte. Rendering the raw template here instead would leave the manifest
-    /// version unstamped and fail every install with `ArtifactContentMismatch`.
+    /// Native-activation staging and the component catalog share one Kimi
+    /// renderer. Rendering the raw template here would leave the manifest
+    /// version unstamped and make the two lifecycle steps disagree.
     #[test]
-    fn kimi_catalog_assets_match_the_legacy_installer_rendering() {
+    fn kimi_catalog_assets_match_native_activation_staging() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let rendered = super::super::kimi::rendered_plugin_files(&bin).unwrap();
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
@@ -841,7 +828,7 @@ mod tests {
             assert_eq!(
                 content.bytes,
                 body.into_bytes(),
-                "{path} must match the legacy installer rendering"
+                "{path} must match native activation staging"
             );
         }
     }
@@ -876,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_catalog_assets_match_the_legacy_installer_rendering() {
+    fn opencode_catalog_assets_match_canonical_renderer() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let rendered = super::super::opencode::rendered_plugin_files(&bin).unwrap();
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
@@ -898,7 +885,7 @@ mod tests {
             assert_eq!(
                 content.bytes,
                 body.into_bytes(),
-                "{path} must match the legacy installer rendering"
+                "{path} must match the canonical renderer"
             );
         }
     }
@@ -935,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn hermes_catalog_assets_match_the_legacy_installer_rendering() {
+    fn hermes_catalog_assets_match_canonical_renderer() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let rendered = super::super::hermes::rendered_plugin_files(&bin).unwrap();
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
@@ -957,7 +944,7 @@ mod tests {
             assert_eq!(
                 content.bytes,
                 body.into_bytes(),
-                "{path} must match the legacy installer rendering"
+                "{path} must match the canonical renderer"
             );
         }
     }
@@ -1144,7 +1131,7 @@ mod tests {
         assert_eq!(bundle.contents.len(), 1);
         // The managed artifact is a TraceDecay-owned descriptor, never Kiro's
         // shared `settings/mcp.json`: that document belongs to the native
-        // registration adapter, which merges into it and hashes it for the
+        // registration authority, which merges into it and hashes it for the
         // confirmed registration revision.
         assert_eq!(
             bundle.contents[0].relative_path,

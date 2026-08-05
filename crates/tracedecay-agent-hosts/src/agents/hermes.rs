@@ -206,14 +206,9 @@ pub(super) fn write_plugin_files(plugin_dir: &Path, tracedecay_bin: &str) -> Res
     Ok(())
 }
 
-/// Canonical rendered Hermes plugin inventory. The legacy installer and the
-/// receipt-backed first-party host-bundle catalog must produce byte-identical
-/// files: the component-set transaction verifies installed artifact digests
-/// after the compatibility registration adapter re-runs this installer, so any
-/// rendering drift between the two writers fails installs with
-/// `ArtifactContentMismatch`. Callers must pass the same binary the installer
-/// resolves (`InstallContext::tracedecay_bin` / `which_tracedecay()`), never
-/// the running executable path.
+/// Canonical rendered Hermes plugin inventory used by the receipt-backed
+/// first-party catalog. Callers must pass the installed binary path, never the
+/// running executable path.
 pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     Ok(vec![
         ("plugin.yaml", templates::plugin_manifest()),

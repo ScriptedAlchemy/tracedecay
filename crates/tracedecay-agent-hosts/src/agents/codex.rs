@@ -108,6 +108,47 @@ impl AgentIntegration for CodexIntegration {
         uninstall_codex_repo_plugin_if_present(&local)
     }
 
+    fn activate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        for path in [
+            codex_repo_plugin_install_dir(project_path).join(".codex-plugin/plugin.json"),
+            codex_repo_plugin_install_dir(project_path).join(".mcp.json"),
+            codex_repo_marketplace_path(project_path),
+        ] {
+            super::ensure_project_local_safe_path(project_path, &path)?;
+        }
+        install_codex_repo_plugin(&ctx.home, project_path, &ctx.tracedecay_bin)
+    }
+
+    fn project_host_component_registration_paths(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+        project_path: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        codex_project_registration_paths(home, project_path)
+    }
+
+    fn deactivate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        let local = InstallContext {
+            home: ctx.home.clone(),
+            tracedecay_bin: ctx.tracedecay_bin.clone(),
+            tool_permissions: ctx.tool_permissions.clone(),
+            project_root: Some(project_path.to_path_buf()),
+            dashboard: ctx.dashboard,
+        };
+        uninstall_codex_repo_plugin_if_present(&local)
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         if !codex_plugin_is_natively_active(&ctx.home)? {
             let install_dir = codex_plugin_install_dir(&ctx.home);
@@ -500,6 +541,72 @@ fn install_codex_repo_plugin(home: &Path, project_path: &Path, tracedecay_bin: &
         install_dir.display()
     );
     Ok(())
+}
+
+fn codex_project_registration_paths(home: &Path, project_path: &Path) -> Result<Vec<PathBuf>> {
+    let install_dir = codex_repo_plugin_install_dir(project_path);
+    super::ensure_project_local_safe_path(project_path, &install_dir)?;
+
+    let mut paths = codex_embedded_plugin_files()
+        .into_iter()
+        .filter(|(relative, _)| *relative != "hooks/hooks.json")
+        .map(|(relative, _)| install_dir.join(relative))
+        .collect::<Vec<_>>();
+
+    match std::fs::symlink_metadata(&install_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            paths.extend(super::collect_regular_files(&install_dir).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "failed to inventory Codex project plugin {}: {error}",
+                        install_dir.display()
+                    ),
+                }
+            })?);
+        }
+        Ok(_) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing to inventory unsafe Codex project plugin path {}",
+                    install_dir.display()
+                ),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect Codex project plugin {}: {error}",
+                    install_dir.display()
+                ),
+            });
+        }
+    }
+
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
+    let active_skills = crate::automation::skill_targets::load_active_managed_skills_for_target(
+        &profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Codex,
+    )?;
+    let overlay_root = install_dir.join("skills/agent-managed");
+    if !active_skills.is_empty() {
+        paths.push(overlay_root.join(".tracedecay-managed-skills.json"));
+    }
+    for skill in active_skills {
+        crate::automation::managed_skills::validate_managed_support_files(&skill.support_files)?;
+        let package_dir = overlay_root.join(&skill.metadata.id);
+        paths.push(package_dir.join("SKILL.md"));
+        paths.extend(
+            skill
+                .support_files
+                .into_iter()
+                .map(|support| package_dir.join(support.path)),
+        );
+    }
+    paths.push(codex_repo_marketplace_path(project_path));
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 /// The scope contract for a rendered Codex plugin bundle, in one place.

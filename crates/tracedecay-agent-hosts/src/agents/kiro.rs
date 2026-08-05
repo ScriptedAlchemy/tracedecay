@@ -210,6 +210,78 @@ impl AgentIntegration for KiroIntegration {
         Ok(())
     }
 
+    fn activate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        let mcp_path = workspace_mcp_config_path(project_path);
+        let steering = project_path.join(".kiro/steering/tracedecay.md");
+        let agent_path = project_path.join(".kiro/agents/tracedecay.json");
+        let skill_index_path = project_path.join(".kiro/steering/tracedecay-managed-skills.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [
+                mcp_path.as_path(),
+                steering.as_path(),
+                agent_path.as_path(),
+                skill_index_path.as_path(),
+            ],
+        )?;
+        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
+        install_steering_rules(&steering)?;
+        install_managed_agent(
+            &agent_path,
+            &ctx.tracedecay_bin,
+            &steering,
+            &ctx.home,
+            Some(&skill_index_path),
+        )?;
+        Ok(())
+    }
+
+    fn project_host_component_registration_paths(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+        project_path: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(vec![
+            workspace_mcp_config_path(project_path),
+            project_path.join(".kiro/steering/tracedecay.md"),
+            project_path.join(".kiro/agents/tracedecay.json"),
+            project_path.join(".kiro/steering/tracedecay-managed-skills.md"),
+            super::managed_memory_digest_targets_path(home),
+        ])
+    }
+
+    fn deactivate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        let mcp_path = workspace_mcp_config_path(project_path);
+        let steering = project_path.join(".kiro/steering/tracedecay.md");
+        let agent_path = project_path.join(".kiro/agents/tracedecay.json");
+        let skill_index_path = project_path.join(".kiro/steering/tracedecay-managed-skills.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [
+                mcp_path.as_path(),
+                steering.as_path(),
+                agent_path.as_path(),
+                skill_index_path.as_path(),
+            ],
+        )?;
+        uninstall_mcp_server(&mcp_path)?;
+        remove_steering_rules(&steering);
+        remove_kiro_managed_skill_index(&ctx.home, &skill_index_path);
+        uninstall_managed_agent(&agent_path);
+        Ok(())
+    }
+
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         // The managed agent file is the only generated artifact (it bakes the
         // tracedecay binary path into its hook commands). The shared MCP

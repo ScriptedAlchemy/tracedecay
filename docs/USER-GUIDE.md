@@ -201,16 +201,14 @@ TraceDecay works as an MCP (Model Context Protocol) server. AI coding agents con
 tracedecay install
 ```
 
-This stages the Claude plugin source at
-`~/.claude/plugins/marketplaces/tracedecay`. Claude Code owns marketplace
-registration, enabled state, cache, hook trust, and permissions: run the
-printed `claude plugin marketplace add …` and `claude plugin install
-tracedecay@tracedecay` commands, then rerun TraceDecay to record the staged
-source. The plugin bundles the MCP server, lifecycle hooks, subagents, skills,
-and slash commands. `tracedecay update-plugin --agent claude` refreshes only
-the source and asks Claude Code to perform its native update. To uninstall,
-remove the plugin with Claude Code first, then rerun TraceDecay to clean the
-staged source. TraceDecay does not migrate or rewrite Claude's host config.
+Claude Code owns marketplace registration, enabled state, cache, hook trust,
+and permissions. When activation is missing, TraceDecay stages verified source
+and prints the native activation command without writing a lifecycle receipt.
+After that host-native action, run the install again so TraceDecay can
+atomically record the catalog component set. The plugin bundles the MCP server,
+lifecycle hooks, subagents, skills, and slash commands. `tracedecay
+update-plugin` refreshes receipt-owned source only through the same component
+transaction. TraceDecay does not migrate or rewrite Claude's host config.
 The installed hooks submit bounded native lifecycle envelopes only:
 `SessionStart`, `Stop`, and saved-edit `PostToolUse`
 (`Edit|MultiEdit|Write|NotebookEdit`). The daemon owns all later capture,
