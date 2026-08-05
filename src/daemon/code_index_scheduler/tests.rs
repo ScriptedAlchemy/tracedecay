@@ -989,6 +989,83 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_overflow_and_exact_hook_share_one_retained_dirty_frontier() {
+    let fixture = GitFixture::new(&[
+        ("src/a.rs", "pub fn a() -> u32 { 1 }\n"),
+        ("src/b.rs", "pub fn b() -> u32 { 1 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let initial_generation = wait_for_initial_generation(&registry, fixture.path()).await;
+
+    fixture.edit("src/a.rs", "pub fn a() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/a.rs".to_owned()])
+            .await
+    );
+    let dirty_generation =
+        wait_for_generation_change(&registry, fixture.path(), &initial_generation).await;
+
+    let admission = registry.background_reconcile_admission();
+    let held = admission
+        .acquire_owned()
+        .await
+        .expect("hold reconcile admission");
+    fixture.edit("src/a.rs", "pub fn a() -> u32 { 1 }\n");
+    fixture.edit("src/b.rs", "pub fn b() -> u32 { 2 }\n");
+
+    let identity = super::identity::IndexingIdentityV1::resolve(fixture.path())
+        .expect("resolve exact watcher identity");
+    assert_eq!(
+        registry.request_for_root(fixture.path(), identity),
+        super::GitStateChangeRequestV1::Accepted
+    );
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/b.rs".to_owned()])
+            .await
+    );
+    drop(held);
+
+    let combined = wait_for_generation_change(&registry, fixture.path(), &dirty_generation).await;
+    assert_ne!(combined, dirty_generation);
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let latest = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .latest_complete()
+        .expect("combined generation");
+    let indexed = latest
+        .lexical()
+        .iter()
+        .map(|chunk| chunk.sanitized_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        indexed.contains("pub fn a() -> u32 { 1 }"),
+        "the watcher overflow revisits the retained dirty path"
+    );
+    assert!(
+        indexed.contains("pub fn b() -> u32 { 2 }"),
+        "the exact hook path remains in the same frontier"
+    );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");

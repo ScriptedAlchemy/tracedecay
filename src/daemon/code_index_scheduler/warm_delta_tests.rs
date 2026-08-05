@@ -49,6 +49,22 @@ fn git(root: &Path, args: &[&str]) {
     assert!(status.success(), "git fixture command failed: {args:?}");
 }
 
+fn git_stdout(root: &Path, args: &[&str]) -> String {
+    let output = Command::new(crate::git::git_program())
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("run git fixture command");
+    assert!(
+        output.status.success(),
+        "git fixture command failed: {args:?}"
+    );
+    String::from_utf8(output.stdout)
+        .expect("git fixture stdout")
+        .trim()
+        .to_owned()
+}
+
 fn write(root: &Path, path: &str, source: &str) {
     let path = root.join(path);
     std::fs::create_dir_all(path.parent().expect("source parent")).expect("create source parent");
@@ -315,6 +331,42 @@ fn warm_head_reconcile_diffs_once_and_reads_only_twenty_changed_paths() {
     assert_eq!(update.full_status_scans, 0);
     assert_eq!(update.head_tree_diffs, 1);
     assert_eq!(update.reextracted_files, 20);
+}
+
+#[test]
+fn clean_snapshot_binds_exact_commit_and_tree_while_dirty_snapshot_binds_neither() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn value() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(&fixture, &store);
+    published(scheduler.reconcile_now().expect("clean generation"));
+
+    let clean = scheduler.latest_complete().expect("clean generation");
+    let clean_snapshot = clean.generation().snapshot();
+    let expected_revision = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let expected_tree = git_stdout(fixture.path(), &["rev-parse", "HEAD^{tree}"]);
+    assert_eq!(
+        clean_snapshot
+            .source_revision
+            .as_ref()
+            .map(|revision| revision.as_str()),
+        Some(expected_revision.as_str())
+    );
+    assert_eq!(
+        clean_snapshot
+            .source_tree
+            .as_ref()
+            .map(|tree| tree.as_str()),
+        Some(expected_tree.as_str())
+    );
+
+    fixture.edit("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
+    published(scheduler.reconcile_now().expect("dirty generation"));
+
+    let dirty = scheduler.latest_complete().expect("dirty generation");
+    let dirty_snapshot = dirty.generation().snapshot();
+    assert_eq!(dirty_snapshot.source_revision, None);
+    assert_eq!(dirty_snapshot.source_tree, None);
 }
 
 /// The bounded full-status backstop is allowed to prove a quiet worktree, but

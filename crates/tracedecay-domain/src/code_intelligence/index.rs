@@ -14,7 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::research::id::{
     CommitId, ManifestDigest, PrivacyDomainId, ProjectId, RefId, RepositoryId, RetrievalAnchorId,
-    SanitizationReceiptId, WorktreeId,
+    SanitizationReceiptId, TreeId, WorktreeId,
 };
 use crate::research::time::UtcMicros;
 use crate::research::{DomainError, canonical_sha256};
@@ -27,9 +27,10 @@ use super::identity::{
 use super::language::EdgeAuthorityV1;
 
 /// One receipt-bound sanitized repository snapshot (Plan 25: the only legal
-/// intake). Carries repository, checkout, worktree, ref, source revision,
-/// sanitizer revision, and content identity. Missing, stale, mixed-snapshot,
-/// or unsanitized input is rejected before parsing.
+/// intake). Carries repository, checkout, worktree, ref, exact source
+/// revision/tree evidence when clean, sanitizer revision, and content identity.
+/// Missing, stale, mixed-snapshot, or unsanitized input is rejected before
+/// parsing.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SanitizedCodeSnapshotV1 {
@@ -37,6 +38,7 @@ pub struct SanitizedCodeSnapshotV1 {
     pub worktree: Option<WorktreeId>,
     pub reference: Option<RefId>,
     pub source_revision: Option<CommitId>,
+    pub source_tree: Option<TreeId>,
     pub sanitizer_revision: SanitizerRevision,
     pub sanitization_receipts: Vec<SanitizationReceiptId>,
     pub content_identity: ContentDigest,
@@ -55,6 +57,22 @@ impl SanitizedCodeSnapshotV1 {
         }
         if let Some(source_revision) = &self.source_revision {
             source_revision.validate()?;
+        }
+        if let Some(source_tree) = &self.source_tree {
+            source_tree.validate()?;
+        }
+        match (&self.source_revision, &self.source_tree) {
+            (Some(_), Some(_)) | (None, None) => {}
+            (Some(_), None) => {
+                return Err(DomainError::UnknownReference {
+                    field: "snapshot source tree",
+                });
+            }
+            (None, Some(_)) => {
+                return Err(DomainError::UnknownReference {
+                    field: "snapshot source revision",
+                });
+            }
         }
         self.sanitizer_revision.validate()?;
         self.content_identity.validate()?;
@@ -668,6 +686,7 @@ mod tests {
             worktree: Some(id("worktree.fixture")),
             reference: Some(id("ref.main")),
             source_revision: Some(id("commit.abc123")),
+            source_tree: Some(id("tree.abc123")),
             sanitizer_revision: id("sanitizer.v1"),
             sanitization_receipts: vec![id("receipt.a"), id("receipt.b")],
             content_identity: id(&digest('a')),
@@ -740,6 +759,27 @@ mod tests {
         let mut noncanonical_path = snapshot();
         noncanonical_path.files[0].logical_path = "./src/a.rs".to_owned();
         assert!(noncanonical_path.validate().is_err());
+    }
+
+    #[test]
+    fn exact_snapshot_requires_commit_and_tree_as_one_identity() {
+        let mut missing_tree = snapshot();
+        missing_tree.source_tree = None;
+        assert!(matches!(
+            missing_tree.validate(),
+            Err(DomainError::UnknownReference {
+                field: "snapshot source tree"
+            })
+        ));
+
+        let mut missing_commit = snapshot();
+        missing_commit.source_revision = None;
+        assert!(matches!(
+            missing_commit.validate(),
+            Err(DomainError::UnknownReference {
+                field: "snapshot source revision"
+            })
+        ));
     }
 
     #[test]

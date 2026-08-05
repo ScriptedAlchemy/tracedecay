@@ -196,6 +196,7 @@ fn request_in_scope(
     request.snapshot.reference = Some(id::<RefId>(reference));
     request.snapshot.worktree = worktree.map(id::<WorktreeId>);
     request.snapshot.source_revision = Some(id::<CommitId>(source_revision));
+    request.snapshot.source_tree = Some(id(&format!("tree.{source_revision}")));
     request
 }
 
@@ -217,6 +218,7 @@ fn request_at_path(
         worktree: None,
         reference: None,
         source_revision: None,
+        source_tree: None,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.production")],
         content_identity: content_digest(source),
@@ -782,6 +784,7 @@ fn multi_file_request(file_count: usize, sealed_at: i64) -> CodeIndexBuildReques
             worktree: None,
             reference: None,
             source_revision: None,
+            source_tree: None,
             sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
             sanitization_receipts: receipts,
             content_identity: identity,

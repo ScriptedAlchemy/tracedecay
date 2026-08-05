@@ -1474,6 +1474,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             let unchanged_source = latest_snapshot.as_ref().is_some_and(|latest| {
                 latest.reference == captured.snapshot.reference
                     && latest.source_revision == captured.snapshot.source_revision
+                    && latest.source_tree == captured.snapshot.source_tree
             });
             if self.latest_content_identity.as_ref() == Some(&captured.snapshot.content_identity)
                 && unchanged_source

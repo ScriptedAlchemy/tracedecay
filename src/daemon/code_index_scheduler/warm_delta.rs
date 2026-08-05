@@ -271,12 +271,21 @@ impl CodeIndexWorktreeSchedulerV1 {
             .collect::<Vec<_>>();
         let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
         let stat_signature = stat_signature(&next_state.candidates);
+        let source_revision = next_state
+            .dirty_paths
+            .is_empty()
+            .then(|| self.identity.head_commit().cloned())
+            .flatten();
+        let source_tree = source_revision
+            .as_ref()
+            .and_then(|_| self.identity.head_tree().cloned());
         Ok(CapturedSnapshotV1 {
             snapshot: SanitizedCodeSnapshotV1 {
                 repository: self.repository_id.clone(),
                 worktree: Some(self.worktree_id.clone()),
                 reference: self.identity.head_ref().cloned(),
-                source_revision: self.identity.head_commit().cloned(),
+                source_revision,
+                source_tree,
                 sanitizer_revision: id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?,
                 sanitization_receipts,
                 content_identity,
