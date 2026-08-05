@@ -8,8 +8,8 @@ use tracedecay_application::{
     BranchSearchMatchV1, BranchSearchRequestV1, BranchSnapshotIdentityV1,
 };
 use tracedecay_domain::{
-    ActorId, ConfigurationRevisionId, GitOidV1, ManifestDigest, RepositoryId, SessionCursorKeyIdV1,
-    SessionCursorVersionV1, SignedCursorKeyRefV1, WorktreeId,
+    ActorId, BranchGraphPublicationEpochV1, ConfigurationRevisionId, GitOidV1, ManifestDigest,
+    RepositoryId, SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1, WorktreeId,
     configuration::{
         AuthorityRef, LocatorDigest, ScopeSourceBinding, SourceBindingId, SourceKindV1,
     },
@@ -54,6 +54,7 @@ impl BranchGraphReadPort for FakeGraph {
 
 fn graph_source(worktree: &str) -> crate::branch_meta::BranchGraphSourceV1 {
     crate::branch_meta::BranchGraphSourceV1 {
+        publication_epoch: BranchGraphPublicationEpochV1::new(1).expect("epoch"),
         project_id: "project.fixture".to_owned(),
         repository_id: "repository.fixture".to_owned(),
         worktree_id: worktree.to_owned(),
@@ -109,6 +110,7 @@ impl FakeResolver {
         .expect("scope");
         let generation = BranchGraphGenerationV1 {
             graph_scope_id: format!("scope.{branch}"),
+            publication_epoch: BranchGraphPublicationEpochV1::new(1).expect("epoch"),
             source_oid: GitOidV1::new("a".repeat(40)).expect("commit"),
             content_digest: ManifestDigest::new(format!("sha256:{}", "c".repeat(64)))
                 .expect("digest"),
@@ -671,4 +673,50 @@ async fn same_oid_owner_handoff_is_unavailable_until_both_markers_publish() {
             .await,
         BranchGenerationOutcome::Current(_)
     ));
+}
+
+#[tokio::test]
+async fn same_owner_same_oid_epoch_advance_rejects_prepublication_rows() {
+    let graph = FakeGraph {
+        commit: Mutex::new(Some("a".repeat(40))),
+        ..FakeGraph::default()
+    };
+    let scope = GraphScopeRecord {
+        graph_scope_id: "scope.main".to_owned(),
+        project_id: "project.fixture".to_owned(),
+        store_id: "store.fixture".to_owned(),
+        branch_name: "main".to_owned(),
+        db_relpath: "branches/main.db".to_owned(),
+        parent_scope_id: None,
+        last_synced_at: Some(1),
+        writable: true,
+    };
+    let sampled_source = graph_source("worktree.same");
+    let mut completed_source = sampled_source.clone();
+    completed_source.publication_epoch =
+        BranchGraphPublicationEpochV1::new(sampled_source.publication_epoch.get() + 1)
+            .expect("completed epoch");
+    *graph.published.lock().expect("published") = Some(completed_source.clone());
+
+    assert!(matches!(
+        RegisteredBranchSnapshotResolver::current_generation(&graph, &scope, &sampled_source, &[],)
+            .await,
+        BranchGenerationOutcome::Drift
+    ));
+
+    let sampled = RegisteredBranchSnapshotResolver::generation(
+        &scope,
+        sampled_source.publication_epoch,
+        GitOidV1::new(sampled_source.source_oid).expect("sampled oid"),
+        RegisteredBranchSnapshotResolver::content_digest(&[]).expect("sampled content"),
+    )
+    .expect("sampled generation");
+    let completed = RegisteredBranchSnapshotResolver::generation(
+        &scope,
+        completed_source.publication_epoch,
+        GitOidV1::new(completed_source.source_oid).expect("completed oid"),
+        RegisteredBranchSnapshotResolver::content_digest(&[]).expect("completed content"),
+    )
+    .expect("completed generation");
+    assert_ne!(sampled.generation_digest, completed.generation_digest);
 }

@@ -460,6 +460,7 @@ impl RegisteredBranchSnapshotResolver {
 
     fn generation(
         scope: &GraphScopeRecord,
+        publication_epoch: tracedecay_domain::BranchGraphPublicationEpochV1,
         source_oid: GitOidV1,
         content_digest: ManifestDigest,
     ) -> Result<BranchGraphGenerationV1, BranchQueryUnavailableReasonV1> {
@@ -482,12 +483,14 @@ impl RegisteredBranchSnapshotResolver {
             &scope.store_id,
             &scope.branch_name,
             &scope.db_relpath,
+            publication_epoch,
             &source_oid,
             &content_digest,
         ))
         .map_err(|_| BranchQueryUnavailableReasonV1::GenerationUnavailable)?;
         Ok(BranchGraphGenerationV1 {
             graph_scope_id: scope.graph_scope_id.clone(),
+            publication_epoch,
             source_oid,
             content_digest,
             recorded_sync_at,
@@ -531,7 +534,7 @@ impl RegisteredBranchSnapshotResolver {
             Ok(digest) => digest,
             Err(reason) => return BranchGenerationOutcome::Unavailable(reason),
         };
-        match Self::generation(scope, source_oid, content_digest) {
+        match Self::generation(scope, source.publication_epoch, source_oid, content_digest) {
             Ok(generation) => BranchGenerationOutcome::Current(generation),
             Err(reason) => BranchGenerationOutcome::Unavailable(reason),
         }

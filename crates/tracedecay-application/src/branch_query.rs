@@ -11,8 +11,8 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CanonicalGitRefNameV1, ConfigurationRevisionId, GitOidV1, ManifestDigest, ProjectId, RefId,
-    RepositoryId, UtcMicros, WorktreeId,
+    BranchGraphPublicationEpochV1, CanonicalGitRefNameV1, ConfigurationRevisionId, GitOidV1,
+    ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
 };
 
 use crate::{ApplicationContractError, CancellationSignal, Deadline};
@@ -177,6 +177,7 @@ pub struct BranchQueryControlsV1 {
 #[serde(deny_unknown_fields)]
 pub struct BranchGraphGenerationV1 {
     pub graph_scope_id: String,
+    pub publication_epoch: BranchGraphPublicationEpochV1,
     pub source_oid: GitOidV1,
     pub content_digest: ManifestDigest,
     pub recorded_sync_at: Option<UtcMicros>,

@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::BranchGraphPublicationEpochV1;
 
 use crate::storage::{BRANCH_META_FILENAME, PrivateStoreIo};
 
@@ -37,6 +38,9 @@ pub struct BranchEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BranchGraphSourceV1 {
+    /// Monotonic graph-local mutation epoch. Every writer advances this before
+    /// exposing any row mutation, including semantic no-op rewrites.
+    pub publication_epoch: BranchGraphPublicationEpochV1,
     pub project_id: String,
     pub repository_id: String,
     pub worktree_id: String,
@@ -591,6 +595,7 @@ mod tests {
         let meta = BranchMeta::new_for_dir(dir.path(), "main");
         save_branch_meta(dir.path(), &meta).unwrap();
         let source = BranchGraphSourceV1 {
+            publication_epoch: BranchGraphPublicationEpochV1::new(1).unwrap(),
             project_id: "project.fixture".to_owned(),
             repository_id: "repository.fixture".to_owned(),
             worktree_id: "worktree.linked".to_owned(),

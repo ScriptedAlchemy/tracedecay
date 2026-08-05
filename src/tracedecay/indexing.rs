@@ -18,9 +18,11 @@ use crate::types::*;
 
 use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
 
+mod branch_publication;
+pub(super) use branch_publication::BranchGraphMutationV1;
+
 const GRAPH_REBUILD_STATE_KEY: &str = "graph_rebuild_state_v1";
 pub(crate) const BRANCH_QUERY_GRAPH_SOURCE_KEY: &str = "branch_query_graph_source_v1";
-const BRANCH_QUERY_GRAPH_SOURCE_UPDATING: &str = "updating";
 const GRAPH_REBUILD_CHECKPOINT_DIR: &str = "graph-rebuild-checkpoint-v1";
 const GRAPH_REBUILD_CHECKPOINT_BATCH_SIZE: usize = 1_024;
 static GRAPH_REBUILD_WORKERS: LazyLock<Mutex<HashSet<PathBuf>>> =
@@ -33,39 +35,6 @@ static GRAPH_REBUILD_TEST_EXTRACTIONS: AtomicUsize = AtomicUsize::new(0);
 static GRAPH_REBUILD_TEST_HOLD_LEASE_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(test, feature = "test-transport"))]
 static GRAPH_REBUILD_TEST_DISABLE_SPAWN: AtomicBool = AtomicBool::new(false);
-
-fn branch_graph_source_for_root(
-    project_root: &Path,
-    project_id: String,
-    branch: &str,
-    source_oid: &str,
-) -> Result<crate::branch_meta::BranchGraphSourceV1> {
-    let worktree_root = project_root
-        .canonicalize()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("branch graph worktree root is unavailable: {error}"),
-        })?;
-    let repository_id = crate::daemon::code_index_scheduler::identity::repository_id_for(
-        &worktree_root,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("branch graph repository identity is unavailable: {error}"),
-    })?;
-    let worktree_id = crate::daemon::code_index_scheduler::identity::worktree_id_for(
-        &worktree_root,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("branch graph worktree identity is unavailable: {error}"),
-    })?;
-    Ok(crate::branch_meta::BranchGraphSourceV1 {
-        project_id,
-        repository_id: repository_id.to_string(),
-        worktree_id: worktree_id.to_string(),
-        worktree_root: worktree_root.to_string_lossy().into_owned(),
-        reference: format!("refs/heads/{branch}"),
-        source_oid: source_oid.to_owned(),
-    })
-}
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct GraphRebuildCheckpointEntryV1 {
@@ -817,7 +786,8 @@ impl TraceDecay {
         let live_branch = self.branch_memo();
         self.ensure_branch_writable_with("full index", &live_branch)?;
         let sync_lease = self.begin_active_sync()?;
-        self.invalidate_branch_query_publication(&live_branch)
+        let branch_publication = self
+            .invalidate_branch_query_publication(&live_branch)
             .await?;
         #[cfg(any(test, feature = "test-transport"))]
         if rebuild_availability.is_some() {
@@ -997,7 +967,7 @@ impl TraceDecay {
         // Stamp HEAD after releasing the full-index transaction: this helper
         // acquires its own writer lane, as do the incremental-sync call sites.
         let source_oid = self.stamp_last_synced_commit().await;
-        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())
+        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref(), &branch_publication)
             .await?;
 
         let result = IndexResult {
@@ -1151,7 +1121,8 @@ impl TraceDecay {
         use crate::sync as sync_mod;
 
         self.ensure_branch_writable_with("sync files", live_branch)?;
-        self.invalidate_branch_query_publication(live_branch)
+        let branch_publication = self
+            .invalidate_branch_query_publication(live_branch)
             .await?;
 
         let start = Instant::now();
@@ -1256,7 +1227,7 @@ impl TraceDecay {
         // HEAD is unchanged, re-stamping the same commit is idempotent; if a
         // hook-driven edit accompanied a commit, this keeps the base accurate.
         let source_oid = self.stamp_last_synced_commit().await;
-        self.publish_branch_meta_synced(live_branch, source_oid.as_deref())
+        self.publish_branch_meta_synced(live_branch, source_oid.as_deref(), &branch_publication)
             .await?;
         self.db
             .set_metadata(
@@ -1479,7 +1450,8 @@ impl TraceDecay {
         let live_branch = self.branch_memo();
         self.ensure_branch_writable_with("sync", &live_branch)?;
         let sync_lease = self.begin_active_sync()?;
-        self.invalidate_branch_query_publication(&live_branch)
+        let branch_publication = self
+            .invalidate_branch_query_publication(&live_branch)
             .await?;
         let start = Instant::now();
 
@@ -1684,8 +1656,12 @@ impl TraceDecay {
                 .set_metadata("last_sync_at", &current_timestamp().to_string())
                 .await?;
             let source_oid = self.stamp_last_synced_commit().await;
-            self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())
-                .await?;
+            self.publish_branch_meta_synced(
+                &live_branch,
+                source_oid.as_deref(),
+                &branch_publication,
+            )
+            .await?;
             self.db
                 .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
                 .await?;
@@ -1827,7 +1803,7 @@ impl TraceDecay {
             .await?;
         // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
         let source_oid = self.stamp_last_synced_commit().await;
-        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref())
+        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref(), &branch_publication)
             .await?;
         self.db
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
@@ -1995,67 +1971,6 @@ impl TraceDecay {
             return 0;
         };
         walk.filter_map(std::result::Result::ok).count()
-    }
-
-    /// Publishes graph-owner evidence only for an already tracked branch.
-    async fn invalidate_branch_query_publication(
-        &self,
-        live_branch: &crate::branch::BranchMemo,
-    ) -> Result<()> {
-        let Some(branch) = live_branch.resolve_for(&self.project_root) else {
-            return Ok(());
-        };
-        if crate::branch_meta::load_branch_meta(&self.store_layout.data_root)
-            .is_some_and(|meta| meta.is_tracked(&branch))
-        {
-            self.db
-                .set_metadata(
-                    BRANCH_QUERY_GRAPH_SOURCE_KEY,
-                    BRANCH_QUERY_GRAPH_SOURCE_UPDATING,
-                )
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn publish_branch_meta_synced(
-        &self,
-        live_branch: &crate::branch::BranchMemo,
-        source_oid: Option<&str>,
-    ) -> Result<()> {
-        let Some(branch) = live_branch.resolve_for(&self.project_root) else {
-            return Ok(());
-        };
-        if !crate::branch_meta::load_branch_meta(&self.store_layout.data_root)
-            .is_some_and(|meta| meta.is_tracked(&branch))
-        {
-            return Ok(());
-        }
-        let Some(source_oid) = source_oid else {
-            crate::branch_meta::update_synced_timestamp(&self.store_layout.data_root, &branch);
-            return Ok(());
-        };
-        let project_id = self
-            .store_layout
-            .identity
-            .project_id
-            .clone()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "branch graph publication requires a project identity".to_owned(),
-            })?;
-        let source =
-            branch_graph_source_for_root(&self.project_root, project_id, &branch, source_oid)?;
-        let encoded = serde_json::to_string(&source).map_err(|error| TraceDecayError::Config {
-            message: format!("branch graph source encoding failed: {error}"),
-        })?;
-        self.db
-            .set_metadata(BRANCH_QUERY_GRAPH_SOURCE_KEY, &encoded)
-            .await?;
-        crate::branch_meta::publish_graph_source(&self.store_layout.data_root, &branch, source)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("branch graph source publication failed: {error}"),
-            })?;
-        Ok(())
     }
 
     /// Stamps the current git HEAD commit id for watcher diff scoping.
@@ -2305,63 +2220,5 @@ mod graph_rebuild_tests {
         assert_eq!(restored.entries.len(), 1);
         assert_eq!(restored.entries[0].file_path, "src/lib.rs");
         assert_eq!(restored.entries[0].result.duration_ms, 7);
-    }
-}
-
-#[cfg(test)]
-mod branch_graph_source_tests {
-    use std::process::Command;
-
-    use super::branch_graph_source_for_root;
-
-    fn git(root: &std::path::Path, args: &[&str]) {
-        let status = Command::new(crate::git::git_program())
-            .current_dir(root)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-            .env("GIT_AUTHOR_EMAIL", "tracedecay@example.invalid")
-            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-            .env("GIT_COMMITTER_EMAIL", "tracedecay@example.invalid")
-            .status()
-            .expect("git");
-        assert!(status.success(), "git {args:?}");
-    }
-
-    #[test]
-    fn linked_worktree_sync_source_uses_the_graph_owning_worktree() {
-        let fixture = tempfile::tempdir().expect("fixture");
-        let primary = fixture.path().join("primary");
-        let linked = fixture.path().join("linked");
-        std::fs::create_dir(&primary).expect("primary");
-        git(&primary, &["init", "-b", "main"]);
-        std::fs::write(primary.join("tracked.txt"), "main\n").expect("file");
-        git(&primary, &["add", "tracked.txt"]);
-        git(&primary, &["commit", "-m", "initial"]);
-        git(&primary, &["branch", "feature"]);
-        git(
-            &primary,
-            &[
-                "worktree",
-                "add",
-                linked.to_str().expect("linked"),
-                "feature",
-            ],
-        );
-        let oid = crate::git::git_capture(&linked, &["rev-parse", "HEAD"]).expect("oid");
-
-        let source =
-            branch_graph_source_for_root(&linked, "project.fixture".to_owned(), "feature", &oid)
-                .expect("source");
-        let primary_worktree =
-            crate::daemon::code_index_scheduler::identity::worktree_id_for(&primary)
-                .expect("primary worktree");
-
-        assert_eq!(
-            std::path::Path::new(&source.worktree_root),
-            linked.canonicalize().expect("canonical linked")
-        );
-        assert_ne!(source.worktree_id, primary_worktree.as_str());
-        assert_eq!(source.reference, "refs/heads/feature");
-        assert_eq!(source.source_oid, oid);
     }
 }

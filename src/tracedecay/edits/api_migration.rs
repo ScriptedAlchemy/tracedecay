@@ -21,6 +21,9 @@ impl TraceDecay {
         &self,
         files: &[PlannedSourceEditFile],
     ) -> Result<()> {
+        let mutation = self
+            .begin_branch_graph_mutation("recover source edit preimages")
+            .await?;
         rollback_planned_source_edit_files(&self.project_root, files)?;
         for file in files {
             let Some(expected) = &file.expected else {
@@ -28,10 +31,15 @@ impl TraceDecay {
             };
             let authority =
                 SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
-            self.reindex_file(&file.relative_path, expected, &authority)
-                .await?;
+            self.reindex_file_within_graph_mutation(
+                &mutation,
+                &file.relative_path,
+                expected,
+                &authority,
+            )
+            .await?;
         }
-        Ok(())
+        self.commit_branch_graph_mutation(mutation).await
     }
 
     /// Roll a completed-but-unfinalized source edit forward: the intended bytes
@@ -44,16 +52,24 @@ impl TraceDecay {
         &self,
         files: &[PlannedSourceEditFile],
     ) -> Result<()> {
+        let mutation = self
+            .begin_branch_graph_mutation("commit source edit postimages")
+            .await?;
         for file in files {
             let Some(intended) = &file.intended else {
                 continue;
             };
             let authority =
                 SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
-            self.reindex_file(&file.relative_path, intended, &authority)
-                .await?;
+            self.reindex_file_within_graph_mutation(
+                &mutation,
+                &file.relative_path,
+                intended,
+                &authority,
+            )
+            .await?;
         }
-        Ok(())
+        self.commit_branch_graph_mutation(mutation).await
     }
 
     /// Applies one immutable API-migration file family through the source-edit
@@ -184,10 +200,14 @@ impl TraceDecay {
             });
         }
 
+        let mutation = self
+            .begin_branch_graph_mutation("apply API migration")
+            .await?;
         let mut published = Vec::<&tracedecay_application::ApiMigrationFilePlanV1>::new();
         for candidate in &plan.files {
             if is_cancelled() {
                 rollback_api_migration_files(&self.project_root, &published)?;
+                self.commit_branch_graph_mutation(mutation).await?;
                 return Ok(tracedecay_application::ApiMigrationApplyResultV1 {
                     success: false,
                     dry_run: false,
@@ -217,6 +237,7 @@ impl TraceDecay {
                 &candidate.intended_content,
             ) {
                 rollback_api_migration_files(&self.project_root, &published)?;
+                self.commit_branch_graph_mutation(mutation).await?;
                 return Err(TraceDecayError::Config {
                     message: format!(
                         "API migration publication failed and prior files were restored: {error}"
@@ -226,30 +247,56 @@ impl TraceDecay {
             published.push(candidate);
         }
 
-        for candidate in &published {
-            let file =
-                SourceEditFileAuthority::open(&self.project_root, Path::new(&candidate.path))?;
-            if let Err(error) = self
-                .reindex_file(&candidate.path, &candidate.intended_content, &file)
-                .await
-            {
-                rollback_api_migration_files(&self.project_root, &published)?;
+        let refresh = async {
+            for candidate in &published {
+                let file =
+                    SourceEditFileAuthority::open(&self.project_root, Path::new(&candidate.path))?;
+                self.reindex_file_within_graph_mutation(
+                    &mutation,
+                    &candidate.path,
+                    &candidate.intended_content,
+                    &file,
+                )
+                .await?;
+            }
+            Result::<()>::Ok(())
+        }
+        .await;
+        if let Err(error) = refresh {
+            rollback_api_migration_files(&self.project_root, &published)?;
+            let restore = async {
                 for restored in &published {
-                    if let Ok(file) =
-                        SourceEditFileAuthority::open(&self.project_root, Path::new(&restored.path))
-                    {
-                        let _ = self
-                            .reindex_file(&restored.path, &restored.expected_content, &file)
-                            .await;
-                    }
+                    let file = SourceEditFileAuthority::open(
+                        &self.project_root,
+                        Path::new(&restored.path),
+                    )?;
+                    self.reindex_file_within_graph_mutation(
+                        &mutation,
+                        &restored.path,
+                        &restored.expected_content,
+                        &file,
+                    )
+                    .await?;
                 }
+                Result::<()>::Ok(())
+            }
+            .await;
+            if let Err(restore_error) = restore {
                 return Err(TraceDecayError::Config {
                     message: format!(
-                        "API migration graph refresh failed and workspace bytes were restored: {error}"
+                        "API migration graph refresh failed ({error}); graph rollback also failed \
+                         ({restore_error}) and remains unpublished"
                     ),
                 });
             }
+            self.commit_branch_graph_mutation(mutation).await?;
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "API migration graph refresh failed and workspace bytes were restored: {error}"
+                ),
+            });
         }
+        self.commit_branch_graph_mutation(mutation).await?;
         Ok(tracedecay_application::ApiMigrationApplyResultV1 {
             success: true,
             dry_run: false,
@@ -273,14 +320,22 @@ impl TraceDecay {
             .iter()
             .filter(|file| file.expected_content != file.intended_content)
             .collect::<Vec<_>>();
+        let mutation = self
+            .begin_branch_graph_mutation("rollback API migration")
+            .await?;
         rollback_api_migration_files(&self.project_root, &published)?;
         for restored in published {
             let file =
                 SourceEditFileAuthority::open(&self.project_root, Path::new(&restored.path))?;
-            self.reindex_file(&restored.path, &restored.expected_content, &file)
-                .await?;
+            self.reindex_file_within_graph_mutation(
+                &mutation,
+                &restored.path,
+                &restored.expected_content,
+                &file,
+            )
+            .await?;
         }
-        Ok(())
+        self.commit_branch_graph_mutation(mutation).await
     }
 }
 

@@ -144,6 +144,19 @@ pub(super) async fn indexed_api_migration_fixture(
     (project, graph, database_scope)
 }
 
+pub(super) async fn graph_publication_epoch(graph: &TraceDecay) -> u64 {
+    let encoded = graph
+        .db
+        .get_metadata(crate::tracedecay::BRANCH_QUERY_GRAPH_SOURCE_KEY)
+        .await
+        .unwrap()
+        .expect("published branch graph source");
+    serde_json::from_str::<crate::branch_meta::BranchGraphSourceV1>(&encoded)
+        .expect("typed branch graph source")
+        .publication_epoch
+        .get()
+}
+
 pub(super) async fn api_migration_symbol(graph: &TraceDecay, name: &str) -> ApiMigrationSymbolV1 {
     api_migration_symbol_in(graph, name, "src/lib.rs").await
 }

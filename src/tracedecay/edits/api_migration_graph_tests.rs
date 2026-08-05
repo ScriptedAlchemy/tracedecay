@@ -7,13 +7,13 @@ use tracedecay_application::{
 };
 
 use super::test_support::{
-    api_migration_symbol, apply_api_migration_fixture, indexed_api_migration_fixture,
-    plan_api_migration_fixture,
+    api_migration_symbol, apply_api_migration_fixture, graph_publication_epoch,
+    indexed_api_migration_fixture, plan_api_migration_fixture,
 };
 use crate::application::edit::preview_source_edit_expected_state;
 
 #[tokio::test]
-async fn api_migration_promote_primary_plans_and_applies_the_replacement_definition() {
+async fn api_migration_apply_and_rollback_each_publish_a_unique_graph_epoch() {
     let initial = "pub fn legacy_api() -> &'static str {\n    \"legacy\"\n}\n";
     let expected = "pub fn primary_api() -> &'static str {\n    \"primary\"\n}\n";
     let (project, graph, _database_scope) = indexed_api_migration_fixture(initial).await;
@@ -26,12 +26,13 @@ async fn api_migration_promote_primary_plans_and_applies_the_replacement_definit
     };
 
     let plan = plan_api_migration_fixture(&graph, "family.promote-primary", operation).await;
+    let indexed_epoch = graph_publication_epoch(&graph).await;
 
     assert!(!plan.blocked);
     assert_eq!(plan.sites.len(), 1);
     assert_eq!(plan.sites[0].reason, "whole definition replacement");
     assert_eq!(plan.files[0].intended_content, expected);
-    let result = apply_api_migration_fixture(&graph, plan).await;
+    let result = apply_api_migration_fixture(&graph, plan.clone()).await;
     assert!(result.success);
     assert_eq!(result.changed_sites, 1);
     assert_eq!(result.changed_files, ["src/lib.rs"]);
@@ -39,6 +40,15 @@ async fn api_migration_promote_primary_plans_and_applies_the_replacement_definit
         fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
         expected
     );
+    let applied_epoch = graph_publication_epoch(&graph).await;
+    assert_eq!(applied_epoch, indexed_epoch + 1);
+
+    graph.rollback_api_migration_plan(&plan).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+        initial
+    );
+    assert_eq!(graph_publication_epoch(&graph).await, applied_epoch + 1);
 }
 
 #[tokio::test]

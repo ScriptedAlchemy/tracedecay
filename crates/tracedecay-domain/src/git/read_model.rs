@@ -17,6 +17,38 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::research::time::UtcMicros;
 use crate::research::{DomainError, ManifestDigest, RepositoryId};
 
+/// Monotonic fence for one graph store's externally visible publications.
+///
+/// Epoch zero is reserved for "never published"; every attempted mutation,
+/// including a crash retry or semantic no-op, owns a distinct non-zero value.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct BranchGraphPublicationEpochV1(u64);
+
+impl BranchGraphPublicationEpochV1 {
+    pub fn new(value: u64) -> Result<Self, DomainError> {
+        if value == 0 {
+            return Err(DomainError::NonCanonical {
+                field: "BranchGraphPublicationEpochV1",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for BranchGraphPublicationEpochV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Schema/domain separator for the independently hashed `HunkRefV1` identity
 /// (Plan 36, "`HunkRef` compare-and-swap contract").
 pub const HUNK_REF_DIGEST_DOMAIN: &str = "tracedecay.git.hunkref.v1";

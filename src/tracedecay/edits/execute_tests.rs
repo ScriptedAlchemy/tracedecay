@@ -9,7 +9,8 @@ use tracedecay_application::{
 use tracedecay_domain::UtcMicros;
 
 use super::test_support::{
-    CancelBeforeEffectAuthorization, fixture_authorization, fixture_graph, fixture_request,
+    CancelBeforeEffectAuthorization, fixture_authorization, fixture_graph, fixture_request, git,
+    graph_publication_epoch,
 };
 use crate::application::edit::{
     SourceEditEffectControlV1, execute_source_edit, execute_source_edit_with_control,
@@ -23,7 +24,27 @@ async fn preview_apply_replay_and_expected_state_cas_preserve_exact_bytes() {
     let initial = b"old\r\nunchanged \xE2\x98\x83\n";
     let applied = b"new\r\nunchanged \xE2\x98\x83\n";
     fs::write(project.path().join("src/lib.rs"), initial).unwrap();
+    git(
+        project.path(),
+        &["init", "--quiet", "--initial-branch=main"],
+    );
+    git(project.path(), &["add", "src/lib.rs"]);
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
     let (graph, _database_scope) = fixture_graph(project.path()).await;
+    graph.index_all().await.unwrap();
+    let indexed_epoch = graph_publication_epoch(&graph).await;
     let operation = source_edit_operation(SourceEditKind::StrReplace).unwrap();
     let request = fixture_request();
     let authorization = fixture_authorization(&request);
@@ -53,6 +74,8 @@ async fn preview_apply_replay_and_expected_state_cas_preserve_exact_bytes() {
         fs::read(project.path().join("src/lib.rs")).unwrap(),
         applied
     );
+    let applied_epoch = graph_publication_epoch(&graph).await;
+    assert_eq!(applied_epoch, indexed_epoch + 1);
 
     let replay = execute_source_edit(&graph, &operation, apply_request, &authorization)
         .await
@@ -62,6 +85,7 @@ async fn preview_apply_replay_and_expected_state_cas_preserve_exact_bytes() {
         fs::read(project.path().join("src/lib.rs")).unwrap(),
         applied
     );
+    assert_eq!(graph_publication_epoch(&graph).await, applied_epoch);
 
     fs::write(project.path().join("src/lib.rs"), initial).unwrap();
     let expected_state = preview_source_edit_expected_state(&graph, fixture_request().edit)
