@@ -5,8 +5,8 @@
 //! `tracedecay_agent_hosts::ports`, and
 //! `tracedecay_runtime_core::ports::branch_admin_recovery`. Each slot has a
 //! conservative default so an unwired process still runs — it just does less
-//! (no LCM redaction, no memory injection, zero turn costs, a daemon that
-//! reports itself unavailable).
+//! (no memory injection, zero turn costs, a daemon that reports itself
+//! unavailable).
 //!
 //! Only the composition root can fill them, and it must do so before any
 //! transcript ingest, host installer, hook, or branch lock runs. That is what
@@ -47,25 +47,11 @@ pub fn register_runtime_ports() {
 fn register_session_ports() {
     use tracedecay_sessions::host_ports;
 
-    host_ports::lcm_redaction::register(lcm_redaction_policy);
     host_ports::hermes_profile_pin::register(
         tracedecay_agent_hosts::agents::hermes::read_config_pinned_project_root,
     );
     host_ports::session_review::register(crate::hooks::schedule_user_session_review);
     host_ports::unregistered_admission::register(unregistered_admission);
-}
-
-/// Owner-configured LCM redaction policy, read from the user profile.
-///
-/// Redaction is irreversible, so this is strictly opt-in: the profile default
-/// is "disabled with no patterns", which reproduces the port's own unwired
-/// default.
-fn lcm_redaction_policy() -> tracedecay_sessions::host_ports::LcmRedactionPolicy {
-    let config = crate::user_config::UserConfig::load();
-    tracedecay_sessions::host_ports::LcmRedactionPolicy {
-        enabled: config.lcm_sensitive_redaction_enabled,
-        patterns: config.lcm_sensitive_redaction_patterns,
-    }
 }
 
 /// Builds an admission facade with no durable authority behind it.
@@ -141,30 +127,6 @@ mod tests {
         let pinned = crate::config::PinnedUserDataDir::new();
         ONCE.call_once(register_runtime_ports);
         pinned
-    }
-
-    #[test]
-    fn lcm_redaction_policy_is_resolvable_after_registration() {
-        let _pinned = registered();
-        // Unwired, `resolve()` always answers the inert default and the owner's
-        // opt-in is silently ignored — LCM raw payloads keep their secrets.
-        // Write the opt-in into the pinned profile and require it to arrive.
-        let path = crate::user_config::config_path().expect("pinned profile config path");
-        std::fs::write(
-            &path,
-            "lcm_sensitive_redaction_enabled = true\n\
-             lcm_sensitive_redaction_patterns = [\"authorization\"]\n",
-        )
-        .expect("write pinned user config");
-
-        assert_eq!(
-            tracedecay_sessions::host_ports::lcm_redaction::resolve(),
-            tracedecay_sessions::host_ports::LcmRedactionPolicy {
-                enabled: true,
-                patterns: vec!["authorization".to_owned()],
-            },
-            "registered provider must carry the owner's redaction opt-in to LCM ingest"
-        );
     }
 
     #[test]

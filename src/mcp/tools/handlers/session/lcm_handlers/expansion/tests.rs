@@ -89,6 +89,7 @@ async fn expand_maps_raw_alias_and_preserves_bounded_legacy_expansion() {
                 truncated: true,
             },
             raw_message: None,
+            raw_message_metadata: None,
             summary_node: None,
             summary_sources: Vec::new(),
             payload_ref: None,

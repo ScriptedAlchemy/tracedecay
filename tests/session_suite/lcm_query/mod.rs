@@ -9,6 +9,7 @@ use tracedecay::sessions::lcm::{
     MAX_DERIVED_SNIPPET_CHARS,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use crate::common::{self, lcm_dag_message as raw_message};
 
@@ -164,6 +165,46 @@ async fn insert_raw_messages(
     )
     .await
     .expect("registered transcript fixture should write")
+}
+
+async fn replace_inline_content_without_updating_hash(
+    db: &HostAdmissionTestRuntimeV1,
+    store_id: i64,
+    replacement: &str,
+) {
+    let database = db
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let writer = database
+        .writer_connection()
+        .expect("registered profile writer");
+    Executor::execute(
+        &writer,
+        "UPDATE lcm_raw_messages SET content = ?1 WHERE store_id = ?2",
+        params![replacement, store_id],
+    )
+    .await
+    .expect("raw message fixture should be tampered");
+}
+
+async fn replace_summary_content_without_updating_hash(
+    db: &HostAdmissionTestRuntimeV1,
+    node_id: &str,
+    replacement: &str,
+) {
+    let database = db
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let writer = database
+        .writer_connection()
+        .expect("registered profile writer");
+    Executor::execute(
+        &writer,
+        "UPDATE lcm_summary_nodes SET summary_text = ?1 WHERE node_id = ?2",
+        params![replacement, node_id],
+    )
+    .await
+    .expect("summary fixture should be tampered");
 }
 
 fn summary_draft(

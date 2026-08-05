@@ -1,4 +1,4 @@
-//! Cross-host projection glue for a completed PR13 advisory publication.
+//! Cross-host projection glue for a completed advisory publication.
 //!
 //! This module owns no feedback state, analyzer, suggestion channel, retry
 //! loop, or host transport. It mounts the already-authoritative PR12 read
@@ -306,9 +306,9 @@ pub enum Pr13AdvisoryHookDeliveryV1 {
 
 #[derive(Debug, Error)]
 pub enum Pr13AdvisoryHostDeliveryErrorV1 {
-    #[error("PR13 advisory cycle did not complete")]
+    #[error("advisory cycle did not complete")]
     AdvisoryNotCompleted,
-    #[error("PR13 advisory cycle has no recorded shared-store publication")]
+    #[error("advisory cycle has no recorded shared-store publication")]
     PublicationNotRecorded,
     #[error("completed advisory cycle does not match the shared publication")]
     PublicationMismatch,
@@ -355,7 +355,7 @@ pub struct Pr13AdvisoryHostDeliveryRegistrationV1 {
 }
 
 /// One daemon-startup bundle for PR13 execution and every existing delivery
-/// surface. Both members retain handles to the same PR12 owner/store.
+/// surface. Both members retain handles to the same feedback owner/store.
 pub struct Pr13AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC> {
     pub advisory: Pr13AdvisoryDaemonRegistrationV1<GR, GA, CS, CE, PE, PC>,
     pub host_delivery: Pr13AdvisoryHostDeliveryRegistrationV1,
@@ -424,7 +424,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
             .collect()
     }
 
-    /// Validates a completed PR13 advisory outcome against one canonical PR12
+    /// Validates a completed advisory outcome against one canonical PR12
     /// publication, then builds the bounded content-free Hook V2 lookup
     /// notice. The outcome exposes the publication only after the shared store
     /// committed it; this method never reconstructs, polls, or persists it.
@@ -656,7 +656,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
     }
 }
 
-/// Builds the concrete host-delivery registration from the PR13 daemon
+/// Builds the concrete host-delivery registration from the advisory daemon
 /// registration's existing read owner/store. `scope` is passed explicitly
 /// because it is the startup authority that admitted the daemon registration.
 pub fn mount_pr13_advisory_host_delivery<GR, GA, CS, CE, PE, PC>(

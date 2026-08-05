@@ -14,7 +14,8 @@ pub use crate::lcm::contracts::{
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
     LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget,
     LcmExpandedSummarySource, LcmPayloadExpansion, LcmPayloadRef, LcmRawMessage,
-    LcmRawMessageOverview, LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview,
+    LcmRawMessageMetadata, LcmRawMessageOverview, LcmSourceRef, LcmStorageKind, LcmSummaryNode,
+    LcmSummaryNodeOverview,
 };
 
 impl From<tracedecay_runtime_core::db::engine::Error> for LcmError {

@@ -3,6 +3,7 @@ use std::fmt::Display;
 use rusqlite::types::{ToSqlOutput, Type, Value, ValueRef};
 use rusqlite::{OptionalExtension, ToSql};
 use serde::{Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 
 pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
     serde_json::to_string(value).map_err(|error| conversion(error.to_string()))
@@ -17,6 +18,18 @@ pub(super) fn canonical_digest<T: Serialize + ?Sized>(value: &T) -> rusqlite::Re
     tracedecay_domain::canonical_sha256(&value)
         .map(|digest| digest.as_str().to_owned())
         .map_err(|error| conversion(error.to_string()))
+}
+
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 pub(super) fn conversion(error: impl Display) -> rusqlite::Error {

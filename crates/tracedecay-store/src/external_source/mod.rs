@@ -1,4 +1,4 @@
-//! Store contracts for atomic external-source commits.
+//! Store contracts for normalized external-source commits.
 //!
 //! The production adapter supplies the transaction. These types make the
 //! required compare-and-set, source frontier, snapshot-completion, and
@@ -16,6 +16,14 @@ use tracedecay_domain::{
     SourceContentStateV1, SourceDefinitionV1, SourceDeletionSemanticsV1, SourceNativeObjectIdV1,
     SourceObjectObservationV1, SourceObjectRevisionV1, SourcePartitionIdV1,
     SourceSnapshotCompletionV1, canonical_sha256,
+};
+
+mod acquisition;
+pub use acquisition::{
+    MAX_SOURCE_ACQUISITION_ATTEMPTS_V1, MAX_SOURCE_ACQUISITION_RECEIPTS_V1,
+    SourceAcquisitionQueueCasV1, SourceAcquisitionQueueContractErrorV1,
+    SourceAcquisitionQueueResultV1, SourceAcquisitionQueueStateV1, SourceAcquisitionRequestV1,
+    SourceScheduledRefetchV1,
 };
 
 pub const MAX_SOURCE_COMMIT_OBSERVATIONS_V1: usize = 10_000;
@@ -481,7 +489,7 @@ impl SourceObjectLineageV1 {
         &self.lineage_digest
     }
 
-    fn validate(&self) -> SourceStoreResult<()> {
+    pub fn validate(&self) -> SourceStoreResult<()> {
         if self.verified.is_verified() {
             return Ok(());
         }
@@ -520,7 +528,6 @@ pub struct SourceCommitV1 {
     definition: SourceDefinitionV1,
     binding: SourceBindingV1,
     partition: SourcePartitionIdV1,
-    projector: ComponentVersion,
     idempotency_key: ManifestDigest,
     request_digest: ManifestDigest,
     expected_frontier: Option<SourceAggregateFrontierV1>,
@@ -537,7 +544,6 @@ impl SourceCommitV1 {
         definition: SourceDefinitionV1,
         binding: SourceBindingV1,
         partition: SourcePartitionIdV1,
-        projector: ComponentVersion,
         idempotency_key: ManifestDigest,
         request_digest: ManifestDigest,
         expected_frontier: Option<SourceAggregateFrontierV1>,
@@ -549,7 +555,6 @@ impl SourceCommitV1 {
             definition,
             binding,
             partition,
-            projector,
             idempotency_key,
             request_digest,
             expected_frontier,
@@ -572,10 +577,6 @@ impl SourceCommitV1 {
 
     pub fn partition(&self) -> &SourcePartitionIdV1 {
         &self.partition
-    }
-
-    pub fn projector(&self) -> &ComponentVersion {
-        &self.projector
     }
 
     pub fn idempotency_key(&self) -> &ManifestDigest {
@@ -609,7 +610,6 @@ impl SourceCommitV1 {
         self.definition.validate()?;
         self.binding.validate_against(&self.definition)?;
         self.partition.validate()?;
-        self.projector.validate()?;
         self.idempotency_key.validate()?;
         self.request_digest.validate()?;
         let binding = self.binding.immutable_identity()?;
@@ -705,167 +705,25 @@ impl SourceCommitV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "observation")]
-pub enum SourceProjectionEffectV1 {
-    Upsert(SourceObjectObservationV1),
-    Tombstone(SourceObjectObservationV1),
-}
-
-impl SourceProjectionEffectV1 {
-    pub fn observation(&self) -> &SourceObjectObservationV1 {
-        match self {
-            Self::Upsert(observation) | Self::Tombstone(observation) => observation,
-        }
-    }
-}
-
-/// Pure, deterministic projection of one committed source page.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceProjectionCommitV1 {
-    projector: ComponentVersion,
-    source_frontier: SourceAggregateFrontierV1,
-    mutations: Vec<SourceObjectMutationV1>,
-    effects: Vec<SourceProjectionEffectV1>,
-    lineage: Vec<SourceObjectLineageV1>,
-    receipt_digest: ManifestDigest,
-    #[serde(skip)]
-    verified: ValidationMemoV1,
-}
-
-impl SourceProjectionCommitV1 {
-    fn new(
-        projector: ComponentVersion,
-        source_frontier: SourceAggregateFrontierV1,
-        mutations: Vec<SourceObjectMutationV1>,
-        effects: Vec<SourceProjectionEffectV1>,
-        lineage: Vec<SourceObjectLineageV1>,
-    ) -> SourceStoreResult<Self> {
-        projector.validate()?;
-        source_frontier.validate()?;
-        validate_projection_payload(&source_frontier, &mutations, &effects, &lineage)?;
-        let receipt_digest = canonical_sha256(&(
-            "tracedecay.external-source.projection-commit.v1",
-            &projector,
-            &source_frontier,
-            &mutations,
-            &effects,
-            &lineage,
-        ))?;
-        // Every check `validate` performs just ran, and `receipt_digest` was
-        // computed from these exact fields, so the equality it re-derives holds
-        // by construction.
-        let verified = ValidationMemoV1::default();
-        verified.mark_verified();
-        Ok(Self {
-            projector,
-            source_frontier,
-            mutations,
-            effects,
-            lineage,
-            receipt_digest,
-            verified,
-        })
-    }
-
-    pub fn projector(&self) -> &ComponentVersion {
-        &self.projector
-    }
-
-    pub fn source_frontier(&self) -> &SourceAggregateFrontierV1 {
-        &self.source_frontier
-    }
-
-    pub fn effects(&self) -> &[SourceProjectionEffectV1] {
-        &self.effects
-    }
-
-    pub fn mutations(&self) -> &[SourceObjectMutationV1] {
-        &self.mutations
-    }
-
-    pub fn lineage(&self) -> &[SourceObjectLineageV1] {
-        &self.lineage
-    }
-
-    pub fn receipt_digest(&self) -> &ManifestDigest {
-        &self.receipt_digest
-    }
-
-    pub fn validate(&self) -> SourceStoreResult<()> {
-        if self.verified.is_verified() {
-            return Ok(());
-        }
-        self.projector.validate()?;
-        self.source_frontier.validate()?;
-        validate_projection_payload(
-            &self.source_frontier,
-            &self.mutations,
-            &self.effects,
-            &self.lineage,
-        )?;
-        let expected = canonical_sha256(&(
-            "tracedecay.external-source.projection-commit.v1",
-            &self.projector,
-            &self.source_frontier,
-            &self.mutations,
-            &self.effects,
-            &self.lineage,
-        ))?;
-        if expected != self.receipt_digest {
-            return Err(SourceStoreErrorV1::Domain(DomainError::DigestMismatch));
-        }
-        self.verified.mark_verified();
-        Ok(())
-    }
-}
-
-fn validate_projection_payload(
-    source_frontier: &SourceAggregateFrontierV1,
-    mutations: &[SourceObjectMutationV1],
-    effects: &[SourceProjectionEffectV1],
-    lineage: &[SourceObjectLineageV1],
-) -> SourceStoreResult<()> {
-    if mutations.len() != effects.len() {
-        return Err(SourceStoreErrorV1::RevisionConflict);
-    }
-    let mut expected_lineage = Vec::new();
-    for (mutation, effect) in mutations.iter().zip(effects) {
-        let partition = mutation.evidence().partition();
-        if source_frontier.partition(partition).is_none() {
-            return Err(SourceStoreErrorV1::ObjectPartitionConflict);
-        }
-        mutation.validate_against(source_frontier.binding(), partition)?;
-        effect.observation().validate()?;
-        let effect_is_tombstone = matches!(effect, SourceProjectionEffectV1::Tombstone(_));
-        let mutation_is_tombstone =
-            mutation.observation().content_state() == SourceContentStateV1::AuthoritativeDeleted;
-        if effect.observation() != mutation.observation()
-            || effect_is_tombstone != mutation_is_tombstone
-        {
-            return Err(SourceStoreErrorV1::RevisionConflict);
-        }
-        if mutation.predecessor().is_some() {
-            expected_lineage.push(SourceObjectLineageV1::new(partition.clone(), mutation)?);
-        }
-    }
-    for edge in lineage {
-        edge.validate()?;
-    }
-    if lineage != expected_lineage {
-        return Err(SourceStoreErrorV1::LineageConflict);
-    }
-    Ok(())
-}
+mod projection;
+pub use projection::{SourceProjectionCommitV1, SourceProjectionEffectV1};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceCommitReceiptV1 {
     idempotency_key: ManifestDigest,
     request_digest: ManifestDigest,
+    definition_revision: u64,
+    definition_digest: ManifestDigest,
+    binding_revision: u64,
+    binding_digest: ManifestDigest,
+    prior_source_frontier: Option<SourceAggregateFrontierV1>,
     source_frontier: SourceAggregateFrontierV1,
-    projection: SourceProjectionCommitV1,
+    partition: SourcePartitionIdV1,
+    mutations: Vec<SourceObjectMutationV1>,
+    lineage: Vec<SourceObjectLineageV1>,
+    snapshot_completion: Option<SourceSnapshotCompletionV1>,
+    receipt_digest: ManifestDigest,
     #[serde(skip)]
     verified: ValidationMemoV1,
 }
@@ -874,14 +732,44 @@ impl SourceCommitReceiptV1 {
     fn new(
         idempotency_key: ManifestDigest,
         request_digest: ManifestDigest,
+        definition: &SourceDefinitionV1,
+        binding: &SourceBindingV1,
+        prior_source_frontier: Option<SourceAggregateFrontierV1>,
         source_frontier: SourceAggregateFrontierV1,
-        projection: SourceProjectionCommitV1,
+        partition: SourcePartitionIdV1,
+        mutations: Vec<SourceObjectMutationV1>,
+        lineage: Vec<SourceObjectLineageV1>,
+        snapshot_completion: Option<SourceSnapshotCompletionV1>,
     ) -> SourceStoreResult<Self> {
+        let receipt_digest = canonical_sha256(&(
+            "tracedecay.external-source.source-commit-receipt.v1",
+            &idempotency_key,
+            &request_digest,
+            definition.revision,
+            &definition.definition_digest,
+            binding.binding_revision,
+            &binding.binding_digest,
+            &prior_source_frontier,
+            &source_frontier,
+            &partition,
+            &mutations,
+            &lineage,
+            &snapshot_completion,
+        ))?;
         let receipt = Self {
             idempotency_key,
             request_digest,
+            definition_revision: definition.revision,
+            definition_digest: definition.definition_digest.clone(),
+            binding_revision: binding.binding_revision,
+            binding_digest: binding.binding_digest.clone(),
+            prior_source_frontier,
             source_frontier,
-            projection,
+            partition,
+            mutations,
+            lineage,
+            snapshot_completion,
+            receipt_digest,
             verified: ValidationMemoV1::default(),
         };
         receipt.validate()?;
@@ -896,12 +784,48 @@ impl SourceCommitReceiptV1 {
         &self.request_digest
     }
 
+    pub fn definition_revision(&self) -> u64 {
+        self.definition_revision
+    }
+
+    pub fn definition_digest(&self) -> &ManifestDigest {
+        &self.definition_digest
+    }
+
+    pub fn binding_revision(&self) -> u64 {
+        self.binding_revision
+    }
+
+    pub fn binding_digest(&self) -> &ManifestDigest {
+        &self.binding_digest
+    }
+
     pub fn source_frontier(&self) -> &SourceAggregateFrontierV1 {
         &self.source_frontier
     }
 
-    pub fn projection(&self) -> &SourceProjectionCommitV1 {
-        &self.projection
+    pub fn prior_source_frontier(&self) -> Option<&SourceAggregateFrontierV1> {
+        self.prior_source_frontier.as_ref()
+    }
+
+    pub fn partition(&self) -> &SourcePartitionIdV1 {
+        &self.partition
+    }
+
+    pub fn mutations(&self) -> &[SourceObjectMutationV1] {
+        &self.mutations
+    }
+
+    pub fn lineage(&self) -> &[SourceObjectLineageV1] {
+        &self.lineage
+    }
+
+    pub fn snapshot_completion(&self) -> Option<&SourceSnapshotCompletionV1> {
+        self.snapshot_completion.as_ref()
+    }
+
+    pub fn receipt_digest(&self) -> &ManifestDigest {
+        &self.receipt_digest
     }
 
     pub fn validate(&self) -> SourceStoreResult<()> {
@@ -910,10 +834,44 @@ impl SourceCommitReceiptV1 {
         }
         self.idempotency_key.validate()?;
         self.request_digest.validate()?;
+        self.definition_digest.validate()?;
+        self.binding_digest.validate()?;
+        if self.definition_revision == 0 || self.binding_revision == 0 {
+            return Err(SourceStoreErrorV1::AuthorityRevisionConflict);
+        }
         self.source_frontier.validate()?;
-        self.projection.validate()?;
-        if self.projection.source_frontier() != &self.source_frontier {
+        self.partition.validate()?;
+        if self.source_frontier.partition(&self.partition).is_none()
+            || self
+                .prior_source_frontier
+                .as_ref()
+                .is_some_and(|frontier| frontier.binding() != self.source_frontier.binding())
+        {
             return Err(SourceStoreErrorV1::FrontierConflict);
+        }
+        for mutation in &self.mutations {
+            mutation.validate_against(self.source_frontier.binding(), &self.partition)?;
+        }
+        for edge in &self.lineage {
+            edge.validate()?;
+        }
+        let expected = canonical_sha256(&(
+            "tracedecay.external-source.source-commit-receipt.v1",
+            &self.idempotency_key,
+            &self.request_digest,
+            self.definition_revision,
+            &self.definition_digest,
+            self.binding_revision,
+            &self.binding_digest,
+            &self.prior_source_frontier,
+            &self.source_frontier,
+            &self.partition,
+            &self.mutations,
+            &self.lineage,
+            &self.snapshot_completion,
+        ))?;
+        if expected != self.receipt_digest {
+            return Err(SourceStoreErrorV1::Domain(DomainError::DigestMismatch));
         }
         self.verified.mark_verified();
         Ok(())
@@ -965,6 +923,14 @@ impl SourceAuthorityPublicationV1 {
     pub fn binding(&self) -> &SourceBindingV1 {
         &self.binding
     }
+
+    pub fn idempotency_key(&self) -> &ManifestDigest {
+        &self.idempotency_key
+    }
+
+    pub fn request_digest(&self) -> &ManifestDigest {
+        &self.request_digest
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -995,7 +961,7 @@ impl SourceAuthorityPublicationReceiptV1 {
         &self.binding_digest
     }
 
-    fn validate(&self) -> SourceStoreResult<()> {
+    pub fn validate(&self) -> SourceStoreResult<()> {
         self.idempotency_key.validate()?;
         self.request_digest.validate()?;
         self.prior_definition_digest.validate()?;
@@ -1019,16 +985,13 @@ impl SourceAuthorityPublicationReceiptV1 {
 pub struct SourceStoreStateV1 {
     definition: SourceDefinitionV1,
     binding: SourceBindingV1,
-    definition_history: BTreeMap<u64, SourceDefinitionV1>,
-    binding_history: BTreeMap<u64, SourceBindingV1>,
-    authority_receipt_history: BTreeMap<ManifestDigest, SourceAuthorityPublicationReceiptV1>,
     source_frontier: SourceAggregateFrontierV1,
-    projection: SourceProjectionCommitV1,
+    projection: Option<SourceProjectionCommitV1>,
+    observed_objects: BTreeMap<SourceNativeObjectIdV1, SourceObjectObservationV1>,
     projected_objects: BTreeMap<SourceNativeObjectIdV1, SourceObjectObservationV1>,
     object_partitions: BTreeMap<SourceNativeObjectIdV1, SourcePartitionIdV1>,
-    revision_history: BTreeMap<SourceNativeObjectIdV1, Vec<SourceObjectMutationV1>>,
-    lineage: Vec<SourceObjectLineageV1>,
-    receipt_history: BTreeMap<ManifestDigest, SourceCommitReceiptV1>,
+    latest_mutations: BTreeMap<SourceNativeObjectIdV1, SourceObjectMutationV1>,
+    projected_mutations: BTreeMap<SourceNativeObjectIdV1, SourceObjectMutationV1>,
     receipt: SourceCommitReceiptV1,
     #[serde(skip)]
     verified: ValidationMemoV1,
@@ -1048,6 +1011,67 @@ impl SourceStoreStateV1 {
         Ok(self)
     }
 
+    pub fn restore(
+        definition: SourceDefinitionV1,
+        binding: SourceBindingV1,
+        source_frontier: SourceAggregateFrontierV1,
+        projection: Option<SourceProjectionCommitV1>,
+        observed_mutations: Vec<SourceObjectMutationV1>,
+        projected_mutations: Vec<SourceObjectMutationV1>,
+        receipt: SourceCommitReceiptV1,
+    ) -> SourceStoreResult<Self> {
+        let binding_identity = binding.immutable_identity()?;
+        let mut observed_objects = BTreeMap::new();
+        let mut object_partitions = BTreeMap::new();
+        let mut latest_mutations = BTreeMap::new();
+        for mutation in observed_mutations {
+            let native_object = mutation.observation().native_object().clone();
+            mutation.validate_against(&binding_identity, mutation.evidence().partition())?;
+            if observed_objects
+                .insert(native_object.clone(), mutation.observation().clone())
+                .is_some()
+                || object_partitions
+                    .insert(
+                        native_object.clone(),
+                        mutation.evidence().partition().clone(),
+                    )
+                    .is_some()
+                || latest_mutations.insert(native_object, mutation).is_some()
+            {
+                return Err(SourceStoreErrorV1::DuplicateNativeObject);
+            }
+        }
+        let mut projected_objects = BTreeMap::new();
+        let mut current_projected_mutations = BTreeMap::new();
+        for mutation in projected_mutations {
+            let native_object = mutation.observation().native_object().clone();
+            mutation.validate_against(&binding_identity, mutation.evidence().partition())?;
+            if projected_objects
+                .insert(native_object.clone(), mutation.observation().clone())
+                .is_some()
+                || current_projected_mutations
+                    .insert(native_object, mutation)
+                    .is_some()
+            {
+                return Err(SourceStoreErrorV1::DuplicateNativeObject);
+            }
+        }
+        Self {
+            definition,
+            binding,
+            source_frontier,
+            projection,
+            observed_objects,
+            projected_objects,
+            object_partitions,
+            latest_mutations,
+            projected_mutations: current_projected_mutations,
+            receipt,
+            verified: ValidationMemoV1::default(),
+        }
+        .validated()
+    }
+
     pub fn source_frontier(&self) -> &SourceAggregateFrontierV1 {
         &self.source_frontier
     }
@@ -1060,39 +1084,22 @@ impl SourceStoreStateV1 {
         &self.binding
     }
 
-    pub fn definition_history(&self) -> &BTreeMap<u64, SourceDefinitionV1> {
-        &self.definition_history
-    }
-
-    pub fn binding_history(&self) -> &BTreeMap<u64, SourceBindingV1> {
-        &self.binding_history
-    }
-
-    pub fn authority_receipts(
-        &self,
-    ) -> &BTreeMap<ManifestDigest, SourceAuthorityPublicationReceiptV1> {
-        &self.authority_receipt_history
-    }
-
-    pub fn commit_receipts(&self) -> &BTreeMap<ManifestDigest, SourceCommitReceiptV1> {
-        &self.receipt_history
-    }
-
     pub fn projected_objects(
         &self,
     ) -> &BTreeMap<SourceNativeObjectIdV1, SourceObjectObservationV1> {
         &self.projected_objects
     }
 
-    pub fn receipt(&self) -> &SourceCommitReceiptV1 {
-        &self.receipt
+    pub fn observed_objects(&self) -> &BTreeMap<SourceNativeObjectIdV1, SourceObjectObservationV1> {
+        &self.observed_objects
     }
 
-    pub fn receipt_by_idempotency_key(
-        &self,
-        idempotency_key: &ManifestDigest,
-    ) -> Option<&SourceCommitReceiptV1> {
-        self.receipt_history.get(idempotency_key)
+    pub fn projection(&self) -> Option<&SourceProjectionCommitV1> {
+        self.projection.as_ref()
+    }
+
+    pub fn receipt(&self) -> &SourceCommitReceiptV1 {
+        &self.receipt
     }
 
     pub fn object_partition(
@@ -1102,15 +1109,18 @@ impl SourceStoreStateV1 {
         self.object_partitions.get(native_object)
     }
 
-    pub fn revision_history(
+    pub fn latest_mutation(
         &self,
         native_object: &SourceNativeObjectIdV1,
-    ) -> Option<&[SourceObjectMutationV1]> {
-        self.revision_history.get(native_object).map(Vec::as_slice)
+    ) -> Option<&SourceObjectMutationV1> {
+        self.latest_mutations.get(native_object)
     }
 
-    pub fn lineage(&self) -> &[SourceObjectLineageV1] {
-        &self.lineage
+    pub fn projected_mutation(
+        &self,
+        native_object: &SourceNativeObjectIdV1,
+    ) -> Option<&SourceObjectMutationV1> {
+        self.projected_mutations.get(native_object)
     }
 
     pub fn validate(&self) -> SourceStoreResult<()> {
@@ -1119,74 +1129,10 @@ impl SourceStoreStateV1 {
         }
         self.definition.validate()?;
         self.binding.validate_against(&self.definition)?;
-        if self.definition_history.get(&self.definition.revision) != Some(&self.definition)
-            || self.binding_history.get(&self.binding.binding_revision) != Some(&self.binding)
-            || self.definition_history.keys().next_back() != Some(&self.definition.revision)
-            || self.binding_history.keys().next_back() != Some(&self.binding.binding_revision)
-        {
-            return Err(SourceStoreErrorV1::AuthorityRevisionConflict);
-        }
-        let mut prior_definition_revision = None;
-        for (revision, definition) in &self.definition_history {
-            definition.validate()?;
-            if definition.source_id != self.definition.source_id
-                || definition.revision != *revision
-                || prior_definition_revision.is_some_and(|prior| *revision != prior + 1)
-            {
-                return Err(SourceStoreErrorV1::DefinitionConflict);
-            }
-            prior_definition_revision = Some(*revision);
-        }
-        let binding_identity = self.binding.immutable_identity()?;
-        let mut prior_binding_revision = None;
-        for (revision, binding) in &self.binding_history {
-            binding.validate()?;
-            if binding.immutable_identity()? != binding_identity
-                || binding.binding_revision != *revision
-                || self
-                    .definition_history
-                    .get(&binding.definition_revision)
-                    .is_none_or(|definition| {
-                        definition.definition_digest != binding.definition_digest
-                    })
-                || prior_binding_revision.is_some_and(|prior| *revision != prior + 1)
-            {
-                return Err(SourceStoreErrorV1::BindingConflict);
-            }
-            prior_binding_revision = Some(*revision);
-        }
-        for (key, receipt) in &self.authority_receipt_history {
-            receipt.validate()?;
-            if key != receipt.idempotency_key() {
-                return Err(SourceStoreErrorV1::IdempotencyConflict);
-            }
-        }
+        let binding = self.binding.immutable_identity()?;
         self.source_frontier.validate()?;
-        self.projection.validate()?;
         self.receipt.validate()?;
-        for (idempotency_key, receipt) in &self.receipt_history {
-            idempotency_key.validate()?;
-            receipt.validate()?;
-            if receipt.idempotency_key() != idempotency_key
-                || receipt.source_frontier().binding() != &binding_identity
-                || receipt
-                    .source_frontier()
-                    .partitions()
-                    .iter()
-                    .any(|(partition, historical)| {
-                        self.source_frontier
-                            .partition(partition)
-                            .is_none_or(|current| historical.sequence() > current.sequence())
-                    })
-            {
-                return Err(SourceStoreErrorV1::IdempotencyConflict);
-            }
-        }
-        if self.receipt_history.get(self.receipt.idempotency_key()) != Some(&self.receipt) {
-            return Err(SourceStoreErrorV1::IdempotencyConflict);
-        }
-        if self.source_frontier.binding() != &binding_identity
-            || self.projection.source_frontier() != &self.source_frontier
+        if self.source_frontier.binding() != &binding
             || self.receipt.source_frontier() != &self.source_frontier
         {
             return Err(SourceStoreErrorV1::BindingConflict);
@@ -1194,89 +1140,158 @@ impl SourceStoreStateV1 {
         if self.source_frontier.partitions().len() > usize::from(self.definition.max_partitions) {
             return Err(SourceStoreErrorV1::TooManyPartitions);
         }
-        let mut expected_lineage = Vec::new();
-        for (native_object, observation) in &self.projected_objects {
-            native_object.validate()?;
-            observation.validate()?;
-            if native_object != observation.native_object() {
-                return Err(SourceStoreErrorV1::SnapshotCompletionMismatch);
-            }
-            let partition = self
-                .object_partitions
-                .get(native_object)
-                .ok_or(SourceStoreErrorV1::ObjectPartitionConflict)?;
-            let history = self
-                .revision_history
-                .get(native_object)
-                .ok_or(SourceStoreErrorV1::RevisionConflict)?;
-            if history.is_empty()
-                || history.last().map(SourceObjectMutationV1::observation) != Some(observation)
-            {
-                return Err(SourceStoreErrorV1::RevisionConflict);
-            }
-            let mut revisions = BTreeSet::new();
-            for (index, mutation) in history.iter().enumerate() {
-                mutation.validate_against(&binding_identity, partition)?;
-                if mutation.observation().native_object() != native_object
-                    || !revisions.insert(mutation.observation().revision().digest().clone())
-                {
-                    return Err(SourceStoreErrorV1::RevisionConflict);
-                }
-                if index == 0 {
-                    if mutation.transition() != SourceObjectTransitionV1::Initial
-                        || mutation.predecessor().is_some()
-                    {
-                        return Err(SourceStoreErrorV1::LineageConflict);
-                    }
-                } else {
-                    validate_transition(Some(history[index - 1].observation()), mutation)?;
-                    expected_lineage.push(SourceObjectLineageV1::new(partition.clone(), mutation)?);
-                }
-            }
-        }
-        if self.projected_objects.len() != self.object_partitions.len()
-            || self.projected_objects.len() != self.revision_history.len()
+        if self.observed_objects.len() != self.object_partitions.len()
+            || self.observed_objects.len() != self.latest_mutations.len()
         {
             return Err(SourceStoreErrorV1::RevisionConflict);
         }
-        for mutation in self.projection.mutations() {
-            let native_object = mutation.observation().native_object();
-            if self.projected_objects.get(native_object) != Some(mutation.observation())
-                || self
-                    .revision_history
-                    .get(native_object)
-                    .into_iter()
-                    .flatten()
-                    .filter(|stored| *stored == mutation)
-                    .count()
-                    != 1
-            {
+        for (native_object, observation) in &self.observed_objects {
+            let partition = self
+                .object_partitions
+                .get(native_object)
+                .ok_or(SourceStoreErrorV1::ObjectPartitionConflict)?;
+            let mutation = self
+                .latest_mutations
+                .get(native_object)
+                .ok_or(SourceStoreErrorV1::RevisionConflict)?;
+            mutation.validate_against(&binding, partition)?;
+            if mutation.observation() != observation {
                 return Err(SourceStoreErrorV1::RevisionConflict);
             }
         }
-        for edge in &self.lineage {
-            edge.validate()?;
-            let partition = self
-                .object_partitions
-                .get(&edge.native_object)
-                .ok_or(SourceStoreErrorV1::ObjectPartitionConflict)?;
-            if partition != &edge.partition {
-                return Err(SourceStoreErrorV1::ObjectPartitionConflict);
+        if self.projected_objects.len() != self.projected_mutations.len() {
+            return Err(SourceStoreErrorV1::RevisionConflict);
+        }
+        for (native_object, observation) in &self.projected_objects {
+            let mutation = self
+                .projected_mutations
+                .get(native_object)
+                .ok_or(SourceStoreErrorV1::RevisionConflict)?;
+            mutation.validate_against(&binding, mutation.evidence().partition())?;
+            if mutation.observation() != observation {
+                return Err(SourceStoreErrorV1::RevisionConflict);
             }
         }
-        if self.lineage.len() != expected_lineage.len()
-            || expected_lineage
-                .iter()
-                .any(|expected| self.lineage.iter().filter(|edge| *edge == expected).count() != 1)
-            || self
-                .projection
-                .lineage()
-                .iter()
-                .any(|edge| self.lineage.iter().filter(|stored| *stored == edge).count() != 1)
-        {
-            return Err(SourceStoreErrorV1::LineageConflict);
+        match &self.projection {
+            None if !self.projected_objects.is_empty() => {
+                return Err(SourceStoreErrorV1::FrontierConflict);
+            }
+            Some(projection)
+                if projection.source_frontier().binding() != &binding
+                    || frontier_is_ahead(projection.source_frontier(), &self.source_frontier) =>
+            {
+                return Err(SourceStoreErrorV1::FrontierConflict);
+            }
+            Some(projection) => projection.validate()?,
+            None => {}
         }
         self.verified.mark_verified();
+        Ok(())
+    }
+}
+
+fn frontier_is_ahead(
+    candidate: &SourceAggregateFrontierV1,
+    current: &SourceAggregateFrontierV1,
+) -> bool {
+    candidate.partitions().iter().any(|(partition, candidate)| {
+        current
+            .partition(partition)
+            .is_none_or(|current| candidate.sequence() > current.sequence())
+    })
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePendingProjectionV1 {
+    definition: SourceDefinitionV1,
+    binding: SourceBindingV1,
+    receipt: SourceCommitReceiptV1,
+    expected_projection_frontier: Option<SourceAggregateFrontierV1>,
+    projected_mutations: BTreeMap<SourceNativeObjectIdV1, SourceObjectMutationV1>,
+}
+
+impl SourcePendingProjectionV1 {
+    pub fn new(
+        definition: SourceDefinitionV1,
+        binding: SourceBindingV1,
+        receipt: SourceCommitReceiptV1,
+        expected_projection_frontier: Option<SourceAggregateFrontierV1>,
+        projected_mutations: Vec<SourceObjectMutationV1>,
+    ) -> SourceStoreResult<Self> {
+        let mut current = BTreeMap::new();
+        for mutation in projected_mutations {
+            if current
+                .insert(mutation.observation().native_object().clone(), mutation)
+                .is_some()
+            {
+                return Err(SourceStoreErrorV1::DuplicateNativeObject);
+            }
+        }
+        let pending = Self {
+            definition,
+            binding,
+            receipt,
+            expected_projection_frontier,
+            projected_mutations: current,
+        };
+        pending.validate()?;
+        Ok(pending)
+    }
+
+    pub fn from_state(
+        state: &SourceStoreStateV1,
+        definition: SourceDefinitionV1,
+        binding: SourceBindingV1,
+        receipt: SourceCommitReceiptV1,
+    ) -> SourceStoreResult<Self> {
+        Self::new(
+            definition,
+            binding,
+            receipt,
+            state
+                .projection()
+                .map(|projection| projection.source_frontier().clone()),
+            state.projected_mutations.values().cloned().collect(),
+        )
+    }
+
+    pub fn binding_identity(&self) -> SourceStoreResult<SourceBindingIdentityV1> {
+        self.binding.immutable_identity().map_err(Into::into)
+    }
+
+    pub fn receipt(&self) -> &SourceCommitReceiptV1 {
+        &self.receipt
+    }
+
+    pub fn expected_projection_frontier(&self) -> Option<&SourceAggregateFrontierV1> {
+        self.expected_projection_frontier.as_ref()
+    }
+
+    pub fn projected_mutations(&self) -> &BTreeMap<SourceNativeObjectIdV1, SourceObjectMutationV1> {
+        &self.projected_mutations
+    }
+
+    pub fn validate(&self) -> SourceStoreResult<()> {
+        self.definition.validate()?;
+        self.binding.validate_against(&self.definition)?;
+        self.receipt.validate()?;
+        let binding = self.binding.immutable_identity()?;
+        if self.receipt.definition_revision() != self.definition.revision
+            || self.receipt.definition_digest() != &self.definition.definition_digest
+            || self.receipt.binding_revision() != self.binding.binding_revision
+            || self.receipt.binding_digest() != &self.binding.binding_digest
+        {
+            return Err(SourceStoreErrorV1::AuthorityRevisionConflict);
+        }
+        if self.receipt.source_frontier().binding() != &binding
+            || self.receipt.prior_source_frontier() != self.expected_projection_frontier.as_ref()
+        {
+            return Err(SourceStoreErrorV1::FrontierConflict);
+        }
+        for mutation in self.projected_mutations.values() {
+            mutation.validate_against(&binding, mutation.evidence().partition())?;
+        }
         Ok(())
     }
 }
@@ -1287,22 +1302,157 @@ pub enum SourceCommitApplyOutcomeV1 {
     ExactDuplicate(Box<SourceCommitReceiptV1>),
 }
 
-pub fn apply_source_authority_publication(
-    current: &SourceStoreStateV1,
-    publication: SourceAuthorityPublicationV1,
-) -> SourceStoreResult<SourceStoreStateV1> {
-    current.validate()?;
-    publication.validate()?;
-    if let Some(receipt) = current
-        .authority_receipt_history
-        .get(&publication.idempotency_key)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceProjectionApplyOutcomeV1 {
+    Projected(Box<SourceStoreStateV1>),
+    ExactDuplicate(Box<SourceProjectionCommitV1>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceAuthorityPublicationApplyOutcomeV1 {
+    state: Box<SourceStoreStateV1>,
+    receipt: SourceAuthorityPublicationReceiptV1,
+}
+
+impl SourceAuthorityPublicationApplyOutcomeV1 {
+    pub fn into_parts(self) -> (Box<SourceStoreStateV1>, SourceAuthorityPublicationReceiptV1) {
+        (self.state, self.receipt)
+    }
+}
+
+/// Derives the next view transition from the exact oldest pending receipt.
+///
+/// This function is pure. Publishing the returned transition is a separate
+/// compare-and-set operation through [`apply_source_projection`].
+pub fn build_source_projection(
+    pending: &SourcePendingProjectionV1,
+    projector: ComponentVersion,
+) -> SourceStoreResult<SourceProjectionCommitV1> {
+    pending.validate()?;
+    projector.validate()?;
+    let receipt = pending.receipt();
+    let expected_projection_frontier = pending.expected_projection_frontier.clone();
+    let mut mutations = receipt.mutations().to_vec();
+    let mut effects = mutations
+        .iter()
+        .map(|mutation| {
+            if mutation.observation().content_state() == SourceContentStateV1::AuthoritativeDeleted
+            {
+                SourceProjectionEffectV1::Tombstone(mutation.observation().clone())
+            } else {
+                SourceProjectionEffectV1::Upsert(mutation.observation().clone())
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut lineage = receipt.lineage().to_vec();
+    if pending.definition.deletion_semantics == SourceDeletionSemanticsV1::CompleteSnapshotAbsence
+        && let Some(completion) = receipt.snapshot_completion()
     {
-        return if receipt.request_digest() == &publication.request_digest {
-            Ok(current.clone())
+        let absent = pending
+            .projected_mutations
+            .iter()
+            .filter(|(native_object, mutation)| {
+                mutation.observation().content_state() != SourceContentStateV1::AuthoritativeDeleted
+                    && mutation.evidence().partition() == completion.partition()
+                    && !completion.present_objects().contains(*native_object)
+            })
+            .map(|(native_object, _)| native_object.clone())
+            .collect::<Vec<_>>();
+        for native_object in absent {
+            let prior = pending
+                .projected_mutations
+                .get(&native_object)
+                .ok_or(SourceStoreErrorV1::RevisionConflict)?;
+            let mutation =
+                absence_tombstone(pending.binding.immutable_identity()?, completion, prior)?;
+            lineage.push(SourceObjectLineageV1::new(
+                completion.partition().clone(),
+                &mutation,
+            )?);
+            effects.push(SourceProjectionEffectV1::Tombstone(
+                mutation.observation().clone(),
+            ));
+            mutations.push(mutation);
+        }
+    }
+    SourceProjectionCommitV1::new(
+        projector,
+        &pending.definition,
+        &pending.binding,
+        expected_projection_frontier,
+        receipt.source_frontier().clone(),
+        receipt.receipt_digest().clone(),
+        mutations,
+        effects,
+        lineage,
+    )
+}
+
+/// Publishes one deterministic projection transition with exact source and
+/// prior-projection compare-and-set semantics.
+pub fn apply_source_projection(
+    current: &SourceStoreStateV1,
+    pending: &SourcePendingProjectionV1,
+    projection: SourceProjectionCommitV1,
+) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
+    current.validate()?;
+    pending.validate()?;
+    projection.validate()?;
+    if let Some(existing) = current.projection()
+        && existing.receipt_digest() == projection.receipt_digest()
+    {
+        return if existing == &projection {
+            Ok(SourceProjectionApplyOutcomeV1::ExactDuplicate(Box::new(
+                existing.clone(),
+            )))
         } else {
             Err(SourceStoreErrorV1::IdempotencyConflict)
         };
     }
+    if pending.binding_identity()? != current.binding.immutable_identity()?
+        || pending.receipt().source_frontier() != projection.source_frontier()
+        || frontier_is_ahead(projection.source_frontier(), current.source_frontier())
+        || current.projected_mutations != pending.projected_mutations
+    {
+        return Err(SourceStoreErrorV1::FrontierConflict);
+    }
+    if current
+        .projection()
+        .map(SourceProjectionCommitV1::source_frontier)
+        != projection.expected_projection_frontier()
+    {
+        return Err(SourceStoreErrorV1::FrontierConflict);
+    }
+    if pending.receipt().receipt_digest() != projection.source_receipt_digest() {
+        return Err(SourceStoreErrorV1::IdempotencyConflict);
+    }
+    let expected = build_source_projection(pending, projection.projector().clone())?;
+    if expected != projection {
+        return Err(SourceStoreErrorV1::RevisionConflict);
+    }
+    let mut next = current.clone();
+    for (mutation, effect) in projection.mutations().iter().zip(projection.effects()) {
+        next.projected_objects.insert(
+            effect.observation().native_object().clone(),
+            effect.observation().clone(),
+        );
+        next.projected_mutations.insert(
+            mutation.observation().native_object().clone(),
+            mutation.clone(),
+        );
+    }
+    next.projection = Some(projection);
+    Ok(SourceProjectionApplyOutcomeV1::Projected(Box::new(
+        next.validated()?,
+    )))
+}
+
+pub fn apply_source_authority_publication(
+    current: &SourceStoreStateV1,
+    publication: SourceAuthorityPublicationV1,
+) -> SourceStoreResult<SourceAuthorityPublicationApplyOutcomeV1> {
+    current.validate()?;
+    publication.validate()?;
     if publication.binding.immutable_identity()? != current.binding.immutable_identity()? {
         return Err(SourceStoreErrorV1::BindingConflict);
     }
@@ -1325,290 +1475,12 @@ pub fn apply_source_authority_publication(
     let mut next = current.clone();
     next.definition = publication.definition;
     next.binding = publication.binding;
-    next.definition_history
-        .insert(next.definition.revision, next.definition.clone());
-    next.binding_history
-        .insert(next.binding.binding_revision, next.binding.clone());
-    next.authority_receipt_history
-        .insert(receipt.idempotency_key.clone(), receipt);
-    next.validated()
+    Ok(SourceAuthorityPublicationApplyOutcomeV1 {
+        state: Box::new(next.validated()?),
+        receipt,
+    })
 }
 
-/// Applies one source commit against the caller's previously read state. The
-/// caller is responsible for placing this operation inside its authoritative
-/// database transaction.
-pub fn apply_source_commit(
-    current: Option<&SourceStoreStateV1>,
-    commit: SourceCommitV1,
-) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
-    commit.validate()?;
-    if let Some(current) = current {
-        current.validate()?;
-        if &current.definition != commit.definition() {
-            return Err(SourceStoreErrorV1::DefinitionConflict);
-        }
-        if &current.binding != commit.binding() {
-            return Err(SourceStoreErrorV1::BindingConflict);
-        }
-        if let Some(receipt) = current.receipt_by_idempotency_key(commit.idempotency_key()) {
-            return if receipt.request_digest() == commit.request_digest() {
-                Ok(SourceCommitApplyOutcomeV1::ExactDuplicate(Box::new(
-                    receipt.clone(),
-                )))
-            } else {
-                Err(SourceStoreErrorV1::IdempotencyConflict)
-            };
-        }
-        if commit.expected_frontier() != Some(current.source_frontier()) {
-            return Err(SourceStoreErrorV1::FrontierConflict);
-        }
-    } else if commit.expected_frontier().is_some() {
-        return Err(SourceStoreErrorV1::FrontierConflict);
-    }
-
-    let mut projected_objects =
-        current.map_or_else(BTreeMap::new, |state| state.projected_objects.clone());
-    let mut object_partitions =
-        current.map_or_else(BTreeMap::new, |state| state.object_partitions.clone());
-    let mut revision_history =
-        current.map_or_else(BTreeMap::new, |state| state.revision_history.clone());
-    let mut lineage = current.map_or_else(Vec::new, |state| state.lineage.clone());
-    let mut mutations = commit.mutations().to_vec();
-    mutations.sort_by(|left, right| {
-        left.observation()
-            .native_object()
-            .digest()
-            .as_str()
-            .cmp(right.observation().native_object().digest().as_str())
-    });
-    let mut effects = Vec::new();
-    let mut committed_mutations = Vec::new();
-    let mut committed_lineage = Vec::new();
-    for mutation in mutations {
-        apply_object_mutation(
-            &commit,
-            mutation,
-            &mut projected_objects,
-            &mut object_partitions,
-            &mut revision_history,
-            &mut lineage,
-            &mut effects,
-            &mut committed_mutations,
-            &mut committed_lineage,
-        )?;
-    }
-    if let Some(completion) = commit.snapshot_completion() {
-        for native_object in completion.present_objects() {
-            if object_partitions.get(native_object) != Some(completion.partition())
-                || projected_objects
-                    .get(native_object)
-                    .is_none_or(|observation| {
-                        observation.content_state() == SourceContentStateV1::AuthoritativeDeleted
-                    })
-            {
-                return Err(SourceStoreErrorV1::ObjectPartitionConflict);
-            }
-        }
-        if commit.definition().deletion_semantics
-            == SourceDeletionSemanticsV1::CompleteSnapshotAbsence
-        {
-            let absent = projected_objects
-                .iter()
-                .filter(|(native_object, observation)| {
-                    observation.content_state() != SourceContentStateV1::AuthoritativeDeleted
-                        && object_partitions.get(*native_object) == Some(completion.partition())
-                        && !completion.present_objects().contains(*native_object)
-                })
-                .map(|(native_object, _)| native_object.clone())
-                .collect::<Vec<_>>();
-            for native_object in absent {
-                let prior = revision_history
-                    .get(&native_object)
-                    .and_then(|history| history.last())
-                    .ok_or(SourceStoreErrorV1::RevisionConflict)?;
-                let tombstone =
-                    absence_tombstone(commit.binding().immutable_identity()?, completion, prior)?;
-                apply_object_mutation(
-                    &commit,
-                    tombstone,
-                    &mut projected_objects,
-                    &mut object_partitions,
-                    &mut revision_history,
-                    &mut lineage,
-                    &mut effects,
-                    &mut committed_mutations,
-                    &mut committed_lineage,
-                )?;
-            }
-        }
-    }
-    let projection = SourceProjectionCommitV1::new(
-        commit.projector().clone(),
-        commit.next_frontier().clone(),
-        committed_mutations,
-        effects,
-        committed_lineage,
-    )?;
-    let receipt = SourceCommitReceiptV1::new(
-        commit.idempotency_key().clone(),
-        commit.request_digest().clone(),
-        commit.next_frontier().clone(),
-        projection.clone(),
-    )?;
-    let mut receipt_history =
-        current.map_or_else(BTreeMap::new, |state| state.receipt_history.clone());
-    receipt_history.insert(receipt.idempotency_key().clone(), receipt.clone());
-    let mut definition_history =
-        current.map_or_else(BTreeMap::new, |state| state.definition_history.clone());
-    definition_history.insert(commit.definition().revision, commit.definition().clone());
-    let mut binding_history =
-        current.map_or_else(BTreeMap::new, |state| state.binding_history.clone());
-    binding_history.insert(commit.binding().binding_revision, commit.binding().clone());
-    Ok(SourceCommitApplyOutcomeV1::Committed(Box::new(
-        SourceStoreStateV1 {
-            definition: commit.definition().clone(),
-            binding: commit.binding().clone(),
-            definition_history,
-            binding_history,
-            authority_receipt_history: current.map_or_else(BTreeMap::new, |state| {
-                state.authority_receipt_history.clone()
-            }),
-            source_frontier: commit.next_frontier().clone(),
-            projection,
-            projected_objects,
-            object_partitions,
-            revision_history,
-            lineage,
-            receipt_history,
-            receipt,
-            verified: ValidationMemoV1::default(),
-        }
-        .validated()?,
-    )))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_object_mutation(
-    commit: &SourceCommitV1,
-    mutation: SourceObjectMutationV1,
-    projected_objects: &mut BTreeMap<SourceNativeObjectIdV1, SourceObjectObservationV1>,
-    object_partitions: &mut BTreeMap<SourceNativeObjectIdV1, SourcePartitionIdV1>,
-    revision_history: &mut BTreeMap<SourceNativeObjectIdV1, Vec<SourceObjectMutationV1>>,
-    lineage: &mut Vec<SourceObjectLineageV1>,
-    effects: &mut Vec<SourceProjectionEffectV1>,
-    committed_mutations: &mut Vec<SourceObjectMutationV1>,
-    committed_lineage: &mut Vec<SourceObjectLineageV1>,
-) -> SourceStoreResult<()> {
-    let native_object = mutation.observation().native_object().clone();
-    if let Some(owner) = object_partitions.get(&native_object)
-        && owner != commit.partition()
-    {
-        return Err(SourceStoreErrorV1::ObjectPartitionConflict);
-    }
-    let prior = projected_objects.get(&native_object);
-    if let Some(history) = revision_history.get(&native_object)
-        && let Some(existing) = history
-            .iter()
-            .find(|existing| existing.observation().revision() == mutation.observation().revision())
-    {
-        return if existing == &mutation {
-            Ok(())
-        } else {
-            Err(SourceStoreErrorV1::RevisionConflict)
-        };
-    }
-    validate_transition(prior, &mutation)?;
-    let edge = mutation
-        .predecessor()
-        .map(|_| SourceObjectLineageV1::new(commit.partition().clone(), &mutation))
-        .transpose()?;
-    let effect =
-        if mutation.observation().content_state() == SourceContentStateV1::AuthoritativeDeleted {
-            SourceProjectionEffectV1::Tombstone(mutation.observation().clone())
-        } else {
-            SourceProjectionEffectV1::Upsert(mutation.observation().clone())
-        };
-    object_partitions.insert(native_object.clone(), commit.partition().clone());
-    projected_objects.insert(native_object.clone(), mutation.observation().clone());
-    revision_history
-        .entry(native_object)
-        .or_default()
-        .push(mutation.clone());
-    committed_mutations.push(mutation);
-    if let Some(edge) = edge {
-        lineage.push(edge.clone());
-        committed_lineage.push(edge);
-    }
-    effects.push(effect);
-    Ok(())
-}
-
-fn validate_transition(
-    prior: Option<&SourceObjectObservationV1>,
-    mutation: &SourceObjectMutationV1,
-) -> SourceStoreResult<()> {
-    let next_deleted =
-        mutation.observation().content_state() == SourceContentStateV1::AuthoritativeDeleted;
-    match prior {
-        None if mutation.transition() == SourceObjectTransitionV1::Initial
-            && mutation.predecessor().is_none()
-            && !next_deleted =>
-        {
-            Ok(())
-        }
-        Some(prior)
-            if mutation.predecessor() == Some(prior.revision())
-                && prior.revision() != mutation.observation().revision() =>
-        {
-            let prior_deleted = prior.content_state() == SourceContentStateV1::AuthoritativeDeleted;
-            match (prior_deleted, next_deleted, mutation.transition()) {
-                (false, false, SourceObjectTransitionV1::Successor)
-                | (false, false, SourceObjectTransitionV1::Correction)
-                | (false, true, SourceObjectTransitionV1::Tombstone)
-                | (true, false, SourceObjectTransitionV1::Reappearance) => Ok(()),
-                _ => Err(SourceStoreErrorV1::LineageConflict),
-            }
-        }
-        _ => Err(SourceStoreErrorV1::LineageConflict),
-    }
-}
-
-fn absence_tombstone(
-    binding: SourceBindingIdentityV1,
-    completion: &SourceSnapshotCompletionV1,
-    prior: &SourceObjectMutationV1,
-) -> SourceStoreResult<SourceObjectMutationV1> {
-    let revision = SourceObjectRevisionV1::new(canonical_sha256(&(
-        "tracedecay.external-source.absence-tombstone-revision.v1",
-        prior.observation().revision(),
-        completion.snapshot(),
-    ))?);
-    let digest = canonical_sha256(&(
-        "tracedecay.external-source.absence-tombstone.v1",
-        prior.observation().native_object(),
-        &revision,
-        completion.completion_digest(),
-    ))?;
-    let observation = SourceObjectObservationV1::new(
-        prior.observation().native_object().clone(),
-        revision,
-        digest,
-        SourceContentStateV1::AuthoritativeDeleted,
-    )?;
-    let evidence = SourceObservationEvidenceV1::new_internal(
-        binding,
-        completion.partition().clone(),
-        &observation,
-        prior.evidence().sanitization_receipt().clone(),
-        prior.evidence().retrieval_anchor().clone(),
-        prior.evidence().authorization().clone(),
-        prior.evidence().source_authorization_digest().clone(),
-        Some(completion.completion_digest().clone()),
-    )?;
-    SourceObjectMutationV1::new(
-        observation,
-        Some(prior.observation().revision().clone()),
-        SourceObjectTransitionV1::Tombstone,
-        evidence,
-    )
-}
+mod reducer;
+use reducer::absence_tombstone;
+pub use reducer::apply_source_commit;
