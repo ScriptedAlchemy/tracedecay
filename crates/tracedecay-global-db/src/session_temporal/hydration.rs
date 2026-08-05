@@ -1,4 +1,4 @@
-use std::fmt::{self, Write as _};
+use std::fmt;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -7,8 +7,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracedecay_application::now_micros;
 use tracedecay_domain::{
-    AnchorDurabilityClass, CanonicalObservationEnvelopeV1, DurableObservationV1, HydrationStateV1,
-    ObservationScopeV1, PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord,
+    AnchorDurabilityClass, DurableObservationV1, HydrationStateV1, ObservationScopeV1,
+    PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord,
 };
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::SessionMessageRecord;
@@ -59,7 +59,11 @@ impl fmt::Debug for PayloadDescriptor {
 #[derive(Clone)]
 enum PayloadSource {
     Occurrence {
-        content: Zeroizing<Vec<u8>>,
+        provider: String,
+        session_id: String,
+        message_id: String,
+        source_observation_id: String,
+        projection_output_ordinal: i64,
     },
     Summary {
         session_id: String,
@@ -181,12 +185,26 @@ fn same_payload_descriptor(left: &PayloadDescriptor, right: &PayloadDescriptor) 
         && match (&left.source, &right.source) {
             (
                 PayloadSource::Occurrence {
-                    content: left_content,
+                    provider: left_provider,
+                    session_id: left_session,
+                    message_id: left_message,
+                    source_observation_id: left_observation,
+                    projection_output_ordinal: left_ordinal,
                 },
                 PayloadSource::Occurrence {
-                    content: right_content,
+                    provider: right_provider,
+                    session_id: right_session,
+                    message_id: right_message,
+                    source_observation_id: right_observation,
+                    projection_output_ordinal: right_ordinal,
                 },
-            ) => left_content.as_slice() == right_content.as_slice(),
+            ) => {
+                left_provider == right_provider
+                    && left_session == right_session
+                    && left_message == right_message
+                    && left_observation == right_observation
+                    && left_ordinal == right_ordinal
+            }
             (
                 PayloadSource::Summary {
                     session_id: left_session,
@@ -461,8 +479,26 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
         Box::pin(async move {
             control.checkpoint()?;
             match &descriptor.source {
-                PayloadSource::Occurrence { content } => {
-                    bounded_copy(content.as_slice(), max_bytes, control)
+                PayloadSource::Occurrence {
+                    provider,
+                    session_id,
+                    message_id,
+                    source_observation_id,
+                    projection_output_ordinal,
+                } => {
+                    read_occurrence_content(
+                        &self.read,
+                        self.storage_root,
+                        descriptor,
+                        provider,
+                        session_id,
+                        message_id,
+                        source_observation_id,
+                        *projection_output_ordinal,
+                        max_bytes,
+                        control,
+                    )
+                    .await
                 }
                 PayloadSource::Summary {
                     session_id,
@@ -514,6 +550,115 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
             }
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn read_occurrence_content(
+    conn: &TemporalSqlRead<'_>,
+    storage_root: &Path,
+    descriptor: &PayloadDescriptor,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    source_observation_id: &str,
+    projection_output_ordinal: i64,
+    max_bytes: usize,
+    control: &ExecutionControl,
+) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
+    control.checkpoint()?;
+    let mut rows = conn
+        .query(
+            "SELECT observation_json
+             FROM observations
+             WHERE observation_id = ?1
+             LIMIT 2",
+            [source_observation_id],
+        )
+        .await
+        .map_err(|_| HydrationError::Unavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| HydrationError::Unavailable)?
+        .ok_or(HydrationError::Unavailable)?;
+    let observation_json: String = row.get(0).map_err(|_| HydrationError::Unavailable)?;
+    if rows
+        .next()
+        .await
+        .map_err(|_| HydrationError::Unavailable)?
+        .is_some()
+    {
+        return Err(HydrationError::Unavailable);
+    }
+    control.checkpoint()?;
+    let observation: DurableObservationV1 =
+        serde_json::from_str(&observation_json).map_err(|_| HydrationError::Unavailable)?;
+    if observation.observation_id().as_str() != source_observation_id
+        || observation.source().provider().as_str() != provider
+        || observation.source().session_id().as_str() != session_id
+    {
+        return Err(HydrationError::Unavailable);
+    }
+    if let Some(message) =
+        canonical_projected_message(&observation, message_id, projection_output_ordinal)
+        && content_matches_descriptor(message.text.as_bytes(), descriptor)
+    {
+        return bounded_copy(message.text.as_bytes(), max_bytes, control);
+    }
+
+    let raw_payload = raw::load_raw_message_by_identity(conn, provider, session_id, message_id)
+        .await
+        .map_err(|_| HydrationError::Unavailable)?
+        .ok_or(HydrationError::Unavailable)?;
+    match raw_payload.storage_kind {
+        LcmStorageKind::Inline
+            if content_matches_descriptor(raw_payload.content.as_bytes(), descriptor) =>
+        {
+            bounded_copy(raw_payload.content.as_bytes(), max_bytes, control)
+        }
+        LcmStorageKind::External => {
+            let payload_ref = raw_payload
+                .payload_ref
+                .as_deref()
+                .ok_or(HydrationError::Unavailable)?;
+            let resolution = resolve_external_manifest(
+                conn,
+                provider,
+                session_id,
+                message_id,
+                payload_ref,
+                &raw_payload.content_hash,
+            )
+            .await
+            .map_err(|_| HydrationError::Unavailable)?;
+            let HydrationResolution::Available(external) = resolution else {
+                return Err(HydrationError::Unavailable);
+            };
+            let PayloadSource::External { char_count, .. } = &external.source else {
+                return Err(HydrationError::Unavailable);
+            };
+            if external.byte_count != descriptor.byte_count
+                || external.content_hash != descriptor.content_hash
+            {
+                return Err(HydrationError::Unavailable);
+            }
+            let content = read_verified_payload_content(
+                storage_root,
+                payload_ref,
+                &descriptor.content_hash,
+                descriptor.byte_count,
+                *char_count,
+            )
+            .map_err(|_| HydrationError::Unavailable)?;
+            bounded_copy(content.as_bytes(), max_bytes, control)
+        }
+        _ => Err(HydrationError::Unavailable),
+    }
+}
+
+fn content_matches_descriptor(content: &[u8], descriptor: &PayloadDescriptor) -> bool {
+    content.len() == descriptor.byte_count
+        && content_hash_matches(&descriptor.content_hash, content)
 }
 
 async fn resolve_current(
@@ -607,10 +752,11 @@ async fn resolve_occurrence(
             conn.query(
                 "SELECT occurrence.session_id, COALESCE(occurrence.message_id, ''),
                         occurrence.projection_output_ordinal,
-                        observation.observation_id, observation.observation_json
+                        occurrence.source_observation_id,
+                        occurrence.source_provider,
+                        occurrence.sanitized_content_digest,
+                        occurrence.sanitized_content_bytes
                  FROM session_occurrences occurrence
-                 JOIN observations observation
-                   ON observation.observation_id = occurrence.source_observation_id
                  WHERE occurrence.session_id = ?1
                    AND occurrence.generation = ?2
                    AND occurrence.retrieval_anchor_id = ?3
@@ -629,20 +775,18 @@ async fn resolve_occurrence(
             conn.query(
                 "SELECT occurrence.session_id, COALESCE(occurrence.message_id, ''),
                         occurrence.projection_output_ordinal,
-                        observation.observation_id, observation.observation_json
+                        occurrence.source_observation_id,
+                        occurrence.source_provider,
+                        occurrence.sanitized_content_digest,
+                        occurrence.sanitized_content_bytes
                  FROM session_occurrences occurrence
                  JOIN session_temporal_generations generation
                    ON generation.session_id = occurrence.session_id
                   AND generation.generation = occurrence.generation
                   AND generation.state = 'active'
-                 JOIN observations observation
-                   ON observation.observation_id = occurrence.source_observation_id
                  JOIN sessions authority_session
                    ON authority_session.session_id = occurrence.session_id
-                  AND authority_session.provider = COALESCE(
-                      json_extract(observation.observation_json, '$.identity.source.provider'),
-                      'claude'
-                  )
+                  AND authority_session.provider = occurrence.source_provider
                   AND authority_session.project_key = ?2
                  WHERE occurrence.retrieval_anchor_id = ?1
                    AND (?3 IS NULL OR authority_session.provider = ?3)
@@ -660,140 +804,55 @@ async fn resolve_occurrence(
     let session_id: String = row.get(0).map_err(|_| ())?;
     let message_id: String = row.get(1).map_err(|_| ())?;
     let projection_output_ordinal: i64 = row.get(2).map_err(|_| ())?;
-    let stored_observation_id: String = row.get(3).map_err(|_| ())?;
-    let observation_json: String = row.get(4).map_err(|_| ())?;
+    let source_observation_id: String = row.get(3).map_err(|_| ())?;
+    let provider: String = row.get(4).map_err(|_| ())?;
+    let content_hash: String = row.get(5).map_err(|_| ())?;
+    let byte_count = nonnegative_usize(row.get::<Option<i64>>(6).map_err(|_| ())?)?;
     if rows.next().await.map_err(|_| ())?.is_some() {
         return Ok(Some(HydrationResolution::Unavailable(
             HydrationStateV1::RetainedButUnavailable,
         )));
     }
-    if message_id.is_empty() {
-        return Ok(Some(HydrationResolution::Unavailable(
-            HydrationStateV1::RetainedButUnavailable,
-        )));
-    }
-    let observation: DurableObservationV1 = match serde_json::from_str(&observation_json) {
-        Ok(observation) => observation,
-        Err(_) => {
-            return Ok(Some(HydrationResolution::Unavailable(
-                HydrationStateV1::UnverifiableLegacy,
-            )));
-        }
-    };
-    if observation.observation_id().as_str() != stored_observation_id {
+    if message_id.is_empty()
+        || provider.is_empty()
+        || !is_canonical_sha256_hex(&content_hash)
+        || !anchor
+            .source_observations()
+            .iter()
+            .any(|observation_id| observation_id.as_str() == source_observation_id)
+    {
         return Ok(Some(HydrationResolution::Unavailable(
             HydrationStateV1::UnverifiableLegacy,
         )));
     }
-    let provider = observation.source().provider().as_str();
-    if let Some(state) = participant_access_state(snapshot, &session_id, provider) {
+    if let Some(state) = participant_access_state(snapshot, &session_id, &provider) {
         return Ok(Some(HydrationResolution::Unavailable(state)));
     }
-    let expected_owner = session_owner(conn, provider, &session_id).await?;
+    let expected_owner = session_owner(conn, &provider, &session_id).await?;
     let provider_matches = snapshot
         .provider_scope()
-        .is_none_or(|expected| expected == provider);
+        .is_none_or(|expected| expected == provider.as_str());
     if let Some(state) = classify_current_access(
         anchor.payload_access(),
         anchor.durability(),
         now_micros().0,
-        anchor.owner() == observation.scope()
-            && serde_json::to_string(observation.scope()).ok().as_deref() == Some(owner_json),
-        provider_matches
-            && observation.source().session_id().as_str() == session_id
-            && observation.source().provider().as_str() == provider
-            && expected_owner.as_ref() == Some(observation.scope()),
+        serde_json::to_string(anchor.owner()).ok().as_deref() == Some(owner_json)
+            && expected_owner.as_ref() == Some(anchor.owner()),
+        provider_matches,
     ) {
         return Ok(Some(HydrationResolution::Unavailable(state)));
     }
-
-    let envelope: CanonicalObservationEnvelopeV1 =
-        match serde_json::from_value(observation.payload().clone()) {
-            Ok(envelope) => envelope,
-            Err(_) => {
-                return Ok(Some(HydrationResolution::Unavailable(
-                    HydrationStateV1::UnverifiableLegacy,
-                )));
-            }
-        };
-    // The occurrence's message_id must bind to a canonical projection output of
-    // this digest-verified observation. `derive_canonical_projection` keys the
-    // message on the tool-dispatch identity, else the envelope's
-    // relations.message_id, else its stable record id — so an occurrence whose
-    // id legitimately falls back to the stable record id carries no
-    // relations.message_id at all, and checking that single field alone would
-    // refuse it. Binding through the projection accepts every message the
-    // projection can produce while still refusing a message_id that
-    // corresponds to no output of this envelope. The relations fast-path covers
-    // the inverse case: a message the envelope names directly but the
-    // projection re-keys (derived/tool outputs).
-    let canonical_message =
-        canonical_projected_message(&observation, &message_id, projection_output_ordinal);
-    let relations_bind = envelope
-        .relations()
-        .message_id()
-        .is_some_and(|candidate| candidate.as_str() == message_id);
-    if !relations_bind && canonical_message.is_none() {
-        return Ok(Some(HydrationResolution::Unavailable(
-            HydrationStateV1::UnverifiableLegacy,
-        )));
-    }
-    if let Some(message) = canonical_message
-        .as_ref()
-        .filter(|message| !message.text.is_empty())
-    {
-        let content = Zeroizing::new(message.text.as_bytes().to_vec());
-        let content_hash = sha256_hex(content.as_slice());
-        return Ok(Some(HydrationResolution::Available(PayloadDescriptor {
-            byte_count: content.len(),
-            source: PayloadSource::Occurrence { content },
-            content_hash,
-        })));
-    }
-    let raw_payload =
-        raw::load_raw_message_by_identity(conn, provider, session_id.as_str(), message_id.as_str())
-            .await
-            .map_err(|_| ())?;
-    if let Some(raw_payload) = raw_payload {
-        match raw_payload.storage_kind {
-            LcmStorageKind::Inline => {
-                let content = Zeroizing::new(raw_payload.content.into_bytes());
-                return Ok(Some(HydrationResolution::Available(PayloadDescriptor {
-                    byte_count: content.len(),
-                    source: PayloadSource::Occurrence { content },
-                    content_hash: raw_payload.content_hash,
-                })));
-            }
-            LcmStorageKind::External if raw_payload.payload_ref.is_some() => {
-                let payload_ref = raw_payload.payload_ref.as_deref().ok_or(())?;
-                let resolution = resolve_external_manifest(
-                    conn,
-                    provider,
-                    &session_id,
-                    message_id.as_str(),
-                    payload_ref,
-                    &raw_payload.content_hash,
-                )
-                .await?;
-                if matches!(resolution, HydrationResolution::Available(_)) {
-                    return Ok(Some(resolution));
-                }
-            }
-            _ => {}
-        }
-    }
-    if let Some(message) = canonical_message {
-        let content = Zeroizing::new(message.text.into_bytes());
-        let content_hash = sha256_hex(content.as_slice());
-        return Ok(Some(HydrationResolution::Available(PayloadDescriptor {
-            byte_count: content.len(),
-            source: PayloadSource::Occurrence { content },
-            content_hash,
-        })));
-    }
-    Ok(Some(HydrationResolution::Unavailable(
-        HydrationStateV1::RetainedButUnavailable,
-    )))
+    Ok(Some(HydrationResolution::Available(PayloadDescriptor {
+        source: PayloadSource::Occurrence {
+            provider,
+            session_id,
+            message_id,
+            source_observation_id,
+            projection_output_ordinal,
+        },
+        byte_count,
+        content_hash,
+    })))
 }
 
 async fn resolve_summary(
@@ -961,13 +1020,7 @@ async fn summary_has_provider_evidence(
                       retained.source_anchor_id
                   AND source_occurrence.session_id = ?2
                   AND source_occurrence.generation = ?3
-                 JOIN observations AS source_observation
-                   ON source_observation.observation_id =
-                      source_occurrence.source_observation_id
-                 WHERE json_extract(
-                     source_observation.observation_json,
-                     '$.identity.source.provider'
-                 ) = ?4
+                 WHERE source_occurrence.source_provider = ?4
                  LIMIT 1
              )",
             params![summary_id, session_id, generation, provider],
@@ -1210,11 +1263,21 @@ fn content_hash_matches(expected: &str, bytes: &[u8]) -> bool {
     expected.strip_prefix("sha256:").unwrap_or(expected) == sha256_hex(bytes)
 }
 
+fn is_canonical_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
     let digest = Sha256::digest(bytes);
     let mut actual = String::with_capacity(64);
     for byte in digest {
-        let _ = write!(&mut actual, "{byte:02x}");
+        actual.push(char::from(HEX[usize::from(byte >> 4)]));
+        actual.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     actual
 }
@@ -1370,18 +1433,22 @@ mod tests {
                 &writer,
                 "INSERT INTO session_occurrences (
                     session_id, generation, occurrence_id, source_observation_id,
-                    projection_output_ordinal, retrieval_anchor_id, message_id,
-                    role, knowledge_at, valid_time_json, evidence_json,
+                    source_provider, projection_output_ordinal, retrieval_anchor_id,
+                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    sanitized_content_digest, sanitized_content_bytes,
                     snippet_text, index_text
                  ) VALUES (
-                    ?1, 1, 'occurrence-1', ?2, 0, ?3, ?4,
-                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?5, ?5
+                    ?1, 1, 'occurrence-1', ?2, ?3, 0, ?4, ?5,
+                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?6, ?7, ?8, ?8
                  )",
                 params![
                     session_id,
                     observation.observation_id().as_str(),
+                    provider,
                     anchor.anchor_id().as_str(),
                     message_id,
+                    hash(canonical_payload.as_bytes()),
+                    i64::try_from(canonical_payload.len()).expect("canonical payload bytes"),
                     canonical_payload
                 ],
             )
@@ -1390,8 +1457,9 @@ mod tests {
         }
 
         /// Rewrite the seeded occurrence's `message_id` to a value that
-        /// corresponds to no projection output of its observation, exercising the
-        /// genuine `UnverifiableLegacy` refusal path.
+        /// corresponds to no projection output of its observation. Authorization
+        /// trusts only immutable projected metadata; the post-authorization
+        /// content read must reject the broken projection binding.
         async fn corrupt_hydration_occurrence_message_id_for_test(
             &self,
             session_id: &str,
@@ -1411,6 +1479,27 @@ mod tests {
             )
             .await
             .expect("corrupt occurrence message id");
+        }
+
+        async fn corrupt_hydration_observation_json_for_test(&self, observation_id: &str) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let writer = database
+                .writer_connection()
+                .expect("registered profile writer");
+            Executor::execute_batch(&writer, "DROP TRIGGER observations_immutable_update;")
+                .await
+                .expect("drop observation immutability for corruption fixture");
+            Executor::execute(
+                &writer,
+                "UPDATE observations
+                 SET observation_json = '{'
+                 WHERE observation_id = ?1",
+                [observation_id],
+            )
+            .await
+            .expect("corrupt observation json");
         }
 
         async fn seed_root_hydration_fixture_for_test(
@@ -1462,16 +1551,20 @@ mod tests {
                 &writer,
                 "INSERT INTO session_occurrences (
                     session_id, generation, occurrence_id, source_observation_id,
-                    projection_output_ordinal, retrieval_anchor_id, message_id,
-                    role, knowledge_at, valid_time_json, evidence_json,
+                    source_provider, projection_output_ordinal, retrieval_anchor_id,
+                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    sanitized_content_digest, sanitized_content_bytes,
                     snippet_text, index_text
                  ) VALUES (
-                    'session-2', 1, 'occurrence-1', ?1, 0, ?2, 'message-1',
-                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?3, ?3
+                    'session-2', 1, 'occurrence-1', ?1, ?2, 0, ?3, 'message-1',
+                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?4, ?5, ?6, ?6
                  )",
                 params![
                     observation.observation_id().as_str(),
+                    provider,
                     anchor.anchor_id().as_str(),
+                    hash(canonical_payload.as_bytes()),
+                    i64::try_from(canonical_payload.len()).expect("canonical payload bytes"),
                     canonical_payload
                 ],
             )
@@ -1633,18 +1726,29 @@ mod tests {
                 &writer,
                 "INSERT INTO session_occurrences (
                     session_id, generation, occurrence_id, source_observation_id,
-                    projection_output_ordinal, retrieval_anchor_id, message_id,
-                    role, knowledge_at, valid_time_json, evidence_json,
+                    source_provider, projection_output_ordinal, retrieval_anchor_id,
+                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    sanitized_content_digest, sanitized_content_bytes,
                     snippet_text, index_text
                  ) VALUES (
-                    'session-1', 1, 'occurrence-1', ?1, 0, ?2, 'message-1',
+                    'session-1', 1, 'occurrence-1', ?1, ?2, 0, ?3, 'message-1',
                     'assistant', 1, '{\"kind\":\"unknown\"}', '{}',
+                    ?4, ?5,
                     'non-empty occurrence payload', 'non-empty occurrence payload'
                  )",
-                params![
-                    occurrence_observation.observation_id().as_str(),
-                    occurrence_anchor.anchor_id().as_str()
-                ],
+                {
+                    let canonical =
+                        canonical_projected_message(occurrence_observation, "message-1", 0)
+                            .expect("canonical occurrence projection");
+                    params![
+                        occurrence_observation.observation_id().as_str(),
+                        provider,
+                        occurrence_anchor.anchor_id().as_str(),
+                        hash(canonical.text.as_bytes()),
+                        i64::try_from(canonical.text.len())
+                            .expect("canonical occurrence payload bytes")
+                    ]
+                },
             )
             .await
             .expect("occurrence");
@@ -2344,13 +2448,10 @@ mod tests {
         let read = runtime.hydration_read_for_test().await;
         let adapter = read.adapter();
         let authorization = adapter.authorize(&snapshot, anchor.anchor_id()).await;
-        assert!(
-            matches!(
-                authorization,
-                Ok(HydrationAuthorization::Denied(ref denial))
-                    if denial.state() == HydrationStateV1::RetainedButUnavailable
-            ),
-            "{authorization:?}"
+        assert_eq!(
+            authorization,
+            Ok(HydrationAuthorization::Authorized),
+            "authorization must not inspect raw or canonical content"
         );
 
         let mut output = Vec::new();
@@ -2365,6 +2466,49 @@ mod tests {
         );
         assert!(output.is_empty());
         assert!(!String::from_utf8_lossy(&output).contains("canary"));
+    }
+
+    #[tokio::test]
+    async fn occurrence_authorization_does_not_parse_observation_content() {
+        let dir = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        let (observation, anchor) =
+            Box::pin(persist_anchor_for_session(&runtime, 1, "session-1")).await;
+        let provider = observation.source().provider().as_str();
+        runtime
+            .seed_session_occurrence_for_test(
+                provider,
+                "session-1",
+                &observation,
+                &anchor,
+                "message-1",
+                "payload-1",
+            )
+            .await;
+        runtime
+            .corrupt_hydration_observation_json_for_test(observation.observation_id().as_str())
+            .await;
+
+        let snapshot = authorized_snapshot(&anchor);
+        let read = runtime.hydration_read_for_test().await;
+        let adapter = read.adapter();
+        assert_eq!(
+            adapter.authorize(&snapshot, anchor.anchor_id()).await,
+            Ok(HydrationAuthorization::Authorized)
+        );
+        let mut output = Vec::new();
+        assert_eq!(
+            adapter
+                .read_after_recheck(&snapshot, anchor.anchor_id(), 1024, 64, &mut |chunk| {
+                    output.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .await,
+            Err(HydrationError::Unavailable)
+        );
+        assert!(output.is_empty());
     }
 
     #[tokio::test]
@@ -2520,10 +2664,9 @@ mod tests {
             .expect("stable-record-id occurrence hydration");
         assert_eq!(output, canonical_payload.as_bytes());
 
-        // An occurrence whose message_id corresponds to no projection output of
-        // its digest-verified observation must still be refused: the binding
-        // runs through the projection rather than widening acceptance for
-        // unverifiable rows.
+        // Authorization consumes only canonical projected metadata. A broken
+        // message binding is discovered during the post-authorization content
+        // read and must emit nothing.
         drop(read);
         runtime
             .corrupt_hydration_occurrence_message_id_for_test("session-1", "does-not-project")
@@ -2533,14 +2676,22 @@ mod tests {
         let authorization = corrupted_adapter
             .authorize(&snapshot, anchor.anchor_id())
             .await;
-        assert!(
-            matches!(
-                authorization,
-                Ok(HydrationAuthorization::Denied(ref denial))
-                    if denial.state() == HydrationStateV1::UnverifiableLegacy
-            ),
-            "{authorization:?}"
+        assert_eq!(
+            authorization,
+            Ok(HydrationAuthorization::Authorized),
+            "authorization must not project or parse observation content"
         );
+        let mut corrupted_output = Vec::new();
+        assert_eq!(
+            corrupted_adapter
+                .read_after_recheck(&snapshot, anchor.anchor_id(), 1024, 7, &mut |chunk| {
+                    corrupted_output.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .await,
+            Err(HydrationError::Unavailable)
+        );
+        assert!(corrupted_output.is_empty());
     }
 
     #[test]

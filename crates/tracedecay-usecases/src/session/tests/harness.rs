@@ -532,19 +532,26 @@ impl RegisteredTemporalHarness {
             .execute(
                 "INSERT INTO session_occurrences (
                     session_id, generation, occurrence_id, source_observation_id,
-                    projection_output_ordinal, retrieval_anchor_id, message_id,
-                    role, knowledge_at, valid_time_json, evidence_json,
+                    source_provider, projection_output_ordinal, retrieval_anchor_id,
+                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    sanitized_content_digest, sanitized_content_bytes,
                     snippet_text, index_text
-                 ) VALUES (?1, 1, ?2, ?3, 0, ?4, ?5, 'assistant', ?6, ?7, ?8, ?9, ?9)",
+                 ) VALUES (
+                    ?1, 1, ?2, ?3, ?4, 0, ?5, ?6, 'assistant', ?7, ?8, ?9,
+                    ?10, ?11, ?12, ?12
+                 )",
                 params![
                     observation.source().session_id().as_str(),
                     occurrence_id.as_str(),
                     observation.observation_id().as_str(),
+                    observation.source().provider().as_str(),
                     anchor.anchor_id().as_str(),
                     message_id,
                     ordinal,
                     json!({"kind": "known", "valid_at": ordinal}).to_string(),
                     evidence,
+                    hex::encode(sha2::Sha256::digest(payload.as_bytes())),
+                    i64::try_from(payload.len()).expect("fixture payload byte count"),
                     payload
                 ],
             )

@@ -302,6 +302,11 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         generation INTEGER NOT NULL,
         occurrence_id TEXT NOT NULL,
         source_observation_id TEXT NOT NULL,
+        source_provider TEXT NOT NULL CHECK(
+            source_provider <> ''
+            AND length(source_provider) <= 512
+            AND source_provider = trim(source_provider)
+        ),
         projection_output_ordinal INTEGER NOT NULL CHECK(projection_output_ordinal >= 0),
         retrieval_anchor_id TEXT NOT NULL,
         thread_id TEXT,
@@ -327,6 +332,11 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
             )
         ),
         evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+        sanitized_content_digest TEXT NOT NULL CHECK(
+            length(sanitized_content_digest) = 64
+            AND sanitized_content_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        sanitized_content_bytes INTEGER NOT NULL CHECK(sanitized_content_bytes >= 0),
         snippet_text TEXT NOT NULL,
         index_text TEXT NOT NULL,
         PRIMARY KEY(session_id, generation, occurrence_id),
@@ -869,6 +879,7 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "generation",
             "occurrence_id",
             "source_observation_id",
+            "source_provider",
             "projection_output_ordinal",
             "retrieval_anchor_id",
             "thread_id",
@@ -881,6 +892,8 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "knowledge_at",
             "valid_time_json",
             "evidence_json",
+            "sanitized_content_digest",
+            "sanitized_content_bytes",
             "snippet_text",
             "index_text",
         ],

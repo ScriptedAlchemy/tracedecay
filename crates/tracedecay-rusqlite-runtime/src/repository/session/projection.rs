@@ -12,7 +12,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{SessionFrozenWatermarksV1, SessionTemporalProjectionBatchV1};
 
-use super::super::support::{canonical_digest, decode, encode};
+use super::super::support::{canonical_digest, decode, encode, invalid, sha256_hex, usize_to_i64};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +70,7 @@ pub(super) struct ProjectionStatements<'connection> {
     pub(super) thread: Statement<'connection>,
     pub(super) turn: Statement<'connection>,
     pub(super) agent: Statement<'connection>,
+    pub(super) message: Statement<'connection>,
     pub(super) occurrence: Statement<'connection>,
     pub(super) copy: Statement<'connection>,
     pub(super) assertion: Statement<'connection>,
@@ -111,11 +112,35 @@ pub(super) fn insert_occurrence(
         ])?;
     }
     let role = encode(&occurrence.role)?.trim_matches('"').to_owned();
+    let message_id = occurrence
+        .message_id
+        .as_ref()
+        .ok_or_else(|| invalid("session occurrence has no message id"))?;
+    let (source_provider, sanitized_content) = {
+        let mut rows = statements
+            .message
+            .query(params![batch.session_id().as_str(), message_id.as_str()])?;
+        let row = rows
+            .next()?
+            .ok_or_else(|| invalid("session occurrence has no canonical message projection"))?;
+        let source_provider = row.get::<_, String>(0)?;
+        let projected_role = row.get::<_, String>(1)?;
+        let sanitized_content = row.get::<_, String>(2)?;
+        if source_provider.is_empty() || projected_role != role || rows.next()?.is_some() {
+            return Err(invalid(
+                "session occurrence canonical message projection is ambiguous or mismatched",
+            ));
+        }
+        (source_provider, sanitized_content)
+    };
+    let sanitized_content_digest = sha256_hex(sanitized_content.as_bytes());
+    let sanitized_content_bytes = usize_to_i64(sanitized_content.len(), "sanitized content bytes")?;
     statements.occurrence.execute(params![
         batch.session_id().as_str(),
         generation,
         occurrence.occurrence_id.as_str(),
         occurrence.source_observation_id.as_str(),
+        source_provider,
         i64::from(occurrence.projection_output_ordinal.value()),
         occurrence.retrieval_anchor_id.as_str(),
         occurrence.thread_id.as_ref().map(|value| value.as_str()),
@@ -132,6 +157,8 @@ pub(super) fn insert_occurrence(
         occurrence.knowledge_at.0,
         encode(&occurrence.valid_time)?,
         encode(&occurrence.evidence)?,
+        sanitized_content_digest,
+        sanitized_content_bytes,
     ])?;
     Ok(())
 }
