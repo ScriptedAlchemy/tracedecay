@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_application::session_sync::{
-    SessionGitSyncV1, SessionSyncCommandV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
-    SessionSyncScopeV1, SessionSyncServicePort, SessionTranscriptImportV1,
+    SessionGitSyncV1, SessionSyncCommandV1, SessionSyncControlV1, SessionSyncOutcomeV1,
+    SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncServicePort, SessionTranscriptImportV1,
 };
 use tracedecay_application::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
 
@@ -30,6 +30,12 @@ enum AdminCliAction {
         since: i64,
         limit_sessions: usize,
         dry_run: bool,
+    },
+    SessionsSyncStatus {
+        idempotency_key: String,
+    },
+    SessionsSyncCancel {
+        idempotency_key: String,
     },
     SessionsUnfinished {
         limit: usize,
@@ -264,6 +270,12 @@ async fn dispatch_admin_cli(
                     }
                 })?;
             execute_session_sync(&context, SessionSyncCommandV1::SynchronizeGit(options)).await?
+        }
+        AdminCliAction::SessionsSyncStatus { idempotency_key } => {
+            control_session_sync(&context, idempotency_key, false).await?
+        }
+        AdminCliAction::SessionsSyncCancel { idempotency_key } => {
+            control_session_sync(&context, idempotency_key, true).await?
         }
         AdminCliAction::SessionsUnfinished { limit } => {
             sessions_unfinished(context.require_registered_project_session_db()?, limit).await?
@@ -589,21 +601,9 @@ async fn execute_session_sync(
             },
         ));
     };
-    let project = context.require_project()?;
+    let scope = session_sync_scope(context)?;
+    let project_id = scope.project_id().clone();
     let identity = context.require_profile_identity()?;
-    let project_id = project
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "daemon project identity is unavailable".to_string(),
-        })
-        .and_then(|value| {
-            tracedecay_domain::ProjectId::new(value).map_err(|error| TraceDecayError::Config {
-                message: error.to_string(),
-            })
-        })?;
     let mut digest = Sha256::new();
     digest.update(b"tracedecay.session-sync.v1\0");
     digest.update(project_id.as_str().as_bytes());
@@ -660,7 +660,7 @@ async fn execute_session_sync(
     let request = SessionSyncRequestV1::new(
         operation_id,
         idempotency_key,
-        SessionSyncScopeV1::new(project_id, identity.profile_id().clone()),
+        scope,
         deadline,
         cancellation,
         command,
@@ -668,21 +668,72 @@ async fn execute_session_sync(
     Ok(render_session_sync_outcome(service.execute(request).await))
 }
 
+fn session_sync_scope(context: &AdminCliContext<'_>) -> Result<SessionSyncScopeV1> {
+    let project = context.require_project()?;
+    let identity = context.require_profile_identity()?;
+    let project_id = project
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "daemon project identity is unavailable".to_string(),
+        })
+        .and_then(|value| {
+            tracedecay_domain::ProjectId::new(value).map_err(|error| TraceDecayError::Config {
+                message: error.to_string(),
+            })
+        })?;
+    Ok(SessionSyncScopeV1::new(
+        project_id,
+        identity.profile_id().clone(),
+    ))
+}
+
+async fn control_session_sync(
+    context: &AdminCliContext<'_>,
+    idempotency_key: String,
+    cancel: bool,
+) -> Result<Value> {
+    let Some(service) = context.session_sync else {
+        return Ok(render_session_sync_outcome(
+            SessionSyncOutcomeV1::Unavailable {
+                reason_code: "session_sync_authority_unavailable",
+            },
+        ));
+    };
+    let control = SessionSyncControlV1::new(
+        session_sync_scope(context)?,
+        IdempotencyKey::new(idempotency_key).map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?,
+    );
+    let outcome = if cancel {
+        service.cancel(control).await
+    } else {
+        service.status(control).await
+    };
+    Ok(render_session_sync_outcome(outcome))
+}
+
 fn render_session_sync_outcome(outcome: SessionSyncOutcomeV1) -> Value {
     match outcome {
         SessionSyncOutcomeV1::Accepted(receipt) => json!({
             "status": "accepted",
             "operation_id": receipt.operation_id,
+            "idempotency_key": receipt.idempotency_key,
             "accepted_at": receipt.accepted_at,
         }),
         SessionSyncOutcomeV1::Joined(receipt) => json!({
             "status": "joined",
             "operation_id": receipt.operation_id,
+            "idempotency_key": receipt.idempotency_key,
             "accepted_at": receipt.accepted_at,
         }),
         SessionSyncOutcomeV1::Complete(receipt) => json!({
             "status": "complete",
             "operation_id": receipt.admission.operation_id,
+            "idempotency_key": receipt.admission.idempotency_key,
             "termination": receipt.termination,
             "stats": receipt.stats,
             "failure_codes": receipt.failure_codes,
@@ -744,6 +795,20 @@ mod tests {
                 "dry_run": true,
             })),
             Ok(AdminCliAction::SessionsGitSync { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            serde_json::from_value::<AdminCliAction>(json!({
+                "action": "sessions_sync_status",
+                "idempotency_key": "session-sync.fixture",
+            })),
+            Ok(AdminCliAction::SessionsSyncStatus { .. })
+        ));
+        assert!(matches!(
+            serde_json::from_value::<AdminCliAction>(json!({
+                "action": "sessions_sync_cancel",
+                "idempotency_key": "session-sync.fixture",
+            })),
+            Ok(AdminCliAction::SessionsSyncCancel { .. })
         ));
     }
 
