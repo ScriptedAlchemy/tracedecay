@@ -152,7 +152,7 @@ fn application_profiles(
         (
             APPLICATION_ADMINISTRATIVE_PROFILE_ID,
             ProfileKind::Administrative,
-            ProfileBudget::new(40, 8_000)?,
+            ProfileBudget::new(48, 8_000)?,
             false,
         ),
         (

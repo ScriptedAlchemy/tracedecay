@@ -176,7 +176,7 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
         (
             "profile.administrative",
             ProfileKind::Administrative,
-            ProfileBudget::new(40, 8_000).unwrap(),
+            ProfileBudget::new(48, 8_000).unwrap(),
         ),
         (
             "profile.host-limited",
