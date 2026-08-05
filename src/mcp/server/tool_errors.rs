@@ -31,6 +31,7 @@ fn value_has_semantic_error(value: &Value) -> bool {
                     return false;
                 };
                 payload.get("success").and_then(Value::as_bool) == Some(false)
+                    || payload.get("status").and_then(Value::as_str) == Some("unavailable")
                     || payload.get("error").is_some_and(|error| !error.is_null())
                     || payload
                         .get("failed")
@@ -240,5 +241,27 @@ pub(crate) fn serialize_response_line(resp: &JsonRpcResponse) -> String {
                 hardcoded_internal_error_response(&resp.id, &fallback_err.to_string())
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_unavailable_payload_is_a_semantic_tool_error() {
+        let mut result = ToolResult::new(
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": r#"{"status":"unavailable","reason":"owner_unavailable"}"#,
+                }],
+            }),
+            Vec::new(),
+        );
+
+        assert!(tool_result_has_semantic_error(&result));
+        mark_semantic_tool_error(&mut result);
+        assert_eq!(result.value["isError"], json!(true));
     }
 }

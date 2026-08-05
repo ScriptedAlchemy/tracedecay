@@ -323,7 +323,6 @@ pub(super) async fn handle_search(
         crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
             let reason = unavailable.reason.as_str();
             let output = json!({
-                "results": [],
                 "code_generation": unavailable.code_generation,
                 "query_fallback_digest": Value::Null,
                 "semantic": semantic_status_value(semantic_mode, &unavailable.semantic),
@@ -332,13 +331,11 @@ pub(super) async fn handle_search(
                 "coverage": coverage_value(&unavailable.coverage),
             });
             let failure = format!("code-index search unavailable: {reason}");
-            let mut result =
+            Ok(
                 rendered_tool_result(cg, &args, &output, Vec::new(), || render_search_md(&output))
-                    .with_failure_message(failure);
-            if semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic {
-                result = result.with_semantic_error(true);
-            }
-            Ok(result)
+                    .with_semantic_error(true)
+                    .with_failure_message(failure),
+            )
         }
     }
 }
@@ -444,7 +441,13 @@ fn render_search_md(value: &Value) -> String {
             }
         }
         _ => {
-            md.empty_note("No matching symbols.");
+            md.empty_note(
+                if value.get("status").and_then(Value::as_str) == Some("unavailable") {
+                    "Search unavailable; no result set was produced."
+                } else {
+                    "No matching symbols."
+                },
+            );
         }
     }
     if let Some(reason) = value.get("reason").and_then(Value::as_str) {
@@ -1862,6 +1865,20 @@ mod tests {
                 reason: crate::mcp::server::lane_reason::GENERATION_REBUILDING,
             }
         );
+    }
+
+    #[test]
+    fn unavailable_search_does_not_render_as_an_empty_result_set() {
+        let rendered = render_search_md(&json!({
+            "status": "unavailable",
+            "reason": "generation_unavailable",
+            "coverage": {
+                "recall": "unavailable",
+            },
+        }));
+
+        assert!(rendered.contains("Search unavailable; no result set was produced."));
+        assert!(!rendered.contains("No matching symbols."));
     }
 
     #[tokio::test]

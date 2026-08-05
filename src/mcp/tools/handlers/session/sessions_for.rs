@@ -378,16 +378,18 @@ pub(in super::super) async fn handle_sessions_for(
     };
 
     let Some(db) = session_db else {
+        const MESSAGE: &str = "registered project session database is unavailable";
         return Ok(tool_json(
             Some(cg.project_root()),
             &args,
             &json!({
                 "status": "unavailable",
-                "message": "registered project session database is unavailable",
-                "results": [],
-                "count": 0
+                "reason": "session_database_unavailable",
+                "message": MESSAGE,
             }),
-        ));
+        )
+        .with_semantic_error(true)
+        .with_failure_message(MESSAGE));
     };
     let (results, index_health, observed_fallback) = {
         // Read the correlation-index health from the same open so an empty
