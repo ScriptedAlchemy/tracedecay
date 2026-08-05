@@ -27,6 +27,11 @@ pub(in super::super) async fn install_final_schema(
             window_start INTEGER NOT NULL,
             window_end INTEGER NOT NULL,
             worktree BLOB NOT NULL,
+            worktree_identity BLOB NOT NULL,
+            git_dir BLOB NOT NULL,
+            git_dir_identity BLOB NOT NULL,
+            common_dir BLOB NOT NULL,
+            common_dir_identity BLOB NOT NULL,
             generation INTEGER NOT NULL CHECK(generation >= 0),
             scan_mode TEXT NOT NULL
                 CHECK(scan_mode IN ('reflog_capture', 'reflog_verify', 'graph')),
@@ -200,6 +205,11 @@ pub(super) struct GitHistoryProgressRow {
     pub window_start: i64,
     pub window_end: i64,
     pub worktree: Vec<u8>,
+    pub worktree_identity: Vec<u8>,
+    pub git_dir: Vec<u8>,
+    pub git_dir_identity: Vec<u8>,
+    pub common_dir: Vec<u8>,
+    pub common_dir_identity: Vec<u8>,
     pub generation: u64,
     pub scan_mode: GitHistoryScanMode,
     pub reflog_path: Vec<u8>,
@@ -258,7 +268,8 @@ pub(super) async fn read_progress(
     let mut rows = conn
         .query(
             "SELECT activity_timestamp, source_rowid, provider, session_id,
-                    project_path, window_start, window_end, worktree, generation,
+                    project_path, window_start, window_end, worktree, worktree_identity,
+                    git_dir, git_dir_identity, common_dir, common_dir_identity, generation,
                     scan_mode, reflog_path, reflog_byte_offset, reflog_byte_length,
                     source_generation, reflog_digest, capture_target_offset,
                     verify_byte_offset, verify_digest, source_head_referent, source_head_oid,
@@ -286,7 +297,8 @@ pub(super) async fn insert_progress(
         .execute(
             "INSERT INTO git_history_index_progress (
                     activity_timestamp, source_rowid, provider, session_id,
-                    project_path, window_start, window_end, worktree, generation,
+                    project_path, window_start, window_end, worktree, worktree_identity,
+                    git_dir, git_dir_identity, common_dir, common_dir_identity, generation,
                     scan_mode, reflog_path, reflog_byte_offset, reflog_byte_length,
                     source_generation, reflog_digest, capture_target_offset,
                     verify_byte_offset, verify_digest, source_head_referent, source_head_oid,
@@ -296,7 +308,7 @@ pub(super) async fn insert_progress(
                  VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                     ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
-                    ?24, ?25, ?26, ?27, ?28
+                    ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33
                  )
                  ON CONFLICT(activity_timestamp, source_rowid) DO NOTHING",
             progress_params(progress, &consulted_ref_seal_json),
@@ -354,6 +366,11 @@ pub(super) async fn compare_and_swap_progress(
                 AND source_generation = ?27
                 AND source_head_referent IS ?28
                 AND source_head_oid = ?29
+                AND worktree_identity = ?30
+                AND git_dir = ?31
+                AND git_dir_identity = ?32
+                AND common_dir = ?33
+                AND common_dir_identity = ?34
                 AND (
                     (scan_mode = 'reflog_capture'
                         AND ?2 IN ('reflog_capture', 'reflog_verify')
@@ -418,6 +435,11 @@ pub(super) async fn compare_and_swap_progress(
                 &next.source_generation,
                 next.source_head_referent.as_deref(),
                 &next.source_head_oid,
+                &next.worktree_identity,
+                &next.git_dir,
+                &next.git_dir_identity,
+                &next.common_dir,
+                &next.common_dir_identity,
             ],
         )
         .await?;
@@ -626,26 +648,31 @@ fn progress_from_row(row: &Row) -> Result<GitHistoryProgressRow, GitCorrelationE
         window_start: row.get(5)?,
         window_end: row.get(6)?,
         worktree: row.get(7)?,
-        generation: row.get(8)?,
-        scan_mode: GitHistoryScanMode::from_db(&row.get::<String>(9)?)?,
-        reflog_path: row.get(10)?,
-        reflog_byte_offset: row.get(11)?,
-        reflog_byte_length: row.get(12)?,
-        source_generation: row.get(13)?,
-        reflog_digest: row.get(14)?,
-        capture_target_offset: row.get(15)?,
-        verify_byte_offset: row.get(16)?,
-        verify_digest: row.get(17)?,
-        source_head_referent: row.get(18)?,
-        source_head_oid: row.get(19)?,
-        cursor_head_state: GitHistoryCursorHeadState::from_db(&row.get::<String>(20)?)?,
-        cursor_head_branch: row.get(21)?,
-        cursor_oid: row.get(22)?,
-        segment_end: row.get(23)?,
-        segment_tip_oid: row.get(24)?,
-        segment_cursor: row.get(25)?,
-        emitted_count: row.get(26)?,
-        consulted_refs: decode_consulted_refs(&row.get::<String>(27)?)?,
+        worktree_identity: row.get(8)?,
+        git_dir: row.get(9)?,
+        git_dir_identity: row.get(10)?,
+        common_dir: row.get(11)?,
+        common_dir_identity: row.get(12)?,
+        generation: row.get(13)?,
+        scan_mode: GitHistoryScanMode::from_db(&row.get::<String>(14)?)?,
+        reflog_path: row.get(15)?,
+        reflog_byte_offset: row.get(16)?,
+        reflog_byte_length: row.get(17)?,
+        source_generation: row.get(18)?,
+        reflog_digest: row.get(19)?,
+        capture_target_offset: row.get(20)?,
+        verify_byte_offset: row.get(21)?,
+        verify_digest: row.get(22)?,
+        source_head_referent: row.get(23)?,
+        source_head_oid: row.get(24)?,
+        cursor_head_state: GitHistoryCursorHeadState::from_db(&row.get::<String>(25)?)?,
+        cursor_head_branch: row.get(26)?,
+        cursor_oid: row.get(27)?,
+        segment_end: row.get(28)?,
+        segment_tip_oid: row.get(29)?,
+        segment_cursor: row.get(30)?,
+        emitted_count: row.get(31)?,
+        consulted_refs: decode_consulted_refs(&row.get::<String>(32)?)?,
     })
 }
 
@@ -689,6 +716,11 @@ fn progress_params(
         progress.window_start,
         progress.window_end,
         &progress.worktree,
+        &progress.worktree_identity,
+        &progress.git_dir,
+        &progress.git_dir_identity,
+        &progress.common_dir,
+        &progress.common_dir_identity,
         progress.generation,
         progress.scan_mode.as_str(),
         &progress.reflog_path,
@@ -721,6 +753,12 @@ fn validate_progress(progress: &GitHistoryProgressRow) -> Result<(), GitCorrelat
         || !(progress.window_start..=progress.window_end).contains(&progress.segment_end)
         || progress.reflog_byte_offset > progress.reflog_byte_length
         || progress.verify_byte_offset > progress.reflog_byte_length
+        || progress.worktree.is_empty()
+        || progress.worktree_identity.is_empty()
+        || progress.git_dir.is_empty()
+        || progress.git_dir_identity.is_empty()
+        || progress.common_dir.is_empty()
+        || progress.common_dir_identity.is_empty()
         || progress.reflog_path.is_empty()
         || progress.source_generation.is_empty()
         || progress.reflog_digest.is_empty()

@@ -14,6 +14,11 @@ fn progress(key: GitHistoryProgressKey) -> GitHistoryProgressRow {
         window_start: 100,
         window_end: 200,
         worktree: b"/repo/linked".to_vec(),
+        worktree_identity: b"worktree-identity".to_vec(),
+        git_dir: b"/repo/.git/worktrees/linked".to_vec(),
+        git_dir_identity: b"git-dir-identity".to_vec(),
+        common_dir: b"/repo/.git".to_vec(),
+        common_dir_identity: b"common-dir-identity".to_vec(),
         generation: 0,
         scan_mode: GitHistoryScanMode::ReflogCapture,
         reflog_path: b"/repo/.git/logs/HEAD".to_vec(),
@@ -175,6 +180,14 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
     resealed.source_head_oid = "bbbbbbbb".to_string();
     assert!(
         !compare_and_swap_progress(&conn, 3, &resealed)
+            .await
+            .unwrap()
+    );
+    let mut replaced_repository = verified.clone();
+    replaced_repository.generation = 4;
+    replaced_repository.common_dir_identity = b"replacement-common-dir".to_vec();
+    assert!(
+        !compare_and_swap_progress(&conn, 3, &replaced_repository)
             .await
             .unwrap()
     );
