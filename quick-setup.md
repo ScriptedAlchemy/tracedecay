@@ -35,10 +35,12 @@ cd /path/to/your/project
 tracedecay init
 ```
 
-This creates a `.tracedecay/` directory and indexes all supported files. The
-default `full` feature set covers 50+ languages; `Cargo.toml` is the source of
-truth for exact membership of the `lite` / `medium` / `full` tiers. After the
-initial index, `tracedecay sync` picks up only changed files. To force a full re-index, use `tracedecay sync --force`.
+This enrolls the repository with the daemon-owned project store and indexes all
+supported files. Store locations are daemon-owned implementation details:
+clients, host integrations, and operators must not open, copy, edit, or query a
+TraceDecay database directly. The default `full` feature set covers 50+
+languages; `Cargo.toml` is the source of truth for exact membership of the
+`lite` / `medium` / `full` tiers.
 
 Check what was indexed:
 
@@ -69,7 +71,7 @@ Once configured, Claude has access to these tools:
 | `tracedecay_god_class` | Find classes with the most members |
 | `tracedecay_coupling` | Rank files by fan-in/fan-out coupling |
 
-Plus dozens more — see [README.md](README.md) for the full list of 70+ tools.
+Plus more typed operations — see [README.md](README.md) for the full list.
 
 Claude will use these tools automatically when you ask questions about your codebase. Examples:
 
@@ -100,20 +102,27 @@ Replace `/path/to/your/project` with the absolute path to your indexed project.
 
 ## Keeping the index fresh
 
-After making code changes, sync the graph:
+No routine manual synchronization is required. Hooks, MCP, LSP, and workspace
+events submit bounded change hints; the daemon captures the selected snapshot
+and converges a new immutable generation in the background. Reads retain
+truthful coverage while it works: `warming`, `refresh_required`, `partial`, and
+`unavailable` are states to inspect, not empty successful answers.
 
-```bash
-tracedecay sync
-```
+Use `tracedecay status --json` to see the selected generation and coverage. An
+explicit `tracedecay sync` is an administrative refresh request for a diagnostic
+or offline workflow, not the normal post-edit command. Request it only when the
+daemon reports it is needed; use `tracedecay sync --force` only when that
+administrative workflow requires a complete refresh.
 
-The MCP server reads from the database on each request, so it picks up synced changes without restarting.
+## Branches and linked worktrees
 
-## Multi-branch (optional)
+TraceDecay keeps one project authority for a repository. Branches and linked
+worktrees do not create separate databases or fact stores. Each code result is
+bound to the exact repository, worktree, ref, commit, and immutable generation
+that produced it, while project facts, sessions, and LCM history remain
+project-wide. The daemon receives bounded change signals from hooks/MCP and
+publishes complete generations; it never silently serves an ancestor or the
+currently active checkout when an explicit snapshot is requested.
 
-If you work on multiple branches, TraceDecay can keep a separate graph per branch so switching never causes stale results:
-
-```bash
-tracedecay branch add          # track the current branch
-```
-
-This copies the nearest ancestor's database and syncs only the changed files. See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for the full guide.
+See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for exact
+selection, provenance, and recovery behavior.

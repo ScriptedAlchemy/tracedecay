@@ -1,13 +1,17 @@
 # tracedecay vs lean-ctx
 
 > Historical comparison snapshot. The ranked import list records ideas at the
-> time of review; several items have since shipped and it is not a current gap
-> list.
+> time of review; it is not a current capability or gap list.
 
 Both projects compress context for AI coding agents but with different centers of gravity:
 
-- **tracedecay** — code-graph engine (SQLite via the `rusqlite` runtime + tree-sitter, 50+ languages). 70+ MCP tools focused on symbol-level intelligence (callers/callees, impact, complexity, DSM, test_risk, code-health composite, branch diffs, atomic edit primitives). Cost tracking, on-demand index freshness, monitor TUI.
-- **lean-ctx** — context runtime that *also* compresses arbitrary file reads and shell output. ~56 MCP tools plus 95+ shell-hook patterns, multi-mode file reads, hybrid search with embeddings, portable `.lctxpkg` bundles, persistent knowledge facts.
+- **tracedecay** — daemon-owned code intelligence and agent-memory product.
+  Grafeo owns graph/vector data; SQLite owns relational/content records. Its
+  typed MCP operations focus on symbol evidence, impact, code health, session
+  recall, and daemon-owned freshness.
+- **lean-ctx** — a context runtime that also compresses arbitrary file reads
+  and shell output, with multi-mode file reads, hybrid search, portable context
+  bundles, and persistent knowledge features.
 
 The two overlap in graph/impact analysis but diverge on read modes, shell-output compression, and persistent knowledge. TraceDecay is deeper on graph quality metrics; lean-ctx is broader on the I/O surface.
 
@@ -19,7 +23,11 @@ The two overlap in graph/impact analysis but diverge on read modes, shell-output
 
 1. **Mode-aware file read primitive** — `tracedecay_read` with modes `full | map | signatures | diff | lines:N-M | entropy | auto`. tracedecay already has the symbol graph (`tracedecay_node`, `tracedecay_module_api`) but no whole-file `Read` replacement. Exposing one would let agents skip raw `Read` for huge files. The `signatures` and `map` modes can be served almost for free from the existing graph.
 
-2. **Shell-output compression patterns** — lean-ctx's 95+ declarative patterns for `git` / `cargo` / `npm` / `docker` output. Orthogonal to tracedecay's graph; addresses the *other half* of agent token spend (Bash tool results). Could ship as `tracedecay compress -c <cmd>` plus a Claude Code Bash post-tool hook. Pattern registry stays declarative and easy to extend.
+2. **Shell-output compression patterns** — lean-ctx's declarative patterns for
+   `git` / `cargo` / `npm` / `docker` output. Orthogonal to tracedecay's graph;
+   addresses the *other half* of agent token spend (Bash tool results). Could
+   ship as `tracedecay compress -c <cmd>` plus a Claude Code Bash post-tool
+   hook. Pattern registry stays declarative and easy to extend.
 
 3. **Hybrid search with RRF** — extend `tracedecay_search` / `tracedecay_context` with Reciprocal Rank Fusion over (FTS5 BM25, graph proximity, optional local embeddings). tracedecay already has the first two; adding a small embedding model behind a feature flag would meaningfully improve recall on conceptual queries (the `keywords` arg on `tracedecay_context` is the manual workaround for the same problem).
 

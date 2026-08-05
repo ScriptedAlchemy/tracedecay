@@ -21,12 +21,13 @@ Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as
 
 ## Highlights
 
-- 70+ MCP tools for discovery, call graphs, impact analysis, code health, test mapping, PR context, and anchored edits.
+- Typed MCP operations for discovery, call graphs, impact analysis, code health, test mapping, repository context, and anchored edits.
 - 50+ languages through Rust tree-sitter extractors, with lite/medium/full Cargo feature tiers.
 - Native integrations for Claude Code, Codex, Cursor, Gemini, Hermes, Kiro, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo, Kimi, and Vibe.
-- Local SQLite storage through the `rusqlite` runtime. Your code and project memory stay on your machine.
-- On-demand freshness checks, optional per-branch databases, and linked git worktree support.
-- Local dashboard for code graph, memory, LCM sessions, savings, and cost analytics.
+- Local daemon-owned storage through the `rusqlite` runtime and embedded Grafeo graph store. Your code and project memory stay on your machine.
+- On-demand freshness checks with exact repository, worktree, ref, commit, and generation provenance across linked git worktrees.
+- Project-wide facts, sessions, and lossless LCM history remain available across branches; historical host transcripts enter through the same sanitized daemon ingestion path.
+- Local dashboard for evidence, memory, LCM sessions, savings, and cost analytics.
 
 ## Install
 
@@ -87,9 +88,9 @@ Run it once before starting a new Codex session so Codex copies the generated pl
 ## Common Commands
 
 ```bash
-tracedecay init [path]              # initialize a project store
-tracedecay sync [path]              # incremental index update
-tracedecay sync --force [path]      # full re-index
+tracedecay init [path]              # enroll a project and publish its first generation
+tracedecay sync [path]              # explicit administrative refresh
+tracedecay sync --force [path]      # explicit full generation refresh
 tracedecay status [path]            # graph stats, freshness, savings, cost
 tracedecay tool                     # list every MCP tool
 tracedecay tool search "<query>"    # CLI symbol search
@@ -122,20 +123,24 @@ Most read tools are safe to call in parallel. Edit tools are single-file, anchor
 
 ## Index Freshness
 
-TraceDecay does not run a filesystem watcher. MCP calls check for stale indexed files and sync them on demand with a cooldown. When an MCP server starts, it runs a catch-up sync for changes made while no agent was attached.
+The daemon owns freshness and background convergence. Hooks, MCP, LSP, and
+workspace events submit bounded, content-free hints; the daemon resolves exact
+repository/worktree/ref/commit identity, captures a snapshot, and publishes an
+immutable generation. Queries report the generation and typed
+`warming`/`refresh_required`/`partial`/`unavailable` coverage while a newer
+generation is being prepared; they never run a hidden sync or silently use an
+ancestor. An explicit `tracedecay sync` remains an administrative refresh
+request for diagnostics or offline workflows.
 
-Linked git worktrees share the same project enrollment through the repository common directory. Initialize once from any checkout; do not copy `.tracedecay/` into worktrees.
+Linked git worktrees share one registered project authority through the
+repository common directory. Initialize once from any checkout; do not copy a
+TraceDecay store into another worktree. Queries and comparisons select exact
+worktree/ref/commit generations and report typed stale, indexing, partial, or
+unavailable state when that snapshot is not ready. Branches and worktrees do
+not create separate databases or fact stores.
 
-Optional branch databases:
-
-```bash
-tracedecay branch add
-tracedecay branch list
-tracedecay branch remove <name>
-tracedecay branch gc
-```
-
-See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for full branch behavior and recovery.
+See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for branch
+selection, provenance, and recovery behavior.
 
 ## Dashboard
 
@@ -145,17 +150,30 @@ tracedecay dashboard --port 8080
 tracedecay dashboard --port 0 --open
 ```
 
-The dashboard includes graph exploration, project memory, LCM session search, token savings, and cost views. See [docs/dashboard.md](docs/dashboard.md) and [docs/graph-explorer.md](docs/graph-explorer.md).
+The dashboard includes graph exploration, project memory, LCM session search, token savings, and cost views. See [docs/dashboard.md](docs/dashboard.md).
 
 ## Privacy
 
-Core indexing, graph queries, MCP tools, memory, and dashboard data are local.
+Core indexing, graph queries, MCP tools, memory, and dashboard data stay in the
+local daemon-owned authority. That local processing boundary does not mean that
+every command is offline or that network state can be inferred from an absent
+value.
 
-Optional or external network calls:
+Network-capable effects are separate from core retrieval:
 
-- Worldwide counter: uploads one aggregate token-savings number only when enabled; the Worker also derives country from request metadata for aggregate geography.
-- Version check: fetches release metadata.
-- Pricing refresh: fetches public LiteLLM model pricing for `tracedecay cost`.
+- Worldwide counter: when opted in, sends the pending aggregate token-savings
+  amount and may fetch the public total/country display data.
+- Release checks and updates: contact GitHub release endpoints.
+- Cost pricing refresh: `tracedecay cost` may retrieve public model-pricing
+  data and cache it locally.
+
+These services receive normal transport metadata, including the connection's
+source address, in addition to any request payload. The counter request is an
+aggregate amount, not repository content, but it is not an anonymity guarantee.
+Use a network policy or firewall if a command must make no outbound connection.
+An opt-out, denial, timeout, or unavailable remote service must remain visible
+as that state; it is not evidence of a zero counter, an up-to-date release, or
+current pricing.
 
 Disable the worldwide counter with:
 
@@ -167,16 +185,23 @@ tracedecay disable-upload-counter
 
 ```bash
 tracedecay doctor
-tracedecay status --runtime
-tracedecay sync --doctor
+tracedecay status --json
 ```
+
+`tracedecay doctor` is read-only installation and authority diagnostics. It
+does not repair stores or rewrite host files; authorized maintenance is a
+separate daemon operation with its own preview, receipt, and recovery state.
 
 Common fixes:
 
 - Not initialized: run `tracedecay init` from the project root.
 - Agent does not see tools: run `tracedecay doctor --agent <name>`, then restart the agent.
-- Missing symbols: run `tracedecay sync` and confirm the file is not ignored.
-- Slow first index: use normal incremental `tracedecay sync` after the first run.
+- Missing symbols: inspect `tracedecay status --json` for the selected
+  generation and typed warming/refresh-required coverage; request an explicit
+  administrative refresh only when the daemon says it is needed, then confirm
+  the file is not ignored.
+- Slow first index: use daemon status/coverage to inspect warming and backlog;
+  routine updates are daemon-owned.
 
 ## Build
 
