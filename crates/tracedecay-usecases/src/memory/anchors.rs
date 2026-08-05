@@ -6,7 +6,7 @@ use std::future::Future;
 use thiserror::Error;
 
 use tracedecay_domain::{DomainError, FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecordV2};
-use tracedecay_store::FactStore;
+use tracedecay_store::FactLineageStore;
 
 use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
 
@@ -61,7 +61,7 @@ pub trait EvidenceAnchorResolver: Send + Sync {
     ) -> impl Future<Output = Result<ResolvedEvidenceAnchorV1, EvidenceAnchorResolutionError>> + Send;
 }
 
-impl<A: FactStore> MemoryApplication<A> {
+impl<A: FactLineageStore> MemoryApplication<A> {
     /// Resolves a daemon-authorized observation anchor before the caller
     /// materializes the returned record in `FactWriteBatch::new_anchors`.
     /// The fact shard never performs a cross-database anchor lookup itself.

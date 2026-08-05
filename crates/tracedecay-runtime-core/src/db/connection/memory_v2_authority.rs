@@ -8,7 +8,7 @@ use super::Database;
 impl Database {
     /// Marks an owner-bound V23 compatibility-bank projection dirty inside an
     /// already-open authoritative writer transaction.
-    pub(crate) async fn mark_memory_v2_compatibility_bank_dirty_in_transaction(
+    pub(crate) async fn mark_memory_v2_bank_dirty_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
@@ -19,7 +19,7 @@ impl Database {
         self.require_active_write_scope(
             "mark memory v2 compatibility bank dirty in writer transaction",
         )?;
-        memory_v2::mark_memory_v2_compatibility_bank_dirty_in_transaction(
+        memory_v2::mark_memory_v2_bank_dirty_in_transaction(
             transaction,
             owner,
             source_store_id,
@@ -32,7 +32,7 @@ impl Database {
     /// Replaces an owner-bound V23 compatibility-bank projection inside an
     /// already-open authoritative writer transaction.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn upsert_memory_v2_compatibility_bank_in_transaction(
+    pub(crate) async fn upsert_memory_v2_bank_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
@@ -45,7 +45,7 @@ impl Database {
         self.require_active_write_scope(
             "upsert memory v2 compatibility bank in writer transaction",
         )?;
-        memory_v2::upsert_memory_v2_compatibility_bank_in_transaction(
+        memory_v2::upsert_memory_v2_bank_in_transaction(
             transaction,
             owner,
             source_store_id,
@@ -59,7 +59,7 @@ impl Database {
 
     /// Deletes an empty owner-bound V23 compatibility-bank projection inside
     /// an already-open authoritative writer transaction.
-    pub(crate) async fn delete_memory_v2_compatibility_bank_in_transaction(
+    pub(crate) async fn delete_memory_v2_bank_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
@@ -69,7 +69,7 @@ impl Database {
         self.require_active_write_scope(
             "delete memory v2 compatibility bank in writer transaction",
         )?;
-        memory_v2::delete_memory_v2_compatibility_bank_in_transaction(
+        memory_v2::delete_memory_v2_bank_in_transaction(
             transaction,
             owner,
             source_store_id,
@@ -80,7 +80,7 @@ impl Database {
 
     /// Clears an owner-bound V23 dirty-bank generation only when it matches
     /// the generation the caller rebuilt in this writer transaction.
-    pub(crate) async fn clear_memory_v2_compatibility_bank_dirty_in_transaction(
+    pub(crate) async fn clear_memory_v2_bank_dirty_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
@@ -91,7 +91,7 @@ impl Database {
         self.require_active_write_scope(
             "clear memory v2 compatibility bank dirty in writer transaction",
         )?;
-        memory_v2::clear_memory_v2_compatibility_bank_dirty_in_transaction(
+        memory_v2::clear_memory_v2_bank_dirty_in_transaction(
             transaction,
             owner,
             source_store_id,

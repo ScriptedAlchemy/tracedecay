@@ -5,9 +5,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    CompatibilityFactSearchCursorV1, CompatibilityFactSearchFilterV1,
-    CompatibilityFactSearchKindV1, CompatibilityFactTargetV1, FactStoreError, FactStoreResult,
-    MAX_COMPATIBILITY_SEARCH_BYTES, StoredFactV1, validate_owned_fact_id,
+    FactLineageError, FactLineageResult, FactSearchCursor, FactSearchFilter, FactSearchKind,
+    FactTarget, MAX_FACT_SEARCH_BYTES, StoredFactV1, validate_owned_fact_id,
 };
 
 pub(super) const MAX_CURRENT_LIMIT: usize = 1_000;
@@ -206,7 +205,7 @@ pub struct FactCurrentQuery {
 }
 
 impl FactCurrentQuery {
-    pub fn new(owner: FactOwnerV1, fact_id: FactId) -> FactStoreResult<Self> {
+    pub fn new(owner: FactOwnerV1, fact_id: FactId) -> FactLineageResult<Self> {
         owner.validate()?;
         fact_id.validate()?;
         validate_owned_fact_id(&fact_id, &owner)?;
@@ -227,7 +226,7 @@ impl CurrentFactsQuery {
         owner: FactOwnerV1,
         after_fact_id: Option<FactId>,
         limit: usize,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         if let Some(fact_id) = &after_fact_id {
             fact_id.validate()?;
@@ -263,7 +262,7 @@ pub struct FactAsOfQuery {
 }
 
 impl FactAsOfQuery {
-    pub fn new(owner: FactOwnerV1, fact_id: FactId, as_of: UtcMicros) -> FactStoreResult<Self> {
+    pub fn new(owner: FactOwnerV1, fact_id: FactId, as_of: UtcMicros) -> FactLineageResult<Self> {
         owner.validate()?;
         fact_id.validate()?;
         validate_owned_fact_id(&fact_id, &owner)?;
@@ -295,7 +294,7 @@ pub struct FactLineageCursor {
 }
 
 impl FactLineageCursor {
-    pub fn new(occurred_at: UtcMicros, event_id: FactEventId) -> FactStoreResult<Self> {
+    pub fn new(occurred_at: UtcMicros, event_id: FactEventId) -> FactLineageResult<Self> {
         event_id.validate()?;
         Ok(Self {
             occurred_at,
@@ -334,11 +333,11 @@ impl LegacyFactQuery {
         owner: FactOwnerV1,
         source_store_id: SourceStoreId,
         legacy_fact_id: i64,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         source_store_id.validate()?;
         if legacy_fact_id <= 0 {
-            return Err(FactStoreError::InvalidLegacyFactId { legacy_fact_id });
+            return Err(FactLineageError::InvalidLegacyFactId { legacy_fact_id });
         }
         Ok(Self {
             owner,
@@ -360,7 +359,7 @@ impl LegacyFactQuery {
     }
 
     /// Validate the canonical result returned for this legacy lookup.
-    pub fn validate_resolved_fact_id(&self, fact_id: &FactId) -> FactStoreResult<()> {
+    pub fn validate_resolved_fact_id(&self, fact_id: &FactId) -> FactLineageResult<()> {
         validate_owned_fact_id(fact_id, &self.owner)
     }
 }
@@ -371,7 +370,7 @@ impl FactLineageQuery {
         fact_id: FactId,
         after: Option<FactLineageCursor>,
         limit: usize,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         fact_id.validate()?;
         validate_owned_fact_id(&fact_id, &owner)?;
@@ -409,7 +408,7 @@ pub struct RetrievalAnchorQuery {
 }
 
 impl RetrievalAnchorQuery {
-    pub fn new(owner: FactOwnerV1, anchor_id: RetrievalAnchorId) -> FactStoreResult<Self> {
+    pub fn new(owner: FactOwnerV1, anchor_id: RetrievalAnchorId) -> FactLineageResult<Self> {
         owner.validate()?;
         anchor_id.validate()?;
         Ok(Self { owner, anchor_id })
@@ -424,9 +423,9 @@ impl RetrievalAnchorQuery {
     }
 }
 
-pub(super) fn validate_limit(limit: usize, max: usize) -> FactStoreResult<()> {
+pub(super) fn validate_limit(limit: usize, max: usize) -> FactLineageResult<()> {
     if !(1..=max).contains(&limit) {
-        return Err(FactStoreError::InvalidQueryLimit { limit, max });
+        return Err(FactLineageError::InvalidQueryLimit { limit, max });
     }
     Ok(())
 }
@@ -435,13 +434,13 @@ pub(super) fn validate_limit(limit: usize, max: usize) -> FactStoreResult<()> {
 /// derived at the application boundary from sanitized content; storage never
 /// accepts a raw proposal payload for this read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactContentDigestQueryV1 {
+pub struct FactContentDigestQuery {
     owner: FactOwnerV1,
     content_digest: LocatorDigest,
 }
 
-impl CompatibilityFactContentDigestQueryV1 {
-    pub fn new(owner: FactOwnerV1, content_digest: LocatorDigest) -> FactStoreResult<Self> {
+impl FactContentDigestQuery {
+    pub fn new(owner: FactOwnerV1, content_digest: LocatorDigest) -> FactLineageResult<Self> {
         owner.validate()?;
         content_digest.validate()?;
         Ok(Self {
@@ -462,28 +461,28 @@ impl CompatibilityFactContentDigestQueryV1 {
 /// Bounded request for search, probe, related, or reason retrieval.  Search
 /// results must use deterministic score/fact-ID ordering in the response DTO.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactSearchQuery {
+pub struct FactSearchQuery {
     owner: FactOwnerV1,
-    kind: CompatibilityFactSearchKindV1,
+    kind: FactSearchKind,
     query: Option<String>,
-    filter: CompatibilityFactSearchFilterV1,
-    after: Option<CompatibilityFactSearchCursorV1>,
+    filter: FactSearchFilter,
+    after: Option<FactSearchCursor>,
     limit: usize,
 }
 
-impl CompatibilityFactSearchQuery {
+impl FactSearchQuery {
     pub fn new(
         owner: FactOwnerV1,
-        kind: CompatibilityFactSearchKindV1,
+        kind: FactSearchKind,
         query: Option<String>,
-        after: Option<CompatibilityFactSearchCursorV1>,
+        after: Option<FactSearchCursor>,
         limit: usize,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         Self::with_filter(
             owner,
             kind,
             query,
-            CompatibilityFactSearchFilterV1::default(),
+            FactSearchFilter::default(),
             after,
             limit,
         )
@@ -491,25 +490,22 @@ impl CompatibilityFactSearchQuery {
 
     pub fn with_filter(
         owner: FactOwnerV1,
-        kind: CompatibilityFactSearchKindV1,
+        kind: FactSearchKind,
         query: Option<String>,
-        filter: CompatibilityFactSearchFilterV1,
-        after: Option<CompatibilityFactSearchCursorV1>,
+        filter: FactSearchFilter,
+        after: Option<FactSearchCursor>,
         limit: usize,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         kind.validate()?;
         if let Some(query) = &query {
-            if query.trim().is_empty() || query.len() > MAX_COMPATIBILITY_SEARCH_BYTES {
-                return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            if query.trim().is_empty() || query.len() > MAX_FACT_SEARCH_BYTES {
+                return Err(FactLineageError::Contract(DomainError::NonCanonical {
                     field: "compatibility fact search query",
                 }));
             }
-        } else if matches!(
-            &kind,
-            CompatibilityFactSearchKindV1::Search | CompatibilityFactSearchKindV1::Probe
-        ) {
-            return Err(FactStoreError::Contract(DomainError::Empty {
+        } else if matches!(&kind, FactSearchKind::Search | FactSearchKind::Probe) {
+            return Err(FactLineageError::Contract(DomainError::Empty {
                 field: "compatibility fact search query",
             }));
         }
@@ -530,16 +526,16 @@ impl CompatibilityFactSearchQuery {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn kind(&self) -> CompatibilityFactSearchKindV1 {
+    pub fn kind(&self) -> FactSearchKind {
         self.kind.clone()
     }
     pub fn query(&self) -> Option<&str> {
         self.query.as_deref()
     }
-    pub fn filter(&self) -> &CompatibilityFactSearchFilterV1 {
+    pub fn filter(&self) -> &FactSearchFilter {
         &self.filter
     }
-    pub fn after(&self) -> Option<&CompatibilityFactSearchCursorV1> {
+    pub fn after(&self) -> Option<&FactSearchCursor> {
         self.after.as_ref()
     }
     pub fn limit(&self) -> usize {
@@ -549,7 +545,7 @@ impl CompatibilityFactSearchQuery {
 
 /// Deterministic compatibility list filters without exposing raw SQL fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactListQueryV1 {
+pub struct FactListQuery {
     owner: FactOwnerV1,
     category: Option<FactCategoryV1>,
     min_trust: Option<Confidence>,
@@ -557,14 +553,14 @@ pub struct CompatibilityFactListQueryV1 {
     limit: usize,
 }
 
-impl CompatibilityFactListQueryV1 {
+impl FactListQuery {
     pub fn new(
         owner: FactOwnerV1,
         category: Option<FactCategoryV1>,
         min_trust: Option<Confidence>,
         after_fact_id: Option<FactId>,
         limit: usize,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         if let Some(fact_id) = &after_fact_id {
             validate_owned_fact_id(fact_id, &owner)?;
@@ -597,18 +593,18 @@ impl CompatibilityFactListQueryV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactHistoryQueryV1 {
-    target: CompatibilityFactTargetV1,
+pub struct FactHistoryQuery {
+    target: FactTarget,
     after: Option<FactLineageCursor>,
     limit: usize,
 }
 
-impl CompatibilityFactHistoryQueryV1 {
+impl FactHistoryQuery {
     pub fn new(
-        target: CompatibilityFactTargetV1,
+        target: FactTarget,
         after: Option<FactLineageCursor>,
         limit: usize,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         validate_limit(limit, MAX_LINEAGE_LIMIT)?;
         Ok(Self {
             target,
@@ -617,7 +613,7 @@ impl CompatibilityFactHistoryQueryV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &FactTarget {
         &self.target
     }
     pub fn after(&self) -> Option<&FactLineageCursor> {
@@ -629,18 +625,18 @@ impl CompatibilityFactHistoryQueryV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactFeedbackHistoryQueryV1 {
-    target: CompatibilityFactTargetV1,
+pub struct FactFeedbackHistoryQuery {
+    target: FactTarget,
     after: Option<FactLineageCursor>,
     limit: usize,
 }
 
-impl CompatibilityFactFeedbackHistoryQueryV1 {
+impl FactFeedbackHistoryQuery {
     pub fn new(
-        target: CompatibilityFactTargetV1,
+        target: FactTarget,
         after: Option<FactLineageCursor>,
         limit: usize,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         validate_limit(limit, MAX_LINEAGE_LIMIT)?;
         Ok(Self {
             target,
@@ -649,7 +645,7 @@ impl CompatibilityFactFeedbackHistoryQueryV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &FactTarget {
         &self.target
     }
     pub fn after(&self) -> Option<&FactLineageCursor> {

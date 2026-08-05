@@ -7,21 +7,19 @@ use crate::db::engine::params;
 
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::{
-    CompatibilityFeedbackRepairProgressV1, CompatibilityMemoryAlgebraV1,
-    CompatibilityMemoryFeedbackFunnelV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1, FactCompatibilityResult,
-    FactStoreResult,
+    FactLineageResult, FactStoreResult, FeedbackRepairProgress, MemoryAlgebra,
+    MemoryFeedbackFunnel, MemoryRepairStats, MemoryStatus, ProjectionState,
 };
 
 use super::primitives::{
-    COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey,
-    compatibility_source_store_id, nonnegative_u64, row_i64, storage_error, storage_message,
+    FACT_READ_OPERATION, FACT_WRITE_OPERATION, OwnerKey, nonnegative_u64, row_i64, source_store_id,
+    storage_error, storage_message,
 };
 
-async fn compatibility_owner_status_counts_tx(
+async fn owner_status_counts_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> FactStoreResult<(u64, u64, u64, [u64; 4], u64, u64, u64, u64, u64, u64)> {
+) -> FactLineageResult<(u64, u64, u64, [u64; 4], u64, u64, u64, u64, u64, u64)> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -55,67 +53,31 @@ async fn compatibility_owner_status_counts_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     let row = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                "compatibility status is missing",
-            )
-        })?;
-    let fact_count = nonnegative_u64(
-        row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION)?,
-        "fact count",
-    )?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?
+        .ok_or_else(|| storage_message(FACT_WRITE_OPERATION, "compatibility status is missing"))?;
+    let fact_count = nonnegative_u64(row_i64(&row, 0, FACT_WRITE_OPERATION)?, "fact count")?;
     let trust = [
-        nonnegative_u64(
-            row_i64(&row, 1, COMPATIBILITY_WRITE_OPERATION)?,
-            "trust count",
-        )?,
-        nonnegative_u64(
-            row_i64(&row, 2, COMPATIBILITY_WRITE_OPERATION)?,
-            "trust count",
-        )?,
-        nonnegative_u64(
-            row_i64(&row, 3, COMPATIBILITY_WRITE_OPERATION)?,
-            "trust count",
-        )?,
-        nonnegative_u64(
-            row_i64(&row, 4, COMPATIBILITY_WRITE_OPERATION)?,
-            "trust count",
-        )?,
+        nonnegative_u64(row_i64(&row, 1, FACT_WRITE_OPERATION)?, "trust count")?,
+        nonnegative_u64(row_i64(&row, 2, FACT_WRITE_OPERATION)?, "trust count")?,
+        nonnegative_u64(row_i64(&row, 3, FACT_WRITE_OPERATION)?, "trust count")?,
+        nonnegative_u64(row_i64(&row, 4, FACT_WRITE_OPERATION)?, "trust count")?,
     ];
-    let below_default = nonnegative_u64(
-        row_i64(&row, 5, COMPATIBILITY_WRITE_OPERATION)?,
-        "trust count",
-    )?;
-    let helpful = nonnegative_u64(
-        row_i64(&row, 6, COMPATIBILITY_WRITE_OPERATION)?,
-        "helpful count",
-    )?;
-    let unhelpful = nonnegative_u64(
-        row_i64(&row, 7, COMPATIBILITY_WRITE_OPERATION)?,
-        "unhelpful count",
-    )?;
-    let retrieval_total = nonnegative_u64(
-        row_i64(&row, 8, COMPATIBILITY_WRITE_OPERATION)?,
-        "retrieval total",
-    )?;
-    let access_total = nonnegative_u64(
-        row_i64(&row, 9, COMPATIBILITY_WRITE_OPERATION)?,
-        "access total",
-    )?;
+    let below_default = nonnegative_u64(row_i64(&row, 5, FACT_WRITE_OPERATION)?, "trust count")?;
+    let helpful = nonnegative_u64(row_i64(&row, 6, FACT_WRITE_OPERATION)?, "helpful count")?;
+    let unhelpful = nonnegative_u64(row_i64(&row, 7, FACT_WRITE_OPERATION)?, "unhelpful count")?;
+    let retrieval_total =
+        nonnegative_u64(row_i64(&row, 8, FACT_WRITE_OPERATION)?, "retrieval total")?;
+    let access_total = nonnegative_u64(row_i64(&row, 9, FACT_WRITE_OPERATION)?, "access total")?;
     let retrieved_fact_count = nonnegative_u64(
-        row_i64(&row, 10, COMPATIBILITY_WRITE_OPERATION)?,
+        row_i64(&row, 10, FACT_WRITE_OPERATION)?,
         "retrieved fact count",
     )?;
-    let rated_fact_count = nonnegative_u64(
-        row_i64(&row, 11, COMPATIBILITY_WRITE_OPERATION)?,
-        "rated fact count",
-    )?;
+    let rated_fact_count =
+        nonnegative_u64(row_i64(&row, 11, FACT_WRITE_OPERATION)?, "rated fact count")?;
     Ok((
         fact_count,
         helpful,
@@ -130,16 +92,16 @@ async fn compatibility_owner_status_counts_tx(
     ))
 }
 
-async fn compatibility_owner_has_dirty_banks_tx(
+async fn owner_has_dirty_banks_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
+    let source_store_id = source_store_id()?;
     let mut rows = transaction
         .query(
             "SELECT 1
-             FROM memory_v2_compatibility_bank_dirty AS dirty
+             FROM memory_v2_bank_dirty AS dirty
              WHERE dirty.owner_kind = ?1 AND dirty.project_id = ?2
                AND dirty.owner_json = ?3 AND dirty.source_store_id = ?4
              LIMIT 1",
@@ -151,19 +113,19 @@ async fn compatibility_owner_has_dirty_banks_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?;
     Ok(rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?
         .is_some())
 }
 
-pub(super) async fn compatibility_memory_status_tx(
+pub(super) async fn memory_status_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    feedback_repair: CompatibilityFeedbackRepairProgressV1,
-) -> FactCompatibilityResult<CompatibilityMemoryStatusV1> {
+    feedback_repair: FeedbackRepairProgress,
+) -> FactStoreResult<MemoryStatus> {
     let (
         fact_count,
         helpful_count,
@@ -175,9 +137,9 @@ pub(super) async fn compatibility_memory_status_tx(
         retrieved_fact_count,
         rated_fact_count,
         feedback_total,
-    ) = compatibility_owner_status_counts_tx(transaction, owner).await?;
+    ) = owner_status_counts_tx(transaction, owner).await?;
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
+    let source_store_id = source_store_id()?;
     let mut entity_rows = transaction
         .query(
             "SELECT COUNT(DISTINCT relations.entity_id)
@@ -193,19 +155,16 @@ pub(super) async fn compatibility_memory_status_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?;
     let entity_row = entity_rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?
         .ok_or_else(|| {
-            storage_message(
-                COMPATIBILITY_READ_OPERATION,
-                "compatibility entity count is missing",
-            )
+            storage_message(FACT_READ_OPERATION, "compatibility entity count is missing")
         })?;
     let entity_count = nonnegative_u64(
-        row_i64(&entity_row, 0, COMPATIBILITY_READ_OPERATION)?,
+        row_i64(&entity_row, 0, FACT_READ_OPERATION)?,
         "entity count",
     )?;
     let mut missing_rows = transaction
@@ -240,25 +199,25 @@ pub(super) async fn compatibility_memory_status_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?;
     let missing_row = missing_rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                FACT_READ_OPERATION,
                 "compatibility missing vector count is missing",
             )
         })?;
     let missing_vector_count = nonnegative_u64(
-        row_i64(&missing_row, 0, COMPATIBILITY_READ_OPERATION)?,
+        row_i64(&missing_row, 0, FACT_READ_OPERATION)?,
         "missing vector count",
     )?;
-    let dirty_banks = compatibility_owner_has_dirty_banks_tx(transaction, owner).await?;
+    let dirty_banks = owner_has_dirty_banks_tx(transaction, owner).await?;
     let mut bank_rows = transaction
         .query(
-            "SELECT COUNT(*) FROM memory_v2_compatibility_banks AS banks
+            "SELECT COUNT(*) FROM memory_v2_banks AS banks
              WHERE banks.owner_kind = ?1 AND banks.project_id = ?2
                AND banks.owner_json = ?3 AND banks.source_store_id = ?4",
             params![
@@ -269,32 +228,26 @@ pub(super) async fn compatibility_memory_status_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?;
     let bank_row = bank_rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?
         .ok_or_else(|| {
-            storage_message(
-                COMPATIBILITY_READ_OPERATION,
-                "compatibility bank count is missing",
-            )
+            storage_message(FACT_READ_OPERATION, "compatibility bank count is missing")
         })?;
-    let bank_count = nonnegative_u64(
-        row_i64(&bank_row, 0, COMPATIBILITY_READ_OPERATION)?,
-        "bank count",
-    )?;
+    let bank_count = nonnegative_u64(row_i64(&bank_row, 0, FACT_READ_OPERATION)?, "bank count")?;
     let projection_state = if missing_vector_count == 0 && !dirty_banks {
-        CompatibilityProjectionStateV1::Ready
+        ProjectionState::Ready
     } else {
-        CompatibilityProjectionStateV1::Rebuilding
+        ProjectionState::Rebuilding
     };
-    CompatibilityMemoryStatusV1::new(
+    MemoryStatus::new(
         owner.clone(),
         fact_count,
         entity_count,
         bank_count,
-        CompatibilityMemoryAlgebraV1::new(
+        MemoryAlgebra::new(
             "amari_fhrr".to_owned(),
             HolographicEncoder::DIMENSIONS as u64,
             fact_count.saturating_mul(HolographicEncoder::DIMENSIONS as u64),
@@ -308,8 +261,8 @@ pub(super) async fn compatibility_memory_status_tx(
         unhelpful_count,
         missing_vector_count,
         projection_state,
-        CompatibilityMemoryRepairStatsV1::new(0, 0),
-        CompatibilityMemoryFeedbackFunnelV1::new(
+        MemoryRepairStats::new(0, 0),
+        MemoryFeedbackFunnel::new(
             retrieval_count_total,
             access_count_total,
             retrieved_fact_count,

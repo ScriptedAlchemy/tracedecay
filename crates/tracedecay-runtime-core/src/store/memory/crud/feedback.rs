@@ -1,32 +1,26 @@
 //! Compatibility fact feedback recording, history, inspection, and proposal promotion dispatch.
 
 use super::super::envelope::{
-    CompatibilityOperationReceiptV1, compatibility_digest,
-    compatibility_lookup_operation_receipt_tx, compatibility_receipt_u64,
-    compatibility_record_operation_receipt_tx, compatibility_target_digest,
+    OperationReceipt, digest, lookup_operation_receipt_tx, receipt_u64,
+    record_operation_receipt_tx, target_digest,
 };
 use super::super::primitives::{
-    COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey,
-    compatibility_legacy_timestamp, compatibility_now, compatibility_source_label,
-    compatibility_source_store_id, from_json, row_f64, row_i64, row_optional_string, row_string,
+    FACT_READ_OPERATION, FACT_WRITE_OPERATION, OwnerKey, fact_source_label, from_json,
+    legacy_timestamp, now, row_f64, row_i64, row_optional_string, row_string, source_store_id,
     storage_error, storage_message,
 };
 use super::super::projection::{
-    compatibility_fact_status_tx, compatibility_projection_metadata_tx,
-    compatibility_required_mapping_tx, load_compatibility_projection_tx,
-    resolve_compatibility_target_tx,
+    fact_status_tx, load_projection_tx, projection_metadata_tx, required_mapping_tx,
+    resolve_target_tx,
 };
 use super::super::proposals::{
-    compatibility_advance_proposal_tx, compatibility_proposal_action_id,
-    compatibility_proposal_record_tx, compatibility_replay_proposal_tx,
+    advance_proposal_tx, proposal_action_id, proposal_record_tx, replay_proposal_tx,
 };
-use super::super::scoring::compatibility_millionths;
+use super::super::scoring::millionths;
 use super::{
-    CompatibilityMirrorInsertV1, compatibility_commit_batch_tx,
-    compatibility_feedback_action_label, compatibility_feedback_delta, compatibility_initial_batch,
-    compatibility_legacy_mapping_for_new_fact, compatibility_mirror_feedback_tx,
-    compatibility_mirror_insert_tx, compatibility_payload_metadata, compatibility_sanitize_payload,
-    compatibility_update_feedback_projection_tx, load_current_fact_tx, query_fact_lineage_tx,
+    MirrorInsert, commit_batch_tx, feedback_action_label, feedback_delta, initial_batch,
+    legacy_mapping_for_new_fact, load_current_fact_tx, mirror_feedback_tx, mirror_insert_tx,
+    payload_metadata, query_fact_lineage_tx, sanitize_payload, update_feedback_projection_tx,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
@@ -38,64 +32,57 @@ use tracedecay_domain::{
     FactLineageEventV1, FactOwnerV1, RetrievalAnchorRecordV2, UtcMicros,
 };
 use tracedecay_store::{
-    CompatibilityFactFeedbackActionV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackDetailsAvailabilityV1, CompatibilityFactFeedbackHistoryEntryV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryV1, CompatibilityFactInspectionV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalPromotionDispositionV1,
-    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
-    CompatibilityFactProposalRecordV1, CompatibilityFactProposalStateV1, CompatibilityFactTargetV1,
-    CompatibilityFeedbackRepairProgressV1, FactCommitOutcome, FactCompatibilityResult,
-    FactLineageCursor, FactLineageQuery, FactStoreError, FactStoreResult, FactWriteBatch,
-    PromoteFactProposalOutcome, StoredFactV1,
+    FactCommitOutcome, FactFeedbackAction, FactFeedbackCommand, FactFeedbackDetailsAvailability,
+    FactFeedbackHistory, FactFeedbackHistoryEntry, FactFeedbackHistoryQuery, FactFeedbackOutcome,
+    FactHistory, FactInspection, FactLineageCursor, FactLineageError, FactLineageQuery,
+    FactLineageResult, FactProjection, FactProposalPromotion, FactProposalPromotionDisposition,
+    FactProposalPromotionResult, FactProposalRecord, FactProposalState, FactStoreResult,
+    FactTarget, FactWriteBatch, FeedbackRepairProgress, PromoteFactProposalOutcome, StoredFactV1,
 };
-fn compatibility_receipt_i32(receipt: &Value, field: &'static str) -> FactStoreResult<i32> {
+fn receipt_i32(receipt: &Value, field: &'static str) -> FactLineageResult<i32> {
     receipt
         .get(field)
         .and_then(Value::as_i64)
         .and_then(|value| i32::try_from(value).ok())
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                FACT_WRITE_OPERATION,
                 format!("compatibility receipt {field} is malformed"),
             )
         })
 }
 
-fn compatibility_receipt_confidence(
-    receipt: &Value,
-    field: &'static str,
-) -> FactStoreResult<Confidence> {
-    let millionths = compatibility_receipt_u64(receipt, field)?;
+fn receipt_confidence(receipt: &Value, field: &'static str) -> FactLineageResult<Confidence> {
+    let millionths = receipt_u64(receipt, field)?;
     if millionths > 1_000_000 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             format!("compatibility receipt {field} is out of range"),
         ));
     }
-    Confidence::new(millionths as f64 / 1_000_000.0).map_err(FactStoreError::from)
+    Confidence::new(millionths as f64 / 1_000_000.0).map_err(FactLineageError::from)
 }
 
-fn compatibility_feedback_detail(value: Option<&str>) -> Option<String> {
+fn feedback_detail(value: Option<&str>) -> Option<String> {
     value
         .and_then(sanitize_provider_metadata_text)
         .filter(|value| !value.trim().is_empty())
 }
 
-fn compatibility_feedback_details(
+fn feedback_details(
     source: Option<&str>,
     reason: Option<&str>,
 ) -> (
     String,
     Option<String>,
     Option<String>,
-    CompatibilityFactFeedbackDetailsAvailabilityV1,
+    FactFeedbackDetailsAvailability,
 ) {
     let persisted_source = match source {
-        Some(source) => compatibility_feedback_detail(Some(source)),
+        Some(source) => feedback_detail(Some(source)),
         None => Some("mcp".to_owned()),
     };
-    let persisted_note = compatibility_feedback_detail(reason);
+    let persisted_note = feedback_detail(reason);
     let details_available = reason.is_none() || persisted_note.is_some();
     if let Some(source) = persisted_source
         && details_available
@@ -104,25 +91,25 @@ fn compatibility_feedback_details(
             source.clone(),
             Some(source),
             persisted_note,
-            CompatibilityFactFeedbackDetailsAvailabilityV1::Available,
+            FactFeedbackDetailsAvailability::Available,
         )
     } else {
         (
             "mcp".to_owned(),
             None,
             None,
-            CompatibilityFactFeedbackDetailsAvailabilityV1::Unknown,
+            FactFeedbackDetailsAvailability::Unknown,
         )
     }
 }
 
-fn compatibility_feedback_batch(
+fn feedback_batch(
     fact: &StoredFactV1,
     new_trust: Confidence,
     expected_last_event_id: Option<FactEventId>,
     actor: Option<ActorId>,
     now: UtcMicros,
-) -> FactStoreResult<FactWriteBatch> {
+) -> FactLineageResult<FactWriteBatch> {
     let kind = if new_trust == fact.trust() {
         FactLineageEventKindV1::Curated {
             action: FactCurationActionV1::Retained,
@@ -154,66 +141,62 @@ fn compatibility_feedback_batch(
     )
 }
 
-fn compatibility_feedback_details_label(
-    availability: CompatibilityFactFeedbackDetailsAvailabilityV1,
-) -> &'static str {
+fn feedback_details_label(availability: FactFeedbackDetailsAvailability) -> &'static str {
     match availability {
-        CompatibilityFactFeedbackDetailsAvailabilityV1::Available => "available",
-        CompatibilityFactFeedbackDetailsAvailabilityV1::LegacyRedacted => "legacy_redacted",
-        CompatibilityFactFeedbackDetailsAvailabilityV1::Unknown => "unknown",
+        FactFeedbackDetailsAvailability::Available => "available",
+        FactFeedbackDetailsAvailability::LegacyRedacted => "legacy_redacted",
+        FactFeedbackDetailsAvailability::Unknown => "unknown",
     }
 }
 
-fn compatibility_feedback_details_availability(
+fn feedback_details_availability(
     value: &str,
-) -> FactStoreResult<CompatibilityFactFeedbackDetailsAvailabilityV1> {
+) -> FactLineageResult<FactFeedbackDetailsAvailability> {
     match value {
-        "available" => Ok(CompatibilityFactFeedbackDetailsAvailabilityV1::Available),
-        "legacy_redacted" => Ok(CompatibilityFactFeedbackDetailsAvailabilityV1::LegacyRedacted),
-        "unknown" => Ok(CompatibilityFactFeedbackDetailsAvailabilityV1::Unknown),
+        "available" => Ok(FactFeedbackDetailsAvailability::Available),
+        "legacy_redacted" => Ok(FactFeedbackDetailsAvailability::LegacyRedacted),
+        "unknown" => Ok(FactFeedbackDetailsAvailability::Unknown),
         _ => Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
+            FACT_READ_OPERATION,
             format!("unknown compatibility feedback detail availability {value:?}"),
         )),
     }
 }
 
-fn compatibility_feedback_action(
-    value: &str,
-) -> FactStoreResult<CompatibilityFactFeedbackActionV1> {
+fn feedback_action(value: &str) -> FactLineageResult<FactFeedbackAction> {
     match value {
-        "helpful" => Ok(CompatibilityFactFeedbackActionV1::Helpful),
-        "unhelpful" => Ok(CompatibilityFactFeedbackActionV1::Unhelpful),
+        "helpful" => Ok(FactFeedbackAction::Helpful),
+        "unhelpful" => Ok(FactFeedbackAction::Unhelpful),
         _ => Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
+            FACT_READ_OPERATION,
             format!("unknown compatibility feedback action {value:?}"),
         )),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn compatibility_record_feedback_history_tx(
+async fn record_feedback_history_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
     event_id: &FactEventId,
     legacy_feedback_event_id: i64,
-    action: CompatibilityFactFeedbackActionV1,
+    action: FactFeedbackAction,
     old_trust: Confidence,
     new_trust: Confidence,
     occurred_at: UtcMicros,
     source: Option<&str>,
     note: Option<&str>,
-    availability: CompatibilityFactFeedbackDetailsAvailabilityV1,
-) -> FactStoreResult<()> {
+    availability: FactFeedbackDetailsAvailability,
+) -> FactLineageResult<()> {
     if legacy_feedback_event_id <= 0 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             "compatibility legacy feedback event id must be positive",
         ));
     }
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
+    let source_store_id = source_store_id()?;
     transaction
         .execute(
             "INSERT INTO memory_v2_legacy_feedback_event_map(
@@ -229,7 +212,7 @@ async fn compatibility_record_feedback_history_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     transaction
         .execute(
             "INSERT INTO memory_v2_feedback_history(
@@ -241,81 +224,80 @@ async fn compatibility_record_feedback_history_tx(
                 key.project_id.as_str(),
                 fact_id.as_str(),
                 event_id.as_str(),
-                compatibility_feedback_action_label(action),
+                feedback_action_label(action),
                 old_trust.as_f64(),
                 new_trust.as_f64(),
                 occurred_at.0,
                 source,
                 note,
-                compatibility_feedback_details_label(availability),
+                feedback_details_label(availability),
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     Ok(())
 }
 
-async fn compatibility_replay_feedback_tx(
+async fn replay_feedback_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1> {
+    receipt: &OperationReceipt,
+) -> FactStoreResult<FactFeedbackOutcome> {
     let fact_id = receipt.fact_id.as_ref().ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             "compatibility feedback receipt fact is missing",
         )
     })?;
     let event_id = receipt.event_id.as_ref().ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             "compatibility feedback receipt event is missing",
         )
     })?;
-    let fact = load_compatibility_projection_tx(transaction, owner, fact_id)
+    let fact = load_projection_tx(transaction, owner, fact_id)
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                FACT_WRITE_OPERATION,
                 "compatibility feedback replay fact is missing",
             )
         })?;
-    let legacy_feedback_event_id = i64::try_from(compatibility_receipt_u64(
-        &receipt.receipt,
-        "legacy_feedback_event_id",
-    )?)
-    .map_err(|_| {
-        storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
-            "compatibility feedback receipt legacy event id is out of range",
-        )
-    })?;
-    CompatibilityFactFeedbackOutcomeV1::new(
+    let legacy_feedback_event_id =
+        i64::try_from(receipt_u64(&receipt.receipt, "legacy_feedback_event_id")?).map_err(
+            |_| {
+                storage_message(
+                    FACT_WRITE_OPERATION,
+                    "compatibility feedback receipt legacy event id is out of range",
+                )
+            },
+        )?;
+    FactFeedbackOutcome::new(
         fact,
         event_id.clone(),
         Some(legacy_feedback_event_id),
-        compatibility_receipt_confidence(&receipt.receipt, "old_trust_millionths")?,
-        compatibility_receipt_confidence(&receipt.receipt, "new_trust_millionths")?,
-        compatibility_receipt_i32(&receipt.receipt, "trust_delta_millionths")?,
-        compatibility_receipt_u64(&receipt.receipt, "helpful_count")?,
-        compatibility_receipt_u64(&receipt.receipt, "unhelpful_count")?,
+        receipt_confidence(&receipt.receipt, "old_trust_millionths")?,
+        receipt_confidence(&receipt.receipt, "new_trust_millionths")?,
+        receipt_i32(&receipt.receipt, "trust_delta_millionths")?,
+        receipt_u64(&receipt.receipt, "helpful_count")?,
+        receipt_u64(&receipt.receipt, "unhelpful_count")?,
     )
     .map_err(Into::into)
 }
 
-pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
+pub(in crate::store::memory) async fn record_fact_feedback_tx(
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactFeedbackCommandV1,
-) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1> {
-    let request_digest = compatibility_digest(json!({
-        "target": compatibility_target_digest(request.target())?,
+    request: &FactFeedbackCommand,
+) -> FactStoreResult<FactFeedbackOutcome> {
+    let request_digest = digest(json!({
+        "target": target_digest(request.target())?,
         "expected_last_event_id": request.expected_last_event_id().map(FactEventId::as_str),
-        "action": compatibility_feedback_action_label(request.action()),
+        "action": feedback_action_label(request.action()),
         "actor": request.actor().map(ActorId::as_str),
         "source": request.source(),
         "reason": request.reason(),
     }))?;
-    if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
+    if let Some(receipt) = lookup_operation_receipt_tx(
         transaction,
         request.target().owner(),
         request.operation_id(),
@@ -324,14 +306,13 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
     )
     .await?
     {
-        return compatibility_replay_feedback_tx(transaction, request.target().owner(), &receipt)
-            .await;
+        return replay_feedback_tx(transaction, request.target().owner(), &receipt).await;
     }
-    let fact_id = resolve_compatibility_target_tx(transaction, request.target())
+    let fact_id = resolve_target_tx(transaction, request.target())
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                FACT_WRITE_OPERATION,
                 "compatibility feedback target is missing",
             )
         })?;
@@ -340,17 +321,16 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                FACT_WRITE_OPERATION,
                 "compatibility feedback target is unavailable",
             )
         })?;
     let old_trust = current.trust();
-    let new_trust = Confidence::new(
-        (old_trust.as_f64() + compatibility_feedback_delta(request.action())).clamp(0.0, 1.0),
-    )
-    .map_err(FactStoreError::from)?;
-    let now = compatibility_now()?;
-    let batch = compatibility_feedback_batch(
+    let new_trust =
+        Confidence::new((old_trust.as_f64() + feedback_delta(request.action())).clamp(0.0, 1.0))
+            .map_err(FactLineageError::from)?;
+    let now = now()?;
+    let batch = feedback_batch(
         &current,
         new_trust,
         request
@@ -360,7 +340,7 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
         request.actor().cloned(),
         now,
     )?;
-    let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
+    let (canonical_receipt, _) = commit_batch_tx(transaction, &batch).await?;
     let event_id = canonical_receipt.last_event_id().clone();
     publish_fact_feedback_finding_tx(
         transaction,
@@ -369,23 +349,22 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
         event_id.as_str(),
     )
     .await
-    .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-    let mapping =
-        compatibility_required_mapping_tx(transaction, request.target().owner(), &fact_id).await?;
+    .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
+    let mapping = required_mapping_tx(transaction, request.target().owner(), &fact_id).await?;
     let (mirror_source, history_source, history_note, availability) =
-        compatibility_feedback_details(request.source(), request.reason());
-    let legacy_feedback_event_id = compatibility_mirror_feedback_tx(
+        feedback_details(request.source(), request.reason());
+    let legacy_feedback_event_id = mirror_feedback_tx(
         transaction,
         mapping.legacy_fact_id(),
         request.action(),
         old_trust,
         new_trust,
-        compatibility_legacy_timestamp(now),
+        legacy_timestamp(now),
         &mirror_source,
         history_note.as_deref(),
     )
     .await?;
-    compatibility_record_feedback_history_tx(
+    record_feedback_history_tx(
         transaction,
         request.target().owner(),
         &fact_id,
@@ -400,7 +379,7 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
         availability,
     )
     .await?;
-    compatibility_update_feedback_projection_tx(
+    update_feedback_projection_tx(
         transaction,
         request.target().owner(),
         &fact_id,
@@ -408,15 +387,15 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
         now,
     )
     .await?;
-    let fact = load_compatibility_projection_tx(transaction, request.target().owner(), &fact_id)
+    let fact = load_projection_tx(transaction, request.target().owner(), &fact_id)
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                FACT_WRITE_OPERATION,
                 "compatibility feedback projection is missing",
             )
         })?;
-    let (_, _, telemetry) = compatibility_projection_metadata_tx(
+    let (_, _, telemetry) = projection_metadata_tx(
         transaction,
         request.target().owner(),
         &fact_id,
@@ -426,14 +405,14 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
     let trust_delta_millionths =
         ((new_trust.as_f64() - old_trust.as_f64()) * 1_000_000.0).round() as i32;
     let receipt = json!({
-        "old_trust_millionths": compatibility_millionths(old_trust.as_f64()),
-        "new_trust_millionths": compatibility_millionths(new_trust.as_f64()),
+        "old_trust_millionths": millionths(old_trust.as_f64()),
+        "new_trust_millionths": millionths(new_trust.as_f64()),
         "trust_delta_millionths": trust_delta_millionths,
         "helpful_count": telemetry.helpful_count(),
         "unhelpful_count": telemetry.unhelpful_count(),
         "legacy_feedback_event_id": legacy_feedback_event_id,
     });
-    compatibility_record_operation_receipt_tx(
+    record_operation_receipt_tx(
         transaction,
         request.target().owner(),
         request.operation_id(),
@@ -445,7 +424,7 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
         now,
     )
     .await?;
-    CompatibilityFactFeedbackOutcomeV1::new(
+    FactFeedbackOutcome::new(
         fact,
         event_id,
         Some(legacy_feedback_event_id),
@@ -458,22 +437,22 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
     .map_err(Into::into)
 }
 
-pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
+pub(in crate::store::memory) async fn fact_feedback_history_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactFeedbackHistoryQueryV1,
-    repair_progress: CompatibilityFeedbackRepairProgressV1,
-) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1> {
-    let fact_id = resolve_compatibility_target_tx(transaction, query.target())
+    query: &FactFeedbackHistoryQuery,
+    repair_progress: FeedbackRepairProgress,
+) -> FactStoreResult<FactFeedbackHistory> {
+    let fact_id = resolve_target_tx(transaction, query.target())
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                FACT_READ_OPERATION,
                 "compatibility feedback history target is missing",
             )
         })?;
     let key = OwnerKey::new(query.target().owner())?;
     let fetch_limit = i64::try_from(query.limit().saturating_add(1)).map_err(|_| {
-        FactStoreError::InvalidQueryLimit {
+        FactLineageError::InvalidQueryLimit {
             limit: query.limit(),
             max: usize::MAX,
         }
@@ -506,29 +485,25 @@ pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?;
     let mut events = Vec::with_capacity(query.limit().saturating_add(1));
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?
     {
-        events.push(CompatibilityFactFeedbackHistoryEntryV1::new(
-            FactEventId::new(row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?)
-                .map_err(FactStoreError::from)?,
-            UtcMicros(row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?),
-            compatibility_feedback_action(&row_string(&row, 2, COMPATIBILITY_READ_OPERATION)?)?,
-            Confidence::new(row_f64(&row, 3, COMPATIBILITY_READ_OPERATION)?)
-                .map_err(FactStoreError::from)?,
-            Confidence::new(row_f64(&row, 4, COMPATIBILITY_READ_OPERATION)?)
-                .map_err(FactStoreError::from)?,
-            row_optional_string(&row, 5, COMPATIBILITY_READ_OPERATION)?,
-            row_optional_string(&row, 6, COMPATIBILITY_READ_OPERATION)?,
-            compatibility_feedback_details_availability(&row_string(
-                &row,
-                7,
-                COMPATIBILITY_READ_OPERATION,
-            )?)?,
+        events.push(FactFeedbackHistoryEntry::new(
+            FactEventId::new(row_string(&row, 0, FACT_READ_OPERATION)?)
+                .map_err(FactLineageError::from)?,
+            UtcMicros(row_i64(&row, 1, FACT_READ_OPERATION)?),
+            feedback_action(&row_string(&row, 2, FACT_READ_OPERATION)?)?,
+            Confidence::new(row_f64(&row, 3, FACT_READ_OPERATION)?)
+                .map_err(FactLineageError::from)?,
+            Confidence::new(row_f64(&row, 4, FACT_READ_OPERATION)?)
+                .map_err(FactLineageError::from)?,
+            row_optional_string(&row, 5, FACT_READ_OPERATION)?,
+            row_optional_string(&row, 6, FACT_READ_OPERATION)?,
+            feedback_details_availability(&row_string(&row, 7, FACT_READ_OPERATION)?)?,
         )?);
     }
     let has_more = events.len() > query.limit();
@@ -541,7 +516,7 @@ pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
         })
         .flatten()
         .transpose()?;
-    CompatibilityFactFeedbackHistoryV1::new_with_repair_progress(
+    FactFeedbackHistory::new_with_repair_progress(
         query.target().owner().clone(),
         events,
         next_after,
@@ -550,20 +525,20 @@ pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
     .map_err(Into::into)
 }
 
-pub(in crate::store::memory) async fn inspect_compatibility_fact_tx(
+pub(in crate::store::memory) async fn inspect_fact_tx(
     transaction: &Transaction<'_>,
-    target: &CompatibilityFactTargetV1,
-) -> FactCompatibilityResult<Option<CompatibilityFactInspectionV1>> {
-    let Some(fact_id) = resolve_compatibility_target_tx(transaction, target).await? else {
+    target: &FactTarget,
+) -> FactStoreResult<Option<FactInspection>> {
+    let Some(fact_id) = resolve_target_tx(transaction, target).await? else {
         return Ok(None);
     };
-    let Some(CompatibilityFactProjectionV1::Available(fact)) =
-        load_compatibility_projection_tx(transaction, target.owner(), &fact_id).await?
+    let Some(FactProjection::Available(fact)) =
+        load_projection_tx(transaction, target.owner(), &fact_id).await?
     else {
         return Ok(None);
     };
     let lineage = FactLineageQuery::new(target.owner().clone(), fact_id.clone(), None, 1_000)?;
-    let history = CompatibilityFactHistoryV1::new(
+    let history = FactHistory::new(
         target.owner().clone(),
         fact_id.clone(),
         query_fact_lineage_tx(transaction, &lineage).await?,
@@ -606,31 +581,31 @@ pub(in crate::store::memory) async fn inspect_compatibility_fact_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?;
     let mut anchors = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_READ_OPERATION, error))?
     {
         let anchor = from_json::<RetrievalAnchorRecordV2>(
-            &row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?,
-            COMPATIBILITY_READ_OPERATION,
+            &row_string(&row, 0, FACT_READ_OPERATION)?,
+            FACT_READ_OPERATION,
         )?;
         if FactOwnerV1::from(anchor.owner().clone()) != *target.owner() {
-            return Err(FactStoreError::OwnerMismatch.into());
+            return Err(FactLineageError::OwnerMismatch.into());
         }
         anchors.push(anchor);
     }
-    let status = compatibility_fact_status_tx(transaction, target.owner(), &fact_id)
+    let status = fact_status_tx(transaction, target.owner(), &fact_id)
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                FACT_READ_OPERATION,
                 "compatibility inspection status is missing",
             )
         })?;
-    CompatibilityFactInspectionV1::new(*fact, history, anchors, status)
+    FactInspection::new(*fact, history, anchors, status)
         .map(Some)
         .map_err(Into::into)
 }
@@ -645,29 +620,28 @@ pub(in crate::store::memory) struct PromotionAttempt {
     pub(in crate::store::memory) wrote: bool,
 }
 
-pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_tx(
+pub(in crate::store::memory) async fn promote_fact_proposal_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactProposalPromotionV1,
-) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
-    let result =
-        promote_compatibility_fact_proposal_with_disposition_tx(db, transaction, request).await?;
+    request: &FactProposalPromotion,
+) -> FactStoreResult<FactProposalRecord> {
+    let result = promote_fact_proposal_with_disposition_tx(db, transaction, request).await?;
     Ok(result.proposal().clone())
 }
 
-pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_disposition_tx(
+pub(in crate::store::memory) async fn promote_fact_proposal_with_disposition_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactProposalPromotionV1,
-) -> FactCompatibilityResult<CompatibilityFactProposalPromotionResultV1> {
+    request: &FactProposalPromotion,
+) -> FactStoreResult<FactProposalPromotionResult> {
     let material = json!({
         "proposal_id": request.proposal_id().as_str(),
         "expected_revision": request.expected_revision().get(),
         "reviewer": request.reviewer().map(ActorId::as_str),
     });
-    let request_digest = compatibility_digest(material.clone())?;
-    let operation_id = compatibility_proposal_action_id("proposal-promote", material)?;
-    if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
+    let request_digest = digest(material.clone())?;
+    let operation_id = proposal_action_id("proposal-promote", material)?;
+    if let Some(receipt) = lookup_operation_receipt_tx(
         transaction,
         request.owner(),
         &operation_id,
@@ -676,47 +650,35 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
     )
     .await?
     {
-        let proposal =
-            compatibility_replay_proposal_tx(transaction, request.owner(), &receipt).await?;
+        let proposal = replay_proposal_tx(transaction, request.owner(), &receipt).await?;
         let disposition = match proposal.state() {
-            CompatibilityFactProposalStateV1::Applied => {
-                CompatibilityFactProposalPromotionDispositionV1::AlreadyPromoted
-            }
-            CompatibilityFactProposalStateV1::Quarantined => {
-                CompatibilityFactProposalPromotionDispositionV1::Quarantined
-            }
+            FactProposalState::Applied => FactProposalPromotionDisposition::AlreadyPromoted,
+            FactProposalState::Quarantined => FactProposalPromotionDisposition::Quarantined,
             _ => {
                 return Err(storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    FACT_WRITE_OPERATION,
                     "compatibility promotion receipt does not resolve to a terminal proposal",
                 )
                 .into());
             }
         };
-        return CompatibilityFactProposalPromotionResultV1::new(proposal, disposition)
-            .map_err(Into::into);
+        return FactProposalPromotionResult::new(proposal, disposition).map_err(Into::into);
     }
-    let proposal =
-        compatibility_proposal_record_tx(transaction, request.owner(), request.proposal_id())
-            .await?
-            .ok_or_else(|| {
-                storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
-                    "compatibility proposal is missing",
-                )
-            })?;
-    if proposal.state() != CompatibilityFactProposalStateV1::PendingApproval
+    let proposal = proposal_record_tx(transaction, request.owner(), request.proposal_id())
+        .await?
+        .ok_or_else(|| storage_message(FACT_WRITE_OPERATION, "fact proposal is missing"))?;
+    if proposal.state() != FactProposalState::PendingApproval
         || proposal.revision() != request.expected_revision()
     {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
-            "compatibility proposal revision or state changed before promotion",
+            FACT_WRITE_OPERATION,
+            "fact proposal revision or state changed before promotion",
         )
         .into());
     }
-    let now = compatibility_now()?;
-    let payload_metadata = compatibility_payload_metadata(proposal.request().metadata());
-    let sanitized = compatibility_sanitize_payload(
+    let now = now()?;
+    let payload_metadata = payload_metadata(proposal.request().metadata());
+    let sanitized = sanitize_payload(
         proposal.request().content(),
         proposal.request().category(),
         proposal.request().tags(),
@@ -725,13 +687,13 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
     )?;
     let Some(sanitized) = sanitized else {
         let reason = "content rejected by privacy sanitizer";
-        compatibility_advance_proposal_tx(
+        advance_proposal_tx(
             transaction,
             request.owner(),
             request.proposal_id(),
-            CompatibilityFactProposalStateV1::PendingApproval,
+            FactProposalState::PendingApproval,
             request.expected_revision(),
-            CompatibilityFactProposalStateV1::Quarantined,
+            FactProposalState::Quarantined,
             request.reviewer(),
             Some(reason),
             &request_digest,
@@ -746,7 +708,7 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
             "state": "quarantined",
             "revision": request.expected_revision().get().saturating_add(1),
         });
-        compatibility_record_operation_receipt_tx(
+        record_operation_receipt_tx(
             transaction,
             request.owner(),
             &operation_id,
@@ -758,24 +720,24 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
             now,
         )
         .await?;
-        let quarantined = compatibility_replay_proposal_tx(
+        let quarantined = replay_proposal_tx(
             transaction,
             request.owner(),
-            &CompatibilityOperationReceiptV1 {
+            &OperationReceipt {
                 fact_id: None,
                 event_id: None,
                 receipt,
             },
         )
         .await?;
-        return CompatibilityFactProposalPromotionResultV1::new(
+        return FactProposalPromotionResult::new(
             quarantined,
-            CompatibilityFactProposalPromotionDispositionV1::Quarantined,
+            FactProposalPromotionDisposition::Quarantined,
         )
         .map_err(Into::into);
     };
-    let source = compatibility_source_label(proposal.request().source())?;
-    let (fact_id, assertion_id, event_id) = match compatibility_mirror_insert_tx(
+    let source = fact_source_label(proposal.request().source())?;
+    let (fact_id, assertion_id, event_id) = match mirror_insert_tx(
         db,
         transaction,
         request.owner(),
@@ -786,13 +748,13 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
     )
     .await?
     {
-        CompatibilityMirrorInsertV1::Existing { fact_id, .. } => {
+        MirrorInsert::Existing { fact_id, .. } => {
             let key = OwnerKey::new(request.owner())?;
             let fact = load_current_fact_tx(transaction, &key, request.owner(), &fact_id)
                 .await?
                 .ok_or_else(|| {
                     storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
+                        FACT_WRITE_OPERATION,
                         "existing compatibility mirror has no canonical current fact",
                     )
                 })?;
@@ -802,10 +764,10 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
                 fact.last_event_id().clone(),
             )
         }
-        CompatibilityMirrorInsertV1::Inserted(legacy_fact_id) => {
+        MirrorInsert::Inserted(legacy_fact_id) => {
             let (identity, mapping) =
-                compatibility_legacy_mapping_for_new_fact(request.owner(), legacy_fact_id, now)?;
-            let batch = compatibility_initial_batch(
+                legacy_mapping_for_new_fact(request.owner(), legacy_fact_id, now)?;
+            let batch = initial_batch(
                 request.owner(),
                 identity,
                 mapping.clone(),
@@ -815,10 +777,10 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
                 proposal.request().actor().cloned(),
                 now,
             )?;
-            let (receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
+            let (receipt, _) = commit_batch_tx(transaction, &batch).await?;
             let assertion_id = receipt.active_assertion_id().cloned().ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    FACT_WRITE_OPERATION,
                     "promoted compatibility fact has no active assertion",
                 )
             })?;
@@ -829,13 +791,13 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
             )
         }
     };
-    compatibility_advance_proposal_tx(
+    advance_proposal_tx(
         transaction,
         request.owner(),
         request.proposal_id(),
-        CompatibilityFactProposalStateV1::PendingApproval,
+        FactProposalState::PendingApproval,
         request.expected_revision(),
-        CompatibilityFactProposalStateV1::Applied,
+        FactProposalState::Applied,
         request.reviewer(),
         None,
         &request_digest,
@@ -850,7 +812,7 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
         "state": "applied",
         "revision": request.expected_revision().get().saturating_add(1),
     });
-    compatibility_record_operation_receipt_tx(
+    record_operation_receipt_tx(
         transaction,
         request.owner(),
         &operation_id,
@@ -862,19 +824,16 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
         now,
     )
     .await?;
-    let promoted = compatibility_replay_proposal_tx(
+    let promoted = replay_proposal_tx(
         transaction,
         request.owner(),
-        &CompatibilityOperationReceiptV1 {
+        &OperationReceipt {
             fact_id: Some(fact_id),
             event_id: Some(event_id),
             receipt,
         },
     )
     .await?;
-    CompatibilityFactProposalPromotionResultV1::new(
-        promoted,
-        CompatibilityFactProposalPromotionDispositionV1::NewlyPromoted,
-    )
-    .map_err(Into::into)
+    FactProposalPromotionResult::new(promoted, FactProposalPromotionDisposition::NewlyPromoted)
+        .map_err(Into::into)
 }

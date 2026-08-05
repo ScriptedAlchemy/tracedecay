@@ -6,7 +6,7 @@ const MEMORY_SCOPE: &[ScopeDimension] = &[ScopeDimension::Resource];
 
 pub(super) const SPECS: [RetainedSurfaceSpec; 3] = [
     RetainedSurfaceSpec {
-        operation: RetainedSurfaceOperation::FactStore,
+        operation: RetainedSurfaceOperation::FactLineageStore,
         summary: "Use the retained fact store",
         description: "Read or curate facts through the owner-bound memory application.",
         example: "Search the retained project facts",

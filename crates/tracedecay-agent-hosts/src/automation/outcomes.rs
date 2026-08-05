@@ -22,9 +22,8 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_store::{
-    CompatibilityFactAvailabilityV1, CompatibilityFactHistoryQueryV1, CompatibilityFactIdV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalStateV1, CompatibilityFactTargetV1, FactCompatibilityStore,
+    FactAvailability, FactHistoryQuery, FactProjection, FactProposalRecord, FactProposalState,
+    FactStore, FactTarget,
 };
 
 use super::backend::AgentTaskKind;
@@ -102,12 +101,9 @@ pub struct SkillOutcomeRecord {
 pub struct FactOutcomeRecord {
     pub proposal_id: String,
     pub run_id: String,
-    /// Canonical fact identity from the authoritative compatibility proposal.
+    /// Canonical fact identity from the authoritative proposal.
     #[serde(default)]
     pub canonical_fact_id: String,
-    /// Legacy numeric mapping when the authority durably recorded one.
-    #[serde(default)]
-    pub fact_id: Option<i64>,
     pub applied_at: i64,
     pub days_since_applied: i64,
     pub retrieval_count: i64,
@@ -134,7 +130,6 @@ struct FactOutcomeInput {
     proposal_id: String,
     run_id: String,
     canonical_fact_id: String,
-    fact_id: Option<i64>,
     applied_at: i64,
     telemetry: Option<FactOutcomeTelemetry>,
 }
@@ -221,7 +216,6 @@ fn fact_outcome(input: FactOutcomeInput, now_unix: i64) -> FactOutcomeRecord {
         proposal_id: input.proposal_id,
         run_id: input.run_id,
         canonical_fact_id: input.canonical_fact_id,
-        fact_id: input.fact_id,
         applied_at,
         days_since_applied: now_unix.saturating_sub(applied_at) / SECS_PER_DAY,
         retrieval_count: 0,
@@ -352,7 +346,7 @@ pub async fn refresh_skill_outcomes(
 
 /// Recomputes fact outcomes after authoritative compatibility reads, then
 /// persists the derived sidecar snapshot (skills half untouched).
-pub async fn refresh_fact_outcomes<A: FactCompatibilityStore>(
+pub async fn refresh_fact_outcomes<A: FactStore>(
     dashboard_root: &Path,
     application: &MemoryApplication<A>,
     now_unix: i64,
@@ -386,7 +380,7 @@ pub fn compute_skill_outcomes(
         .collect()
 }
 
-pub async fn compute_fact_outcomes<A: FactCompatibilityStore>(
+pub async fn compute_fact_outcomes<A: FactStore>(
     application: &MemoryApplication<A>,
     now_unix: i64,
 ) -> Result<Vec<FactOutcomeRecord>> {
@@ -395,8 +389,8 @@ pub async fn compute_fact_outcomes<A: FactCompatibilityStore>(
 
     loop {
         let page = application
-            .list_compatibility_fact_proposals(
-                Some(CompatibilityFactProposalStateV1::Applied),
+            .list_fact_proposals(
+                Some(FactProposalState::Applied),
                 after_proposal_id.clone(),
                 FACT_OUTCOME_PAGE_LIMIT,
             )
@@ -407,21 +401,19 @@ pub async fn compute_fact_outcomes<A: FactCompatibilityStore>(
         for proposal in page.proposals() {
             let canonical_fact_id = proposal.applied_fact_id().ok_or_else(|| {
                 config_error(format!(
-                    "applied compatibility fact proposal '{}' has no canonical fact id",
+                    "applied fact proposal '{}' has no canonical fact id",
                     proposal.proposal_id().as_str()
                 ))
             })?;
-            let target = CompatibilityFactTargetV1::Canonical(
-                CompatibilityFactIdV1::new(proposal.owner().clone(), canonical_fact_id.clone())
-                    .map_err(|error| {
-                        config_error(format!(
-                            "invalid canonical fact id for proposal '{}': {error}",
-                            proposal.proposal_id().as_str()
-                        ))
-                    })?,
-            );
+            let target = FactTarget::new(proposal.owner().clone(), canonical_fact_id.clone())
+                .map_err(|error| {
+                    config_error(format!(
+                        "invalid canonical fact id for proposal '{}': {error}",
+                        proposal.proposal_id().as_str()
+                    ))
+                })?;
             let projection = application
-                .get_compatibility_fact(target.clone())
+                .get_fact(target.clone())
                 .await
                 .map_err(|error| {
                     config_error(format!(
@@ -445,11 +437,11 @@ pub async fn compute_fact_outcomes<A: FactCompatibilityStore>(
 }
 
 fn fact_outcome_input(
-    proposal: &CompatibilityFactProposalRecordV1,
-    projection: Option<&CompatibilityFactProjectionV1>,
+    proposal: &FactProposalRecord,
+    projection: Option<&FactProjection>,
     applied_at: i64,
 ) -> Result<Option<FactOutcomeInput>> {
-    if proposal.state() != CompatibilityFactProposalStateV1::Applied {
+    if proposal.state() != FactProposalState::Applied {
         return Err(config_error(format!(
             "fact outcome requested for non-applied proposal '{}'",
             proposal.proposal_id().as_str()
@@ -457,12 +449,12 @@ fn fact_outcome_input(
     }
     let canonical_fact_id = proposal.applied_fact_id().ok_or_else(|| {
         config_error(format!(
-            "applied compatibility fact proposal '{}' has no canonical fact id",
+            "applied fact proposal '{}' has no canonical fact id",
             proposal.proposal_id().as_str()
         ))
     })?;
     let telemetry = match projection {
-        Some(CompatibilityFactProjectionV1::Available(fact)) => {
+        Some(FactProjection::Available(fact)) => {
             let telemetry = fact.telemetry();
             Some(FactOutcomeTelemetry {
                 retrieval_count: outcome_count(telemetry.retrieval_count(), "retrieval count")?,
@@ -474,16 +466,13 @@ fn fact_outcome_input(
                     .map(|timestamp| timestamp.0 / 1_000_000),
             })
         }
-        Some(CompatibilityFactProjectionV1::Unavailable(unavailable)) => {
-            match unavailable.availability() {
-                CompatibilityFactAvailabilityV1::Deleted => None,
-                CompatibilityFactAvailabilityV1::Quarantined
-                | CompatibilityFactAvailabilityV1::Unavailable => return Ok(None),
-            }
-        }
+        Some(FactProjection::Unavailable(unavailable)) => match unavailable.availability() {
+            FactAvailability::Deleted => None,
+            FactAvailability::Quarantined | FactAvailability::Unavailable => return Ok(None),
+        },
         None => {
             return Err(config_error(format!(
-                "applied compatibility fact proposal '{}' has no current projection",
+                "applied fact proposal '{}' has no current projection",
                 proposal.proposal_id().as_str()
             )));
         }
@@ -497,37 +486,33 @@ fn fact_outcome_input(
             .unwrap_or_else(|| proposal.request().operation_id().as_str())
             .to_owned(),
         canonical_fact_id: canonical_fact_id.as_str().to_owned(),
-        fact_id: proposal.legacy_fact_id(),
         applied_at,
         telemetry,
     }))
 }
 
-/// The compatibility promotion batch starts its immutable lineage at the
+/// The proposal promotion batch starts its immutable lineage at the
 /// promotion timestamp, which remains available after payload deletion.
-async fn applied_at_from_lineage<A: FactCompatibilityStore>(
+async fn applied_at_from_lineage<A: FactStore>(
     application: &MemoryApplication<A>,
-    target: &CompatibilityFactTargetV1,
-    proposal: &CompatibilityFactProposalRecordV1,
+    target: &FactTarget,
+    proposal: &FactProposalRecord,
 ) -> Result<i64> {
-    let query = CompatibilityFactHistoryQueryV1::new(target.clone(), None, 1).map_err(|error| {
+    let query = FactHistoryQuery::new(target.clone(), None, 1).map_err(|error| {
         config_error(format!(
             "build outcome lineage query for proposal '{}': {error}",
             proposal.proposal_id().as_str()
         ))
     })?;
-    let history = application
-        .get_compatibility_history(query)
-        .await
-        .map_err(|error| {
-            config_error(format!(
-                "read outcome lineage for proposal '{}': {error}",
-                proposal.proposal_id().as_str()
-            ))
-        })?;
+    let history = application.get_history(query).await.map_err(|error| {
+        config_error(format!(
+            "read outcome lineage for proposal '{}': {error}",
+            proposal.proposal_id().as_str()
+        ))
+    })?;
     let event = history.events().first().ok_or_else(|| {
         config_error(format!(
-            "applied compatibility fact proposal '{}' has no lineage",
+            "applied fact proposal '{}' has no lineage",
             proposal.proposal_id().as_str()
         ))
     })?;
@@ -535,11 +520,8 @@ async fn applied_at_from_lineage<A: FactCompatibilityStore>(
 }
 
 fn outcome_count(value: u64, field: &str) -> Result<i64> {
-    i64::try_from(value).map_err(|_| {
-        config_error(format!(
-            "compatibility fact {field} exceeds the legacy outcome range"
-        ))
-    })
+    i64::try_from(value)
+        .map_err(|_| config_error(format!("fact {field} exceeds the outcome range")))
 }
 
 /// The outcome records relevant to one automation task: the skill writer is
@@ -632,7 +614,6 @@ pub(super) fn outcome_eval_definitions(
                 "type": "applied_fact",
                 "proposal_id": record.proposal_id,
                 "canonical_fact_id": record.canonical_fact_id,
-                "fact_id": record.fact_id,
             },
             "observed_outcome": record.verdict.as_str(),
             "expected_outcome": "recalled",

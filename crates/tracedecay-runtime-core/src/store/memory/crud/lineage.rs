@@ -13,13 +13,13 @@ use tracedecay_domain::{
     FactLineageEventKindV1, FactLineageEventV1, LegacyFactMappingV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
-    FactCommitOutcome, FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
+    FactCommitOutcome, FactCommitReceipt, FactLineageError, FactLineageResult, FactWriteBatch,
 };
 pub(super) async fn payload_is_purged_projection(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     let mut rows = transaction
         .query(
             "SELECT current_facts.payload_access
@@ -58,7 +58,7 @@ pub(super) async fn insert_legacy_mapping(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     mapping: &LegacyFactMappingV1,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     if legacy_mapping_exists(transaction, owner, mapping).await? {
         if legacy_mapping_matches(transaction, owner, mapping).await? {
             return Ok(());
@@ -93,7 +93,7 @@ pub(super) async fn legacy_mapping_exists(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     mapping: &LegacyFactMappingV1,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     row_exists_params(
         transaction,
         "SELECT 1 FROM memory_v2_legacy_map
@@ -113,7 +113,7 @@ pub(super) async fn legacy_mapping_matches(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     mapping: &LegacyFactMappingV1,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     let mut rows = transaction
         .query(
             "SELECT owner_json, fact_id FROM memory_v2_legacy_map
@@ -150,7 +150,7 @@ pub(super) async fn ensure_event_references(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     event: &FactLineageEventV1,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     match event.kind() {
         FactLineageEventKindV1::AssertionRecorded { assertion_id } => {
             if !owned_assertion_exists(transaction, owner, event.fact_id(), assertion_id).await? {
@@ -197,7 +197,7 @@ async fn ensure_event_evidence(
     owner: &OwnerKey,
     fact_id: &FactId,
     evidence_ids: &[FactEvidenceId],
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     for evidence_id in evidence_ids {
         if !owned_evidence_exists(transaction, owner, fact_id, evidence_id).await? {
             return Err(storage_message(
@@ -214,7 +214,7 @@ async fn owned_assertion_exists(
     owner: &OwnerKey,
     fact_id: &FactId,
     assertion_id: &FactAssertionId,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     row_exists_params(
         transaction,
         "SELECT 1 FROM memory_v2_assertions
@@ -236,7 +236,7 @@ async fn owned_evidence_exists(
     owner: &OwnerKey,
     fact_id: &FactId,
     evidence_id: &FactEvidenceId,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     row_exists_params(
         transaction,
         "SELECT 1 FROM memory_v2_evidence
@@ -257,7 +257,7 @@ async fn owned_fact_exists(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     row_exists_params(
         transaction,
         "SELECT 1 FROM memory_v2_facts
@@ -277,7 +277,7 @@ pub(super) async fn insert_event(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     event: &FactLineageEventV1,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     if event_exists(transaction, event.event_id()).await? {
         if event_matches(transaction, owner, event).await? {
             return Ok(());
@@ -311,7 +311,7 @@ pub(super) async fn insert_event(
 pub(super) async fn event_exists(
     transaction: &Transaction<'_>,
     event_id: &FactEventId,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     row_exists(
         transaction,
         "SELECT 1 FROM memory_v2_lineage_events WHERE event_id = ?1",
@@ -324,7 +324,7 @@ pub(super) async fn event_matches(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     event: &FactLineageEventV1,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     let mut rows = transaction
         .query(
             "SELECT fact_id, owner_kind, project_id, event_json, occurred_at
@@ -360,7 +360,7 @@ pub(in crate::store::memory) struct Projection {
 }
 
 impl Projection {
-    pub(super) fn empty() -> FactStoreResult<Self> {
+    pub(super) fn empty() -> FactLineageResult<Self> {
         Ok(Self {
             access: PayloadAccessState::Eligible,
             trust: Confidence::new(DEFAULT_TRUST)?,
@@ -370,7 +370,7 @@ impl Projection {
         })
     }
 
-    pub(super) fn apply(&mut self, event: &FactLineageEventV1) -> FactStoreResult<()> {
+    pub(super) fn apply(&mut self, event: &FactLineageEventV1) -> FactLineageResult<()> {
         match event.kind() {
             FactLineageEventKindV1::AssertionRecorded { assertion_id } => {
                 self.active_assertion_id = Some(assertion_id.clone());
@@ -411,7 +411,7 @@ pub(super) async fn publish_current_projection(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     let mut projection = load_current_projection(transaction, owner, batch.fact_id())
         .await?
         .unwrap_or(Projection::empty()?);
@@ -427,7 +427,7 @@ pub(super) async fn publish_current_projection(
     let last = projection
         .last_event_id
         .as_ref()
-        .ok_or(FactStoreError::EmptyBatch)?;
+        .ok_or(FactLineageError::EmptyBatch)?;
     transaction
         .execute(
             "INSERT INTO memory_v2_current_facts(
@@ -514,7 +514,7 @@ pub(in crate::store::memory) async fn load_current_projection(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
-) -> FactStoreResult<Option<Projection>> {
+) -> FactLineageResult<Option<Projection>> {
     let mut rows = transaction
         .query(
             "SELECT payload_access, trust_score, active_assertion_id,
@@ -550,7 +550,7 @@ pub(super) async fn receipt_outcome(
     owner: &OwnerKey,
     batch: &FactWriteBatch,
     replay: bool,
-) -> FactStoreResult<FactCommitOutcome> {
+) -> FactLineageResult<FactCommitOutcome> {
     let projection = load_current_projection(transaction, owner, batch.fact_id())
         .await?
         .ok_or_else(|| storage_message(COMMIT_OPERATION, "committed projection is missing"))?;
@@ -558,7 +558,7 @@ pub(super) async fn receipt_outcome(
         .events()
         .last()
         .map(FactLineageEventV1::event_id)
-        .ok_or(FactStoreError::EmptyBatch)?;
+        .ok_or(FactLineageError::EmptyBatch)?;
     let receipt = FactCommitReceipt::new(
         batch.fact_id().clone(),
         batch.owner().clone(),
@@ -581,7 +581,7 @@ pub(super) async fn ensure_fact_identity(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     let mut rows = transaction
         .query(
             "SELECT owner_kind, project_id, owner_json, identity_json
@@ -616,7 +616,7 @@ pub(super) async fn ensure_fact_identity(
     }
     let identity = batch
         .identity_material()
-        .ok_or_else(|| FactStoreError::Storage {
+        .ok_or_else(|| FactLineageError::Storage {
             operation: COMMIT_OPERATION,
             source: Box::new(std::io::Error::other(
                 "new fact requires deterministic identity material",
@@ -627,7 +627,7 @@ pub(super) async fn ensure_fact_identity(
         .events()
         .first()
         .map(FactLineageEventV1::occurred_at)
-        .ok_or(FactStoreError::EmptyBatch)?;
+        .ok_or(FactLineageError::EmptyBatch)?;
     transaction
         .execute(
             "INSERT INTO memory_v2_facts(

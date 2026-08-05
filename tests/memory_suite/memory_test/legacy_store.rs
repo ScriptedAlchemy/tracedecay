@@ -473,7 +473,7 @@ fn write_time_vector_similarity_uses_real_cosine_for_normalized_vectors() {
 }
 
 #[test]
-fn vector_deserialize_accepts_legacy_f64_blobs_for_forward_compatibility_and_backfill() {
+fn vector_deserialize_accepts_legacy_f64_blobs_for_forward_and_backfill() {
     let encoder = HolographicEncoder;
     let baseline = encoder.encode_fact(
         "Legacy f64 vectors remain readable during precision backfill",

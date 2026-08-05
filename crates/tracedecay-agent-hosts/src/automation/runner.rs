@@ -57,7 +57,9 @@ use crate::ports::project_runtime::ProfileRuntime;
 #[cfg(test)]
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::ports::session_store::AutomationSessionStore;
+#[cfg(test)]
 use crate::store::memory::DatabaseFactStore;
+use crate::store::memory::ProjectFactStore;
 use crate::tracedecay::{TraceDecay, current_timestamp};
 use tracedecay_global_db::RegisteredGlobalDb;
 #[cfg(test)]
@@ -691,11 +693,14 @@ async fn run_combined_review_for_retrieval(
     }
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let sessions_db = project_automation_sessions(cg).await?;
-    let memory =
-        MemoryApplication::new(cg.project_memory_owner()?, DatabaseFactStore::new(cg.db()))
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("could not initialize combined review memory authority: {error}"),
-            })?;
+    let project_memory = cg.open_project_store_db().await?;
+    let memory = MemoryApplication::new(
+        cg.project_memory_owner()?,
+        ProjectFactStore::owned(Box::new(project_memory)),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("could not initialize combined review memory authority: {error}"),
+    })?;
     let started_at = current_timestamp().to_string();
 
     let reflector_bundle =
@@ -1668,10 +1673,8 @@ mod tests {
         let memory =
             MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
                 .unwrap();
-        let dashboard_root = temp.path().join("dashboard");
         let records = record_session_fact_proposals(
             &memory,
-            &dashboard_root,
             "run-digest-disposition",
             None,
             &[json!({
@@ -1690,14 +1693,10 @@ mod tests {
         .await
         .unwrap();
 
-        let (applied, newly_promoted) = auto_apply_session_fact_proposals(
-            &memory,
-            Some(&project_root),
-            &dashboard_root,
-            records.clone(),
-        )
-        .await
-        .unwrap();
+        let (applied, newly_promoted) =
+            auto_apply_session_fact_proposals(&memory, Some(&project_root), records.clone())
+                .await
+                .unwrap();
         assert!(newly_promoted);
         assert_eq!(applied[0].state, FactProposalState::Applied);
 
@@ -1705,14 +1704,10 @@ mod tests {
         assert!(snapshot.exists(), "new promotion must refresh the digest");
         std::fs::remove_file(&snapshot).unwrap();
 
-        let (replayed, newly_promoted) = auto_apply_session_fact_proposals(
-            &memory,
-            Some(&project_root),
-            &dashboard_root,
-            records,
-        )
-        .await
-        .unwrap();
+        let (replayed, newly_promoted) =
+            auto_apply_session_fact_proposals(&memory, Some(&project_root), records)
+                .await
+                .unwrap();
         assert!(
             !newly_promoted,
             "an applied proposal replay is not a promotion"
@@ -1749,10 +1744,8 @@ mod tests {
         let owner = FactOwnerV1::Profile;
         let memory =
             MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).unwrap();
-        let dashboard_root = temp.path().join("dashboard");
         let records = record_session_fact_proposals(
             &memory,
-            &dashboard_root,
             "run-digest-partial",
             None,
             &[
@@ -1786,12 +1779,12 @@ mod tests {
         let rejected_id =
             tracedecay_domain::ProvenanceId::new(records[1].proposal_id.clone()).unwrap();
         let rejected = memory
-            .get_compatibility_fact_proposal(rejected_id.clone())
+            .get_fact_proposal(rejected_id.clone())
             .await
             .unwrap()
             .unwrap();
         memory
-            .reject_compatibility_fact_proposal(
+            .reject_fact_proposal(
                 rejected_id,
                 rejected.revision(),
                 tracedecay_domain::ActorId::new("test:reviewer".to_string()).unwrap(),
@@ -1800,14 +1793,9 @@ mod tests {
             .await
             .unwrap();
 
-        let error = auto_apply_session_fact_proposals(
-            &memory,
-            Some(&project_root),
-            &dashboard_root,
-            records,
-        )
-        .await
-        .expect_err("the rejected second proposal must keep its original error path");
+        let error = auto_apply_session_fact_proposals(&memory, Some(&project_root), records)
+            .await
+            .expect_err("the rejected second proposal must keep its original error path");
         assert!(error.to_string().contains("not pending approval"));
         assert!(
             crate::automation::memory_digest::memory_digest_snapshot_path(&profile_root).exists(),

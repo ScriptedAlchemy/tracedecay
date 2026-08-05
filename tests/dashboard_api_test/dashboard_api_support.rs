@@ -267,7 +267,7 @@ pub(crate) async fn apply_dashboard_automation_fact(
     };
     use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
     use tracedecay::store::memory::DatabaseFactStore;
-    use tracedecay_store::CompatibilityFactProposalPromotionV1;
+    use tracedecay_store::FactProposalPromotion;
 
     let owner = dashboard_fixture_project_owner(cg);
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
@@ -297,10 +297,15 @@ pub(crate) async fn apply_dashboard_automation_fact(
     )
     .unwrap_or_else(|error| panic!("derive outcome proposal identity: {error}"));
     let submitted = memory
-        .submit_compatibility_fact_proposal(context.operation_id().clone(), command, None)
+        .submit_fact_proposal(
+            context.operation_id().clone(),
+            command,
+            None,
+            tracedecay_store::FactProposalEvidence::default(),
+        )
         .await
         .unwrap_or_else(|error| panic!("submit outcome proposal: {error}"));
-    let promotion = CompatibilityFactProposalPromotionV1::new(
+    let promotion = FactProposalPromotion::new(
         owner,
         submitted.proposal_id().clone(),
         submitted.revision(),
@@ -308,7 +313,7 @@ pub(crate) async fn apply_dashboard_automation_fact(
     )
     .unwrap_or_else(|error| panic!("build outcome proposal promotion: {error}"));
     let applied = memory
-        .promote_compatibility_fact_proposal(promotion)
+        .promote_fact_proposal(promotion)
         .await
         .unwrap_or_else(|error| panic!("promote outcome proposal: {error}"));
     let canonical_fact_id = applied
@@ -330,10 +335,7 @@ pub(crate) async fn delete_dashboard_automation_fact(
     use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
     use tracedecay::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactId;
-    use tracedecay_store::{
-        CompatibilityFactIdV1, CompatibilityFactProjectionV1, CompatibilityFactRemoveCommandV1,
-        CompatibilityFactTargetV1,
-    };
+    use tracedecay_store::{FactId, FactProjection, FactRemoveCommand, FactTarget};
 
     let owner = dashboard_fixture_project_owner(cg);
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
@@ -347,22 +349,22 @@ pub(crate) async fn delete_dashboard_automation_fact(
     .unwrap_or_else(|error| panic!("derive outcome deletion identity: {error}"));
     let canonical_fact_id = FactId::new(record.canonical_fact_id.clone())
         .unwrap_or_else(|error| panic!("parse outcome canonical fact identity: {error}"));
-    let target = CompatibilityFactTargetV1::Canonical(
-        CompatibilityFactIdV1::new(owner, canonical_fact_id)
+    let target = FactTarget::Canonical(
+        FactId::new(owner, canonical_fact_id)
             .unwrap_or_else(|error| panic!("build outcome canonical fact target: {error}")),
     );
     let expected_last_event_id = match memory
-        .get_compatibility_fact(target.clone())
+        .get_fact(target.clone())
         .await
         .unwrap_or_else(|error| panic!("inspect outcome fact before deletion: {error}"))
     {
-        Some(CompatibilityFactProjectionV1::Available(fact)) => fact.fact().last_event_id().clone(),
+        Some(FactProjection::Available(fact)) => fact.fact().last_event_id().clone(),
         other => panic!("outcome fact must be available before deletion: {other:?}"),
     };
     assert!(
         memory
-            .remove_compatibility_fact(
-                CompatibilityFactRemoveCommandV1::new(
+            .remove_fact(
+                FactRemoveCommand::new(
                     target,
                     context.operation_id().clone(),
                     Some(expected_last_event_id),

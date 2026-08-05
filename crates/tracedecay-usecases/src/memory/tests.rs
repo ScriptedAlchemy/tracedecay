@@ -11,8 +11,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     FactAsOfResponseV1, FactCommitReceipt, FactContradictionStateV1, FactCurrentResponseV1,
-    FactLineageCursor, FactLineageResponseV1, FactProposalPromotionStateV1, FactQueryCoverageV1,
-    FactStoreResult,
+    FactLineageCursor, FactLineageResponseV1, FactLineageResult, FactProposalPromotionStateV1,
+    FactQueryCoverageV1,
 };
 
 use super::*;
@@ -35,9 +35,9 @@ struct FakeAuthority {
     legacy_queries: Mutex<Vec<LegacyFactQuery>>,
     legacy_result: Mutex<Option<FactId>>,
     anchor_queries: Mutex<Vec<RetrievalAnchorId>>,
-    feedback_history: Mutex<Option<CompatibilityFactFeedbackHistoryV1>>,
-    feedback_requests: Mutex<Vec<CompatibilityFactFeedbackCommandV1>>,
-    compatibility_calls: Mutex<Vec<&'static str>>,
+    feedback_history: Mutex<Option<FactFeedbackHistory>>,
+    feedback_requests: Mutex<Vec<FactFeedbackCommand>>,
+    calls: Mutex<Vec<&'static str>>,
 }
 
 #[derive(Default)]
@@ -75,7 +75,7 @@ impl EvidenceAnchorResolver for StaticEvidenceResolver {
 
 /// The fake holds bare facts and no visibility ledger, so it can only report
 /// what it returned as unmeasured. Stating that here keeps the fabrication
-/// visible in the double instead of hidden in a `FactStore` trait default.
+/// visible in the double instead of hidden in a `FactLineageStore` trait default.
 fn unmeasured_response_metadata(returned: bool) -> (FactQueryCoverageV1, FactContradictionStateV1) {
     (
         FactQueryCoverageV1::new(0, 0, u64::from(returned), 0),
@@ -83,8 +83,8 @@ fn unmeasured_response_metadata(returned: bool) -> (FactQueryCoverageV1, FactCon
     )
 }
 
-impl FactStore for FakeAuthority {
-    async fn commit_fact(&self, batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
+impl FactLineageStore for FakeAuthority {
+    async fn commit_fact(&self, batch: FactWriteBatch) -> FactLineageResult<FactCommitOutcome> {
         let outcome = self
             .next_commit_outcome
             .lock()
@@ -98,7 +98,7 @@ impl FactStore for FakeAuthority {
     async fn query_current_facts(
         &self,
         query: CurrentFactsQuery,
-    ) -> FactStoreResult<Vec<StoredFactV1>> {
+    ) -> FactLineageResult<Vec<StoredFactV1>> {
         self.current_queries.lock().unwrap().push(query);
         Ok(self.current_results.lock().unwrap().clone())
     }
@@ -106,7 +106,7 @@ impl FactStore for FakeAuthority {
     async fn query_fact_as_of(
         &self,
         query: FactAsOfQuery,
-    ) -> FactStoreResult<Option<StoredFactV1>> {
+    ) -> FactLineageResult<Option<StoredFactV1>> {
         self.as_of_queries.lock().unwrap().push(query);
         Ok(self.as_of_result.lock().unwrap().clone())
     }
@@ -114,7 +114,7 @@ impl FactStore for FakeAuthority {
     async fn query_fact_as_of_response(
         &self,
         query: FactAsOfQuery,
-    ) -> FactStoreResult<FactAsOfResponseV1> {
+    ) -> FactLineageResult<FactAsOfResponseV1> {
         let fact = self.query_fact_as_of(query).await?;
         let (coverage, contradiction) = unmeasured_response_metadata(fact.is_some());
         Ok(FactAsOfResponseV1::new(fact, coverage, contradiction))
@@ -123,7 +123,7 @@ impl FactStore for FakeAuthority {
     async fn query_fact_current(
         &self,
         query: FactCurrentQuery,
-    ) -> FactStoreResult<Option<StoredFactV1>> {
+    ) -> FactLineageResult<Option<StoredFactV1>> {
         self.current_fact_queries.lock().unwrap().push(query);
         Ok(self.current_fact_result.lock().unwrap().clone())
     }
@@ -131,7 +131,7 @@ impl FactStore for FakeAuthority {
     async fn query_fact_current_response(
         &self,
         query: FactCurrentQuery,
-    ) -> FactStoreResult<FactCurrentResponseV1> {
+    ) -> FactLineageResult<FactCurrentResponseV1> {
         let fact = self.query_fact_current(query).await?;
         let (coverage, contradiction) = unmeasured_response_metadata(fact.is_some());
         Ok(FactCurrentResponseV1::new(fact, coverage, contradiction))
@@ -140,7 +140,7 @@ impl FactStore for FakeAuthority {
     async fn query_fact_lineage(
         &self,
         query: FactLineageQuery,
-    ) -> FactStoreResult<Vec<FactLineageEventV1>> {
+    ) -> FactLineageResult<Vec<FactLineageEventV1>> {
         self.lineage_queries.lock().unwrap().push(query);
         Ok(self.lineage_results.lock().unwrap().clone())
     }
@@ -148,13 +148,16 @@ impl FactStore for FakeAuthority {
     async fn query_fact_lineage_response(
         &self,
         query: FactLineageQuery,
-    ) -> FactStoreResult<FactLineageResponseV1> {
+    ) -> FactLineageResult<FactLineageResponseV1> {
         let events = self.query_fact_lineage(query).await?;
         let (coverage, contradiction) = unmeasured_response_metadata(!events.is_empty());
         Ok(FactLineageResponseV1::new(events, coverage, contradiction))
     }
 
-    async fn resolve_legacy_fact(&self, query: LegacyFactQuery) -> FactStoreResult<Option<FactId>> {
+    async fn resolve_legacy_fact(
+        &self,
+        query: LegacyFactQuery,
+    ) -> FactLineageResult<Option<FactId>> {
         self.legacy_queries.lock().unwrap().push(query);
         Ok(self.legacy_result.lock().unwrap().clone())
     }
@@ -162,7 +165,7 @@ impl FactStore for FakeAuthority {
     async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
-    ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
+    ) -> FactLineageResult<Option<RetrievalAnchorRecordV2>> {
         self.anchor_queries
             .lock()
             .unwrap()
@@ -189,104 +192,63 @@ impl FactProposalStore for FakeAuthority {
             promotion.expected_state(),
             outcome,
         )
-        .map_err(FactStoreError::from)?;
+        .map_err(FactLineageError::from)?;
         self.promotions.lock().unwrap().push(promotion);
         Ok(result)
     }
 }
 
-impl FactCompatibilityStore for FakeAuthority {
-    async fn list_compatibility_facts(
-        &self,
-        query: CompatibilityFactListQueryV1,
-    ) -> Result<CompatibilityFactPageV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("list");
-        Ok(CompatibilityFactPageV1::new(
-            query.owner().clone(),
-            vec![],
-            None,
-        )?)
+impl FactStore for FakeAuthority {
+    async fn list_facts(&self, query: FactListQuery) -> Result<FactPage, FactStoreError> {
+        self.calls.lock().unwrap().push("list");
+        Ok(FactPage::new(query.owner().clone(), vec![], None)?)
     }
 
-    async fn search_compatibility_facts(
-        &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> Result<CompatibilityFactSearchPageV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("search");
-        Ok(CompatibilityFactSearchPageV1::new(
-            query.owner().clone(),
-            vec![],
-            None,
-        )?)
+    async fn search_facts(&self, query: FactSearchQuery) -> Result<FactSearchPage, FactStoreError> {
+        self.calls.lock().unwrap().push("search");
+        Ok(FactSearchPage::new(query.owner().clone(), vec![], None)?)
     }
 
-    async fn probe_compatibility_facts(
-        &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> Result<CompatibilityFactSearchPageV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("probe");
-        Ok(CompatibilityFactSearchPageV1::new(
-            query.owner().clone(),
-            vec![],
-            None,
-        )?)
+    async fn probe_facts(&self, query: FactSearchQuery) -> Result<FactSearchPage, FactStoreError> {
+        self.calls.lock().unwrap().push("probe");
+        Ok(FactSearchPage::new(query.owner().clone(), vec![], None)?)
     }
 
-    async fn related_compatibility_facts(
+    async fn related_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> Result<CompatibilityFactSearchPageV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("related");
-        Ok(CompatibilityFactSearchPageV1::new(
-            query.owner().clone(),
-            vec![],
-            None,
-        )?)
+        query: FactSearchQuery,
+    ) -> Result<FactSearchPage, FactStoreError> {
+        self.calls.lock().unwrap().push("related");
+        Ok(FactSearchPage::new(query.owner().clone(), vec![], None)?)
     }
 
-    async fn reason_compatibility_facts(
-        &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> Result<CompatibilityFactSearchPageV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("reason");
-        Ok(CompatibilityFactSearchPageV1::new(
-            query.owner().clone(),
-            vec![],
-            None,
-        )?)
+    async fn reason_facts(&self, query: FactSearchQuery) -> Result<FactSearchPage, FactStoreError> {
+        self.calls.lock().unwrap().push("reason");
+        Ok(FactSearchPage::new(query.owner().clone(), vec![], None)?)
     }
 
-    async fn find_compatibility_contradictions(
+    async fn find_contradictions(
         &self,
-        query: CompatibilityFactContradictionQueryV1,
-    ) -> Result<CompatibilityFactContradictionPageV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("contradictions");
-        Ok(CompatibilityFactContradictionPageV1::new(
-            query.owner().clone(),
-            vec![],
-        )?)
+        query: FactContradictionQuery,
+    ) -> Result<FactContradictionPage, FactStoreError> {
+        self.calls.lock().unwrap().push("contradictions");
+        Ok(FactContradictionPage::new(query.owner().clone(), vec![])?)
     }
 
-    async fn get_compatibility_fact(
+    async fn get_fact(
         &self,
-        _target: CompatibilityFactTargetV1,
-    ) -> Result<Option<CompatibilityFactProjectionV1>, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("get");
+        _target: FactTarget,
+    ) -> Result<Option<FactProjection>, FactStoreError> {
+        self.calls.lock().unwrap().push("get");
         Ok(None)
     }
 
-    async fn compatibility_fact_history(
-        &self,
-        query: CompatibilityFactHistoryQueryV1,
-    ) -> Result<CompatibilityFactHistoryV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("history");
+    async fn fact_history(&self, query: FactHistoryQuery) -> Result<FactHistory, FactStoreError> {
+        self.calls.lock().unwrap().push("history");
         let Some(fact_id) = query.target().canonical_fact_id() else {
-            return Err(compatibility_fixture_error());
+            return Err(fixture_error());
         };
-        Ok(CompatibilityFactHistoryV1::new(
+        Ok(FactHistory::new(
             query.target().owner().clone(),
             fact_id.clone(),
             vec![],
@@ -294,266 +256,223 @@ impl FactCompatibilityStore for FakeAuthority {
         )?)
     }
 
-    async fn compatibility_memory_status(
-        &self,
-        owner: FactOwnerV1,
-    ) -> Result<CompatibilityMemoryStatusV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("status");
-        compatibility_memory_status(owner)
+    async fn memory_status(&self, owner: FactOwnerV1) -> Result<MemoryStatus, FactStoreError> {
+        self.calls.lock().unwrap().push("status");
+        memory_status(owner)
     }
 
-    async fn inspect_compatibility_fact(
+    async fn inspect_fact(
         &self,
-        _target: CompatibilityFactTargetV1,
-    ) -> Result<Option<CompatibilityFactInspectionV1>, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("inspect");
+        _target: FactTarget,
+    ) -> Result<Option<FactInspection>, FactStoreError> {
+        self.calls.lock().unwrap().push("inspect");
         Ok(None)
     }
 
-    async fn add_compatibility_fact(
-        &self,
-        _request: CompatibilityFactAddCommandV1,
-    ) -> Result<CompatibilityFactAddOutcomeV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("add");
-        Ok(CompatibilityFactAddOutcomeV1::new(
+    async fn add_fact(&self, _request: FactAddCommand) -> Result<FactAddOutcome, FactStoreError> {
+        self.calls.lock().unwrap().push("add");
+        Ok(FactAddOutcome::new(
             None,
-            tracedecay_store::CompatibilityFactAddDispositionV1::RejectedSecretLike,
+            tracedecay_store::FactAddDisposition::RejectedSecretLike,
             None,
             None,
             Some("fixture rejection".to_owned()),
         )?)
     }
 
-    async fn update_compatibility_fact(
+    async fn update_fact(
         &self,
-        _request: CompatibilityFactUpdateCommandV1,
-    ) -> Result<CompatibilityFactUpdateOutcomeV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("update");
-        Err(compatibility_fixture_error())
+        _request: FactUpdateCommand,
+    ) -> Result<FactUpdateOutcome, FactStoreError> {
+        self.calls.lock().unwrap().push("update");
+        Err(fixture_error())
     }
 
-    async fn remove_compatibility_fact(
+    async fn remove_fact(
         &self,
-        _request: CompatibilityFactRemoveCommandV1,
-    ) -> Result<CompatibilityFactRemoveOutcomeV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("remove");
-        Err(compatibility_fixture_error())
+        _request: FactRemoveCommand,
+    ) -> Result<FactRemoveOutcome, FactStoreError> {
+        self.calls.lock().unwrap().push("remove");
+        Err(fixture_error())
     }
 
-    async fn record_compatibility_fact_feedback(
+    async fn record_fact_feedback(
         &self,
-        request: CompatibilityFactFeedbackCommandV1,
-    ) -> Result<CompatibilityFactFeedbackOutcomeV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("feedback");
+        request: FactFeedbackCommand,
+    ) -> Result<FactFeedbackOutcome, FactStoreError> {
+        self.calls.lock().unwrap().push("feedback");
         self.feedback_requests.lock().unwrap().push(request);
-        Err(compatibility_fixture_error())
+        Err(fixture_error())
     }
 
-    async fn compatibility_fact_feedback_history(
+    async fn fact_feedback_history(
         &self,
-        _query: CompatibilityFactFeedbackHistoryQueryV1,
-    ) -> Result<CompatibilityFactFeedbackHistoryV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("feedback-history");
+        _query: FactFeedbackHistoryQuery,
+    ) -> Result<FactFeedbackHistory, FactStoreError> {
+        self.calls.lock().unwrap().push("feedback-history");
         self.feedback_history
             .lock()
             .unwrap()
             .clone()
-            .ok_or_else(compatibility_fixture_error)
+            .ok_or_else(fixture_error)
     }
 
-    async fn find_compatibility_fact_by_content_digest(
+    async fn find_fact_by_content_digest(
         &self,
-        _query: CompatibilityFactContentDigestQueryV1,
-    ) -> Result<Option<CompatibilityFactProjectionV1>, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("exact-content");
+        _query: FactContentDigestQuery,
+    ) -> Result<Option<FactProjection>, FactStoreError> {
+        self.calls.lock().unwrap().push("exact-content");
         Ok(None)
     }
 
-    async fn apply_compatibility_fact_curation(
+    async fn apply_fact_curation(
         &self,
-        _request: CompatibilityFactCurationBatchV1,
-    ) -> Result<CompatibilityFactCurationReceiptV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("curation");
-        Err(compatibility_fixture_error())
+        _request: FactCurationBatch,
+    ) -> Result<FactCurationReceipt, FactStoreError> {
+        self.calls.lock().unwrap().push("curation");
+        Err(fixture_error())
     }
 
-    async fn merge_compatibility_facts(
+    async fn merge_facts(
         &self,
-        _request: CompatibilityFactMergeCommandV1,
-    ) -> Result<CompatibilityFactMergeOutcomeV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("merge");
-        Err(compatibility_fixture_error())
+        _request: FactMergeCommand,
+    ) -> Result<FactMergeOutcome, FactStoreError> {
+        self.calls.lock().unwrap().push("merge");
+        Err(fixture_error())
     }
 
-    async fn repair_compatibility_memory(
+    async fn repair_memory(
         &self,
-        _request: CompatibilityMemoryRepairCommandV1,
-    ) -> Result<CompatibilityMemoryRepairStatsV1, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("repair");
-        Ok(CompatibilityMemoryRepairStatsV1::default())
+        _request: MemoryRepairCommand,
+    ) -> Result<MemoryRepairStats, FactStoreError> {
+        self.calls.lock().unwrap().push("repair");
+        Ok(MemoryRepairStats::default())
     }
 
-    async fn dashboard_compatibility_memory_overview(
+    async fn dashboard_memory_overview(
         &self,
-        _query: CompatibilityDashboardMemoryOverviewQueryV1,
-    ) -> Result<CompatibilityDashboardMemoryOverviewV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("dashboard-overview");
-        Err(compatibility_fixture_error())
+        _query: DashboardMemoryOverviewQuery,
+    ) -> Result<DashboardMemoryOverview, FactStoreError> {
+        self.calls.lock().unwrap().push("dashboard-overview");
+        Err(fixture_error())
     }
 
-    async fn dashboard_compatibility_fact_detail(
+    async fn dashboard_fact_detail(
         &self,
-        _query: CompatibilityDashboardFactDetailQueryV1,
-    ) -> Result<Option<CompatibilityDashboardFactDetailV1>, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("dashboard-detail");
+        _query: DashboardFactDetailQuery,
+    ) -> Result<Option<DashboardFactDetail>, FactStoreError> {
+        self.calls.lock().unwrap().push("dashboard-detail");
         Ok(None)
     }
 
-    async fn dashboard_compatibility_vector_points(
+    async fn dashboard_vector_points(
         &self,
-        _query: CompatibilityDashboardVectorPointsQueryV1,
-    ) -> Result<Vec<CompatibilityDashboardVectorPointV1>, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("dashboard-vectors");
+        _query: DashboardVectorPointsQuery,
+    ) -> Result<Vec<DashboardVectorPoint>, FactStoreError> {
+        self.calls.lock().unwrap().push("dashboard-vectors");
         Ok(vec![])
     }
 
-    async fn dashboard_compatibility_memory_oplog(
+    async fn dashboard_memory_oplog(
         &self,
-        _query: CompatibilityDashboardOplogQueryV1,
-    ) -> Result<Vec<CompatibilityDashboardOplogEntryV1>, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("dashboard-oplog");
+        _query: DashboardOplogQuery,
+    ) -> Result<Vec<DashboardOplogEntry>, FactStoreError> {
+        self.calls.lock().unwrap().push("dashboard-oplog");
         Ok(vec![])
     }
 
-    async fn record_compatibility_fact_retrieval(
+    async fn record_fact_retrieval(
         &self,
-        _request: CompatibilityFactRetrievalCommandV1,
-    ) -> Result<Vec<CompatibilityFactProjectionV1>, FactCompatibilityStoreError> {
-        self.compatibility_calls.lock().unwrap().push("retrieval");
+        _request: FactRetrievalCommand,
+    ) -> Result<Vec<FactProjection>, FactStoreError> {
+        self.calls.lock().unwrap().push("retrieval");
         Ok(vec![])
     }
 
-    async fn submit_compatibility_fact_proposal(
+    async fn submit_fact_proposal(
         &self,
         _proposal_id: ProvenanceId,
-        _request: CompatibilityFactAddCommandV1,
+        _request: FactAddCommand,
         _submitter: Option<ActorId>,
-    ) -> Result<CompatibilityFactProposalRecordV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-submit");
-        Err(compatibility_fixture_error())
+        _evidence: FactProposalEvidence,
+    ) -> Result<FactProposalRecord, FactStoreError> {
+        self.calls.lock().unwrap().push("proposal-submit");
+        Err(fixture_error())
     }
 
-    async fn get_compatibility_fact_proposal(
+    async fn get_fact_proposal(
         &self,
         _owner: FactOwnerV1,
         _proposal_id: ProvenanceId,
-    ) -> Result<Option<CompatibilityFactProposalRecordV1>, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-get");
+    ) -> Result<Option<FactProposalRecord>, FactStoreError> {
+        self.calls.lock().unwrap().push("proposal-get");
         Ok(None)
     }
 
-    async fn list_compatibility_fact_proposals(
+    async fn list_fact_proposals(
         &self,
         _owner: FactOwnerV1,
-        _state: Option<CompatibilityFactProposalStateV1>,
+        _state: Option<FactProposalState>,
         _after_proposal_id: Option<ProvenanceId>,
         _limit: usize,
-    ) -> Result<CompatibilityFactProposalPageV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-list");
-        Err(compatibility_fixture_error())
+    ) -> Result<FactProposalPage, FactStoreError> {
+        self.calls.lock().unwrap().push("proposal-list");
+        Err(fixture_error())
     }
 
-    async fn count_pending_compatibility_fact_proposals(
+    async fn count_pending_fact_proposals(
         &self,
         _owner: FactOwnerV1,
-    ) -> Result<u64, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-count-pending");
+    ) -> Result<u64, FactStoreError> {
+        self.calls.lock().unwrap().push("proposal-count-pending");
         Ok(0)
     }
 
-    async fn reject_compatibility_fact_proposal(
+    async fn reject_fact_proposal(
         &self,
         _owner: FactOwnerV1,
         _proposal_id: ProvenanceId,
-        _expected_revision: CompatibilityFactProposalRevisionV1,
+        _expected_revision: FactProposalRevision,
         _reviewer: ActorId,
         _reason: String,
-    ) -> Result<CompatibilityFactProposalRecordV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-reject");
-        Err(compatibility_fixture_error())
+    ) -> Result<FactProposalRecord, FactStoreError> {
+        self.calls.lock().unwrap().push("proposal-reject");
+        Err(fixture_error())
     }
 
-    async fn promote_compatibility_fact_proposal(
+    async fn promote_fact_proposal(
         &self,
-        _request: CompatibilityFactProposalPromotionV1,
-    ) -> Result<CompatibilityFactProposalRecordV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-promote");
-        Err(compatibility_fixture_error())
+        _request: FactProposalPromotion,
+    ) -> Result<FactProposalRecord, FactStoreError> {
+        self.calls.lock().unwrap().push("proposal-promote");
+        Err(fixture_error())
     }
 
-    async fn promote_compatibility_fact_proposal_with_disposition(
+    async fn promote_fact_proposal_with_disposition(
         &self,
-        _request: CompatibilityFactProposalPromotionV1,
-    ) -> Result<CompatibilityFactProposalPromotionResultV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
+        _request: FactProposalPromotion,
+    ) -> Result<FactProposalPromotionResult, FactStoreError> {
+        self.calls
             .lock()
             .unwrap()
             .push("proposal-promote-disposition");
-        Err(compatibility_fixture_error())
+        Err(fixture_error())
     }
 }
 
-fn compatibility_fixture_error() -> FactCompatibilityStoreError {
-    FactCompatibilityStoreError::Store(FactStoreError::Contract(DomainError::NonCanonical {
+fn fixture_error() -> FactStoreError {
+    FactStoreError::Store(FactLineageError::Contract(DomainError::NonCanonical {
         field: "fake compatibility authority",
     }))
 }
 
-fn compatibility_memory_status(
-    owner: FactOwnerV1,
-) -> Result<CompatibilityMemoryStatusV1, FactCompatibilityStoreError> {
-    Ok(CompatibilityMemoryStatusV1::new(
+fn memory_status(owner: FactOwnerV1) -> Result<MemoryStatus, FactStoreError> {
+    Ok(MemoryStatus::new(
         owner,
         0,
         0,
         0,
-        tracedecay_store::CompatibilityMemoryAlgebraV1::new("fixture".to_owned(), 1, 1)?,
+        tracedecay_store::MemoryAlgebra::new("fixture".to_owned(), 1, 1)?,
         0,
         0,
         0,
@@ -562,9 +481,9 @@ fn compatibility_memory_status(
         0,
         0,
         0,
-        tracedecay_store::CompatibilityProjectionStateV1::Ready,
-        tracedecay_store::CompatibilityMemoryRepairStatsV1::default(),
-        tracedecay_store::CompatibilityMemoryFeedbackFunnelV1::new(0, 0, 0, 0, 0),
+        tracedecay_store::ProjectionState::Ready,
+        tracedecay_store::MemoryRepairStats::default(),
+        tracedecay_store::MemoryFeedbackFunnel::new(0, 0, 0, 0, 0),
     )?)
 }
 
@@ -817,15 +736,14 @@ async fn query_owner_mismatch_is_rejected_before_authority_access() {
 }
 
 #[tokio::test]
-async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
+async fn reads_use_finite_owner_bound_authority_methods() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
     let fact_id = fact_id(owner(), "operation.compatibility.read");
-    let target = CompatibilityFactTargetV1::Canonical(
-        tracedecay_store::CompatibilityFactIdV1::new(owner(), fact_id).unwrap(),
-    );
-    let search = CompatibilityFactSearchQuery::new(
+    let target =
+        FactTarget::Canonical(tracedecay_store::FactTarget::new(owner(), fact_id).unwrap());
+    let search = FactSearchQuery::new(
         owner(),
-        tracedecay_store::CompatibilityFactSearchKindV1::Search,
+        tracedecay_store::FactSearchKind::Search,
         Some("compatibility fixture".to_owned()),
         None,
         10,
@@ -834,9 +752,7 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
 
     assert!(
         application
-            .list_compatibility_facts(
-                CompatibilityFactListQueryV1::new(owner(), None, None, None, 10).unwrap(),
-            )
+            .list_facts(FactListQuery::new(owner(), None, None, None, 10).unwrap(),)
             .await
             .unwrap()
             .facts()
@@ -844,7 +760,7 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
     );
     assert!(
         application
-            .search_compatibility_facts(search)
+            .search_facts(search)
             .await
             .unwrap()
             .hits()
@@ -852,54 +768,32 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
     );
     assert!(
         application
-            .get_compatibility_fact(target.clone())
+            .get_fact(target.clone())
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         application
-            .get_compatibility_history(
-                CompatibilityFactHistoryQueryV1::new(target.clone(), None, 10).unwrap(),
-            )
+            .get_history(FactHistoryQuery::new(target.clone(), None, 10).unwrap(),)
             .await
             .unwrap()
             .events()
             .is_empty()
     );
+    assert_eq!(application.memory_status().await.unwrap().owner(), &owner());
+    assert!(application.inspect_fact(target).await.unwrap().is_none());
     assert_eq!(
-        application
-            .compatibility_memory_status()
-            .await
-            .unwrap()
-            .owner(),
-        &owner()
-    );
-    assert!(
-        application
-            .inspect_compatibility_fact(target)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        application
-            .authority
-            .compatibility_calls
-            .lock()
-            .unwrap()
-            .as_slice(),
+        application.authority.calls.lock().unwrap().as_slice(),
         ["list", "search", "get", "history", "status", "inspect"]
     );
 }
 
 #[tokio::test]
-async fn compatibility_read_owner_mismatch_never_reaches_authority() {
+async fn read_owner_mismatch_never_reaches_authority() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
     let error = application
-        .list_compatibility_facts(
-            CompatibilityFactListQueryV1::new(FactOwnerV1::Profile, None, None, None, 10).unwrap(),
-        )
+        .list_facts(FactListQuery::new(FactOwnerV1::Profile, None, None, None, 10).unwrap())
         .await
         .unwrap_err();
 
@@ -907,14 +801,7 @@ async fn compatibility_read_owner_mismatch_never_reaches_authority() {
         error,
         MemoryApplicationError::OwnerMismatch { .. }
     ));
-    assert!(
-        application
-            .authority
-            .compatibility_calls
-            .lock()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(application.authority.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -929,7 +816,7 @@ async fn proposal_cas_and_batch_commit_are_one_authority_operation() {
     )
     .unwrap();
 
-    let outcome = application.promote_fact_proposal(promotion).await.unwrap();
+    let outcome = application.commit_fact_proposal(promotion).await.unwrap();
 
     assert!(matches!(outcome.commit(), FactCommitOutcome::Committed(_)));
     assert_eq!(application.authority.promotions.lock().unwrap().len(), 1);
@@ -951,7 +838,7 @@ async fn proposal_cas_conflict_is_typed_and_does_not_commit_a_batch() {
     .unwrap();
 
     let error = application
-        .promote_fact_proposal(promotion)
+        .commit_fact_proposal(promotion)
         .await
         .unwrap_err();
 
@@ -1180,11 +1067,11 @@ async fn v1_feedback_defaults_an_omitted_source_to_mcp() {
 async fn v1_trust_history_never_claims_incomplete_repair_is_complete() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
     *application.authority.feedback_history.lock().unwrap() = Some(
-        CompatibilityFactFeedbackHistoryV1::new_with_repair_progress(
+        FactFeedbackHistory::new_with_repair_progress(
             owner(),
             vec![],
             None,
-            CompatibilityFeedbackRepairProgressV1::Incomplete {
+            FeedbackRepairProgress::Incomplete {
                 processed: 1,
                 remaining: Some(2),
             },
@@ -1199,7 +1086,7 @@ async fn v1_trust_history_never_claims_incomplete_repair_is_complete() {
     assert!(typed.entries.is_empty());
     assert!(matches!(
         typed.repair_progress,
-        CompatibilityFeedbackRepairProgressV1::Incomplete {
+        FeedbackRepairProgress::Incomplete {
             processed: 1,
             remaining: Some(2)
         }
@@ -1209,16 +1096,11 @@ async fn v1_trust_history_never_claims_incomplete_repair_is_complete() {
     assert!(matches!(
         error,
         MemoryApplicationError::FeedbackHistoryUnavailable {
-            progress: CompatibilityFeedbackRepairProgressV1::Incomplete { .. }
+            progress: FeedbackRepairProgress::Incomplete { .. }
         }
     ));
     assert_eq!(
-        application
-            .authority
-            .compatibility_calls
-            .lock()
-            .unwrap()
-            .as_slice(),
+        application.authority.calls.lock().unwrap().as_slice(),
         ["feedback-history", "feedback-history"]
     );
 }

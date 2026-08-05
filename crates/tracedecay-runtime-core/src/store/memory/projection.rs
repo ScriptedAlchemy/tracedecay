@@ -10,28 +10,25 @@ use tracedecay_domain::{
     FactPayloadV1, LegacyFactMappingV1, PayloadAccessState, UtcMicros, VectorWatermark,
 };
 use tracedecay_store::{
-    CompatibilityFactAvailabilityV1, CompatibilityFactIdV1, CompatibilityFactMappingV1,
-    CompatibilityFactProjectionV1, CompatibilityFactSourceV1, CompatibilityFactStatusV1,
-    CompatibilityFactTargetV1, CompatibilityFactTelemetryV1, CompatibilityFactUnavailableV1,
-    CompatibilityFactV1, CompatibilityProjectionStateV1, FactStoreError, FactStoreResult,
-    LegacyFactQuery, StoredFactV1,
+    Fact, FactAvailability, FactLineageError, FactLineageResult, FactMapping, FactProjection,
+    FactSource, FactStatus, FactTarget, FactTelemetry, FactUnavailable, LegacyFactQuery,
+    OwnedFactId, ProjectionState, StoredFactV1,
 };
 
 use super::primitives::{
-    COMPATIBILITY_WRITE_OPERATION, OwnerKey, QUERY_OPERATION, compatibility_source_label,
-    compatibility_source_store_id, from_json, nonnegative_u64, parse_payload_access, row_i64,
-    row_optional_f64, row_optional_i64, row_optional_string, row_string, storage_error,
-    storage_message,
+    FACT_WRITE_OPERATION, OwnerKey, QUERY_OPERATION, fact_source_label, from_json, nonnegative_u64,
+    parse_payload_access, row_i64, row_optional_f64, row_optional_i64, row_optional_string,
+    row_string, source_store_id, storage_error, storage_message,
 };
 
-const COMPATIBILITY_PROJECTION_BATCH_SIZE: usize = 400;
+const FACT_PROJECTION_BATCH_SIZE: usize = 400;
 
-fn compatibility_projection_state(value: &str) -> FactStoreResult<CompatibilityProjectionStateV1> {
+fn projection_state(value: &str) -> FactLineageResult<ProjectionState> {
     match value {
-        "ready" => Ok(CompatibilityProjectionStateV1::Ready),
-        "rebuilding" => Ok(CompatibilityProjectionStateV1::Rebuilding),
-        "stale" => Ok(CompatibilityProjectionStateV1::Stale),
-        "unavailable" => Ok(CompatibilityProjectionStateV1::Unavailable),
+        "ready" => Ok(ProjectionState::Ready),
+        "rebuilding" => Ok(ProjectionState::Rebuilding),
+        "stale" => Ok(ProjectionState::Stale),
+        "unavailable" => Ok(ProjectionState::Unavailable),
         _ => Err(storage_message(
             QUERY_OPERATION,
             format!("unknown compatibility projection state {value:?}"),
@@ -39,21 +36,19 @@ fn compatibility_projection_state(value: &str) -> FactStoreResult<CompatibilityP
     }
 }
 
-fn compatibility_unavailable(
-    access: Option<PayloadAccessState>,
-) -> CompatibilityFactAvailabilityV1 {
+fn unavailable(access: Option<PayloadAccessState>) -> FactAvailability {
     match access {
-        Some(PayloadAccessState::Deleted) => CompatibilityFactAvailabilityV1::Deleted,
-        Some(PayloadAccessState::Quarantined) => CompatibilityFactAvailabilityV1::Quarantined,
-        _ => CompatibilityFactAvailabilityV1::Unavailable,
+        Some(PayloadAccessState::Deleted) => FactAvailability::Deleted,
+        Some(PayloadAccessState::Quarantined) => FactAvailability::Quarantined,
+        _ => FactAvailability::Unavailable,
     }
 }
 
-pub(super) async fn compatibility_fact_status_tx(
+pub(super) async fn fact_status_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
-) -> FactStoreResult<Option<CompatibilityFactStatusV1>> {
+) -> FactLineageResult<Option<FactStatus>> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -85,12 +80,12 @@ pub(super) async fn compatibility_fact_status_tx(
         return Ok(None);
     };
     let access = parse_payload_access(&row_string(&row, 0, QUERY_OPERATION)?)?;
-    let state = compatibility_projection_state(&row_string(&row, 1, QUERY_OPERATION)?)?;
+    let state = projection_state(&row_string(&row, 1, QUERY_OPERATION)?)?;
     let watermark = row_optional_string(&row, 3, QUERY_OPERATION)?
         .as_deref()
         .map(|value| from_json::<VectorWatermark>(value, QUERY_OPERATION))
         .transpose()?;
-    CompatibilityFactStatusV1::new(
+    FactStatus::new(
         owner.clone(),
         Some(fact_id.clone()),
         Some(access),
@@ -101,13 +96,13 @@ pub(super) async fn compatibility_fact_status_tx(
     .map(Some)
 }
 
-pub(super) async fn compatibility_legacy_mapping_tx(
+pub(super) async fn legacy_mapping_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
-) -> FactStoreResult<Option<LegacyFactMappingV1>> {
+) -> FactLineageResult<Option<LegacyFactMappingV1>> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
+    let source_store_id = source_store_id()?;
     let mut rows = transaction
         .query(
             "SELECT mapping_json, owner_json FROM memory_v2_legacy_map
@@ -130,7 +125,7 @@ pub(super) async fn compatibility_legacy_mapping_tx(
         return Ok(None);
     };
     if row_string(&row, 1, QUERY_OPERATION)? != key.json {
-        return Err(FactStoreError::OwnerMismatch);
+        return Err(FactLineageError::OwnerMismatch);
     }
     let mapping =
         from_json::<LegacyFactMappingV1>(&row_string(&row, 0, QUERY_OPERATION)?, QUERY_OPERATION)?;
@@ -143,16 +138,12 @@ pub(super) async fn compatibility_legacy_mapping_tx(
     Ok(Some(mapping))
 }
 
-pub(super) async fn compatibility_projection_metadata_tx(
+pub(super) async fn projection_metadata_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
     mapping: Option<&LegacyFactMappingV1>,
-) -> FactStoreResult<(
-    CompatibilityFactSourceV1,
-    Option<String>,
-    CompatibilityFactTelemetryV1,
-)> {
+) -> FactLineageResult<(FactSource, Option<String>, FactTelemetry)> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -213,7 +204,7 @@ pub(super) async fn compatibility_projection_metadata_tx(
         }
         None => None,
     };
-    let telemetry = CompatibilityFactTelemetryV1::new(
+    let telemetry = FactTelemetry::new(
         nonnegative_u64(row_i64(&row, 2, QUERY_OPERATION)?, "retrieval count")?,
         nonnegative_u64(row_i64(&row, 3, QUERY_OPERATION)?, "access count")?,
         nonnegative_u64(row_i64(&row, 4, QUERY_OPERATION)?, "helpful count")?,
@@ -225,19 +216,19 @@ pub(super) async fn compatibility_projection_metadata_tx(
         row_optional_i64(&row, 9, QUERY_OPERATION)?.map(UtcMicros),
     )?;
     Ok((
-        CompatibilityFactSourceV1::Canonical(identity.source().clone()),
+        FactSource::Canonical(identity.source().clone()),
         source_label,
         telemetry,
     ))
 }
 
-pub(super) async fn load_compatibility_projection_tx(
+pub(super) async fn load_projection_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
-) -> FactStoreResult<Option<CompatibilityFactProjectionV1>> {
+) -> FactLineageResult<Option<FactProjection>> {
     Ok(
-        load_compatibility_projections_tx(transaction, owner, std::slice::from_ref(fact_id))
+        load_projections_tx(transaction, owner, std::slice::from_ref(fact_id))
             .await?
             .pop(),
     )
@@ -245,21 +236,21 @@ pub(super) async fn load_compatibility_projection_tx(
 
 /// Loads many compatibility projections with one joined query per bounded
 /// batch. Search, list, and dashboard vector reads used to call
-/// [`load_compatibility_projection_tx`] once per fact, multiplying each result
+/// [`load_projection_tx`] once per fact, multiplying each result
 /// into up to six serialized actor queries while holding one read snapshot.
-pub(super) async fn load_compatibility_projections_tx(
+pub(super) async fn load_projections_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_ids: &[FactId],
-) -> FactStoreResult<Vec<CompatibilityFactProjectionV1>> {
+) -> FactLineageResult<Vec<FactProjection>> {
     if fact_ids.is_empty() {
         return Ok(Vec::new());
     }
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
+    let source_store_id = source_store_id()?;
     let mut projections = BTreeMap::new();
 
-    for batch in fact_ids.chunks(COMPATIBILITY_PROJECTION_BATCH_SIZE) {
+    for batch in fact_ids.chunks(FACT_PROJECTION_BATCH_SIZE) {
         let mut values = vec![
             Value::Text(key.kind.to_string()),
             Value::Text(key.project_id.clone()),
@@ -327,11 +318,11 @@ pub(super) async fn load_compatibility_projections_tx(
         {
             let fact_id = FactId::new(row_string(&row, 0, QUERY_OPERATION)?)?;
             let access = parse_payload_access(&row_string(&row, 1, QUERY_OPERATION)?)?;
-            let status = CompatibilityFactStatusV1::new(
+            let status = FactStatus::new(
                 owner.clone(),
                 Some(fact_id.clone()),
                 Some(access),
-                compatibility_projection_state(&row_string(&row, 2, QUERY_OPERATION)?)?,
+                projection_state(&row_string(&row, 2, QUERY_OPERATION)?)?,
                 Some(UtcMicros(row_i64(&row, 3, QUERY_OPERATION)?)),
                 row_optional_string(&row, 4, QUERY_OPERATION)?
                     .as_deref()
@@ -343,7 +334,7 @@ pub(super) async fn load_compatibility_projections_tx(
                     if row_optional_string(&row, 6, QUERY_OPERATION)?.as_deref()
                         != Some(key.json.as_str())
                     {
-                        return Err(FactStoreError::OwnerMismatch);
+                        return Err(FactLineageError::OwnerMismatch);
                     }
                     let mapping = from_json::<LegacyFactMappingV1>(&mapping_json, QUERY_OPERATION)?;
                     if mapping.owner() != owner || mapping.fact_id() != &fact_id {
@@ -356,29 +347,26 @@ pub(super) async fn load_compatibility_projections_tx(
                 }
                 None => None,
             };
-            let compatibility_id = CompatibilityFactIdV1::new(owner.clone(), fact_id.clone())?;
-            let mapping =
-                CompatibilityFactMappingV1::new(compatibility_id.clone(), legacy_mapping.clone())?;
+            let id = OwnedFactId::new(owner.clone(), fact_id.clone())?;
+            let mapping = FactMapping::new(id.clone(), legacy_mapping.clone())?;
             let Some(active_assertion_id) = row_optional_string(&row, 8, QUERY_OPERATION)?
                 .map(FactAssertionId::new)
                 .transpose()?
             else {
                 projections.insert(
                     fact_id,
-                    CompatibilityFactProjectionV1::Unavailable(
-                        CompatibilityFactUnavailableV1::new(
-                            compatibility_id,
-                            compatibility_unavailable(status.payload_access()),
-                            status,
-                        )?,
-                    ),
+                    FactProjection::Unavailable(FactUnavailable::new(
+                        id,
+                        unavailable(status.payload_access()),
+                        status,
+                    )?),
                 );
                 continue;
             };
             let payload = match access {
                 PayloadAccessState::Eligible => Some(from_json::<FactPayloadV1>(
                     &row_optional_string(&row, 10, QUERY_OPERATION)?
-                        .ok_or(FactStoreError::PayloadAccessMismatch)?,
+                        .ok_or(FactLineageError::PayloadAccessMismatch)?,
                     QUERY_OPERATION,
                 )?),
                 _ => None,
@@ -402,13 +390,11 @@ pub(super) async fn load_compatibility_projections_tx(
             if stored.payload().is_none() {
                 projections.insert(
                     fact_id,
-                    CompatibilityFactProjectionV1::Unavailable(
-                        CompatibilityFactUnavailableV1::new(
-                            compatibility_id,
-                            compatibility_unavailable(status.payload_access()),
-                            status,
-                        )?,
-                    ),
+                    FactProjection::Unavailable(FactUnavailable::new(
+                        id,
+                        unavailable(status.payload_access()),
+                        status,
+                    )?),
                 );
                 continue;
             }
@@ -422,7 +408,7 @@ pub(super) async fn load_compatibility_projections_tx(
                     "compatibility fact identity material mismatch",
                 ));
             }
-            let telemetry = CompatibilityFactTelemetryV1::new(
+            let telemetry = FactTelemetry::new(
                 nonnegative_u64(row_i64(&row, 13, QUERY_OPERATION)?, "retrieval count")?,
                 nonnegative_u64(row_i64(&row, 14, QUERY_OPERATION)?, "access count")?,
                 nonnegative_u64(row_i64(&row, 15, QUERY_OPERATION)?, "helpful count")?,
@@ -433,17 +419,14 @@ pub(super) async fn load_compatibility_projections_tx(
                 row_optional_i64(&row, 18, QUERY_OPERATION)?.map(UtcMicros),
                 row_optional_i64(&row, 19, QUERY_OPERATION)?.map(UtcMicros),
             )?;
-            let projection = CompatibilityFactV1::new(
+            let projection = Fact::new(
                 stored,
                 mapping,
-                CompatibilityFactSourceV1::Canonical(identity.source().clone()),
+                FactSource::Canonical(identity.source().clone()),
                 telemetry,
             )?
             .with_source_label(row_optional_string(&row, 20, QUERY_OPERATION)?)?;
-            projections.insert(
-                fact_id,
-                CompatibilityFactProjectionV1::Available(Box::new(projection)),
-            );
+            projections.insert(fact_id, FactProjection::Available(Box::new(projection)));
         }
     }
 
@@ -453,25 +436,23 @@ pub(super) async fn load_compatibility_projections_tx(
         .collect())
 }
 
-pub(super) async fn resolve_compatibility_target_tx(
+pub(super) async fn resolve_target_tx(
     transaction: &Transaction<'_>,
-    target: &CompatibilityFactTargetV1,
-) -> FactStoreResult<Option<FactId>> {
+    target: &FactTarget,
+) -> FactLineageResult<Option<FactId>> {
     match target {
-        CompatibilityFactTargetV1::Canonical(target) => Ok(Some(target.fact_id().clone())),
-        CompatibilityFactTargetV1::Legacy(query) => {
-            resolve_legacy_fact_tx(transaction, query).await
-        }
+        FactTarget::Canonical(target) => Ok(Some(target.fact_id().clone())),
+        FactTarget::Legacy(query) => resolve_legacy_fact_tx(transaction, query).await,
     }
 }
 
-pub(super) async fn compatibility_fact_for_legacy_id_tx(
+pub(super) async fn fact_for_legacy_id_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     legacy_fact_id: i64,
-) -> FactStoreResult<Option<FactId>> {
+) -> FactLineageResult<Option<FactId>> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
+    let source_store_id = source_store_id()?;
     let mut rows = transaction
         .query(
             "SELECT fact_id, owner_json FROM memory_v2_legacy_map
@@ -494,54 +475,54 @@ pub(super) async fn compatibility_fact_for_legacy_id_tx(
         return Ok(None);
     };
     if row_string(&row, 1, QUERY_OPERATION)? != key.json {
-        return Err(FactStoreError::OwnerMismatch);
+        return Err(FactLineageError::OwnerMismatch);
     }
     FactId::new(row_string(&row, 0, QUERY_OPERATION)?)
         .map(Some)
-        .map_err(FactStoreError::from)
+        .map_err(FactLineageError::from)
 }
 
-pub(super) async fn compatibility_required_mapping_tx(
+pub(super) async fn required_mapping_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
-) -> FactStoreResult<LegacyFactMappingV1> {
-    compatibility_legacy_mapping_tx(transaction, owner, fact_id)
+) -> FactLineageResult<LegacyFactMappingV1> {
+    legacy_mapping_tx(transaction, owner, fact_id)
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                FACT_WRITE_OPERATION,
                 "compatibility fact has no fixed legacy-memory-v1 mapping",
             )
         })
 }
 
-pub(super) async fn compatibility_source_for_fact_tx(
+pub(super) async fn source_for_fact_tx(
     transaction: &Transaction<'_>,
     mapping: &LegacyFactMappingV1,
-) -> FactStoreResult<String> {
+) -> FactLineageResult<String> {
     let mut rows = transaction
         .query(
             "SELECT source FROM memory_facts WHERE fact_id = ?1",
             params![mapping.legacy_fact_id()],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     let source = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
-        .map(|row| row_optional_string(&row, 0, COMPATIBILITY_WRITE_OPERATION))
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?
+        .map(|row| row_optional_string(&row, 0, FACT_WRITE_OPERATION))
         .transpose()?
         .flatten()
         .unwrap_or_else(|| "manual".to_owned());
-    compatibility_source_label(Some(source.as_str()))
+    fact_source_label(Some(source.as_str()))
 }
 
 pub(super) async fn resolve_legacy_fact_tx(
     snapshot: &Transaction<'_>,
     query: &LegacyFactQuery,
-) -> FactStoreResult<Option<FactId>> {
+) -> FactLineageResult<Option<FactId>> {
     let owner = OwnerKey::new(query.owner())?;
     let mut rows = snapshot
         .query(
@@ -565,7 +546,7 @@ pub(super) async fn resolve_legacy_fact_tx(
         return Ok(None);
     };
     if row_string(&row, 1, QUERY_OPERATION)? != owner.json {
-        return Err(FactStoreError::OwnerMismatch);
+        return Err(FactLineageError::OwnerMismatch);
     }
     let fact_id = FactId::new(row_string(&row, 0, QUERY_OPERATION)?)?;
     query.validate_resolved_fact_id(&fact_id)?;

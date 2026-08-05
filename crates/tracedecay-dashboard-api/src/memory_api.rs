@@ -303,16 +303,10 @@ async fn memory_status_payload(state: &DashboardState) -> Result<MemoryStatusPay
         largest_bank_utilization_pct,
         feedback_history_repair: MemoryFeedbackHistoryRepairV1 {
             state: match typed_status.feedback_history_repair() {
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::NotRequired => {
-                    "not_required"
-                }
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Complete { .. } => {
-                    "complete"
-                }
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => {
-                    "incomplete"
-                }
+                tracedecay_store::FeedbackRepairProgress::Unknown => "unknown",
+                tracedecay_store::FeedbackRepairProgress::NotRequired => "not_required",
+                tracedecay_store::FeedbackRepairProgress::Complete { .. } => "complete",
+                tracedecay_store::FeedbackRepairProgress::Incomplete { .. } => "incomplete",
             }
             .to_owned(),
             processed: typed_status.feedback_history_repair().processed(),
@@ -344,19 +338,15 @@ async fn fact_trust_history_payload(
         .iter()
         .map(|event| {
             let action = match event.action() {
-                tracedecay_store::CompatibilityFactFeedbackActionV1::Helpful => "helpful",
-                tracedecay_store::CompatibilityFactFeedbackActionV1::Unhelpful => "unhelpful",
+                tracedecay_store::FactFeedbackAction::Helpful => "helpful",
+                tracedecay_store::FactFeedbackAction::Unhelpful => "unhelpful",
             };
             let availability = match event.details_availability() {
-                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::Available => {
-                    "available"
-                }
-                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::LegacyRedacted => {
+                tracedecay_store::FactFeedbackDetailsAvailability::Available => "available",
+                tracedecay_store::FactFeedbackDetailsAvailability::LegacyRedacted => {
                     "legacy_redacted"
                 }
-                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::Unknown => {
-                    "unknown"
-                }
+                tracedecay_store::FactFeedbackDetailsAvailability::Unknown => "unknown",
             };
             let mut row = Map::new();
             row.insert("timestamp".into(), json!(event.occurred_at().0));
@@ -379,10 +369,10 @@ async fn fact_trust_history_payload(
         .collect();
     let repair_progress = history.repair_progress();
     let repair_state = match repair_progress {
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::NotRequired => "not_required",
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Complete { .. } => "complete",
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => "incomplete",
+        tracedecay_store::FeedbackRepairProgress::Unknown => "unknown",
+        tracedecay_store::FeedbackRepairProgress::NotRequired => "not_required",
+        tracedecay_store::FeedbackRepairProgress::Complete { .. } => "complete",
+        tracedecay_store::FeedbackRepairProgress::Incomplete { .. } => "incomplete",
     };
     Ok(Some(json!({
         "fact_id": fact_id,
@@ -640,7 +630,6 @@ pub async fn fact_proposals(
     };
     match tracedecay_agent_hosts::automation::fact_proposals::list_fact_proposals(
         &memory,
-        &state.dashboard_root,
         proposal_state,
         limit,
     )
@@ -677,7 +666,6 @@ pub async fn fact_proposal_apply(
     };
     match tracedecay_agent_hosts::automation::fact_proposals::apply_fact_proposal_with_result(
         &memory,
-        &state.dashboard_root,
         &proposal_id,
         reviewer,
     )
@@ -718,7 +706,6 @@ pub async fn fact_proposal_reject(
     };
     match tracedecay_agent_hosts::automation::fact_proposals::reject_fact_proposal(
         &memory,
-        &state.dashboard_root,
         &proposal_id,
         body.reviewer,
         body.reason,

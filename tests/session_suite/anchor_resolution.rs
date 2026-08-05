@@ -27,7 +27,7 @@ use tracedecay_domain::{
 use tracedecay_store::{
     AnchoredObservationWrite, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery,
-    FactLineageResponseV1, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
+    FactLineageResponseV1, FactLineageStore, FactLineageResult, FactWriteBatch, LegacyFactQuery,
     ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite, RetrievalAnchorQuery, SESSION_MESSAGE_PROJECTOR_VERSION,
     StoredFactV1, build_observation_resolution_authorization_v1,
@@ -547,71 +547,71 @@ async fn ambiguous_resolution_reports_typed_state_from_record_and_store_conflict
 /// Fact-store stub: report resolution never touches the fact authority.
 struct UnavailableFactStore;
 
-impl FactStore for UnavailableFactStore {
-    async fn commit_fact(&self, _batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
+impl FactLineageStore for UnavailableFactStore {
+    async fn commit_fact(&self, _batch: FactWriteBatch) -> FactLineageResult<FactCommitOutcome> {
         unreachable!("report resolution never commits facts")
     }
 
     async fn query_current_facts(
         &self,
         _query: CurrentFactsQuery,
-    ) -> FactStoreResult<Vec<StoredFactV1>> {
+    ) -> FactLineageResult<Vec<StoredFactV1>> {
         unreachable!("report resolution never queries facts")
     }
 
     async fn query_fact_current(
         &self,
         _query: FactCurrentQuery,
-    ) -> FactStoreResult<Option<StoredFactV1>> {
+    ) -> FactLineageResult<Option<StoredFactV1>> {
         unreachable!("report resolution never queries facts")
     }
 
     async fn query_fact_current_response(
         &self,
         _query: FactCurrentQuery,
-    ) -> FactStoreResult<FactCurrentResponseV1> {
+    ) -> FactLineageResult<FactCurrentResponseV1> {
         unreachable!("report resolution never queries facts")
     }
 
     async fn query_fact_as_of(
         &self,
         _query: FactAsOfQuery,
-    ) -> FactStoreResult<Option<StoredFactV1>> {
+    ) -> FactLineageResult<Option<StoredFactV1>> {
         unreachable!("report resolution never queries facts")
     }
 
     async fn query_fact_as_of_response(
         &self,
         _query: FactAsOfQuery,
-    ) -> FactStoreResult<FactAsOfResponseV1> {
+    ) -> FactLineageResult<FactAsOfResponseV1> {
         unreachable!("report resolution never queries facts")
     }
 
     async fn query_fact_lineage(
         &self,
         _query: FactLineageQuery,
-    ) -> FactStoreResult<Vec<FactLineageEventV1>> {
+    ) -> FactLineageResult<Vec<FactLineageEventV1>> {
         unreachable!("report resolution never queries fact lineage")
     }
 
     async fn query_fact_lineage_response(
         &self,
         _query: FactLineageQuery,
-    ) -> FactStoreResult<FactLineageResponseV1> {
+    ) -> FactLineageResult<FactLineageResponseV1> {
         unreachable!("report resolution never queries fact lineage")
     }
 
     async fn resolve_legacy_fact(
         &self,
         _query: LegacyFactQuery,
-    ) -> FactStoreResult<Option<FactId>> {
+    ) -> FactLineageResult<Option<FactId>> {
         unreachable!("report resolution never resolves legacy facts")
     }
 
     async fn get_retrieval_anchor(
         &self,
         _query: RetrievalAnchorQuery,
-    ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
+    ) -> FactLineageResult<Option<RetrievalAnchorRecordV2>> {
         unreachable!("report resolution never reads fact-shard anchors")
     }
 }

@@ -529,7 +529,7 @@ pub(super) async fn dispatch_memory_operation(
 ) -> Result<ToolResult> {
     let global_db = options.global_db.map(std::sync::Arc::as_ref);
     let operation_label = match operation {
-        RetainedSurfaceOperation::FactStore => "fact_store",
+        RetainedSurfaceOperation::FactLineageStore => "fact_store",
         RetainedSurfaceOperation::FactFeedback => "fact_feedback",
         RetainedSurfaceOperation::MemoryStatus => "memory_status",
         _ => unreachable!("dispatch_memory_operation handles memory operations only"),
@@ -537,7 +537,7 @@ pub(super) async fn dispatch_memory_operation(
 
     let handler = async {
         match operation {
-            RetainedSurfaceOperation::FactStore => {
+            RetainedSurfaceOperation::FactLineageStore => {
                 memory::handle_fact_store(cg, args, global_db).await
             }
             RetainedSurfaceOperation::FactFeedback => {
@@ -580,7 +580,7 @@ pub(super) async fn execute_project_retained_application_tool(
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match request.operation {
-        RetainedSurfaceOperation::FactStore
+        RetainedSurfaceOperation::FactLineageStore
         | RetainedSurfaceOperation::FactFeedback
         | RetainedSurfaceOperation::MemoryStatus => {
             dispatch_memory_operation(request.operation, cg, request.arguments, options).await

@@ -40,7 +40,7 @@ pub(crate) use status::handle_user_memory_tool;
 #[cfg(test)]
 use serde_json::json;
 #[cfg(test)]
-use tracedecay_store::CompatibilityFeedbackRepairProgressV1;
+use tracedecay_store::FeedbackRepairProgress;
 
 #[cfg(test)]
 use crate::memory::types::{AddFactRequest, MemoryCategory};
@@ -229,8 +229,8 @@ async fn refresh_target_memory_digest(
 mod tests {
     use super::*;
     use tracedecay_store::{
-        CompatibilityFactSearchCursorV1, CompatibilityFactSearchFilterV1,
-        CompatibilityFactSearchKindV1, CompatibilityFactSearchQuery, FactStoreError,
+        FactSearchCursor, FactSearchFilter,
+        FactSearchKind, FactSearchQuery, FactLineageError,
     };
 
     fn cursor_fact(content: &str) -> AddFactRequest {
@@ -248,13 +248,13 @@ mod tests {
     fn cursor_search_query(
         owner: FactOwnerV1,
         query: &str,
-        after: Option<CompatibilityFactSearchCursorV1>,
-    ) -> std::result::Result<CompatibilityFactSearchQuery, FactStoreError> {
-        CompatibilityFactSearchQuery::with_filter(
+        after: Option<FactSearchCursor>,
+    ) -> std::result::Result<FactSearchQuery, FactLineageError> {
+        FactSearchQuery::with_filter(
             owner,
-            CompatibilityFactSearchKindV1::Search,
+            FactSearchKind::Search,
             Some(query.to_owned()),
-            CompatibilityFactSearchFilterV1::new(None, None, None)?,
+            FactSearchFilter::new(None, None, None)?,
             after,
             1,
         )
@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn incomplete_feedback_history_repair_is_explicit() {
         assert_eq!(
-            feedback_history_repair_payload(CompatibilityFeedbackRepairProgressV1::Incomplete {
+            feedback_history_repair_payload(FeedbackRepairProgress::Incomplete {
                 processed: 1,
                 remaining: Some(2),
             }),
@@ -1032,7 +1032,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compatibility_search_cursor_replays_and_rejects_other_owners() {
+    async fn search_cursor_replays_and_rejects_other_owners() {
         let (_tmp, cg) = empty_memory().await;
         let owner = active_project_memory_owner(&cg).unwrap();
         let memory = active_memory(&cg);
@@ -1058,7 +1058,7 @@ mod tests {
         }
 
         let first_page = memory
-            .search_compatibility_facts(
+            .search_facts(
                 cursor_search_query(owner.clone(), "cursor fixture", None).unwrap(),
             )
             .await
@@ -1068,13 +1068,13 @@ mod tests {
             .cloned()
             .expect("the first finite page must provide its real cursor");
         let second_page = memory
-            .search_compatibility_facts(
+            .search_facts(
                 cursor_search_query(owner.clone(), "cursor fixture", Some(cursor.clone())).unwrap(),
             )
             .await
             .unwrap();
         let replay_page = memory
-            .search_compatibility_facts(
+            .search_facts(
                 cursor_search_query(owner.clone(), "cursor fixture", Some(cursor)).unwrap(),
             )
             .await
@@ -1132,7 +1132,7 @@ mod tests {
             );
         }
         let profile_first_page = profile_memory
-            .search_compatibility_facts(
+            .search_facts(
                 cursor_search_query(profile_owner, "profile cursor fixture", None).unwrap(),
             )
             .await
@@ -1143,7 +1143,7 @@ mod tests {
             .expect("the profile page must provide its real cursor");
         assert!(matches!(
             cursor_search_query(owner, "profile cursor fixture", Some(foreign_cursor)),
-            Err(FactStoreError::OwnerMismatch)
+            Err(FactLineageError::OwnerMismatch)
         ));
     }
 }

@@ -7,28 +7,21 @@ use tracedecay_domain::{
     ProvenanceId,
 };
 use tracedecay_store::{
-    CompatibilityFactAddCommandV1, CompatibilityFactAddOutcomeV1,
-    CompatibilityFactContentDigestQueryV1, CompatibilityFactContradictionPageV1,
-    CompatibilityFactContradictionQueryV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
-    CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
-    CompatibilityFactPageV1, CompatibilityFactProjectionV1, CompatibilityFactProposalPageV1,
-    CompatibilityFactProposalPromotionDispositionV1, CompatibilityFactProposalPromotionResultV1,
-    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1,
-    CompatibilityFactRelationV1, CompatibilityFactRemoveCommandV1,
-    CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
-    CompatibilityFactSearchCursorV1, CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery,
-    CompatibilityFactTargetV1, CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
-    CompatibilityMemoryStatusV1, FactCompatibilityStore,
+    FactAddCommand, FactAddOutcome, FactContentDigestQuery, FactContradictionPage,
+    FactContradictionQuery, FactFeedbackCommand, FactFeedbackHistory, FactFeedbackHistoryQuery,
+    FactFeedbackOutcome, FactHistory, FactHistoryQuery, FactInspection, FactListQuery, FactPage,
+    FactProjection, FactProposalEvidence, FactProposalPage, FactProposalPromotion,
+    FactProposalPromotionDisposition, FactProposalPromotionResult, FactProposalRecord,
+    FactProposalRevision, FactProposalState, FactRelation, FactRemoveCommand, FactRemoveOutcome,
+    FactRetrievalCommand, FactSearchCursor, FactSearchPage, FactSearchQuery, FactStore, FactTarget,
+    FactUpdateCommand, FactUpdateOutcome, MemoryStatus as StoreMemoryStatus,
 };
 
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
 use tracedecay_runtime_core::memory::trust::DEFAULT_TRUST;
 use tracedecay_runtime_core::memory::types::{
     AddFactRequest, FactRecord, FactRelationKind, MemoryCategory, MemoryFeedbackFunnel,
-    MemoryRepairStats, MemoryStatus,
+    MemoryRepairStats as RuntimeMemoryRepairStats, MemoryStatus as RuntimeMemoryStatus,
 };
 
 use super::MemoryApplication;
@@ -45,7 +38,7 @@ pub fn automation_fact_proposal_add_command(
     run_id: &str,
     proposal_id: &str,
     actor: Option<ActorId>,
-) -> Result<CompatibilityFactAddCommandV1, MemoryApplicationError> {
+) -> Result<FactAddCommand, MemoryApplicationError> {
     owner.validate()?;
     validate_operation_component(run_id, "automation proposal run identity")?;
     validate_operation_component(proposal_id, "automation proposal identity")?;
@@ -60,32 +53,32 @@ pub fn automation_fact_proposal_add_command(
             invariant: "automation proposal rejected by memory privacy sanitizer",
         });
     };
-    with_automation_run_id(compatibility_add_command(owner, request, &context)?, run_id)
+    with_automation_run_id(add_command(owner, request, &context)?, run_id)
 }
 
 /// Binds the trusted run identity to command metadata after the payload has
 /// been sanitized. It is never serialized into fact payload metadata.
 pub fn with_automation_run_id(
-    command: CompatibilityFactAddCommandV1,
+    command: FactAddCommand,
     run_id: &str,
-) -> Result<CompatibilityFactAddCommandV1, MemoryApplicationError> {
+) -> Result<FactAddCommand, MemoryApplicationError> {
     validate_operation_component(run_id, "automation proposal run identity")?;
     command
         .with_automation_run_id(run_id.to_owned())
         .map_err(MemoryApplicationError::Store)
 }
 
-pub(super) fn compatibility_add_command(
+pub(super) fn add_command(
     owner: FactOwnerV1,
     request: AddFactRequest,
     context: &MemoryOperationContext,
-) -> Result<CompatibilityFactAddCommandV1, MemoryApplicationError> {
+) -> Result<FactAddCommand, MemoryApplicationError> {
     let trust = Confidence::new(request.trust.unwrap_or(DEFAULT_TRUST)).map_err(|_| {
         MemoryApplicationError::InvalidCompatibilityInput {
             invariant: "trust must be between 0.0 and 1.0",
         }
     })?;
-    CompatibilityFactAddCommandV1::new(
+    FactAddCommand::new(
         owner,
         context.operation_id().clone(),
         request.content,
@@ -111,14 +104,12 @@ pub(super) const fn fact_category(category: MemoryCategory) -> FactCategoryV1 {
     }
 }
 
-pub(super) const fn compatibility_relation(
-    relation: FactRelationKind,
-) -> CompatibilityFactRelationV1 {
+pub(super) const fn fact_relation(relation: FactRelationKind) -> FactRelation {
     match relation {
-        FactRelationKind::Supports => CompatibilityFactRelationV1::Supports,
-        FactRelationKind::Contradicts => CompatibilityFactRelationV1::Contradicts,
-        FactRelationKind::Supersedes => CompatibilityFactRelationV1::Supersedes,
-        FactRelationKind::DerivedFrom => CompatibilityFactRelationV1::DerivedFrom,
+        FactRelationKind::Supports => FactRelation::Supports,
+        FactRelationKind::Contradicts => FactRelation::Contradicts,
+        FactRelationKind::Supersedes => FactRelation::Supersedes,
+        FactRelationKind::DerivedFrom => FactRelation::DerivedFrom,
     }
 }
 
@@ -133,9 +124,7 @@ const fn memory_category(category: FactCategoryV1) -> MemoryCategory {
     }
 }
 
-pub(super) fn compatibility_confidence(
-    value: Option<f64>,
-) -> Result<Option<Confidence>, MemoryApplicationError> {
+pub(super) fn confidence(value: Option<f64>) -> Result<Option<Confidence>, MemoryApplicationError> {
     value.map(Confidence::new).transpose().map_err(|_| {
         MemoryApplicationError::InvalidCompatibilityInput {
             invariant: "confidence (trust/min_trust) must be between 0.0 and 1.0",
@@ -163,11 +152,11 @@ pub(super) fn legacy_usize(
 /// shape. Keep this pure so callers cannot accidentally split status and
 /// feedback-history repair across separate reads.
 pub(super) fn project_memory_status_v1(
-    status: &CompatibilityMemoryStatusV1,
-) -> Result<MemoryStatus, MemoryApplicationError> {
+    status: &StoreMemoryStatus,
+) -> Result<RuntimeMemoryStatus, MemoryApplicationError> {
     let funnel = status.feedback_funnel();
     let repair = status.repair();
-    Ok(MemoryStatus {
+    Ok(RuntimeMemoryStatus {
         fact_count: legacy_usize(status.fact_count(), "legacy memory fact count")?,
         entity_count: legacy_usize(status.entity_count(), "legacy memory entity count")?,
         bank_count: legacy_usize(status.bank_count(), "legacy memory bank count")?,
@@ -203,7 +192,7 @@ pub(super) fn project_memory_status_v1(
             status.missing_vector_count(),
             "legacy memory missing vector count",
         )?,
-        repair: MemoryRepairStats {
+        repair: RuntimeMemoryRepairStats {
             missing_vectors_repaired: legacy_usize(
                 repair.missing_vectors_repaired(),
                 "legacy memory repaired vectors",
@@ -236,9 +225,9 @@ pub(super) fn project_memory_status_v1(
     })
 }
 
-pub(super) fn compatibility_fact_record(
+pub(super) fn fact_record(
     scope: &MemoryCompatibilityScope,
-    fact: &tracedecay_store::CompatibilityFactV1,
+    fact: &tracedecay_store::Fact,
 ) -> Result<FactRecord, MemoryApplicationError> {
     if fact.owner() != scope.owner() {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
@@ -282,13 +271,13 @@ pub(super) fn compatibility_fact_record(
     })
 }
 
-pub(super) fn compatibility_projection_record(
+pub(super) fn projection_record(
     scope: &MemoryCompatibilityScope,
-    projection: &CompatibilityFactProjectionV1,
+    projection: &FactProjection,
 ) -> Result<FactRecord, MemoryApplicationError> {
     match projection {
-        CompatibilityFactProjectionV1::Available(fact) => compatibility_fact_record(scope, fact),
-        CompatibilityFactProjectionV1::Unavailable(_) => {
+        FactProjection::Available(fact) => fact_record(scope, fact),
+        FactProjection::Unavailable(_) => {
             Err(MemoryApplicationError::IncompatibleLegacyProjection {
                 invariant: "available legacy fact projection",
             })
@@ -299,77 +288,74 @@ pub(super) fn compatibility_projection_record(
 /// Typed compatibility use cases. Transport adapters translate legacy inputs
 /// before this boundary; only the authority owns the corresponding mutation
 /// transaction and compatibility projection.
-impl<A: FactCompatibilityStore> MemoryApplication<A> {
-    pub async fn list_compatibility_facts(
+impl<A: FactStore> MemoryApplication<A> {
+    pub async fn list_facts(
         &self,
-        query: CompatibilityFactListQueryV1,
-    ) -> Result<CompatibilityFactPageV1, MemoryApplicationError> {
+        query: FactListQuery,
+    ) -> Result<FactPage, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let after_fact_id = query.after_fact_id().cloned();
         let limit = query.limit();
-        let page = self.authority.list_compatibility_facts(query).await?;
-        validate_compatibility_page(&self.owner, after_fact_id.as_ref(), limit, &page)?;
+        let page = self.authority.list_facts(query).await?;
+        validate_page(&self.owner, after_fact_id.as_ref(), limit, &page)?;
         Ok(page)
     }
 
-    pub async fn search_compatibility_facts(
+    pub async fn search_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> Result<CompatibilityFactSearchPageV1, MemoryApplicationError> {
+        query: FactSearchQuery,
+    ) -> Result<FactSearchPage, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let after = query.after().cloned();
         let limit = query.limit();
-        let page = self.authority.search_compatibility_facts(query).await?;
-        validate_compatibility_search_page(&self.owner, after.as_ref(), limit, &page)?;
+        let page = self.authority.search_facts(query).await?;
+        validate_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
 
-    pub async fn probe_compatibility_facts(
+    pub async fn probe_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> Result<CompatibilityFactSearchPageV1, MemoryApplicationError> {
+        query: FactSearchQuery,
+    ) -> Result<FactSearchPage, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let after = query.after().cloned();
         let limit = query.limit();
-        let page = self.authority.probe_compatibility_facts(query).await?;
-        validate_compatibility_search_page(&self.owner, after.as_ref(), limit, &page)?;
+        let page = self.authority.probe_facts(query).await?;
+        validate_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
 
-    pub async fn related_compatibility_facts(
+    pub async fn related_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> Result<CompatibilityFactSearchPageV1, MemoryApplicationError> {
+        query: FactSearchQuery,
+    ) -> Result<FactSearchPage, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let after = query.after().cloned();
         let limit = query.limit();
-        let page = self.authority.related_compatibility_facts(query).await?;
-        validate_compatibility_search_page(&self.owner, after.as_ref(), limit, &page)?;
+        let page = self.authority.related_facts(query).await?;
+        validate_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
 
-    pub async fn reason_compatibility_facts(
+    pub async fn reason_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> Result<CompatibilityFactSearchPageV1, MemoryApplicationError> {
+        query: FactSearchQuery,
+    ) -> Result<FactSearchPage, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let after = query.after().cloned();
         let limit = query.limit();
-        let page = self.authority.reason_compatibility_facts(query).await?;
-        validate_compatibility_search_page(&self.owner, after.as_ref(), limit, &page)?;
+        let page = self.authority.reason_facts(query).await?;
+        validate_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
 
-    pub async fn find_compatibility_contradictions(
+    pub async fn find_contradictions(
         &self,
-        query: CompatibilityFactContradictionQueryV1,
-    ) -> Result<CompatibilityFactContradictionPageV1, MemoryApplicationError> {
+        query: FactContradictionQuery,
+    ) -> Result<FactContradictionPage, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let limit = query.limit();
-        let page = self
-            .authority
-            .find_compatibility_contradictions(query)
-            .await?;
+        let page = self.authority.find_contradictions(query).await?;
         if page.owner() != &self.owner
             || page.contradictions().len() > limit
             || page
@@ -384,17 +370,14 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         Ok(page)
     }
 
-    pub async fn get_compatibility_fact(
+    pub async fn get_fact(
         &self,
-        target: CompatibilityFactTargetV1,
-    ) -> Result<Option<CompatibilityFactProjectionV1>, MemoryApplicationError> {
+        target: FactTarget,
+    ) -> Result<Option<FactProjection>, MemoryApplicationError> {
         self.ensure_owner(target.owner())?;
-        let result = self
-            .authority
-            .get_compatibility_fact(target.clone())
-            .await?;
+        let result = self.authority.get_fact(target.clone()).await?;
         if let Some(projection) = &result {
-            validate_compatibility_projection(&self.owner, &target, projection)?;
+            validate_projection(&self.owner, &target, projection)?;
         }
         Ok(result)
     }
@@ -406,7 +389,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     pub async fn find_exact_fact_v1_by_content(
         &self,
         content: &str,
-    ) -> Result<Option<CompatibilityFactProjectionV1>, MemoryApplicationError> {
+    ) -> Result<Option<FactProjection>, MemoryApplicationError> {
         if content.trim().is_empty() || detect_secret_like(content.trim()).is_some() {
             return Ok(None);
         }
@@ -417,12 +400,10 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         .map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
             invariant: "exact fact content digest",
         })?;
-        let result =
-            self.authority
-                .find_compatibility_fact_by_content_digest(
-                    CompatibilityFactContentDigestQueryV1::new(self.owner.clone(), digest)?,
-                )
-                .await?;
+        let result = self
+            .authority
+            .find_fact_by_content_digest(FactContentDigestQuery::new(self.owner.clone(), digest)?)
+            .await?;
         if let Some(projection) = &result
             && projection.owner() != &self.owner
         {
@@ -433,15 +414,15 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         Ok(result)
     }
 
-    pub async fn get_compatibility_history(
+    pub async fn get_history(
         &self,
-        query: CompatibilityFactHistoryQueryV1,
-    ) -> Result<CompatibilityFactHistoryV1, MemoryApplicationError> {
+        query: FactHistoryQuery,
+    ) -> Result<FactHistory, MemoryApplicationError> {
         self.ensure_owner(query.target().owner())?;
         let target = query.target().clone();
         let after = query.after().cloned();
         let limit = query.limit();
-        let history = self.authority.compatibility_fact_history(query).await?;
+        let history = self.authority.fact_history(query).await?;
         if history.owner() != &self.owner {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
                 invariant: "compatibility history owner",
@@ -466,16 +447,13 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
 
     /// Pure history snapshot. Incomplete repair is surfaced in the returned
     /// progress; callers must use an explicit repair command to advance it.
-    pub async fn get_compatibility_feedback_history(
+    pub async fn get_feedback_history(
         &self,
-        query: CompatibilityFactFeedbackHistoryQueryV1,
-    ) -> Result<CompatibilityFactFeedbackHistoryV1, MemoryApplicationError> {
+        query: FactFeedbackHistoryQuery,
+    ) -> Result<FactFeedbackHistory, MemoryApplicationError> {
         self.ensure_owner(query.target().owner())?;
         let limit = query.limit();
-        let history = self
-            .authority
-            .compatibility_fact_feedback_history(query)
-            .await?;
+        let history = self.authority.fact_feedback_history(query).await?;
         if history.owner() != &self.owner || history.events().len() > limit {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
                 invariant: "compatibility feedback history owner and bounds",
@@ -485,13 +463,8 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     }
 
     /// Pure status snapshot. It reports, but never advances, feedback repair.
-    pub async fn compatibility_memory_status(
-        &self,
-    ) -> Result<CompatibilityMemoryStatusV1, MemoryApplicationError> {
-        let status = self
-            .authority
-            .compatibility_memory_status(self.owner.clone())
-            .await?;
+    pub async fn memory_status(&self) -> Result<StoreMemoryStatus, MemoryApplicationError> {
+        let status = self.authority.memory_status(self.owner.clone()).await?;
         if status.owner() != &self.owner {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
                 invariant: "compatibility memory status owner",
@@ -500,82 +473,73 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         Ok(status)
     }
 
-    pub async fn inspect_compatibility_fact(
+    pub async fn inspect_fact(
         &self,
-        target: CompatibilityFactTargetV1,
-    ) -> Result<Option<CompatibilityFactInspectionV1>, MemoryApplicationError> {
+        target: FactTarget,
+    ) -> Result<Option<FactInspection>, MemoryApplicationError> {
         self.ensure_owner(target.owner())?;
-        let inspection = self
-            .authority
-            .inspect_compatibility_fact(target.clone())
-            .await?;
+        let inspection = self.authority.inspect_fact(target.clone()).await?;
         if let Some(inspection) = &inspection {
-            validate_compatibility_inspection(&self.owner, &target, inspection)?;
+            validate_inspection(&self.owner, &target, inspection)?;
         }
         Ok(inspection)
     }
 
-    pub async fn add_compatibility_fact(
+    pub async fn add_fact(
         &self,
-        request: CompatibilityFactAddCommandV1,
-    ) -> Result<CompatibilityFactAddOutcomeV1, MemoryApplicationError> {
+        request: FactAddCommand,
+    ) -> Result<FactAddOutcome, MemoryApplicationError> {
         self.ensure_owner(request.owner())?;
-        let outcome = self.authority.add_compatibility_fact(request).await?;
-        validate_compatibility_add_outcome(&self.owner, &outcome)?;
+        let outcome = self.authority.add_fact(request).await?;
+        validate_add_outcome(&self.owner, &outcome)?;
         Ok(outcome)
     }
 
-    pub async fn update_compatibility_fact(
+    pub async fn update_fact(
         &self,
-        request: CompatibilityFactUpdateCommandV1,
-    ) -> Result<CompatibilityFactUpdateOutcomeV1, MemoryApplicationError> {
+        request: FactUpdateCommand,
+    ) -> Result<FactUpdateOutcome, MemoryApplicationError> {
         self.ensure_owner(request.target().owner())?;
         let target = request.target().clone();
-        let outcome = self.authority.update_compatibility_fact(request).await?;
-        validate_compatibility_projection(&self.owner, &target, outcome.fact())?;
+        let outcome = self.authority.update_fact(request).await?;
+        validate_projection(&self.owner, &target, outcome.fact())?;
         Ok(outcome)
     }
 
-    pub async fn remove_compatibility_fact(
+    pub async fn remove_fact(
         &self,
-        request: CompatibilityFactRemoveCommandV1,
-    ) -> Result<CompatibilityFactRemoveOutcomeV1, MemoryApplicationError> {
+        request: FactRemoveCommand,
+    ) -> Result<FactRemoveOutcome, MemoryApplicationError> {
         self.ensure_owner(request.target().owner())?;
         let target = request.target().clone();
-        let outcome = self.authority.remove_compatibility_fact(request).await?;
+        let outcome = self.authority.remove_fact(request).await?;
         // A `None` fact is the idempotent no-op disposition for a target that
         // never resolved within the authority's single remove transaction;
         // there is no projection to validate in that case.
         if let Some(fact) = outcome.fact() {
-            validate_compatibility_projection(&self.owner, &target, fact)?;
+            validate_projection(&self.owner, &target, fact)?;
         }
         Ok(outcome)
     }
 
-    pub async fn record_compatibility_fact_feedback(
+    pub async fn record_fact_feedback(
         &self,
-        request: CompatibilityFactFeedbackCommandV1,
-    ) -> Result<CompatibilityFactFeedbackOutcomeV1, MemoryApplicationError> {
+        request: FactFeedbackCommand,
+    ) -> Result<FactFeedbackOutcome, MemoryApplicationError> {
         self.ensure_owner(request.target().owner())?;
         let target = request.target().clone();
-        let outcome = self
-            .authority
-            .record_compatibility_fact_feedback(request)
-            .await?;
-        validate_compatibility_projection(&self.owner, &target, outcome.fact())?;
+        let outcome = self.authority.record_fact_feedback(request).await?;
+        validate_projection(&self.owner, &target, outcome.fact())?;
         Ok(outcome)
     }
 
-    pub async fn record_compatibility_fact_retrieval(
+    pub async fn record_fact_retrieval(
         &self,
-        request: CompatibilityFactRetrievalCommandV1,
-    ) -> Result<Vec<CompatibilityFactProjectionV1>, MemoryApplicationError> {
+        request: FactRetrievalCommand,
+    ) -> Result<Vec<FactProjection>, MemoryApplicationError> {
         self.ensure_owner(request.owner())?;
         let targets = request.targets().to_vec();
-        let projections = self
-            .authority
-            .record_compatibility_fact_retrieval(request)
-            .await?;
+        let projections = self.authority.record_fact_retrieval(request).await?;
         if projections
             .iter()
             .any(|projection| projection.owner() != &self.owner)
@@ -600,78 +564,67 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         Ok(projections)
     }
 
-    pub async fn submit_compatibility_fact_proposal(
+    pub async fn submit_fact_proposal(
         &self,
         proposal_id: ProvenanceId,
-        request: CompatibilityFactAddCommandV1,
+        request: FactAddCommand,
         submitter: Option<ActorId>,
-    ) -> Result<CompatibilityFactProposalRecordV1, MemoryApplicationError> {
+        evidence: FactProposalEvidence,
+    ) -> Result<FactProposalRecord, MemoryApplicationError> {
         self.ensure_owner(request.owner())?;
         let proposal = self
             .authority
-            .submit_compatibility_fact_proposal(proposal_id.clone(), request, submitter)
+            .submit_fact_proposal(proposal_id.clone(), request, submitter, evidence)
             .await?;
-        validate_compatibility_proposal(&self.owner, &proposal_id, &proposal)?;
+        validate_proposal(&self.owner, &proposal_id, &proposal)?;
         Ok(proposal)
     }
 
-    pub async fn get_compatibility_fact_proposal(
+    pub async fn get_fact_proposal(
         &self,
         proposal_id: ProvenanceId,
-    ) -> Result<Option<CompatibilityFactProposalRecordV1>, MemoryApplicationError> {
+    ) -> Result<Option<FactProposalRecord>, MemoryApplicationError> {
         let proposal = self
             .authority
-            .get_compatibility_fact_proposal(self.owner.clone(), proposal_id.clone())
+            .get_fact_proposal(self.owner.clone(), proposal_id.clone())
             .await?;
         if let Some(proposal) = &proposal {
-            validate_compatibility_proposal(&self.owner, &proposal_id, proposal)?;
+            validate_proposal(&self.owner, &proposal_id, proposal)?;
         }
         Ok(proposal)
     }
 
-    pub async fn list_compatibility_fact_proposals(
+    pub async fn list_fact_proposals(
         &self,
-        state: Option<CompatibilityFactProposalStateV1>,
+        state: Option<FactProposalState>,
         after_proposal_id: Option<ProvenanceId>,
         limit: usize,
-    ) -> Result<CompatibilityFactProposalPageV1, MemoryApplicationError> {
+    ) -> Result<FactProposalPage, MemoryApplicationError> {
         let page = self
             .authority
-            .list_compatibility_fact_proposals(
-                self.owner.clone(),
-                state,
-                after_proposal_id.clone(),
-                limit,
-            )
+            .list_fact_proposals(self.owner.clone(), state, after_proposal_id.clone(), limit)
             .await?;
-        validate_compatibility_proposal_page(
-            &self.owner,
-            after_proposal_id.as_ref(),
-            limit,
-            &page,
-        )?;
+        validate_proposal_page(&self.owner, after_proposal_id.as_ref(), limit, &page)?;
         Ok(page)
     }
 
-    pub async fn count_pending_compatibility_fact_proposals(
-        &self,
-    ) -> Result<u64, MemoryApplicationError> {
+    pub async fn count_pending_fact_proposals(&self) -> Result<u64, MemoryApplicationError> {
         Ok(self
             .authority
-            .count_pending_compatibility_fact_proposals(self.owner.clone())
+            .count_pending_fact_proposals(self.owner.clone())
             .await?)
     }
 
-    pub async fn reject_compatibility_fact_proposal(
+    pub async fn reject_fact_proposal(
         &self,
         proposal_id: ProvenanceId,
-        expected_revision: CompatibilityFactProposalRevisionV1,
+        expected_revision: FactProposalRevision,
         reviewer: ActorId,
         reason: String,
-    ) -> Result<CompatibilityFactProposalRecordV1, MemoryApplicationError> {
+    ) -> Result<FactProposalRecord, MemoryApplicationError> {
         let proposal = self
             .authority
-            .reject_compatibility_fact_proposal(
+            .reject_fact_proposal(
                 self.owner.clone(),
                 proposal_id.clone(),
                 expected_revision,
@@ -679,21 +632,21 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 reason,
             )
             .await?;
-        validate_compatibility_proposal(&self.owner, &proposal_id, &proposal)?;
+        validate_proposal(&self.owner, &proposal_id, &proposal)?;
         if proposal.revision() <= expected_revision {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility proposal rejection revision",
+                invariant: "fact proposal rejection revision",
             });
         }
         Ok(proposal)
     }
 
-    pub async fn promote_compatibility_fact_proposal(
+    pub async fn promote_fact_proposal(
         &self,
-        request: CompatibilityFactProposalPromotionV1,
-    ) -> Result<CompatibilityFactProposalRecordV1, MemoryApplicationError> {
+        request: FactProposalPromotion,
+    ) -> Result<FactProposalRecord, MemoryApplicationError> {
         Ok(self
-            .promote_compatibility_fact_proposal_with_disposition(request)
+            .promote_fact_proposal_with_disposition(request)
             .await?
             .proposal()
             .clone())
@@ -701,56 +654,54 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
 
     /// Atomic promotion result for automation callers. The disposition comes
     /// from the authority transaction/replay receipt, never a pre-read.
-    pub async fn promote_compatibility_fact_proposal_with_disposition(
+    pub async fn promote_fact_proposal_with_disposition(
         &self,
-        request: CompatibilityFactProposalPromotionV1,
-    ) -> Result<CompatibilityFactProposalPromotionResultV1, MemoryApplicationError> {
+        request: FactProposalPromotion,
+    ) -> Result<FactProposalPromotionResult, MemoryApplicationError> {
         self.ensure_owner(request.owner())?;
         let proposal_id = request.proposal_id().clone();
         let expected_revision = request.expected_revision();
         let result = self
             .authority
-            .promote_compatibility_fact_proposal_with_disposition(request)
+            .promote_fact_proposal_with_disposition(request)
             .await?;
         let proposal = result.proposal();
-        validate_compatibility_proposal(&self.owner, &proposal_id, proposal)?;
+        validate_proposal(&self.owner, &proposal_id, proposal)?;
         let revision_is_valid = match result.disposition() {
-            CompatibilityFactProposalPromotionDispositionV1::NewlyPromoted
-            | CompatibilityFactProposalPromotionDispositionV1::Quarantined => {
+            FactProposalPromotionDisposition::NewlyPromoted
+            | FactProposalPromotionDisposition::Quarantined => {
                 proposal.revision() > expected_revision
             }
-            CompatibilityFactProposalPromotionDispositionV1::AlreadyPromoted => {
+            FactProposalPromotionDisposition::AlreadyPromoted => {
                 proposal.revision() >= expected_revision
             }
         };
         if !revision_is_valid {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility proposal promotion revision",
+                invariant: "fact proposal promotion revision",
             });
         }
         Ok(result)
     }
 }
 
-pub(super) fn compatibility_projection_targets(
-    projections: &[CompatibilityFactProjectionV1],
-) -> Vec<CompatibilityFactTargetV1> {
+pub(super) fn projection_targets(projections: &[FactProjection]) -> Vec<FactTarget> {
     projections
         .iter()
         .filter_map(|projection| match projection {
-            CompatibilityFactProjectionV1::Available(fact) => Some(
-                CompatibilityFactTargetV1::Canonical(fact.mapping().compatibility_id().clone()),
-            ),
-            CompatibilityFactProjectionV1::Unavailable(_) => None,
+            FactProjection::Available(fact) => {
+                Some(FactTarget::Canonical(fact.mapping().id().clone()))
+            }
+            FactProjection::Unavailable(_) => None,
         })
         .collect()
 }
 
-fn validate_compatibility_page(
+fn validate_page(
     owner: &FactOwnerV1,
     after_fact_id: Option<&FactId>,
     limit: usize,
-    page: &CompatibilityFactPageV1,
+    page: &FactPage,
 ) -> Result<(), MemoryApplicationError> {
     let facts = page.facts();
     // Resume is exclusive-start, so the canonical cursor for a full page is
@@ -777,11 +728,11 @@ fn validate_compatibility_page(
     Ok(())
 }
 
-fn validate_compatibility_search_page(
+fn validate_search_page(
     owner: &FactOwnerV1,
-    after: Option<&CompatibilityFactSearchCursorV1>,
+    after: Option<&FactSearchCursor>,
     limit: usize,
-    page: &CompatibilityFactSearchPageV1,
+    page: &FactSearchPage,
 ) -> Result<(), MemoryApplicationError> {
     let hits = page.hits();
     let cursor_is_invalid = page.next_after().is_some_and(|cursor| {
@@ -818,8 +769,8 @@ fn validate_compatibility_search_page(
 }
 
 fn search_hit_follows_cursor(
-    hit: &tracedecay_store::CompatibilityFactSearchHitV1,
-    after: &CompatibilityFactSearchCursorV1,
+    hit: &tracedecay_store::FactSearchHit,
+    after: &FactSearchCursor,
 ) -> bool {
     hit.score_millionths() < after.score_millionths()
         || (hit.score_millionths() == after.score_millionths()
@@ -856,10 +807,10 @@ pub(super) fn validate_lineage(
     Ok(())
 }
 
-fn validate_compatibility_projection(
+fn validate_projection(
     owner: &FactOwnerV1,
-    target: &CompatibilityFactTargetV1,
-    projection: &CompatibilityFactProjectionV1,
+    target: &FactTarget,
+    projection: &FactProjection,
 ) -> Result<(), MemoryApplicationError> {
     if projection.owner() != owner {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
@@ -872,7 +823,7 @@ fn validate_compatibility_projection(
                 invariant: "compatibility projection canonical identity",
             });
         }
-    } else if let (Some(query), CompatibilityFactProjectionV1::Available(fact)) =
+    } else if let (Some(query), FactProjection::Available(fact)) =
         (target.legacy_query(), projection)
     {
         let mapping = fact.mapping().legacy_mapping();
@@ -889,10 +840,10 @@ fn validate_compatibility_projection(
     Ok(())
 }
 
-fn validate_compatibility_inspection(
+fn validate_inspection(
     owner: &FactOwnerV1,
-    target: &CompatibilityFactTargetV1,
-    inspection: &CompatibilityFactInspectionV1,
+    target: &FactTarget,
+    inspection: &FactInspection,
 ) -> Result<(), MemoryApplicationError> {
     if inspection.owner() != owner
         || inspection.history().owner() != owner
@@ -916,14 +867,12 @@ fn validate_compatibility_inspection(
         });
     }
     match target {
-        CompatibilityFactTargetV1::Canonical(target)
-            if inspection.fact().fact_id() != target.fact_id() =>
-        {
+        FactTarget::Canonical(target) if inspection.fact().fact_id() != target.fact_id() => {
             Err(MemoryApplicationError::InvalidAuthorityResult {
                 invariant: "compatibility inspection canonical identity",
             })
         }
-        CompatibilityFactTargetV1::Legacy(query) => {
+        FactTarget::Legacy(query) => {
             let mapping = inspection.fact().mapping().legacy_mapping();
             if mapping.is_none_or(|mapping| {
                 mapping.owner() != owner
@@ -936,13 +885,13 @@ fn validate_compatibility_inspection(
             }
             Ok(())
         }
-        CompatibilityFactTargetV1::Canonical(_) => Ok(()),
+        FactTarget::Canonical(_) => Ok(()),
     }
 }
 
-fn validate_compatibility_add_outcome(
+fn validate_add_outcome(
     owner: &FactOwnerV1,
-    outcome: &CompatibilityFactAddOutcomeV1,
+    outcome: &FactAddOutcome,
 ) -> Result<(), MemoryApplicationError> {
     if outcome
         .fact()
@@ -958,27 +907,27 @@ fn validate_compatibility_add_outcome(
     Ok(())
 }
 
-fn validate_compatibility_proposal(
+fn validate_proposal(
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
-    proposal: &CompatibilityFactProposalRecordV1,
+    proposal: &FactProposalRecord,
 ) -> Result<(), MemoryApplicationError> {
     if proposal.owner() != owner
         || proposal.proposal_id() != proposal_id
         || proposal.request().owner() != owner
     {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "compatibility proposal owner and identity",
+            invariant: "fact proposal owner and identity",
         });
     }
     Ok(())
 }
 
-fn validate_compatibility_proposal_page(
+fn validate_proposal_page(
     owner: &FactOwnerV1,
     after_proposal_id: Option<&ProvenanceId>,
     limit: usize,
-    page: &CompatibilityFactProposalPageV1,
+    page: &FactProposalPage,
 ) -> Result<(), MemoryApplicationError> {
     let proposals = page.proposals();
     let cursor_is_invalid = page.next_after_proposal_id().is_some_and(|cursor| {
@@ -1002,7 +951,7 @@ fn validate_compatibility_proposal_page(
         || cursor_is_invalid
     {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "compatibility proposal page bounds, owner, cursor, and ordering",
+            invariant: "fact proposal page bounds, owner, cursor, and ordering",
         });
     }
     Ok(())

@@ -17,7 +17,7 @@ use tracedecay_domain::{
     FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecordV2, UtcMicros,
 };
 use tracedecay_store::{
-    FactCommitConflict, FactCommitOutcome, FactStoreError, FactStoreResult, FactWriteBatch,
+    FactCommitConflict, FactCommitOutcome, FactLineageError, FactLineageResult, FactWriteBatch,
 };
 /// The immutable assertion record deliberately excludes `FactPayloadV1`.
 /// Payload bytes belong only in `memory_v2_assertion_payloads`, which is the
@@ -34,7 +34,7 @@ struct StoredAssertionHeaderV1<'a> {
     actor_id: Option<&'a tracedecay_domain::ActorId>,
 }
 
-fn assertion_header_json(assertion: &FactAssertionV1) -> FactStoreResult<String> {
+fn assertion_header_json(assertion: &FactAssertionV1) -> FactLineageResult<String> {
     let payload_reference = assertion.payload().payload_reference()?;
     to_json(
         &StoredAssertionHeaderV1 {
@@ -54,7 +54,7 @@ fn assertion_header_json(assertion: &FactAssertionV1) -> FactStoreResult<String>
 pub(super) async fn commit_fact_tx(
     transaction: &Transaction<'_>,
     batch: &FactWriteBatch,
-) -> FactStoreResult<CommitAttempt> {
+) -> FactLineageResult<CommitAttempt> {
     let owner = OwnerKey::new(batch.owner())?;
     let actual_last = current_last_event(transaction, &owner, batch.fact_id()).await?;
     if batch_is_exact_replay(transaction, &owner, batch, actual_last.as_ref()).await? {
@@ -109,7 +109,7 @@ pub(super) async fn current_last_event(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
-) -> FactStoreResult<Option<FactEventId>> {
+) -> FactLineageResult<Option<FactEventId>> {
     let mut rows = transaction
         .query(
             "SELECT last_event_id FROM memory_v2_current_facts
@@ -137,11 +137,11 @@ async fn ensure_append_order(
     owner: &OwnerKey,
     batch: &FactWriteBatch,
     actual_last: Option<&FactEventId>,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     let Some(last_event_id) = actual_last else {
         return Ok(());
     };
-    let first = batch.events().first().ok_or(FactStoreError::EmptyBatch)?;
+    let first = batch.events().first().ok_or(FactLineageError::EmptyBatch)?;
     let mut rows = transaction
         .query(
             "SELECT occurred_at, event_id FROM memory_v2_lineage_events
@@ -166,7 +166,7 @@ async fn ensure_append_order(
         FactEventId::new(row_string(&row, 1, COMMIT_OPERATION)?)?,
     );
     if (first.occurred_at(), first.event_id()) <= (last.0, &last.1) {
-        return Err(FactStoreError::EventsOutOfOrder);
+        return Err(FactLineageError::EventsOutOfOrder);
     }
     Ok(())
 }
@@ -176,7 +176,7 @@ async fn batch_is_exact_replay(
     owner: &OwnerKey,
     batch: &FactWriteBatch,
     actual_last: Option<&FactEventId>,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     if actual_last != batch.events().last().map(FactLineageEventV1::event_id) {
         return Ok(false);
     }
@@ -210,7 +210,7 @@ async fn batch_identity_collision(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
-) -> FactStoreResult<Option<FactCommitConflict>> {
+) -> FactLineageResult<Option<FactCommitConflict>> {
     if fact_exists(transaction, batch.fact_id()).await?
         && !fact_identity_matches(transaction, owner, batch).await?
     {
@@ -261,7 +261,7 @@ pub(super) fn collision(kind: &'static str, id: &str) -> FactCommitConflict {
     }
 }
 
-async fn fact_exists(transaction: &Transaction<'_>, fact_id: &FactId) -> FactStoreResult<bool> {
+async fn fact_exists(transaction: &Transaction<'_>, fact_id: &FactId) -> FactLineageResult<bool> {
     row_exists(
         transaction,
         "SELECT 1 FROM memory_v2_facts WHERE fact_id = ?1",
@@ -274,7 +274,7 @@ async fn fact_identity_matches(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     let mut rows = transaction
         .query(
             "SELECT owner_kind, project_id, owner_json, identity_json
@@ -306,7 +306,7 @@ async fn ensure_referenced_anchors(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     for anchor_id in batch.referenced_anchor_ids() {
         let mut rows = transaction
             .query(
@@ -328,7 +328,7 @@ async fn ensure_referenced_anchors(
             .await
             .map_err(|error| storage_error(COMMIT_OPERATION, error))?
         else {
-            return Err(FactStoreError::MissingEvidenceAnchor {
+            return Err(FactLineageError::MissingEvidenceAnchor {
                 anchor_id: anchor_id.clone(),
             });
         };
@@ -340,7 +340,7 @@ async fn insert_or_verify_anchor(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     anchor: &RetrievalAnchorRecordV2,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     if anchor_exists(transaction, anchor.anchor_id()).await? {
         if anchor_matches(transaction, owner, anchor).await? {
             return Ok(());
@@ -386,7 +386,7 @@ async fn insert_or_verify_anchor(
 async fn anchor_exists(
     transaction: &Transaction<'_>,
     anchor_id: &RetrievalAnchorId,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     row_exists(
         transaction,
         "SELECT 1 FROM retrieval_anchors WHERE anchor_id = ?1",
@@ -399,7 +399,7 @@ pub(super) async fn anchor_matches(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     anchor: &RetrievalAnchorRecordV2,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     let mut rows = transaction
         .query(
             "SELECT anchor_json, owner_json, projection_generation
@@ -449,7 +449,7 @@ pub(super) async fn anchor_matches(
                 to_json(alias.locator_digest(), "serialize anchor locator digest")?,
             ))
         })
-        .collect::<FactStoreResult<Vec<_>>>()?;
+        .collect::<FactLineageResult<Vec<_>>>()?;
     expected.sort();
     Ok(stored == expected)
 }
@@ -458,7 +458,7 @@ async fn insert_assertion(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     assertion: &FactAssertionV1,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     if assertion_exists(transaction, assertion.assertion_id()).await? {
         if assertion_matches(transaction, owner, assertion).await? {
             return Ok(());
@@ -621,7 +621,7 @@ fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
 async fn assertion_exists(
     transaction: &Transaction<'_>,
     assertion_id: &FactAssertionId,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     row_exists(
         transaction,
         "SELECT 1 FROM memory_v2_assertions WHERE assertion_id = ?1",
@@ -634,7 +634,7 @@ async fn assertion_matches(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
     assertion: &FactAssertionV1,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     let mut rows = transaction
         .query(
             "SELECT fact_id, owner_kind, project_id, owner_json,
@@ -777,6 +777,6 @@ async fn assertion_matches(
                 evidence.anchor_id().as_str().to_owned(),
             ))
         })
-        .collect::<FactStoreResult<Vec<_>>>()?;
+        .collect::<FactLineageResult<Vec<_>>>()?;
     Ok(stored_evidence == expected_evidence)
 }

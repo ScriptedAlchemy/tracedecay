@@ -1067,7 +1067,7 @@ async fn memory_dispatch_rejects_an_already_elapsed_deadline() {
     .unwrap();
 
     for operation in [
-        RetainedSurfaceOperation::FactStore,
+        RetainedSurfaceOperation::FactLineageStore,
         RetainedSurfaceOperation::FactFeedback,
         RetainedSurfaceOperation::MemoryStatus,
     ] {
@@ -1124,7 +1124,7 @@ async fn memory_dispatch_without_a_deadline_runs_to_completion() {
 
     let options = ToolCallRegistryOptions::default();
     let result = dispatch_memory_operation(
-        RetainedSurfaceOperation::FactStore,
+        RetainedSurfaceOperation::FactLineageStore,
         &cg,
         json!({ "action": "add", "content": "unbounded memory add fixture" }),
         &options,

@@ -1,11 +1,13 @@
-use tracedecay_domain::{ActorId, DomainError, FactId, FactOwnerV1, ProvenanceId};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tracedecay_domain::{ActorId, DomainError, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
 
 use super::super::queries::MAX_CURRENT_LIMIT;
 use super::super::{
-    FactCommitOutcome, FactStoreError, FactStoreResult, FactWriteBatch,
-    MAX_COMPATIBILITY_REASON_BYTES, validate_owned_fact_id,
+    FactCommitOutcome, FactLineageError, FactLineageResult, FactWriteBatch, MAX_FACT_REASON_BYTES,
+    validate_owned_fact_id,
 };
-use super::{CompatibilityFactAddCommandV1, CompatibilityFactMappingV1};
+use super::{FactAddCommand, FactMapping};
 
 /// Authoritative proposal states from which an interrupted promotion may resume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,14 +34,14 @@ impl PromoteFactProposal {
         expected_state: FactProposalPromotionStateV1,
         reviewer: Option<ActorId>,
         batch: FactWriteBatch,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         proposal_id.validate()?;
         owner.validate()?;
         if let Some(reviewer) = &reviewer {
             reviewer.validate()?;
         }
         if batch.owner() != &owner {
-            return Err(FactStoreError::OwnerMismatch);
+            return Err(FactLineageError::OwnerMismatch);
         }
         Ok(Self {
             proposal_id,
@@ -107,7 +109,7 @@ impl PromoteFactProposalOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactProposalStateV1 {
+pub enum FactProposalState {
     PendingApproval,
     Applying,
     Applied,
@@ -115,14 +117,65 @@ pub enum CompatibilityFactProposalStateV1 {
     Quarantined,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CompatibilityFactProposalRevisionV1(u64);
+/// Presentation evidence committed with a proposal in the canonical fact
+/// authority. This is the only source for proposal dashboard metadata.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FactProposalEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proposal: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    validation: Option<Value>,
+}
 
-impl CompatibilityFactProposalRevisionV1 {
-    pub fn new(value: u64) -> FactStoreResult<Self> {
+impl FactProposalEvidence {
+    pub fn new(
+        evidence_hash: Option<String>,
+        proposal: Option<Value>,
+        validation: Option<Value>,
+    ) -> FactLineageResult<Self> {
+        let evidence = Self {
+            evidence_hash,
+            proposal,
+            validation,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> FactLineageResult<()> {
+        if self.evidence_hash.as_ref().is_some_and(|value| {
+            value.trim().is_empty() || value.len() > 160 || value.chars().any(char::is_control)
+        }) {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
+                field: "fact proposal evidence hash",
+            }));
+        }
+        Ok(())
+    }
+
+    pub fn evidence_hash(&self) -> Option<&str> {
+        self.evidence_hash.as_deref()
+    }
+
+    pub fn proposal(&self) -> Option<&Value> {
+        self.proposal.as_ref()
+    }
+
+    pub fn validation(&self) -> Option<&Value> {
+        self.validation.as_ref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FactProposalRevision(u64);
+
+impl FactProposalRevision {
+    pub fn new(value: u64) -> FactLineageResult<Self> {
         if value == 0 {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility fact proposal revision",
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
+                field: "fact proposal revision",
             }));
         }
         Ok(Self(value))
@@ -134,20 +187,20 @@ impl CompatibilityFactProposalRevisionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalPromotionV1 {
+pub struct FactProposalPromotion {
     owner: FactOwnerV1,
     proposal_id: ProvenanceId,
-    expected_revision: CompatibilityFactProposalRevisionV1,
+    expected_revision: FactProposalRevision,
     reviewer: Option<ActorId>,
 }
 
-impl CompatibilityFactProposalPromotionV1 {
+impl FactProposalPromotion {
     pub fn new(
         owner: FactOwnerV1,
         proposal_id: ProvenanceId,
-        expected_revision: CompatibilityFactProposalRevisionV1,
+        expected_revision: FactProposalRevision,
         reviewer: Option<ActorId>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         proposal_id.validate()?;
         if let Some(reviewer) = &reviewer {
@@ -167,7 +220,7 @@ impl CompatibilityFactProposalPromotionV1 {
     pub fn proposal_id(&self) -> &ProvenanceId {
         &self.proposal_id
     }
-    pub fn expected_revision(&self) -> CompatibilityFactProposalRevisionV1 {
+    pub fn expected_revision(&self) -> FactProposalRevision {
         self.expected_revision
     }
     pub fn reviewer(&self) -> Option<&ActorId> {
@@ -176,56 +229,69 @@ impl CompatibilityFactProposalPromotionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalRecordV1 {
+pub struct FactProposalRecord {
     proposal_id: ProvenanceId,
     owner: FactOwnerV1,
-    revision: CompatibilityFactProposalRevisionV1,
-    state: CompatibilityFactProposalStateV1,
-    request: CompatibilityFactAddCommandV1,
+    revision: FactProposalRevision,
+    state: FactProposalState,
+    request: FactAddCommand,
     applied_fact_id: Option<FactId>,
-    applied_mapping: Option<CompatibilityFactMappingV1>,
+    applied_mapping: Option<FactMapping>,
     automation_run_id: Option<String>,
+    evidence: FactProposalEvidence,
     reviewer: Option<ActorId>,
     reason: Option<String>,
+    submitted_at: UtcMicros,
+    updated_at: UtcMicros,
 }
 
-impl CompatibilityFactProposalRecordV1 {
+impl FactProposalRecord {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         proposal_id: ProvenanceId,
         owner: FactOwnerV1,
-        revision: CompatibilityFactProposalRevisionV1,
-        state: CompatibilityFactProposalStateV1,
-        request: CompatibilityFactAddCommandV1,
+        revision: FactProposalRevision,
+        state: FactProposalState,
+        request: FactAddCommand,
         applied_fact_id: Option<FactId>,
-        applied_mapping: Option<CompatibilityFactMappingV1>,
+        applied_mapping: Option<FactMapping>,
+        evidence: FactProposalEvidence,
         reviewer: Option<ActorId>,
         reason: Option<String>,
-    ) -> FactStoreResult<Self> {
+        submitted_at: UtcMicros,
+        updated_at: UtcMicros,
+    ) -> FactLineageResult<Self> {
         proposal_id.validate()?;
         owner.validate()?;
         if request.owner() != &owner {
-            return Err(FactStoreError::OwnerMismatch);
+            return Err(FactLineageError::OwnerMismatch);
         }
         if let Some(fact_id) = &applied_fact_id {
             validate_owned_fact_id(fact_id, &owner)?;
         }
         if let Some(mapping) = &applied_mapping {
             if mapping.owner() != &owner {
-                return Err(FactStoreError::OwnerMismatch);
+                return Err(FactLineageError::OwnerMismatch);
             }
             if applied_fact_id.as_ref() != Some(mapping.fact_id()) {
-                return Err(FactStoreError::FactMismatch);
+                return Err(FactLineageError::FactMismatch);
             }
         }
         if let Some(reviewer) = &reviewer {
             reviewer.validate()?;
         }
-        if reason.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
-        }) {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility fact proposal reason",
+        evidence.validate()?;
+        if reason
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > MAX_FACT_REASON_BYTES)
+        {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
+                field: "fact proposal reason",
+            }));
+        }
+        if updated_at < submitted_at {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
+                field: "fact proposal timestamps",
             }));
         }
         let automation_run_id = request.automation_run_id().map(ToOwned::to_owned);
@@ -238,8 +304,11 @@ impl CompatibilityFactProposalRecordV1 {
             applied_fact_id,
             applied_mapping,
             automation_run_id,
+            evidence,
             reviewer,
             reason,
+            submitted_at,
+            updated_at,
         })
     }
 
@@ -249,13 +318,13 @@ impl CompatibilityFactProposalRecordV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn revision(&self) -> CompatibilityFactProposalRevisionV1 {
+    pub fn revision(&self) -> FactProposalRevision {
         self.revision
     }
-    pub fn state(&self) -> CompatibilityFactProposalStateV1 {
+    pub fn state(&self) -> FactProposalState {
         self.state
     }
-    pub fn request(&self) -> &CompatibilityFactAddCommandV1 {
+    pub fn request(&self) -> &FactAddCommand {
         &self.request
     }
     pub fn applied_fact_id(&self) -> Option<&FactId> {
@@ -264,18 +333,27 @@ impl CompatibilityFactProposalRecordV1 {
     pub fn legacy_fact_id(&self) -> Option<i64> {
         self.applied_mapping
             .as_ref()
-            .and_then(CompatibilityFactMappingV1::legacy_fact_id)
+            .and_then(FactMapping::legacy_fact_id)
     }
     /// Durable automation identity from typed canonical command metadata. It
     /// is never inferred from proposal IDs, payload metadata, or sidecars.
     pub fn automation_run_id(&self) -> Option<&str> {
         self.automation_run_id.as_deref()
     }
+    pub fn evidence(&self) -> &FactProposalEvidence {
+        &self.evidence
+    }
     pub fn reviewer(&self) -> Option<&ActorId> {
         self.reviewer.as_ref()
     }
     pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
+    }
+    pub fn submitted_at(&self) -> UtcMicros {
+        self.submitted_at
+    }
+    pub fn updated_at(&self) -> UtcMicros {
+        self.updated_at
     }
 }
 
@@ -284,7 +362,7 @@ impl CompatibilityFactProposalRecordV1 {
 /// `Quarantined` is a durable privacy rejection and must not be retried as an
 /// ordinary pending proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactProposalPromotionDispositionV1 {
+pub enum FactProposalPromotionDisposition {
     NewlyPromoted,
     AlreadyPromoted,
     Quarantined,
@@ -294,30 +372,30 @@ pub enum CompatibilityFactProposalPromotionDispositionV1 {
 /// durable terminal record; callers run downstream digest work only for
 /// `NewlyPromoted`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalPromotionResultV1 {
-    proposal: CompatibilityFactProposalRecordV1,
-    disposition: CompatibilityFactProposalPromotionDispositionV1,
+pub struct FactProposalPromotionResult {
+    proposal: FactProposalRecord,
+    disposition: FactProposalPromotionDisposition,
 }
 
-impl CompatibilityFactProposalPromotionResultV1 {
+impl FactProposalPromotionResult {
     pub fn new(
-        proposal: CompatibilityFactProposalRecordV1,
-        disposition: CompatibilityFactProposalPromotionDispositionV1,
-    ) -> FactStoreResult<Self> {
+        proposal: FactProposalRecord,
+        disposition: FactProposalPromotionDisposition,
+    ) -> FactLineageResult<Self> {
         let state_matches_disposition = matches!(
             (proposal.state(), disposition),
             (
-                CompatibilityFactProposalStateV1::Applied,
-                CompatibilityFactProposalPromotionDispositionV1::NewlyPromoted
-                    | CompatibilityFactProposalPromotionDispositionV1::AlreadyPromoted,
+                FactProposalState::Applied,
+                FactProposalPromotionDisposition::NewlyPromoted
+                    | FactProposalPromotionDisposition::AlreadyPromoted,
             ) | (
-                CompatibilityFactProposalStateV1::Quarantined,
-                CompatibilityFactProposalPromotionDispositionV1::Quarantined,
+                FactProposalState::Quarantined,
+                FactProposalPromotionDisposition::Quarantined,
             )
         );
         if !state_matches_disposition {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility fact proposal promotion result state",
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
+                field: "fact proposal promotion result state",
             }));
         }
         Ok(Self {
@@ -326,31 +404,31 @@ impl CompatibilityFactProposalPromotionResultV1 {
         })
     }
 
-    pub fn proposal(&self) -> &CompatibilityFactProposalRecordV1 {
+    pub fn proposal(&self) -> &FactProposalRecord {
         &self.proposal
     }
 
-    pub fn disposition(&self) -> CompatibilityFactProposalPromotionDispositionV1 {
+    pub fn disposition(&self) -> FactProposalPromotionDisposition {
         self.disposition
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalPageV1 {
+pub struct FactProposalPage {
     owner: FactOwnerV1,
-    proposals: Vec<CompatibilityFactProposalRecordV1>,
+    proposals: Vec<FactProposalRecord>,
     next_after_proposal_id: Option<ProvenanceId>,
 }
 
-impl CompatibilityFactProposalPageV1 {
+impl FactProposalPage {
     pub fn new(
         owner: FactOwnerV1,
-        proposals: Vec<CompatibilityFactProposalRecordV1>,
+        proposals: Vec<FactProposalRecord>,
         next_after_proposal_id: Option<ProvenanceId>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         if proposals.len() > MAX_CURRENT_LIMIT {
-            return Err(FactStoreError::InvalidQueryLimit {
+            return Err(FactLineageError::InvalidQueryLimit {
                 limit: proposals.len(),
                 max: MAX_CURRENT_LIMIT,
             });
@@ -358,11 +436,11 @@ impl CompatibilityFactProposalPageV1 {
         let mut previous: Option<&ProvenanceId> = None;
         for proposal in &proposals {
             if proposal.owner() != &owner {
-                return Err(FactStoreError::OwnerMismatch);
+                return Err(FactLineageError::OwnerMismatch);
             }
             if previous.is_some_and(|value| value >= proposal.proposal_id()) {
-                return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                    field: "compatibility fact proposal page order",
+                return Err(FactLineageError::Contract(DomainError::NonCanonical {
+                    field: "fact proposal page order",
                 }));
             }
             previous = Some(proposal.proposal_id());
@@ -370,8 +448,8 @@ impl CompatibilityFactProposalPageV1 {
         if let Some(cursor) = &next_after_proposal_id {
             cursor.validate()?;
             if previous.is_some_and(|last| cursor <= last) {
-                return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                    field: "compatibility fact proposal page cursor",
+                return Err(FactLineageError::Contract(DomainError::NonCanonical {
+                    field: "fact proposal page cursor",
                 }));
             }
         }
@@ -385,7 +463,7 @@ impl CompatibilityFactProposalPageV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn proposals(&self) -> &[CompatibilityFactProposalRecordV1] {
+    pub fn proposals(&self) -> &[FactProposalRecord] {
         &self.proposals
     }
     pub fn next_after_proposal_id(&self) -> Option<&ProvenanceId> {

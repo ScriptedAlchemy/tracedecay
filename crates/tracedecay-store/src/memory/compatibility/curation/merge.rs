@@ -1,31 +1,29 @@
 use tracedecay_domain::{ActorId, DomainError, FactOwnerV1, ProvenanceId};
 
-use super::super::super::{FactStoreError, FactStoreResult};
-use super::super::{
-    CompatibilityFactMappingV1, CompatibilityFactTargetV1, validate_compatibility_text,
-};
-use super::MAX_COMPATIBILITY_CURATION_TARGETS;
+use super::super::super::{FactLineageError, FactLineageResult};
+use super::super::{FactMapping, FactTarget, validate_text};
+use super::MAX_FACT_CURATION_TARGETS;
 use super::validate::validate_curation_fact_target;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactMergeCommandV1 {
+pub struct FactMergeCommand {
     owner: FactOwnerV1,
     operation_id: ProvenanceId,
-    winner: CompatibilityFactTargetV1,
-    losers: Vec<CompatibilityFactTargetV1>,
+    winner: FactTarget,
+    losers: Vec<FactTarget>,
     merged_content: Option<String>,
     actor: Option<ActorId>,
 }
 
-impl CompatibilityFactMergeCommandV1 {
+impl FactMergeCommand {
     pub fn new(
         owner: FactOwnerV1,
         operation_id: ProvenanceId,
-        winner: CompatibilityFactTargetV1,
-        losers: Vec<CompatibilityFactTargetV1>,
+        winner: FactTarget,
+        losers: Vec<FactTarget>,
         merged_content: Option<String>,
         actor: Option<ActorId>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         operation_id.validate()?;
         validate_curation_fact_target(&owner, &winner)?;
@@ -33,18 +31,18 @@ impl CompatibilityFactMergeCommandV1 {
             actor.validate()?;
         }
         if let Some(content) = &merged_content {
-            validate_compatibility_text(content, "compatibility merge content")?;
+            validate_text(content, "compatibility merge content")?;
         }
-        if losers.is_empty() || losers.len() > MAX_COMPATIBILITY_CURATION_TARGETS {
-            return Err(FactStoreError::InvalidQueryLimit {
+        if losers.is_empty() || losers.len() > MAX_FACT_CURATION_TARGETS {
+            return Err(FactLineageError::InvalidQueryLimit {
                 limit: losers.len(),
-                max: MAX_COMPATIBILITY_CURATION_TARGETS,
+                max: MAX_FACT_CURATION_TARGETS,
             });
         }
         for (index, loser) in losers.iter().enumerate() {
             validate_curation_fact_target(&owner, loser)?;
             if loser == &winner || losers[..index].iter().any(|previous| previous == loser) {
-                return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                return Err(FactLineageError::Contract(DomainError::NonCanonical {
                     field: "compatibility merge targets",
                 }));
             }
@@ -67,11 +65,11 @@ impl CompatibilityFactMergeCommandV1 {
         &self.operation_id
     }
 
-    pub fn winner(&self) -> &CompatibilityFactTargetV1 {
+    pub fn winner(&self) -> &FactTarget {
         &self.winner
     }
 
-    pub fn losers(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn losers(&self) -> &[FactTarget] {
         &self.losers
     }
 
@@ -85,23 +83,23 @@ impl CompatibilityFactMergeCommandV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactMergeOutcomeV1 {
+pub struct FactMergeOutcome {
     owner: FactOwnerV1,
-    winner: CompatibilityFactMappingV1,
+    winner: FactMapping,
     content_updated: bool,
-    deleted_losers: Vec<CompatibilityFactMappingV1>,
+    deleted_losers: Vec<FactMapping>,
 }
 
-impl CompatibilityFactMergeOutcomeV1 {
+impl FactMergeOutcome {
     pub fn new(
         owner: FactOwnerV1,
-        winner: CompatibilityFactMappingV1,
+        winner: FactMapping,
         content_updated: bool,
-        deleted_losers: Vec<CompatibilityFactMappingV1>,
-    ) -> FactStoreResult<Self> {
+        deleted_losers: Vec<FactMapping>,
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         if winner.owner() != &owner
-            || deleted_losers.len() > MAX_COMPATIBILITY_CURATION_TARGETS
+            || deleted_losers.len() > MAX_FACT_CURATION_TARGETS
             || deleted_losers
                 .iter()
                 .any(|mapping| mapping.owner() != &owner)
@@ -114,7 +112,7 @@ impl CompatibilityFactMergeOutcomeV1 {
                     .any(|previous| previous.fact_id() == mapping.fact_id())
             })
         {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility merge outcome mappings",
             }));
         }
@@ -130,7 +128,7 @@ impl CompatibilityFactMergeOutcomeV1 {
         &self.owner
     }
 
-    pub fn winner(&self) -> &CompatibilityFactMappingV1 {
+    pub fn winner(&self) -> &FactMapping {
         &self.winner
     }
 
@@ -138,24 +136,24 @@ impl CompatibilityFactMergeOutcomeV1 {
         self.content_updated
     }
 
-    pub fn deleted_losers(&self) -> &[CompatibilityFactMappingV1] {
+    pub fn deleted_losers(&self) -> &[FactMapping] {
         &self.deleted_losers
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityMemoryRepairCommandV1 {
+pub struct MemoryRepairCommand {
     owner: FactOwnerV1,
     operation_id: ProvenanceId,
     actor: Option<ActorId>,
 }
 
-impl CompatibilityMemoryRepairCommandV1 {
+impl MemoryRepairCommand {
     pub fn new(
         owner: FactOwnerV1,
         operation_id: ProvenanceId,
         actor: Option<ActorId>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         operation_id.validate()?;
         if let Some(actor) = &actor {

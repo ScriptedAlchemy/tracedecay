@@ -2,13 +2,13 @@
 
 use super::*;
 
-fn compatibility_project_owner(project_id: &str) -> FactOwnerV1 {
+fn project_owner(project_id: &str) -> FactOwnerV1 {
     FactOwnerV1::Project {
         project_id: ProjectId::new(project_id.to_owned()).unwrap(),
     }
 }
 
-async fn add_compatibility_fixture_fact(
+async fn add_fixture_fact(
     memory: &MemoryApplication<DatabaseFactStore<'_>>,
     owner: &FactOwnerV1,
     content: &str,
@@ -25,7 +25,7 @@ async fn add_compatibility_fixture_fact(
         .unwrap()
 }
 
-fn compatibility_owner_scope(owner: &FactOwnerV1) -> (&'static str, String, String) {
+fn owner_scope(owner: &FactOwnerV1) -> (&'static str, String, String) {
     let (kind, project_id) = match owner {
         FactOwnerV1::Profile => ("profile", String::new()),
         FactOwnerV1::Project { project_id } => ("project", project_id.as_str().to_string()),
@@ -33,11 +33,11 @@ fn compatibility_owner_scope(owner: &FactOwnerV1) -> (&'static str, String, Stri
     (kind, project_id, serde_json::to_string(owner).unwrap())
 }
 
-async fn compatibility_bank_rows(
+async fn bank_rows(
     db: &Database,
     owner: &FactOwnerV1,
 ) -> Vec<(String, Vec<u8>, i64, i64)> {
-    let (kind, project_id, owner_json) = compatibility_owner_scope(owner);
+    let (kind, project_id, owner_json) = owner_scope(owner);
     let conn = rusqlite::Connection::open_with_flags(
         db.database_path(),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -46,7 +46,7 @@ async fn compatibility_bank_rows(
     let mut statement = conn
         .prepare(
             "SELECT bank_name, vector, fact_count, updated_at
-             FROM memory_v2_compatibility_banks
+             FROM memory_v2_banks
              WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
                AND source_store_id = 'legacy-memory-v1'
              ORDER BY bank_name",
@@ -66,8 +66,8 @@ async fn compatibility_bank_rows(
         .unwrap()
 }
 
-async fn compatibility_dirty_bank_rows(db: &Database, owner: &FactOwnerV1) -> Vec<(String, i64)> {
-    let (kind, project_id, owner_json) = compatibility_owner_scope(owner);
+async fn dirty_bank_rows(db: &Database, owner: &FactOwnerV1) -> Vec<(String, i64)> {
+    let (kind, project_id, owner_json) = owner_scope(owner);
     let conn = rusqlite::Connection::open_with_flags(
         db.database_path(),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -76,7 +76,7 @@ async fn compatibility_dirty_bank_rows(db: &Database, owner: &FactOwnerV1) -> Ve
     let mut statement = conn
         .prepare(
             "SELECT bank_name, updated_at
-             FROM memory_v2_compatibility_bank_dirty
+             FROM memory_v2_bank_dirty
              WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
                AND source_store_id = 'legacy-memory-v1'
              ORDER BY bank_name",
@@ -92,20 +92,20 @@ async fn compatibility_dirty_bank_rows(db: &Database, owner: &FactOwnerV1) -> Ve
 }
 
 #[tokio::test]
-async fn compatibility_repair_rebuilds_only_requested_owner_banks() {
+async fn repair_rebuilds_only_requested_owner_banks() {
     let (db, _tmp) = make_memory_store().await;
-    let owner_a = compatibility_project_owner("repair-owner-a");
-    let owner_b = compatibility_project_owner("repair-owner-b");
+    let owner_a = project_owner("repair-owner-a");
+    let owner_b = project_owner("repair-owner-b");
     let memory_a = MemoryApplication::new(owner_a.clone(), DatabaseFactStore::new(&db)).unwrap();
     let memory_b = MemoryApplication::new(owner_b.clone(), DatabaseFactStore::new(&db)).unwrap();
-    let fact_a = add_compatibility_fixture_fact(
+    let fact_a = add_fixture_fact(
         &memory_a,
         &owner_a,
         "Owner A repair must not rebuild owner B banks",
         MemoryCategory::Project,
     )
     .await;
-    let fact_b = add_compatibility_fixture_fact(
+    let fact_b = add_fixture_fact(
         &memory_b,
         &owner_b,
         "Owner B dirty vector must remain pending during owner A repair",
@@ -168,20 +168,20 @@ async fn compatibility_repair_rebuilds_only_requested_owner_banks() {
 }
 
 #[tokio::test]
-async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
+async fn rebuild_keeps_ready_peer_owner_banks_unchanged() {
     let (db, _tmp) = make_memory_store().await;
-    let owner_a = compatibility_project_owner("bank-rebuild-owner-a");
-    let owner_b = compatibility_project_owner("bank-rebuild-owner-b");
+    let owner_a = project_owner("bank-rebuild-owner-a");
+    let owner_b = project_owner("bank-rebuild-owner-b");
     let memory_a = MemoryApplication::new(owner_a.clone(), DatabaseFactStore::new(&db)).unwrap();
     let memory_b = MemoryApplication::new(owner_b.clone(), DatabaseFactStore::new(&db)).unwrap();
-    let fact_a = add_compatibility_fixture_fact(
+    let fact_a = add_fixture_fact(
         &memory_a,
         &owner_a,
         "Owner A deletion rebuilds only owner A compatibility banks",
         MemoryCategory::Project,
     )
     .await;
-    add_compatibility_fixture_fact(
+    add_fixture_fact(
         &memory_b,
         &owner_b,
         "Owner B ready compatibility banks must remain unchanged",
@@ -211,8 +211,8 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
     );
 
     let overview_b_before = memory_b.dashboard_overview_v1(10, 10).await.unwrap();
-    let banks_b_before = compatibility_bank_rows(&db, &owner_b).await;
-    let dirty_b_before = compatibility_dirty_bank_rows(&db, &owner_b).await;
+    let banks_b_before = bank_rows(&db, &owner_b).await;
+    let dirty_b_before = dirty_bank_rows(&db, &owner_b).await;
     assert_eq!(banks_b_before.len(), 2);
     assert!(dirty_b_before.is_empty());
     assert_eq!(overview_b_before.bank_count, 2);
@@ -220,7 +220,7 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
     assert_eq!(overview_b_before.hrr_coverage.len(), 1);
     assert_eq!(
         overview_b_before.hrr_coverage[0].state,
-        tracedecay_store::CompatibilityDashboardHrrStateV1::Ready
+        tracedecay_store::DashboardHrrState::Ready
     );
 
     assert!(
@@ -252,9 +252,9 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
     );
 
     let overview_b_after = memory_b.dashboard_overview_v1(10, 10).await.unwrap();
-    assert_eq!(compatibility_bank_rows(&db, &owner_b).await, banks_b_before);
+    assert_eq!(bank_rows(&db, &owner_b).await, banks_b_before);
     assert_eq!(
-        compatibility_dirty_bank_rows(&db, &owner_b).await,
+        dirty_bank_rows(&db, &owner_b).await,
         dirty_b_before
     );
     assert_eq!(
@@ -268,16 +268,16 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
     assert_eq!(overview_b_after.bank_count, 2);
     assert_eq!(
         overview_b_after.hrr_coverage[0].state,
-        tracedecay_store::CompatibilityDashboardHrrStateV1::Ready
+        tracedecay_store::DashboardHrrState::Ready
     );
 }
 
 #[tokio::test]
-async fn compatibility_v1_remove_defaults_to_the_current_event() {
+async fn v1_remove_defaults_to_the_current_event() {
     let (db, _tmp) = make_memory_store().await;
     let owner = FactOwnerV1::Profile;
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
-    let fact = add_compatibility_fixture_fact(
+    let fact = add_fixture_fact(
         &memory,
         &owner,
         "A V1 remove without a caller CAS must use the current fact event",
@@ -298,11 +298,11 @@ async fn compatibility_v1_remove_defaults_to_the_current_event() {
 }
 
 #[tokio::test]
-async fn compatibility_v1_remove_redacts_feedback_history_free_text() {
+async fn v1_remove_redacts_feedback_history_free_text() {
     let (db, _tmp) = make_memory_store().await;
     let owner = FactOwnerV1::Profile;
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
-    let fact = add_compatibility_fixture_fact(
+    let fact = add_fixture_fact(
         &memory,
         &owner,
         "Deleting a fact must erase its feedback free text",
@@ -378,11 +378,11 @@ async fn compatibility_v1_remove_redacts_feedback_history_free_text() {
 }
 
 #[tokio::test]
-async fn compatibility_repair_skips_malformed_unavailable_vectors() {
+async fn repair_skips_malformed_unavailable_vectors() {
     let (db, _tmp) = make_memory_store().await;
     let owner = FactOwnerV1::Profile;
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
-    let fact = add_compatibility_fixture_fact(
+    let fact = add_fixture_fact(
         &memory,
         &owner,
         "Malformed unavailable vectors must not abort repair",
@@ -435,13 +435,13 @@ async fn compatibility_repair_skips_malformed_unavailable_vectors() {
 }
 
 #[tokio::test]
-async fn compatibility_repair_scans_past_a_full_batch_of_unavailable_vectors() {
+async fn repair_scans_past_a_full_batch_of_unavailable_vectors() {
     const UNAVAILABLE_CANDIDATES: usize = 512;
 
     let (db, _tmp) = make_memory_store().await;
     let owner = FactOwnerV1::Profile;
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
-    let eligible = add_compatibility_fixture_fact(
+    let eligible = add_fixture_fact(
         &memory,
         &owner,
         "Eligible vector after unavailable repair batch",
@@ -449,7 +449,7 @@ async fn compatibility_repair_scans_past_a_full_batch_of_unavailable_vectors() {
     )
     .await;
     for index in 0..UNAVAILABLE_CANDIDATES {
-        add_compatibility_fixture_fact(
+        add_fixture_fact(
             &memory,
             &owner,
             &format!("Unavailable vector repair candidate {index}"),
@@ -524,7 +524,7 @@ async fn compatibility_repair_scans_past_a_full_batch_of_unavailable_vectors() {
 }
 
 #[tokio::test]
-async fn compatibility_v1_feedback_on_nonexistent_fact_id_fails_fast() {
+async fn v1_feedback_on_nonexistent_fact_id_fails_fast() {
     // Regression for the live-verified defect where `fact_feedback` on a
     // nonexistent fact hung to the client deadline instead of failing fast
     // like `fact_store --action get`. The compatibility write transaction

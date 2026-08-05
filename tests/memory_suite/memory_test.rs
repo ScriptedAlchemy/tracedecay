@@ -1,7 +1,7 @@
 //! Memory store regression suite, split by fact authority.
 //!
 //! - `legacy_store`: legacy fact-store, retrieval, grooming, and status tests.
-//! - `compatibility_authority`: PR7 compatibility fact authority suite.
+//! - `authority`: PR7 compatibility fact authority suite.
 //!
 //! Shared fixtures live in this parent module; each child pulls them in with `use super::*`.
 
@@ -23,8 +23,8 @@ use tracedecay::store::memory::DatabaseFactStore;
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 
-#[path = "memory_test/compatibility_authority.rs"]
-mod compatibility_authority;
+#[path = "memory_test/authority.rs"]
+mod authority;
 
 #[path = "memory_test/legacy_store.rs"]
 mod legacy_store;

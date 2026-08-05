@@ -173,12 +173,12 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
         Some(i64::from(super::super::migrations::SCHEMA_VERSION))
     );
     assert!(
-        table_exists(&conn, "memory_v2_compatibility_banks")
+        table_exists(&conn, "memory_v2_banks")
             .await
             .unwrap()
     );
     assert!(
-        table_exists(&conn, "memory_v2_compatibility_bank_dirty")
+        table_exists(&conn, "memory_v2_bank_dirty")
             .await
             .unwrap()
     );

@@ -11,19 +11,19 @@ use serde::{Serialize, de::DeserializeOwned};
 use tracedecay_domain::{
     FactCategoryV1, FactOwnerV1, PayloadAccessState, SourceStoreId, UtcMicros,
 };
-use tracedecay_store::{FactProposalStoreError, FactStoreError, FactStoreResult};
+use tracedecay_store::{FactLineageError, FactLineageResult, FactProposalStoreError};
 
 pub(super) const COMMIT_OPERATION: &str = "commit canonical memory fact";
 
 pub(super) const QUERY_OPERATION: &str = "query canonical memory facts";
 
-pub(super) const COMPATIBILITY_READ_OPERATION: &str = "read compatibility memory facts";
+pub(super) const FACT_READ_OPERATION: &str = "read compatibility memory facts";
 
-pub(super) const COMPATIBILITY_WRITE_OPERATION: &str = "write compatibility memory facts";
+pub(super) const FACT_WRITE_OPERATION: &str = "write compatibility memory facts";
 
-const COMPATIBILITY_SOURCE_STORE: &str = "legacy-memory-v1";
+const FACT_SOURCE_STORE: &str = "legacy-memory-v1";
 
-pub(super) fn nonnegative_u64(value: i64, field: &'static str) -> FactStoreResult<u64> {
+pub(super) fn nonnegative_u64(value: i64, field: &'static str) -> FactLineageResult<u64> {
     u64::try_from(value).map_err(|_| {
         storage_message(
             QUERY_OPERATION,
@@ -32,7 +32,7 @@ pub(super) fn nonnegative_u64(value: i64, field: &'static str) -> FactStoreResul
     })
 }
 
-pub(super) fn compatibility_category_label(category: FactCategoryV1) -> &'static str {
+pub(super) fn category_label(category: FactCategoryV1) -> &'static str {
     match category {
         FactCategoryV1::General => "general",
         FactCategoryV1::UserPref => "user_pref",
@@ -43,41 +43,41 @@ pub(super) fn compatibility_category_label(category: FactCategoryV1) -> &'static
     }
 }
 
-pub(super) fn compatibility_now() -> FactStoreResult<UtcMicros> {
+pub(super) fn now() -> FactLineageResult<UtcMicros> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     let micros = i64::try_from(elapsed.as_micros()).map_err(|_| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             "compatibility clock exceeds supported timestamp range",
         )
     })?;
     Ok(UtcMicros(micros))
 }
 
-pub(super) fn compatibility_source_store_id() -> FactStoreResult<SourceStoreId> {
-    SourceStoreId::new(COMPATIBILITY_SOURCE_STORE.to_owned()).map_err(FactStoreError::from)
+pub(super) fn source_store_id() -> FactLineageResult<SourceStoreId> {
+    SourceStoreId::new(FACT_SOURCE_STORE.to_owned()).map_err(FactLineageError::from)
 }
 
-pub(super) fn compatibility_source_label(source: Option<&str>) -> FactStoreResult<String> {
+pub(super) fn fact_source_label(source: Option<&str>) -> FactLineageResult<String> {
     let source = source.unwrap_or("manual");
     sanitize_provider_metadata_text(source).ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             "compatibility source is not eligible for persistence",
         )
     })
 }
 
-pub(super) fn compatibility_legacy_timestamp(now: UtcMicros) -> i64 {
+pub(super) fn legacy_timestamp(now: UtcMicros) -> i64 {
     now.0.div_euclid(1_000_000)
 }
 
-pub(super) fn compatibility_event_time(now: UtcMicros, offset: i64) -> FactStoreResult<UtcMicros> {
+pub(super) fn event_time(now: UtcMicros, offset: i64) -> FactLineageResult<UtcMicros> {
     now.0.checked_add(offset).map(UtcMicros).ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             "compatibility event timestamp overflow",
         )
     })
@@ -91,7 +91,7 @@ pub(super) struct OwnerKey {
 }
 
 impl OwnerKey {
-    pub(super) fn new(owner: &FactOwnerV1) -> FactStoreResult<Self> {
+    pub(super) fn new(owner: &FactOwnerV1) -> FactLineageResult<Self> {
         let (kind, project_id) = match owner {
             FactOwnerV1::Profile => ("profile", String::new()),
             FactOwnerV1::Project { project_id } => ("project", project_id.as_str().to_owned()),
@@ -107,8 +107,8 @@ impl OwnerKey {
 pub(super) fn storage_error(
     operation: &'static str,
     source: impl Error + Send + Sync + 'static,
-) -> FactStoreError {
-    FactStoreError::Storage {
+) -> FactLineageError {
+    FactLineageError::Storage {
         operation,
         source: Box::new(source),
     }
@@ -117,7 +117,7 @@ pub(super) fn storage_error(
 pub(super) fn storage_message(
     operation: &'static str,
     message: impl Into<String>,
-) -> FactStoreError {
+) -> FactLineageError {
     storage_error(operation, std::io::Error::other(message.into()))
 }
 
@@ -131,7 +131,7 @@ pub(super) fn authority_storage_error(
     }
 }
 
-pub(super) fn identity_collision<T>(kind: &'static str, id: &str) -> FactStoreResult<T> {
+pub(super) fn identity_collision<T>(kind: &'static str, id: &str) -> FactLineageResult<T> {
     Err(storage_message(
         COMMIT_OPERATION,
         format!("{kind} identity collision for {id}"),
@@ -141,14 +141,14 @@ pub(super) fn identity_collision<T>(kind: &'static str, id: &str) -> FactStoreRe
 pub(super) fn to_json<T: Serialize + ?Sized>(
     value: &T,
     operation: &'static str,
-) -> FactStoreResult<String> {
+) -> FactLineageResult<String> {
     serde_json::to_string(value).map_err(|error| storage_error(operation, error))
 }
 
 pub(super) fn from_json<T: DeserializeOwned>(
     value: &str,
     operation: &'static str,
-) -> FactStoreResult<T> {
+) -> FactLineageResult<T> {
     serde_json::from_str(value).map_err(|error| storage_error(operation, error))
 }
 
@@ -156,7 +156,7 @@ pub(super) fn row_string(
     row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
-) -> FactStoreResult<String> {
+) -> FactLineageResult<String> {
     row.get(index)
         .map_err(|error| storage_error(operation, error))
 }
@@ -165,7 +165,7 @@ pub(super) fn row_optional_string(
     row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
-) -> FactStoreResult<Option<String>> {
+) -> FactLineageResult<Option<String>> {
     row.get(index)
         .map_err(|error| storage_error(operation, error))
 }
@@ -174,7 +174,7 @@ pub(super) fn row_i64(
     row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
-) -> FactStoreResult<i64> {
+) -> FactLineageResult<i64> {
     row.get(index)
         .map_err(|error| storage_error(operation, error))
 }
@@ -183,7 +183,7 @@ pub(super) fn row_optional_i64(
     row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
-) -> FactStoreResult<Option<i64>> {
+) -> FactLineageResult<Option<i64>> {
     row.get(index)
         .map_err(|error| storage_error(operation, error))
 }
@@ -192,7 +192,7 @@ pub(super) fn row_optional_f64(
     row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
-) -> FactStoreResult<Option<f64>> {
+) -> FactLineageResult<Option<f64>> {
     row.get(index)
         .map_err(|error| storage_error(operation, error))
 }
@@ -201,7 +201,7 @@ pub(super) fn row_f64(
     row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
-) -> FactStoreResult<f64> {
+) -> FactLineageResult<f64> {
     row.get(index)
         .map_err(|error| storage_error(operation, error))
 }
@@ -210,7 +210,7 @@ pub(super) async fn row_exists(
     transaction: &Transaction<'_>,
     sql: &str,
     values: impl crate::db::engine::IntoParams,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     let mut rows = transaction
         .query(sql, values)
         .await
@@ -226,7 +226,7 @@ pub(super) async fn row_exists_params(
     transaction: &Transaction<'_>,
     sql: &str,
     values: impl crate::db::engine::IntoParams,
-) -> FactStoreResult<bool> {
+) -> FactLineageResult<bool> {
     row_exists(transaction, sql, values).await
 }
 
@@ -242,7 +242,7 @@ pub(super) fn payload_access_label(state: PayloadAccessState) -> &'static str {
     }
 }
 
-pub(super) fn parse_payload_access(value: &str) -> FactStoreResult<PayloadAccessState> {
+pub(super) fn parse_payload_access(value: &str) -> FactLineageResult<PayloadAccessState> {
     match value {
         "eligible" => Ok(PayloadAccessState::Eligible),
         "redacted" => Ok(PayloadAccessState::Redacted),

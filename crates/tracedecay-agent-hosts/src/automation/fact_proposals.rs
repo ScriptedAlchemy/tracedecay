@@ -1,21 +1,17 @@
 //! Authority-backed automation fact proposals.
 //!
-//! The separate projection file is strictly post-commit display metadata;
-//! proposal state, CAS, and applied facts always come from
-//! [`MemoryApplication`].
+//! Proposal state and presentation metadata come from [`MemoryApplication`].
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, Weak};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
-    CompatibilityFactProposalPromotionDispositionV1, CompatibilityFactProposalPromotionV1,
-    CompatibilityFactProposalRecordV1, CompatibilityFactProposalStateV1, FactCompatibilityStore,
+    FactProposalEvidence, FactProposalPromotion, FactProposalPromotionDisposition,
+    FactProposalRecord as StoredFactProposal, FactProposalState as StoredFactProposalState,
+    FactStore,
 };
 
 use super::config_error;
@@ -23,23 +19,17 @@ use crate::application::memory::{
     MemoryApplication, MemoryApplicationError, automation_fact_proposal_add_command,
 };
 use crate::errors::{Result, TraceDecayError};
-use crate::memory::types::{AddFactOutcome, AddFactRequest, MemoryCategory};
+use crate::memory::types::{AddFactRequest, MemoryCategory};
 use crate::privacy::sanitize_provider_metadata_text;
 use crate::tracedecay::current_timestamp;
 
-/// Best-effort post-commit presentation cache. Never read to authorize work.
-const FACT_PROPOSAL_PROJECTION_FILENAME: &str = "fact_proposals.projection.json";
 const MAX_FACT_PROPOSAL_PAGE_SIZE: usize = 1_000;
-
-static FACT_PROPOSAL_STORE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static FACT_PROPOSAL_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactProposalState {
     PendingApproval,
-    /// Display-only input state; the authority never persists it.
+    /// Display-only state retained for an in-flight renderer.
     Applying,
     Applied,
     Rejected,
@@ -61,8 +51,7 @@ impl FactProposalState {
     }
 }
 
-/// Compatibility/display shape retained for dashboard and run-ledger JSON.
-/// It is a projection, not a persistence authority.
+/// Display shape retained for dashboard and run-ledger JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactProposalRecord {
     pub schema_version: u32,
@@ -81,16 +70,9 @@ pub struct FactProposalRecord {
     pub validation: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
-    /// Canonical fact identity. Never coerce this into a numeric mapping.
+    /// Canonical fact identity from the authoritative proposal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_canonical_fact_id: Option<String>,
-    /// Legacy numeric mapping, populated only when the authority has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_fact_id: Option<i64>,
-    /// Retired display-only field. Authority-backed projections leave it
-    /// empty rather than manufacturing a write outcome.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub apply_outcome: Option<AddFactOutcome>,
+    pub applied_fact_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "crate::serde_util::is_default")]
@@ -101,128 +83,8 @@ pub struct FactProposalRecord {
     pub folded_contents: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FactProposalStore {
-    pub schema_version: u32,
-    #[serde(default)]
-    pub proposals: Vec<FactProposalRecord>,
-}
-
-impl Default for FactProposalStore {
-    fn default() -> Self {
-        Self {
-            schema_version: 2,
-            proposals: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ProjectionMetadata<'a> {
-    run_id: Option<&'a str>,
-    evidence_hash: Option<&'a str>,
-    observed_at: Option<i64>,
-    proposal: Option<&'a Value>,
-    validation: Option<&'a Value>,
-}
-
-impl ProjectionMetadata<'_> {
-    const fn read_only() -> Self {
-        Self {
-            run_id: None,
-            evidence_hash: None,
-            observed_at: None,
-            proposal: None,
-            validation: None,
-        }
-    }
-}
-
-pub fn fact_proposal_projection_path(dashboard_root: &Path) -> PathBuf {
-    dashboard_root.join(FACT_PROPOSAL_PROJECTION_FILENAME)
-}
-
-pub async fn load_fact_proposal_store(dashboard_root: &Path) -> Result<FactProposalStore> {
-    load_projection_store_unlocked(dashboard_root).await
-}
-
-pub async fn save_fact_proposal_store(
-    dashboard_root: &Path,
-    store: &FactProposalStore,
-) -> Result<()> {
-    let lock = fact_proposal_store_lock(dashboard_root);
-    let _guard = lock.lock().await;
-    save_projection_store_unlocked(dashboard_root, store).await
-}
-
-async fn load_projection_store_unlocked(dashboard_root: &Path) -> Result<FactProposalStore> {
-    let path = fact_proposal_projection_path(dashboard_root);
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(FactProposalStore::default());
-        }
-        Err(error) => {
-            return Err(config_error(format!(
-                "failed to read fact proposal projection '{}': {error}",
-                path.display()
-            )));
-        }
-    };
-    serde_json::from_slice(&bytes).map_err(|error| {
-        config_error(format!(
-            "failed to parse fact proposal projection '{}': {error}",
-            path.display()
-        ))
-    })
-}
-
-async fn save_projection_store_unlocked(
-    dashboard_root: &Path,
-    store: &FactProposalStore,
-) -> Result<()> {
-    let path = fact_proposal_projection_path(dashboard_root);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|error| {
-            config_error(format!(
-                "failed to create fact proposal projection directory '{}': {error}",
-                parent.display()
-            ))
-        })?;
-    }
-    let bytes = serde_json::to_vec_pretty(store).map_err(TraceDecayError::from)?;
-    let nonce = FACT_PROPOSAL_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = path.with_file_name(format!(
-        ".{FACT_PROPOSAL_PROJECTION_FILENAME}.{}.{}.{}.tmp",
-        std::process::id(),
-        crate::runtime_identity::process_run_id(),
-        nonce
-    ));
-    crate::db::DatabaseAuthority::publish_record_atomically(
-        &temporary,
-        &path,
-        &bytes,
-        "fact proposal projection",
-    )
-}
-
-fn fact_proposal_store_lock(dashboard_root: &Path) -> Arc<tokio::sync::Mutex<()>> {
-    let key = dashboard_root.to_path_buf();
-    let mut locks = FACT_PROPOSAL_STORE_LOCKS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
-        return lock;
-    }
-    let lock = Arc::new(tokio::sync::Mutex::new(()));
-    locks.insert(key, Arc::downgrade(&lock));
-    lock
-}
-
-pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
+pub async fn record_session_fact_proposals<A: FactStore>(
     memory: &MemoryApplication<A>,
-    dashboard_root: &Path,
     run_id: &str,
     evidence_hash: Option<&str>,
     accepted_facts: &[Value],
@@ -284,8 +146,14 @@ pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
             continue;
         }
         let authoritative_id = ProvenanceId::new(proposal_id.clone()).map_err(store_error)?;
+        let evidence = FactProposalEvidence::new(
+            evidence_hash.clone(),
+            value.get("proposal").cloned(),
+            value.get("validation").cloned(),
+        )
+        .map_err(store_error)?;
         let proposal = memory
-            .submit_compatibility_fact_proposal(authoritative_id, command, Some(submitter.clone()))
+            .submit_fact_proposal(authoritative_id, command, Some(submitter.clone()), evidence)
             .await
             .map_err(memory_error)?;
         if !submitted_proposal_ids.insert(proposal.proposal_id().as_str().to_string()) {
@@ -294,33 +162,7 @@ pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
             // model item remains a partial no-op.
             continue;
         }
-        records.push(
-            project_authoritative_record(
-                dashboard_root,
-                &proposal,
-                ProjectionMetadata {
-                    run_id: Some(run_id),
-                    evidence_hash: evidence_hash.as_deref(),
-                    observed_at: Some(observed_at),
-                    proposal: value.get("proposal"),
-                    validation: value.get("validation"),
-                },
-            )
-            .await
-            .unwrap_or_else(|_| {
-                record_from_authority(
-                    &proposal,
-                    None,
-                    ProjectionMetadata {
-                        run_id: Some(run_id),
-                        evidence_hash: evidence_hash.as_deref(),
-                        observed_at: Some(observed_at),
-                        proposal: value.get("proposal"),
-                        validation: value.get("validation"),
-                    },
-                )
-            }),
-        );
+        records.push(record_from_authority(&proposal)?);
     }
 
     for (index, _) in rejected_facts.iter().enumerate() {
@@ -336,9 +178,8 @@ pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
     Ok(records)
 }
 
-pub async fn list_fact_proposals<A: FactCompatibilityStore>(
+pub async fn list_fact_proposals<A: FactStore>(
     memory: &MemoryApplication<A>,
-    dashboard_root: &Path,
     state: Option<FactProposalState>,
     limit: usize,
 ) -> Result<Vec<FactProposalRecord>> {
@@ -347,83 +188,38 @@ pub async fn list_fact_proposals<A: FactCompatibilityStore>(
     }
     let limit = limit.min(MAX_FACT_PROPOSAL_PAGE_SIZE);
     let page = memory
-        .list_compatibility_fact_proposals(state.map(compatibility_state), None, limit)
+        .list_fact_proposals(state.map(authority_state), None, limit)
         .await
         .map_err(memory_error)?;
-    let projection = load_fact_proposal_store(dashboard_root)
-        .await
-        .unwrap_or_default();
-    let projection_order: HashMap<&str, usize> = projection
-        .proposals
-        .iter()
-        .enumerate()
-        .map(|(index, record)| (record.proposal_id.as_str(), index))
-        .collect();
-    let mut rendered = page
-        .proposals()
-        .iter()
-        .map(|proposal| {
-            let previous = projection
-                .proposals
-                .iter()
-                .find(|record| record.proposal_id == proposal.proposal_id().as_str());
-            record_from_authority(proposal, previous, ProjectionMetadata::read_only())
-        })
-        .collect::<Vec<_>>();
-    rendered.sort_by(|left, right| {
-        projection_order
-            .get(left.proposal_id.as_str())
-            .copied()
-            .unwrap_or(usize::MAX)
-            .cmp(
-                &projection_order
-                    .get(right.proposal_id.as_str())
-                    .copied()
-                    .unwrap_or(usize::MAX),
-            )
-            .then_with(|| left.proposal_id.cmp(&right.proposal_id))
-    });
-    Ok(rendered)
+    page.proposals().iter().map(record_from_authority).collect()
 }
 
-pub async fn load_fact_proposal<A: FactCompatibilityStore>(
+pub async fn load_fact_proposal<A: FactStore>(
     memory: &MemoryApplication<A>,
-    dashboard_root: &Path,
     proposal_id: &str,
 ) -> Result<Option<FactProposalRecord>> {
     let proposal_id = ProvenanceId::new(proposal_id.to_string()).map_err(store_error)?;
     let proposal = memory
-        .get_compatibility_fact_proposal(proposal_id)
+        .get_fact_proposal(proposal_id)
         .await
         .map_err(memory_error)?;
-    let projection = load_fact_proposal_store(dashboard_root)
-        .await
-        .unwrap_or_default();
-    Ok(proposal.map(|proposal| {
-        let previous = projection
-            .proposals
-            .iter()
-            .find(|record| record.proposal_id == proposal.proposal_id().as_str());
-        record_from_authority(&proposal, previous, ProjectionMetadata::read_only())
-    }))
+    proposal.as_ref().map(record_from_authority).transpose()
 }
 
 /// There is deliberately no authoritative `Applying` state.
-pub async fn list_applying_fact_proposals<A: FactCompatibilityStore>(
+pub async fn list_applying_fact_proposals<A: FactStore>(
     _memory: &MemoryApplication<A>,
-    _dashboard_root: &Path,
 ) -> Result<Vec<FactProposalRecord>> {
     Ok(Vec::new())
 }
 
-pub async fn apply_fact_proposal<A: FactCompatibilityStore>(
+pub async fn apply_fact_proposal<A: FactStore>(
     memory: &MemoryApplication<A>,
-    dashboard_root: &Path,
     proposal_id: &str,
     reviewer: Option<String>,
 ) -> Result<FactProposalRecord> {
     Ok(
-        apply_fact_proposal_with_result(memory, dashboard_root, proposal_id, reviewer)
+        apply_fact_proposal_with_result(memory, proposal_id, reviewer)
             .await?
             .record,
     )
@@ -437,31 +233,30 @@ pub struct FactProposalApplyResult {
     pub newly_promoted: bool,
 }
 
-pub async fn apply_fact_proposal_with_result<A: FactCompatibilityStore>(
+pub async fn apply_fact_proposal_with_result<A: FactStore>(
     memory: &MemoryApplication<A>,
-    dashboard_root: &Path,
     proposal_id: &str,
     reviewer: Option<String>,
 ) -> Result<FactProposalApplyResult> {
     let proposal_id = ProvenanceId::new(proposal_id.to_string()).map_err(store_error)?;
     let current = memory
-        .get_compatibility_fact_proposal(proposal_id.clone())
+        .get_fact_proposal(proposal_id.clone())
         .await
         .map_err(memory_error)?
         .ok_or_else(|| config_error(format!("fact proposal '{proposal_id}' not found")))?;
-    if current.state() == CompatibilityFactProposalStateV1::Applied {
+    if current.state() == StoredFactProposalState::Applied {
         return Ok(FactProposalApplyResult {
-            record: render_authority_record(dashboard_root, &current).await,
+            record: record_from_authority(&current)?,
             newly_promoted: false,
         });
     }
-    if current.state() != CompatibilityFactProposalStateV1::PendingApproval {
+    if current.state() != StoredFactProposalState::PendingApproval {
         return Err(config_error(format!(
             "fact proposal '{proposal_id}' is not pending approval"
         )));
     }
-    let reviewer_actor = proposal_actor("automation:proposal-review")?;
-    let request = CompatibilityFactProposalPromotionV1::new(
+    let reviewer_actor = proposal_reviewer(reviewer.as_deref())?;
+    let request = FactProposalPromotion::new(
         memory.owner().clone(),
         proposal_id,
         current.revision(),
@@ -469,189 +264,76 @@ pub async fn apply_fact_proposal_with_result<A: FactCompatibilityStore>(
     )
     .map_err(store_error)?;
     let promotion = memory
-        .promote_compatibility_fact_proposal_with_disposition(request)
+        .promote_fact_proposal_with_disposition(request)
         .await
         .map_err(memory_error)?;
     let proposal = promotion.proposal();
-    let display_reviewer = bounded_metadata_text(reviewer.as_deref(), 160);
-    let record = project_authoritative_record(
-        dashboard_root,
-        proposal,
-        ProjectionMetadata {
-            run_id: None,
-            evidence_hash: None,
-            observed_at: Some(current_timestamp()),
-            proposal: None,
-            validation: None,
-        },
-    )
-    .await
-    .map_or_else(
-        |_| render_authority_record_sync(proposal),
-        |mut record| {
-            if display_reviewer.is_some() {
-                record.reviewer = display_reviewer;
-            }
-            record
-        },
-    );
+    let record = record_from_authority(proposal)?;
     Ok(FactProposalApplyResult {
         record,
         newly_promoted: matches!(
             promotion.disposition(),
-            CompatibilityFactProposalPromotionDispositionV1::NewlyPromoted
+            FactProposalPromotionDisposition::NewlyPromoted
         ),
     })
 }
 
-pub async fn reject_fact_proposal<A: FactCompatibilityStore>(
+pub async fn reject_fact_proposal<A: FactStore>(
     memory: &MemoryApplication<A>,
-    dashboard_root: &Path,
     proposal_id: &str,
     reviewer: Option<String>,
     reason: Option<String>,
 ) -> Result<FactProposalRecord> {
     let proposal_id = ProvenanceId::new(proposal_id.to_string()).map_err(store_error)?;
     let current = memory
-        .get_compatibility_fact_proposal(proposal_id.clone())
+        .get_fact_proposal(proposal_id.clone())
         .await
         .map_err(memory_error)?
         .ok_or_else(|| config_error(format!("fact proposal '{proposal_id}' not found")))?;
-    if current.state() == CompatibilityFactProposalStateV1::Rejected {
-        return Ok(render_authority_record(dashboard_root, &current).await);
+    if current.state() == StoredFactProposalState::Rejected {
+        return record_from_authority(&current);
     }
-    if current.state() != CompatibilityFactProposalStateV1::PendingApproval {
+    if current.state() != StoredFactProposalState::PendingApproval {
         return Err(config_error(format!(
             "fact proposal '{proposal_id}' is not pending approval"
         )));
     }
-    let reviewer_actor = proposal_actor("automation:proposal-review")?;
+    let reviewer_actor = proposal_reviewer(reviewer.as_deref())?;
     let reason = sanitized_reason(reason);
     let proposal = memory
-        .reject_compatibility_fact_proposal(proposal_id, current.revision(), reviewer_actor, reason)
+        .reject_fact_proposal(proposal_id, current.revision(), reviewer_actor, reason)
         .await
         .map_err(memory_error)?;
-    let display_reviewer = bounded_metadata_text(reviewer.as_deref(), 160);
-    let record = project_authoritative_record(
-        dashboard_root,
-        &proposal,
-        ProjectionMetadata {
-            run_id: None,
-            evidence_hash: None,
-            observed_at: Some(current_timestamp()),
-            proposal: None,
-            validation: None,
-        },
-    )
-    .await
-    .map_or_else(
-        |_| render_authority_record_sync(&proposal),
-        |mut record| {
-            if display_reviewer.is_some() {
-                record.reviewer = display_reviewer;
-            }
-            record
-        },
-    );
-    Ok(record)
+    record_from_authority(&proposal)
 }
 
-async fn project_authoritative_record(
-    dashboard_root: &Path,
-    proposal: &CompatibilityFactProposalRecordV1,
-    metadata: ProjectionMetadata<'_>,
-) -> Result<FactProposalRecord> {
-    let lock = fact_proposal_store_lock(dashboard_root);
-    let _guard = lock.lock().await;
-    let mut store = load_projection_store_unlocked(dashboard_root).await?;
-    let previous = store
-        .proposals
-        .iter()
-        .find(|record| record.proposal_id == proposal.proposal_id().as_str())
-        .cloned();
-    let record = record_from_authority(proposal, previous.as_ref(), metadata);
-    if let Some(index) = store
-        .proposals
-        .iter()
-        .position(|entry| entry.proposal_id == record.proposal_id)
-    {
-        // Projection order is display-only metadata, but it preserves the
-        // user-visible source order while authority state remains canonical.
-        store.proposals[index] = record.clone();
-    } else {
-        store.proposals.push(record.clone());
-    }
-    save_projection_store_unlocked(dashboard_root, &store).await?;
-    Ok(record)
-}
-
-async fn render_authority_record(
-    dashboard_root: &Path,
-    proposal: &CompatibilityFactProposalRecordV1,
-) -> FactProposalRecord {
-    let projection = load_fact_proposal_store(dashboard_root)
-        .await
-        .unwrap_or_default();
-    let previous = projection
-        .proposals
-        .iter()
-        .find(|record| record.proposal_id == proposal.proposal_id().as_str());
-    record_from_authority(proposal, previous, ProjectionMetadata::read_only())
-}
-
-fn render_authority_record_sync(
-    proposal: &CompatibilityFactProposalRecordV1,
-) -> FactProposalRecord {
-    record_from_authority(proposal, None, ProjectionMetadata::read_only())
-}
-
-fn record_from_authority(
-    proposal: &CompatibilityFactProposalRecordV1,
-    previous: Option<&FactProposalRecord>,
-    metadata: ProjectionMetadata<'_>,
-) -> FactProposalRecord {
-    let observed_at = metadata.observed_at.unwrap_or(0);
-    let created_at = previous.map_or(observed_at, |record| record.created_at);
-    let updated_at = metadata
-        .observed_at
-        .or_else(|| previous.map(|record| record.updated_at))
-        .unwrap_or(0);
-    FactProposalRecord {
+fn record_from_authority(proposal: &StoredFactProposal) -> Result<FactProposalRecord> {
+    let run_id = proposal.automation_run_id().ok_or_else(|| {
+        config_error(format!(
+            "fact proposal '{}' is missing its automation run identity",
+            proposal.proposal_id()
+        ))
+    })?;
+    Ok(FactProposalRecord {
         schema_version: 2,
         proposal_id: proposal.proposal_id().as_str().to_string(),
-        run_id: metadata
-            .run_id
-            .map(ToOwned::to_owned)
-            .or_else(|| previous.map(|record| record.run_id.clone()))
-            .or_else(|| proposal.automation_run_id().map(ToOwned::to_owned))
-            .unwrap_or_else(|| "unknown".to_string()),
-        evidence_hash: metadata
-            .evidence_hash
-            .and_then(|value| bounded_metadata_text(Some(value), 160))
-            .or_else(|| previous.and_then(|record| record.evidence_hash.clone())),
+        run_id: run_id.to_string(),
+        evidence_hash: proposal.evidence().evidence_hash().map(ToOwned::to_owned),
         state: display_state(proposal.state()),
         add_fact_request: Some(add_request_from_command(proposal.request())),
-        proposal: metadata
-            .proposal
-            .cloned()
-            .or_else(|| previous.and_then(|record| record.proposal.clone())),
+        proposal: proposal.evidence().proposal().cloned(),
         validation_reason: proposal.reason().map(ToOwned::to_owned),
-        validation: metadata
-            .validation
-            .cloned()
-            .or_else(|| previous.and_then(|record| record.validation.clone())),
+        validation: proposal.evidence().validation().cloned(),
         reviewer: proposal.reviewer().map(|actor| actor.as_str().to_string()),
-        applied_canonical_fact_id: proposal
+        applied_fact_id: proposal
             .applied_fact_id()
             .map(|fact_id| fact_id.as_str().to_string()),
-        applied_fact_id: proposal.legacy_fact_id(),
-        apply_outcome: None,
-        created_at,
-        updated_at,
+        created_at: proposal.submitted_at().0.div_euclid(1_000_000),
+        updated_at: proposal.updated_at().0.div_euclid(1_000_000),
         duplicate_count: 0,
         last_duplicate_run_id: None,
         folded_contents: Vec::new(),
-    }
+    })
 }
 
 fn rejected_projection(
@@ -673,9 +355,7 @@ fn rejected_projection(
         validation_reason: Some(reason.to_string()),
         validation: None,
         reviewer: Some("automation:session-reflector".to_string()),
-        applied_canonical_fact_id: None,
         applied_fact_id: None,
-        apply_outcome: None,
         created_at: observed_at,
         updated_at: observed_at,
         duplicate_count: 0,
@@ -684,9 +364,7 @@ fn rejected_projection(
     }
 }
 
-fn add_request_from_command(
-    command: &tracedecay_store::CompatibilityFactAddCommandV1,
-) -> AddFactRequest {
+fn add_request_from_command(command: &tracedecay_store::FactAddCommand) -> AddFactRequest {
     AddFactRequest {
         content: command.content().to_string(),
         category: MemoryCategory::from(command.category()),
@@ -698,29 +376,37 @@ fn add_request_from_command(
     }
 }
 
-const fn compatibility_state(state: FactProposalState) -> CompatibilityFactProposalStateV1 {
+const fn authority_state(state: FactProposalState) -> StoredFactProposalState {
     match state {
         FactProposalState::PendingApproval | FactProposalState::Applying => {
-            CompatibilityFactProposalStateV1::PendingApproval
+            StoredFactProposalState::PendingApproval
         }
-        FactProposalState::Applied => CompatibilityFactProposalStateV1::Applied,
-        FactProposalState::Rejected => CompatibilityFactProposalStateV1::Rejected,
-        FactProposalState::Quarantined => CompatibilityFactProposalStateV1::Quarantined,
+        FactProposalState::Applied => StoredFactProposalState::Applied,
+        FactProposalState::Rejected => StoredFactProposalState::Rejected,
+        FactProposalState::Quarantined => StoredFactProposalState::Quarantined,
     }
 }
 
-const fn display_state(state: CompatibilityFactProposalStateV1) -> FactProposalState {
+const fn display_state(state: StoredFactProposalState) -> FactProposalState {
     match state {
-        CompatibilityFactProposalStateV1::PendingApproval
-        | CompatibilityFactProposalStateV1::Applying => FactProposalState::PendingApproval,
-        CompatibilityFactProposalStateV1::Applied => FactProposalState::Applied,
-        CompatibilityFactProposalStateV1::Rejected => FactProposalState::Rejected,
-        CompatibilityFactProposalStateV1::Quarantined => FactProposalState::Quarantined,
+        StoredFactProposalState::PendingApproval | StoredFactProposalState::Applying => {
+            FactProposalState::PendingApproval
+        }
+        StoredFactProposalState::Applied => FactProposalState::Applied,
+        StoredFactProposalState::Rejected => FactProposalState::Rejected,
+        StoredFactProposalState::Quarantined => FactProposalState::Quarantined,
     }
 }
 
 fn proposal_actor(value: &str) -> Result<ActorId> {
     ActorId::new(value.to_string()).map_err(store_error)
+}
+
+fn proposal_reviewer(value: Option<&str>) -> Result<ActorId> {
+    match bounded_metadata_text(value, 160) {
+        Some(value) => ActorId::new(value).map_err(store_error),
+        None => proposal_actor("automation:proposal-review"),
+    }
 }
 
 fn sanitized_reason(reason: Option<String>) -> String {

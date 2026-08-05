@@ -7,9 +7,9 @@ use super::projection::PROJECTION_POINT_CAP;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_runtime_core::memory::types::MemoryCategory;
 use tracedecay_store::{
-    CompatibilityDashboardEntityV1, CompatibilityDashboardFactSummaryV1,
-    CompatibilityDashboardHrrStateV1, CompatibilityDashboardMemoryOverviewV1,
-    CompatibilityFactProjectionV1, CompatibilityFactTargetV1,
+    DashboardEntity, DashboardFactSummary,
+    DashboardHrrState, DashboardMemoryOverview,
+    FactProjection, FactTarget,
 };
 
 pub fn providers_payload() -> Value {
@@ -28,14 +28,14 @@ pub fn providers_payload() -> Value {
     })
 }
 
-fn legacy_fact_id(projection: &CompatibilityFactProjectionV1) -> Option<i64> {
+fn legacy_fact_id(projection: &FactProjection) -> Option<i64> {
     match projection {
-        CompatibilityFactProjectionV1::Available(fact) => fact.legacy_fact_id(),
-        CompatibilityFactProjectionV1::Unavailable(_) => None,
+        FactProjection::Available(fact) => fact.legacy_fact_id(),
+        FactProjection::Unavailable(_) => None,
     }
 }
 
-pub(super) fn target_legacy_fact_id(target: &CompatibilityFactTargetV1) -> Option<i64> {
+pub(super) fn target_legacy_fact_id(target: &FactTarget) -> Option<i64> {
     target
         .legacy_query()
         .map(tracedecay_store::LegacyFactQuery::legacy_fact_id)
@@ -43,8 +43,8 @@ pub(super) fn target_legacy_fact_id(target: &CompatibilityFactTargetV1) -> Optio
 
 /// Converts only an available, mapped compatibility fact. Unavailable or
 /// redacted payload fields stay omitted; dashboard handlers never invent them.
-pub(super) fn fact_summary_json(summary: &CompatibilityDashboardFactSummaryV1) -> Option<Value> {
-    let CompatibilityFactProjectionV1::Available(fact) = &summary.fact else {
+pub(super) fn fact_summary_json(summary: &DashboardFactSummary) -> Option<Value> {
+    let FactProjection::Available(fact) = &summary.fact else {
         return None;
     };
     let fact_id = fact.legacy_fact_id()?;
@@ -81,7 +81,7 @@ pub(super) fn fact_summary_json(summary: &CompatibilityDashboardFactSummaryV1) -
     Some(Value::Object(row))
 }
 
-fn entity_json(entity: &CompatibilityDashboardEntityV1) -> Value {
+fn entity_json(entity: &DashboardEntity) -> Value {
     json!({
         "entity_id": entity.target.legacy_entity_id(),
         "name": entity.name,
@@ -115,7 +115,7 @@ pub(super) async fn dashboard_overview(
     state: &DashboardState,
     fact_limit: usize,
     graph_limit: usize,
-) -> Result<CompatibilityDashboardMemoryOverviewV1, String> {
+) -> Result<DashboardMemoryOverview, String> {
     memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?
         .dashboard_overview_v1(fact_limit, graph_limit)
@@ -150,7 +150,7 @@ pub async fn fetch_entities(state: &DashboardState, limit: i64) -> Result<Vec<Va
         .collect())
 }
 
-fn trust_histogram(overview: &CompatibilityDashboardMemoryOverviewV1) -> Vec<Value> {
+fn trust_histogram(overview: &DashboardMemoryOverview) -> Vec<Value> {
     let mut buckets: Vec<Value> = (0..10)
         .map(|i| {
             json!({
@@ -162,7 +162,7 @@ fn trust_histogram(overview: &CompatibilityDashboardMemoryOverviewV1) -> Vec<Val
         .collect();
     for row in &overview.trust_histogram {
         // The store emits bucket rows named "trust-<n>" (see
-        // dashboard_compatibility_named_counts_tx); a bare-number parse fails
+        // dashboard_named_counts_tx); a bare-number parse fails
         // on every real row and left this histogram permanently zero.
         let name = row.name.strip_prefix("trust-").unwrap_or(&row.name);
         let Ok(idx) = name.parse::<usize>() else {
@@ -185,10 +185,10 @@ pub async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
         .iter()
         .map(|coverage| {
             let state = match &coverage.state {
-                CompatibilityDashboardHrrStateV1::Ready => "ready",
-                CompatibilityDashboardHrrStateV1::MissingVectors => "missing_vectors",
-                CompatibilityDashboardHrrStateV1::MissingBank => "missing_bank",
-                CompatibilityDashboardHrrStateV1::StaleBank => "stale_bank",
+                DashboardHrrState::Ready => "ready",
+                DashboardHrrState::MissingVectors => "missing_vectors",
+                DashboardHrrState::MissingBank => "missing_bank",
+                DashboardHrrState::StaleBank => "stale_bank",
             };
             json!({
                 "category": coverage.category,
@@ -274,7 +274,7 @@ pub async fn fact_detail_payload(
                     .then_some(point.vector.is_some())
             })
         });
-    let mut fact = fact_summary_json(&CompatibilityDashboardFactSummaryV1 {
+    let mut fact = fact_summary_json(&DashboardFactSummary {
         fact: detail.fact,
         has_hrr_vector: vector_state.flatten().unwrap_or(false),
     });

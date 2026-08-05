@@ -6,7 +6,6 @@
 mod baseline;
 mod compatibility;
 mod introspection;
-mod proposals;
 mod upgrades;
 
 pub(in crate::db) use baseline::create_schema;

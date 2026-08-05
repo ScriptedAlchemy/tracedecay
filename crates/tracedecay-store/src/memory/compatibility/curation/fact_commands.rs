@@ -4,16 +4,12 @@ use tracedecay_domain::{
 };
 
 use super::super::super::{
-    CompatibilityFactFeedbackActionV1, FactStoreError, FactStoreResult,
-    MAX_COMPATIBILITY_REASON_BYTES,
+    FactFeedbackAction, FactLineageError, FactLineageResult, MAX_FACT_REASON_BYTES,
 };
-use super::super::{
-    CompatibilityFactIdV1, CompatibilityFactProjectionV1, CompatibilityFactTargetV1,
-    validate_compatibility_text,
-};
+use super::super::{FactProjection, FactTarget, OwnedFactId, validate_text};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactAddCommandV1 {
+pub struct FactAddCommand {
     owner: FactOwnerV1,
     operation_id: ProvenanceId,
     content: String,
@@ -30,7 +26,7 @@ pub struct CompatibilityFactAddCommandV1 {
     actor: Option<ActorId>,
 }
 
-impl CompatibilityFactAddCommandV1 {
+impl FactAddCommand {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner: FactOwnerV1,
@@ -43,18 +39,19 @@ impl CompatibilityFactAddCommandV1 {
         metadata: Value,
         default_trust: Confidence,
         actor: Option<ActorId>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         operation_id.validate()?;
         if content.trim().is_empty() {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact add content",
             }));
         }
-        if source.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
-        }) {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+        if source
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > MAX_FACT_REASON_BYTES)
+        {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact add source",
             }));
         }
@@ -100,8 +97,8 @@ impl CompatibilityFactAddCommandV1 {
     pub fn metadata(&self) -> &Value {
         &self.metadata
     }
-    pub fn with_automation_run_id(mut self, run_id: String) -> FactStoreResult<Self> {
-        validate_compatibility_text(&run_id, "compatibility fact automation run identity")?;
+    pub fn with_automation_run_id(mut self, run_id: String) -> FactLineageResult<Self> {
+        validate_text(&run_id, "compatibility fact automation run identity")?;
         self.automation_run_id = Some(run_id);
         Ok(self)
     }
@@ -117,7 +114,7 @@ impl CompatibilityFactAddCommandV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactUpdatePatchV1 {
+pub struct FactUpdatePatch {
     content: Option<String>,
     category: Option<FactCategoryV1>,
     source: Option<Option<String>>,
@@ -127,7 +124,7 @@ pub struct CompatibilityFactUpdatePatchV1 {
     trust: Option<Confidence>,
 }
 
-impl CompatibilityFactUpdatePatchV1 {
+impl FactUpdatePatch {
     pub fn new(
         content: Option<String>,
         category: Option<FactCategoryV1>,
@@ -136,7 +133,7 @@ impl CompatibilityFactUpdatePatchV1 {
         entities: Option<Vec<String>>,
         metadata: Option<Value>,
         trust: Option<Confidence>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         if content.is_none()
             && category.is_none()
             && source.is_none()
@@ -145,7 +142,7 @@ impl CompatibilityFactUpdatePatchV1 {
             && metadata.is_none()
             && trust.is_none()
         {
-            return Err(FactStoreError::Contract(DomainError::Empty {
+            return Err(FactLineageError::Contract(DomainError::Empty {
                 field: "compatibility fact update patch",
             }));
         }
@@ -153,16 +150,16 @@ impl CompatibilityFactUpdatePatchV1 {
             .as_ref()
             .is_some_and(|value| value.trim().is_empty())
         {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact update content",
             }));
         }
         if source.as_ref().is_some_and(|value| {
             value.as_ref().is_some_and(|source| {
-                source.trim().is_empty() || source.len() > MAX_COMPATIBILITY_REASON_BYTES
+                source.trim().is_empty() || source.len() > MAX_FACT_REASON_BYTES
             })
         }) {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact update source",
             }));
         }
@@ -201,22 +198,22 @@ impl CompatibilityFactUpdatePatchV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactUpdateCommandV1 {
-    target: CompatibilityFactTargetV1,
+pub struct FactUpdateCommand {
+    target: FactTarget,
     operation_id: ProvenanceId,
     expected_last_event_id: Option<FactEventId>,
-    patch: CompatibilityFactUpdatePatchV1,
+    patch: FactUpdatePatch,
     actor: Option<ActorId>,
 }
 
-impl CompatibilityFactUpdateCommandV1 {
+impl FactUpdateCommand {
     pub fn new(
-        target: CompatibilityFactTargetV1,
+        target: FactTarget,
         operation_id: ProvenanceId,
         expected_last_event_id: Option<FactEventId>,
-        patch: CompatibilityFactUpdatePatchV1,
+        patch: FactUpdatePatch,
         actor: Option<ActorId>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         operation_id.validate()?;
         if let Some(event_id) = &expected_last_event_id {
             event_id.validate()?;
@@ -233,7 +230,7 @@ impl CompatibilityFactUpdateCommandV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &FactTarget {
         &self.target
     }
     pub fn operation_id(&self) -> &ProvenanceId {
@@ -242,7 +239,7 @@ impl CompatibilityFactUpdateCommandV1 {
     pub fn expected_last_event_id(&self) -> Option<&FactEventId> {
         self.expected_last_event_id.as_ref()
     }
-    pub fn patch(&self) -> &CompatibilityFactUpdatePatchV1 {
+    pub fn patch(&self) -> &FactUpdatePatch {
         &self.patch
     }
     pub fn actor(&self) -> Option<&ActorId> {
@@ -251,20 +248,20 @@ impl CompatibilityFactUpdateCommandV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactRemoveCommandV1 {
-    target: CompatibilityFactTargetV1,
+pub struct FactRemoveCommand {
+    target: FactTarget,
     operation_id: ProvenanceId,
     expected_last_event_id: Option<FactEventId>,
     actor: Option<ActorId>,
 }
 
-impl CompatibilityFactRemoveCommandV1 {
+impl FactRemoveCommand {
     pub fn new(
-        target: CompatibilityFactTargetV1,
+        target: FactTarget,
         operation_id: ProvenanceId,
         expected_last_event_id: Option<FactEventId>,
         actor: Option<ActorId>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         operation_id.validate()?;
         if let Some(event_id) = &expected_last_event_id {
             event_id.validate()?;
@@ -280,7 +277,7 @@ impl CompatibilityFactRemoveCommandV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &FactTarget {
         &self.target
     }
     pub fn operation_id(&self) -> &ProvenanceId {
@@ -295,26 +292,26 @@ impl CompatibilityFactRemoveCommandV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactFeedbackCommandV1 {
-    target: CompatibilityFactTargetV1,
+pub struct FactFeedbackCommand {
+    target: FactTarget,
     operation_id: ProvenanceId,
     expected_last_event_id: Option<FactEventId>,
-    action: CompatibilityFactFeedbackActionV1,
+    action: FactFeedbackAction,
     actor: Option<ActorId>,
     source: Option<String>,
     reason: Option<String>,
 }
 
-impl CompatibilityFactFeedbackCommandV1 {
+impl FactFeedbackCommand {
     pub fn new(
-        target: CompatibilityFactTargetV1,
+        target: FactTarget,
         operation_id: ProvenanceId,
         expected_last_event_id: Option<FactEventId>,
-        action: CompatibilityFactFeedbackActionV1,
+        action: FactFeedbackAction,
         actor: Option<ActorId>,
         source: Option<String>,
         reason: Option<String>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         operation_id.validate()?;
         if let Some(event_id) = &expected_last_event_id {
             event_id.validate()?;
@@ -322,17 +319,19 @@ impl CompatibilityFactFeedbackCommandV1 {
         if let Some(actor) = &actor {
             actor.validate()?;
         }
-        if source.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
-        }) {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+        if source
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > MAX_FACT_REASON_BYTES)
+        {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact feedback source",
             }));
         }
-        if reason.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
-        }) {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+        if reason
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > MAX_FACT_REASON_BYTES)
+        {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact feedback reason",
             }));
         }
@@ -347,7 +346,7 @@ impl CompatibilityFactFeedbackCommandV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &FactTarget {
         &self.target
     }
     pub fn operation_id(&self) -> &ProvenanceId {
@@ -356,7 +355,7 @@ impl CompatibilityFactFeedbackCommandV1 {
     pub fn expected_last_event_id(&self) -> Option<&FactEventId> {
         self.expected_last_event_id.as_ref()
     }
-    pub fn action(&self) -> CompatibilityFactFeedbackActionV1 {
+    pub fn action(&self) -> FactFeedbackAction {
         self.action
     }
     pub fn actor(&self) -> Option<&ActorId> {
@@ -371,7 +370,7 @@ impl CompatibilityFactFeedbackCommandV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactAddDispositionV1 {
+pub enum FactAddDisposition {
     Added,
     NearDuplicate,
     PossibleConflict,
@@ -379,28 +378,28 @@ pub enum CompatibilityFactAddDispositionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactAddOutcomeV1 {
-    fact: Option<CompatibilityFactProjectionV1>,
-    disposition: CompatibilityFactAddDispositionV1,
-    closest_fact_id: Option<CompatibilityFactIdV1>,
+pub struct FactAddOutcome {
+    fact: Option<FactProjection>,
+    disposition: FactAddDisposition,
+    closest_fact_id: Option<OwnedFactId>,
     similarity_millionths: Option<u32>,
     reason: Option<String>,
 }
 
-impl CompatibilityFactAddOutcomeV1 {
+impl FactAddOutcome {
     pub fn new(
-        fact: Option<CompatibilityFactProjectionV1>,
-        disposition: CompatibilityFactAddDispositionV1,
-        closest_fact_id: Option<CompatibilityFactIdV1>,
+        fact: Option<FactProjection>,
+        disposition: FactAddDisposition,
+        closest_fact_id: Option<OwnedFactId>,
         similarity_millionths: Option<u32>,
         reason: Option<String>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         if similarity_millionths.is_some_and(|value| value > 1_000_000)
-            || reason.as_ref().is_some_and(|value| {
-                value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
-            })
+            || reason
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty() || value.len() > MAX_FACT_REASON_BYTES)
         {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact add outcome",
             }));
         }
@@ -413,13 +412,13 @@ impl CompatibilityFactAddOutcomeV1 {
         })
     }
 
-    pub fn fact(&self) -> Option<&CompatibilityFactProjectionV1> {
+    pub fn fact(&self) -> Option<&FactProjection> {
         self.fact.as_ref()
     }
-    pub fn disposition(&self) -> CompatibilityFactAddDispositionV1 {
+    pub fn disposition(&self) -> FactAddDisposition {
         self.disposition
     }
-    pub fn closest_fact_id(&self) -> Option<&CompatibilityFactIdV1> {
+    pub fn closest_fact_id(&self) -> Option<&OwnedFactId> {
         self.closest_fact_id.as_ref()
     }
     pub fn similarity_millionths(&self) -> Option<u32> {
@@ -431,18 +430,15 @@ impl CompatibilityFactAddOutcomeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactUpdateOutcomeV1 {
-    fact: CompatibilityFactProjectionV1,
+pub struct FactUpdateOutcome {
+    fact: FactProjection,
     trust_delta_millionths: i32,
 }
 
-impl CompatibilityFactUpdateOutcomeV1 {
-    pub fn new(
-        fact: CompatibilityFactProjectionV1,
-        trust_delta_millionths: i32,
-    ) -> FactStoreResult<Self> {
+impl FactUpdateOutcome {
+    pub fn new(fact: FactProjection, trust_delta_millionths: i32) -> FactLineageResult<Self> {
         if !(-1_000_000..=1_000_000).contains(&trust_delta_millionths) {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact update trust delta",
             }));
         }
@@ -452,7 +448,7 @@ impl CompatibilityFactUpdateOutcomeV1 {
         })
     }
 
-    pub fn fact(&self) -> &CompatibilityFactProjectionV1 {
+    pub fn fact(&self) -> &FactProjection {
         &self.fact
     }
     pub fn trust_delta_millionths(&self) -> i32 {
@@ -461,23 +457,19 @@ impl CompatibilityFactUpdateOutcomeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactRemoveOutcomeV1 {
+pub struct FactRemoveOutcome {
     /// `None` only for the idempotent no-op disposition: the target never
     /// resolved to a stored fact inside this transaction (never added, or
     /// concurrently removed just before this attempt), so there is no
     /// projection to report. `removed` and `remaining_fact_count` remain
     /// meaningful in that case.
-    fact: Option<CompatibilityFactProjectionV1>,
+    fact: Option<FactProjection>,
     removed: bool,
     remaining_fact_count: u64,
 }
 
-impl CompatibilityFactRemoveOutcomeV1 {
-    pub fn new(
-        fact: CompatibilityFactProjectionV1,
-        removed: bool,
-        remaining_fact_count: u64,
-    ) -> Self {
+impl FactRemoveOutcome {
+    pub fn new(fact: FactProjection, removed: bool, remaining_fact_count: u64) -> Self {
         Self {
             fact: Some(fact),
             removed,
@@ -497,7 +489,7 @@ impl CompatibilityFactRemoveOutcomeV1 {
         }
     }
 
-    pub fn fact(&self) -> Option<&CompatibilityFactProjectionV1> {
+    pub fn fact(&self) -> Option<&FactProjection> {
         self.fact.as_ref()
     }
     pub fn removed(&self) -> bool {
@@ -509,8 +501,8 @@ impl CompatibilityFactRemoveOutcomeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactFeedbackOutcomeV1 {
-    fact: CompatibilityFactProjectionV1,
+pub struct FactFeedbackOutcome {
+    fact: FactProjection,
     event_id: FactEventId,
     /// Numeric event identity from the authoritative V1 mirror.  It is only
     /// present when the adapter durably recorded that mirror row; callers must
@@ -523,10 +515,10 @@ pub struct CompatibilityFactFeedbackOutcomeV1 {
     unhelpful_count: u64,
 }
 
-impl CompatibilityFactFeedbackOutcomeV1 {
+impl FactFeedbackOutcome {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        fact: CompatibilityFactProjectionV1,
+        fact: FactProjection,
         event_id: FactEventId,
         legacy_feedback_event_id: Option<i64>,
         old_trust: Confidence,
@@ -534,10 +526,10 @@ impl CompatibilityFactFeedbackOutcomeV1 {
         trust_delta_millionths: i32,
         helpful_count: u64,
         unhelpful_count: u64,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         event_id.validate()?;
         if legacy_feedback_event_id.is_some_and(|value| value <= 0) {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility legacy feedback event id",
             }));
         }
@@ -554,7 +546,7 @@ impl CompatibilityFactFeedbackOutcomeV1 {
         })
     }
 
-    pub fn fact(&self) -> &CompatibilityFactProjectionV1 {
+    pub fn fact(&self) -> &FactProjection {
         &self.fact
     }
     pub fn event_id(&self) -> &FactEventId {
@@ -584,12 +576,12 @@ fn validate_feedback_trust_delta(
     old_trust: Confidence,
     new_trust: Confidence,
     trust_delta_millionths: i32,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     let expected = ((new_trust.as_f64() - old_trust.as_f64()) * 1_000_000.0).round() as i32;
     if !(-1_000_000..=1_000_000).contains(&trust_delta_millionths)
         || trust_delta_millionths != expected
     {
-        return Err(FactStoreError::Contract(DomainError::NonCanonical {
+        return Err(FactLineageError::Contract(DomainError::NonCanonical {
             field: "compatibility fact feedback trust delta",
         }));
     }

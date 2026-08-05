@@ -6,65 +6,50 @@ use tracedecay_domain::{
     ActorId, FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2,
 };
 use tracedecay_store::{
-    CompatibilityDashboardFactDetailQueryV1, CompatibilityDashboardFactDetailV1,
-    CompatibilityDashboardMemoryOverviewQueryV1, CompatibilityDashboardMemoryOverviewV1,
-    CompatibilityDashboardOplogEntryV1, CompatibilityDashboardOplogQueryV1,
-    CompatibilityDashboardVectorPointV1, CompatibilityDashboardVectorPointsQueryV1,
-    CompatibilityFactAddCommandV1, CompatibilityFactAddOutcomeV1,
-    CompatibilityFactContentDigestQueryV1, CompatibilityFactContradictionPageV1,
-    CompatibilityFactContradictionQueryV1, CompatibilityFactCurationBatchV1,
-    CompatibilityFactCurationReceiptV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
-    CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
-    CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalPageV1,
-    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
-    CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
-    CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
-    CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
-    CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
-    CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
-    FactCommitOutcome, FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery,
-    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStore,
-    FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
-    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    CurrentFactsQuery, DashboardFactDetail, DashboardFactDetailQuery, DashboardMemoryOverview,
+    DashboardMemoryOverviewQuery, DashboardOplogEntry, DashboardOplogQuery, DashboardVectorPoint,
+    DashboardVectorPointsQuery, FactAddCommand, FactAddOutcome, FactAsOfQuery, FactAsOfResponseV1,
+    FactCommitOutcome, FactContentDigestQuery, FactContradictionPage, FactContradictionQuery,
+    FactCurationBatch, FactCurationReceipt, FactCurrentQuery, FactCurrentResponseV1,
+    FactFeedbackCommand, FactFeedbackHistory, FactFeedbackHistoryQuery, FactFeedbackOutcome,
+    FactHistory, FactHistoryQuery, FactInspection, FactLineageQuery, FactLineageResponseV1,
+    FactLineageResult, FactLineageStore, FactListQuery, FactMergeCommand, FactMergeOutcome,
+    FactPage, FactProjection, FactProposalEvidence, FactProposalPage, FactProposalPromotion,
+    FactProposalPromotionResult, FactProposalRecord, FactProposalRevision, FactProposalState,
+    FactProposalStore, FactProposalStoreError, FactRemoveCommand, FactRemoveOutcome,
+    FactRetrievalCommand, FactSearchPage, FactSearchQuery, FactStore, FactStoreResult, FactTarget,
+    FactUpdateCommand, FactUpdateOutcome, FactWriteBatch, LegacyFactQuery, MemoryRepairCommand,
+    MemoryRepairStats, MemoryStatus, PromoteFactProposal, PromoteFactProposalOutcome,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 
 use crud::{
-    PROMOTE_OPERATION, add_compatibility_fact_tx, compatibility_fact_feedback_history_tx,
-    compatibility_fact_history_tx, fact_response_metadata_tx,
-    find_compatibility_fact_by_content_digest_tx, get_compatibility_fact_tx,
-    get_retrieval_anchor_tx, inspect_compatibility_fact_tx, list_compatibility_facts_tx,
-    promote_compatibility_fact_proposal_tx,
-    promote_compatibility_fact_proposal_with_disposition_tx, promote_fact_proposal_tx,
-    query_current_facts_tx, query_fact_as_of_response_tx, query_fact_as_of_tx,
-    query_fact_current_response_tx, query_fact_current_tx, query_fact_lineage_response_tx,
-    query_fact_lineage_tx, record_compatibility_fact_feedback_tx, remove_compatibility_fact_tx,
-    update_compatibility_fact_tx,
+    PROMOTE_OPERATION, add_fact_tx, commit_fact_proposal_tx, fact_feedback_history_tx,
+    fact_history_tx, fact_response_metadata_tx, find_fact_by_content_digest_tx, get_fact_tx,
+    get_retrieval_anchor_tx, inspect_fact_tx, list_facts_tx, promote_fact_proposal_tx,
+    promote_fact_proposal_with_disposition_tx, query_current_facts_tx,
+    query_fact_as_of_response_tx, query_fact_as_of_tx, query_fact_current_response_tx,
+    query_fact_current_tx, query_fact_lineage_response_tx, query_fact_lineage_tx,
+    record_fact_feedback_tx, remove_fact_tx, update_fact_tx,
 };
-use curation::{apply_compatibility_fact_curation_tx, merge_compatibility_facts_tx};
+use curation::{apply_fact_curation_tx, merge_facts_tx};
 use dashboard::{
-    dashboard_compatibility_fact_detail_tx, dashboard_compatibility_memory_oplog_tx,
-    dashboard_compatibility_memory_overview_tx, dashboard_compatibility_vector_points_tx,
+    dashboard_fact_detail_tx, dashboard_memory_oplog_tx, dashboard_memory_overview_tx,
+    dashboard_vector_points_tx,
 };
 use envelope::finish_read_snapshot;
 use primitives::{QUERY_OPERATION, authority_storage_error, storage_error};
 use projection::resolve_legacy_fact_tx;
 use proposals::{
-    count_pending_compatibility_fact_proposals_tx, get_compatibility_fact_proposal_tx,
-    list_compatibility_fact_proposals_tx, reject_compatibility_fact_proposal_tx,
-    submit_compatibility_fact_proposal_tx,
+    count_pending_fact_proposals_tx, get_fact_proposal_tx, list_fact_proposals_tx,
+    reject_fact_proposal_tx, submit_fact_proposal_tx,
 };
-use repair::{compatibility_feedback_history_repair_progress_tx, repair_compatibility_memory_tx};
+use repair::{feedback_history_repair_progress_tx, repair_memory_tx};
 use search::{
-    find_compatibility_contradictions_tx, probe_compatibility_facts_tx,
-    reason_compatibility_facts_tx, record_compatibility_fact_retrieval_tx,
-    related_compatibility_facts_tx, search_compatibility_facts_tx,
+    find_contradictions_tx, probe_facts_tx, reason_facts_tx, record_fact_retrieval_tx,
+    related_facts_tx, search_facts_tx,
 };
-use status::compatibility_memory_status_tx;
+use status::memory_status_tx;
 
 mod crud;
 mod curation;
@@ -96,58 +81,10 @@ impl<'a> DatabaseFactStore<'a> {
     pub const fn new(db: &'a Database) -> Self {
         Self { db }
     }
-
-    #[cfg(any(test, feature = "test-transport"))]
-    #[doc(hidden)]
-    pub async fn inspect_owner_archive_for_test(
-        &self,
-        owner: &tracedecay_domain::FactOwnerV1,
-    ) -> FactStoreResult<tracedecay_store::MemoryV2OwnerArchiveV1> {
-        let transaction = self
-            .db
-            .begin_memory_read_transaction(QUERY_OPERATION)
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        let archive = crate::db::export_memory_v2_owner_archive(
-            &transaction,
-            crate::db::MemoryV2ArchiveDatabase::Main,
-            owner,
-        )
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error));
-        finish_read_snapshot(transaction, archive).await
-    }
-
-    #[cfg(any(test, feature = "test-transport"))]
-    #[doc(hidden)]
-    pub async fn import_owner_archive_for_test(
-        &self,
-        archive: &tracedecay_store::MemoryV2OwnerArchiveV1,
-    ) -> FactStoreResult<()> {
-        let transaction = self
-            .db
-            .begin_memory_write_transaction("import typed Memory V2 owner archive fixture")
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        let plan = crate::db::plan_memory_v2_owner_archive_import(&transaction, archive)
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        crate::db::import_memory_v2_owner_archive(&transaction, archive, &plan)
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        self.db
-            .checkpoint()
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))
-    }
 }
 
-impl FactStore for DatabaseFactStore<'_> {
-    async fn commit_fact(&self, batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
+impl FactLineageStore for DatabaseFactStore<'_> {
+    async fn commit_fact(&self, batch: FactWriteBatch) -> FactLineageResult<FactCommitOutcome> {
         match runtime::retained_fact_runtime(self.db)? {
             Some(runtime) => runtime::commit_fact(self.db, runtime, batch).await,
             None => self.commit_batch(&batch).await,
@@ -157,7 +94,7 @@ impl FactStore for DatabaseFactStore<'_> {
     async fn query_current_facts(
         &self,
         query: CurrentFactsQuery,
-    ) -> FactStoreResult<Vec<StoredFactV1>> {
+    ) -> FactLineageResult<Vec<StoredFactV1>> {
         let snapshot = self
             .db
             .begin_memory_read_transaction(QUERY_OPERATION)
@@ -170,7 +107,7 @@ impl FactStore for DatabaseFactStore<'_> {
     async fn query_fact_current(
         &self,
         query: FactCurrentQuery,
-    ) -> FactStoreResult<Option<StoredFactV1>> {
+    ) -> FactLineageResult<Option<StoredFactV1>> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
             return runtime::query_fact_current(runtime, query);
         }
@@ -186,7 +123,7 @@ impl FactStore for DatabaseFactStore<'_> {
     async fn query_fact_current_response(
         &self,
         query: FactCurrentQuery,
-    ) -> FactStoreResult<FactCurrentResponseV1> {
+    ) -> FactLineageResult<FactCurrentResponseV1> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
             // The runtime read port answers the fact itself. It admits no
             // response-shaped operation, so coverage and contradiction are
@@ -217,7 +154,7 @@ impl FactStore for DatabaseFactStore<'_> {
     async fn query_fact_as_of(
         &self,
         query: FactAsOfQuery,
-    ) -> FactStoreResult<Option<StoredFactV1>> {
+    ) -> FactLineageResult<Option<StoredFactV1>> {
         let snapshot = self
             .db
             .begin_memory_read_transaction(QUERY_OPERATION)
@@ -230,7 +167,7 @@ impl FactStore for DatabaseFactStore<'_> {
     async fn query_fact_as_of_response(
         &self,
         query: FactAsOfQuery,
-    ) -> FactStoreResult<FactAsOfResponseV1> {
+    ) -> FactLineageResult<FactAsOfResponseV1> {
         let snapshot = self
             .db
             .begin_memory_read_transaction(QUERY_OPERATION)
@@ -243,7 +180,7 @@ impl FactStore for DatabaseFactStore<'_> {
     async fn query_fact_lineage(
         &self,
         query: FactLineageQuery,
-    ) -> FactStoreResult<Vec<FactLineageEventV1>> {
+    ) -> FactLineageResult<Vec<FactLineageEventV1>> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
             return runtime::query_fact_lineage(runtime, query);
         }
@@ -259,7 +196,7 @@ impl FactStore for DatabaseFactStore<'_> {
     async fn query_fact_lineage_response(
         &self,
         query: FactLineageQuery,
-    ) -> FactStoreResult<FactLineageResponseV1> {
+    ) -> FactLineageResult<FactLineageResponseV1> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
             // As in `query_fact_current_response`: the runtime answers the
             // lineage page, and the accompanying coverage and contradiction are
@@ -294,7 +231,10 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
-    async fn resolve_legacy_fact(&self, query: LegacyFactQuery) -> FactStoreResult<Option<FactId>> {
+    async fn resolve_legacy_fact(
+        &self,
+        query: LegacyFactQuery,
+    ) -> FactLineageResult<Option<FactId>> {
         let snapshot = self
             .db
             .begin_memory_read_transaction(QUERY_OPERATION)
@@ -307,7 +247,7 @@ impl FactStore for DatabaseFactStore<'_> {
     async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
-    ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
+    ) -> FactLineageResult<Option<RetrievalAnchorRecordV2>> {
         let snapshot = self
             .db
             .begin_memory_read_transaction(QUERY_OPERATION)
@@ -319,7 +259,7 @@ impl FactStore for DatabaseFactStore<'_> {
 }
 
 impl FactProposalStore for DatabaseFactStore<'_> {
-    async fn promote_fact_proposal(
+    async fn commit_fact_proposal(
         &self,
         promotion: PromoteFactProposal,
     ) -> Result<PromoteFactProposalOutcome, FactProposalStoreError> {
@@ -328,7 +268,7 @@ impl FactProposalStore for DatabaseFactStore<'_> {
             .begin_memory_write_transaction(PROMOTE_OPERATION)
             .await
             .map_err(|error| authority_storage_error(PROMOTE_OPERATION, error))?;
-        let outcome = match promote_fact_proposal_tx(&transaction, &promotion).await {
+        let outcome = match commit_fact_proposal_tx(&transaction, &promotion).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 return match transaction.rollback().await {
@@ -357,295 +297,238 @@ impl FactProposalStore for DatabaseFactStore<'_> {
     }
 }
 
-impl FactCompatibilityStore for DatabaseFactStore<'_> {
-    async fn list_compatibility_facts(
-        &self,
-        query: CompatibilityFactListQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityFactPageV1> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move { list_compatibility_facts_tx(transaction, &query).await })
+impl FactStore for DatabaseFactStore<'_> {
+    async fn list_facts(&self, query: FactListQuery) -> FactStoreResult<FactPage> {
+        self.read(move |transaction| {
+            Box::pin(async move { list_facts_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn search_compatibility_facts(
-        &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move { search_compatibility_facts_tx(transaction, &query).await })
+    async fn search_facts(&self, query: FactSearchQuery) -> FactStoreResult<FactSearchPage> {
+        self.read(move |transaction| {
+            Box::pin(async move { search_facts_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn probe_compatibility_facts(
-        &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move { probe_compatibility_facts_tx(transaction, &query).await })
+    async fn probe_facts(&self, query: FactSearchQuery) -> FactStoreResult<FactSearchPage> {
+        self.read(move |transaction| {
+            Box::pin(async move { probe_facts_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn related_compatibility_facts(
-        &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move { related_compatibility_facts_tx(transaction, &query).await })
+    async fn related_facts(&self, query: FactSearchQuery) -> FactStoreResult<FactSearchPage> {
+        self.read(move |transaction| {
+            Box::pin(async move { related_facts_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn reason_compatibility_facts(
-        &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move { reason_compatibility_facts_tx(transaction, &query).await })
+    async fn reason_facts(&self, query: FactSearchQuery) -> FactStoreResult<FactSearchPage> {
+        self.read(move |transaction| {
+            Box::pin(async move { reason_facts_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn find_compatibility_contradictions(
+    async fn find_contradictions(
         &self,
-        query: CompatibilityFactContradictionQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityFactContradictionPageV1> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move { find_compatibility_contradictions_tx(transaction, &query).await })
+        query: FactContradictionQuery,
+    ) -> FactStoreResult<FactContradictionPage> {
+        self.read(move |transaction| {
+            Box::pin(async move { find_contradictions_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn get_compatibility_fact(
-        &self,
-        target: CompatibilityFactTargetV1,
-    ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move { get_compatibility_fact_tx(transaction, &target).await })
+    async fn get_fact(&self, target: FactTarget) -> FactStoreResult<Option<FactProjection>> {
+        self.read(move |transaction| {
+            Box::pin(async move { get_fact_tx(transaction, &target).await })
         })
         .await
     }
 
-    async fn compatibility_fact_history(
-        &self,
-        query: CompatibilityFactHistoryQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityFactHistoryV1> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move { compatibility_fact_history_tx(transaction, &query).await })
+    async fn fact_history(&self, query: FactHistoryQuery) -> FactStoreResult<FactHistory> {
+        self.read(move |transaction| {
+            Box::pin(async move { fact_history_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn compatibility_memory_status(
-        &self,
-        owner: FactOwnerV1,
-    ) -> FactCompatibilityResult<CompatibilityMemoryStatusV1> {
-        self.compatibility_read(move |transaction| {
+    async fn memory_status(&self, owner: FactOwnerV1) -> FactStoreResult<MemoryStatus> {
+        self.read(move |transaction| {
             Box::pin(async move {
                 let feedback_repair =
-                    compatibility_feedback_history_repair_progress_tx(transaction, &owner).await?;
-                compatibility_memory_status_tx(transaction, &owner, feedback_repair).await
+                    feedback_history_repair_progress_tx(transaction, &owner).await?;
+                memory_status_tx(transaction, &owner, feedback_repair).await
             })
         })
         .await
     }
 
-    async fn inspect_compatibility_fact(
-        &self,
-        target: CompatibilityFactTargetV1,
-    ) -> FactCompatibilityResult<Option<CompatibilityFactInspectionV1>> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move { inspect_compatibility_fact_tx(transaction, &target).await })
+    async fn inspect_fact(&self, target: FactTarget) -> FactStoreResult<Option<FactInspection>> {
+        self.read(move |transaction| {
+            Box::pin(async move { inspect_fact_tx(transaction, &target).await })
         })
         .await
     }
 
-    async fn add_compatibility_fact(
-        &self,
-        request: CompatibilityFactAddCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityFactAddOutcomeV1> {
+    async fn add_fact(&self, request: FactAddCommand) -> FactStoreResult<FactAddOutcome> {
         let db = self.db.clone();
-        self.compatibility_write(move |transaction| {
-            Box::pin(async move { add_compatibility_fact_tx(&db, transaction, &request).await })
+        self.write(move |transaction| {
+            Box::pin(async move { add_fact_tx(&db, transaction, &request).await })
         })
         .await
     }
 
-    async fn update_compatibility_fact(
-        &self,
-        request: CompatibilityFactUpdateCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityFactUpdateOutcomeV1> {
+    async fn update_fact(&self, request: FactUpdateCommand) -> FactStoreResult<FactUpdateOutcome> {
         let db = self.db.clone();
-        self.compatibility_write(move |transaction| {
-            Box::pin(async move { update_compatibility_fact_tx(&db, transaction, &request).await })
+        self.write(move |transaction| {
+            Box::pin(async move { update_fact_tx(&db, transaction, &request).await })
         })
         .await
     }
 
-    async fn remove_compatibility_fact(
-        &self,
-        request: CompatibilityFactRemoveCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityFactRemoveOutcomeV1> {
+    async fn remove_fact(&self, request: FactRemoveCommand) -> FactStoreResult<FactRemoveOutcome> {
         let db = self.db.clone();
-        self.compatibility_write(move |transaction| {
-            Box::pin(async move { remove_compatibility_fact_tx(&db, transaction, &request).await })
+        self.write(move |transaction| {
+            Box::pin(async move { remove_fact_tx(&db, transaction, &request).await })
         })
         .await
     }
 
-    async fn record_compatibility_fact_feedback(
+    async fn record_fact_feedback(
         &self,
-        request: CompatibilityFactFeedbackCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1> {
-        self.compatibility_write(move |transaction| {
-            Box::pin(
-                async move { record_compatibility_fact_feedback_tx(transaction, &request).await },
-            )
+        request: FactFeedbackCommand,
+    ) -> FactStoreResult<FactFeedbackOutcome> {
+        self.write(move |transaction| {
+            Box::pin(async move { record_fact_feedback_tx(transaction, &request).await })
         })
         .await
     }
 
-    async fn compatibility_fact_feedback_history(
+    async fn fact_feedback_history(
         &self,
-        query: CompatibilityFactFeedbackHistoryQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1> {
-        self.compatibility_read(move |transaction| {
+        query: FactFeedbackHistoryQuery,
+    ) -> FactStoreResult<FactFeedbackHistory> {
+        self.read(move |transaction| {
             Box::pin(async move {
-                let feedback_repair = compatibility_feedback_history_repair_progress_tx(
-                    transaction,
-                    query.target().owner(),
-                )
-                .await?;
-                compatibility_fact_feedback_history_tx(transaction, &query, feedback_repair).await
+                let feedback_repair =
+                    feedback_history_repair_progress_tx(transaction, query.target().owner())
+                        .await?;
+                fact_feedback_history_tx(transaction, &query, feedback_repair).await
             })
         })
         .await
     }
 
-    async fn find_compatibility_fact_by_content_digest(
+    async fn find_fact_by_content_digest(
         &self,
-        query: CompatibilityFactContentDigestQueryV1,
-    ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move {
-                find_compatibility_fact_by_content_digest_tx(transaction, &query).await
-            })
+        query: FactContentDigestQuery,
+    ) -> FactStoreResult<Option<FactProjection>> {
+        self.read(move |transaction| {
+            Box::pin(async move { find_fact_by_content_digest_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn apply_compatibility_fact_curation(
+    async fn apply_fact_curation(
         &self,
-        request: CompatibilityFactCurationBatchV1,
-    ) -> FactCompatibilityResult<CompatibilityFactCurationReceiptV1> {
+        request: FactCurationBatch,
+    ) -> FactStoreResult<FactCurationReceipt> {
         let db = self.db.clone();
-        self.compatibility_write(move |transaction| {
-            Box::pin(async move {
-                apply_compatibility_fact_curation_tx(&db, transaction, &request).await
-            })
+        self.write(move |transaction| {
+            Box::pin(async move { apply_fact_curation_tx(&db, transaction, &request).await })
         })
         .await
     }
 
-    async fn merge_compatibility_facts(
-        &self,
-        request: CompatibilityFactMergeCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityFactMergeOutcomeV1> {
+    async fn merge_facts(&self, request: FactMergeCommand) -> FactStoreResult<FactMergeOutcome> {
         let db = self.db.clone();
-        self.compatibility_write(move |transaction| {
-            Box::pin(async move { merge_compatibility_facts_tx(&db, transaction, &request).await })
+        self.write(move |transaction| {
+            Box::pin(async move { merge_facts_tx(&db, transaction, &request).await })
         })
         .await
     }
 
-    async fn repair_compatibility_memory(
+    async fn repair_memory(
         &self,
-        request: CompatibilityMemoryRepairCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1> {
+        request: MemoryRepairCommand,
+    ) -> FactStoreResult<MemoryRepairStats> {
         let db = self.db.clone();
-        self.compatibility_write(move |transaction| {
-            Box::pin(
-                async move { repair_compatibility_memory_tx(&db, transaction, &request).await },
-            )
+        self.write(move |transaction| {
+            Box::pin(async move { repair_memory_tx(&db, transaction, &request).await })
         })
         .await
     }
 
-    async fn dashboard_compatibility_memory_overview(
+    async fn dashboard_memory_overview(
         &self,
-        query: CompatibilityDashboardMemoryOverviewQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityDashboardMemoryOverviewV1> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move {
-                dashboard_compatibility_memory_overview_tx(transaction, &query).await
-            })
+        query: DashboardMemoryOverviewQuery,
+    ) -> FactStoreResult<DashboardMemoryOverview> {
+        self.read(move |transaction| {
+            Box::pin(async move { dashboard_memory_overview_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn dashboard_compatibility_fact_detail(
+    async fn dashboard_fact_detail(
         &self,
-        query: CompatibilityDashboardFactDetailQueryV1,
-    ) -> FactCompatibilityResult<Option<CompatibilityDashboardFactDetailV1>> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(
-                async move { dashboard_compatibility_fact_detail_tx(transaction, &query).await },
-            )
+        query: DashboardFactDetailQuery,
+    ) -> FactStoreResult<Option<DashboardFactDetail>> {
+        self.read(move |transaction| {
+            Box::pin(async move { dashboard_fact_detail_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn dashboard_compatibility_vector_points(
+    async fn dashboard_vector_points(
         &self,
-        query: CompatibilityDashboardVectorPointsQueryV1,
-    ) -> FactCompatibilityResult<Vec<CompatibilityDashboardVectorPointV1>> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(
-                async move { dashboard_compatibility_vector_points_tx(transaction, &query).await },
-            )
+        query: DashboardVectorPointsQuery,
+    ) -> FactStoreResult<Vec<DashboardVectorPoint>> {
+        self.read(move |transaction| {
+            Box::pin(async move { dashboard_vector_points_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn dashboard_compatibility_memory_oplog(
+    async fn dashboard_memory_oplog(
         &self,
-        query: CompatibilityDashboardOplogQueryV1,
-    ) -> FactCompatibilityResult<Vec<CompatibilityDashboardOplogEntryV1>> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(
-                async move { dashboard_compatibility_memory_oplog_tx(transaction, &query).await },
-            )
+        query: DashboardOplogQuery,
+    ) -> FactStoreResult<Vec<DashboardOplogEntry>> {
+        self.read(move |transaction| {
+            Box::pin(async move { dashboard_memory_oplog_tx(transaction, &query).await })
         })
         .await
     }
 
-    async fn record_compatibility_fact_retrieval(
+    async fn record_fact_retrieval(
         &self,
-        request: CompatibilityFactRetrievalCommandV1,
-    ) -> FactCompatibilityResult<Vec<CompatibilityFactProjectionV1>> {
-        self.compatibility_write(move |transaction| {
-            Box::pin(
-                async move { record_compatibility_fact_retrieval_tx(transaction, &request).await },
-            )
+        request: FactRetrievalCommand,
+    ) -> FactStoreResult<Vec<FactProjection>> {
+        self.write(move |transaction| {
+            Box::pin(async move { record_fact_retrieval_tx(transaction, &request).await })
         })
         .await
     }
 
-    async fn submit_compatibility_fact_proposal(
+    async fn submit_fact_proposal(
         &self,
         proposal_id: ProvenanceId,
-        request: CompatibilityFactAddCommandV1,
+        request: FactAddCommand,
         submitter: Option<ActorId>,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
-        self.compatibility_write(move |transaction| {
+        evidence: FactProposalEvidence,
+    ) -> FactStoreResult<FactProposalRecord> {
+        self.write(move |transaction| {
             Box::pin(async move {
-                submit_compatibility_fact_proposal_tx(
+                submit_fact_proposal_tx(
                     transaction,
                     proposal_id,
                     &request,
                     submitter.as_ref(),
+                    &evidence,
                 )
                 .await
             })
@@ -653,29 +536,27 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         .await
     }
 
-    async fn get_compatibility_fact_proposal(
+    async fn get_fact_proposal(
         &self,
         owner: FactOwnerV1,
         proposal_id: ProvenanceId,
-    ) -> FactCompatibilityResult<Option<CompatibilityFactProposalRecordV1>> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move {
-                get_compatibility_fact_proposal_tx(transaction, &owner, &proposal_id).await
-            })
+    ) -> FactStoreResult<Option<FactProposalRecord>> {
+        self.read(move |transaction| {
+            Box::pin(async move { get_fact_proposal_tx(transaction, &owner, &proposal_id).await })
         })
         .await
     }
 
-    async fn list_compatibility_fact_proposals(
+    async fn list_fact_proposals(
         &self,
         owner: FactOwnerV1,
-        state: Option<CompatibilityFactProposalStateV1>,
+        state: Option<FactProposalState>,
         after_proposal_id: Option<ProvenanceId>,
         limit: usize,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalPageV1> {
-        self.compatibility_read(move |transaction| {
+    ) -> FactStoreResult<FactProposalPage> {
+        self.read(move |transaction| {
             Box::pin(async move {
-                list_compatibility_fact_proposals_tx(
+                list_fact_proposals_tx(
                     transaction,
                     &owner,
                     state,
@@ -688,29 +569,24 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         .await
     }
 
-    async fn count_pending_compatibility_fact_proposals(
-        &self,
-        owner: FactOwnerV1,
-    ) -> FactCompatibilityResult<u64> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move {
-                count_pending_compatibility_fact_proposals_tx(transaction, &owner).await
-            })
+    async fn count_pending_fact_proposals(&self, owner: FactOwnerV1) -> FactStoreResult<u64> {
+        self.read(move |transaction| {
+            Box::pin(async move { count_pending_fact_proposals_tx(transaction, &owner).await })
         })
         .await
     }
 
-    async fn reject_compatibility_fact_proposal(
+    async fn reject_fact_proposal(
         &self,
         owner: FactOwnerV1,
         proposal_id: ProvenanceId,
-        expected_revision: CompatibilityFactProposalRevisionV1,
+        expected_revision: FactProposalRevision,
         reviewer: ActorId,
         reason: String,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
-        self.compatibility_write(move |transaction| {
+    ) -> FactStoreResult<FactProposalRecord> {
+        self.write(move |transaction| {
             Box::pin(async move {
-                reject_compatibility_fact_proposal_tx(
+                reject_fact_proposal_tx(
                     transaction,
                     &owner,
                     &proposal_id,
@@ -724,28 +600,25 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         .await
     }
 
-    async fn promote_compatibility_fact_proposal(
+    async fn promote_fact_proposal(
         &self,
-        request: CompatibilityFactProposalPromotionV1,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
+        request: FactProposalPromotion,
+    ) -> FactStoreResult<FactProposalRecord> {
         let db = self.db.clone();
-        self.compatibility_write(move |transaction| {
-            Box::pin(async move {
-                promote_compatibility_fact_proposal_tx(&db, transaction, &request).await
-            })
+        self.write(move |transaction| {
+            Box::pin(async move { promote_fact_proposal_tx(&db, transaction, &request).await })
         })
         .await
     }
 
-    async fn promote_compatibility_fact_proposal_with_disposition(
+    async fn promote_fact_proposal_with_disposition(
         &self,
-        request: CompatibilityFactProposalPromotionV1,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalPromotionResultV1> {
+        request: FactProposalPromotion,
+    ) -> FactStoreResult<FactProposalPromotionResult> {
         let db = self.db.clone();
-        self.compatibility_write(move |transaction| {
+        self.write(move |transaction| {
             Box::pin(async move {
-                promote_compatibility_fact_proposal_with_disposition_tx(&db, transaction, &request)
-                    .await
+                promote_fact_proposal_with_disposition_tx(&db, transaction, &request).await
             })
         })
         .await
@@ -827,140 +700,141 @@ macro_rules! delegate_fact_store_methods {
     };
 }
 
-impl FactStore for ProjectFactStore<'_> {
+impl FactLineageStore for ProjectFactStore<'_> {
     delegate_fact_store_methods! {
-        fn commit_fact(batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome>;
-        fn query_current_facts(query: CurrentFactsQuery) -> FactStoreResult<Vec<StoredFactV1>>;
-        fn query_fact_current(query: FactCurrentQuery) -> FactStoreResult<Option<StoredFactV1>>;
+        fn commit_fact(batch: FactWriteBatch) -> FactLineageResult<FactCommitOutcome>;
+        fn query_current_facts(query: CurrentFactsQuery) -> FactLineageResult<Vec<StoredFactV1>>;
+        fn query_fact_current(query: FactCurrentQuery) -> FactLineageResult<Option<StoredFactV1>>;
         fn query_fact_current_response(
             query: FactCurrentQuery,
-        ) -> FactStoreResult<FactCurrentResponseV1>;
-        fn query_fact_as_of(query: FactAsOfQuery) -> FactStoreResult<Option<StoredFactV1>>;
-        fn query_fact_as_of_response(query: FactAsOfQuery) -> FactStoreResult<FactAsOfResponseV1>;
-        fn query_fact_lineage(query: FactLineageQuery) -> FactStoreResult<Vec<FactLineageEventV1>>;
+        ) -> FactLineageResult<FactCurrentResponseV1>;
+        fn query_fact_as_of(query: FactAsOfQuery) -> FactLineageResult<Option<StoredFactV1>>;
+        fn query_fact_as_of_response(query: FactAsOfQuery) -> FactLineageResult<FactAsOfResponseV1>;
+        fn query_fact_lineage(query: FactLineageQuery) -> FactLineageResult<Vec<FactLineageEventV1>>;
         fn query_fact_lineage_response(
             query: FactLineageQuery,
-        ) -> FactStoreResult<FactLineageResponseV1>;
-        fn resolve_legacy_fact(query: LegacyFactQuery) -> FactStoreResult<Option<FactId>>;
+        ) -> FactLineageResult<FactLineageResponseV1>;
+        fn resolve_legacy_fact(query: LegacyFactQuery) -> FactLineageResult<Option<FactId>>;
         fn get_retrieval_anchor(
             query: RetrievalAnchorQuery,
-        ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>>;
+        ) -> FactLineageResult<Option<RetrievalAnchorRecordV2>>;
     }
 }
 
 impl FactProposalStore for ProjectFactStore<'_> {
     delegate_fact_store_methods! {
-        fn promote_fact_proposal(
+        fn commit_fact_proposal(
             promotion: PromoteFactProposal,
         ) -> Result<PromoteFactProposalOutcome, FactProposalStoreError>;
     }
 }
 
-impl FactCompatibilityStore for ProjectFactStore<'_> {
+impl FactStore for ProjectFactStore<'_> {
     delegate_fact_store_methods! {
-        fn list_compatibility_facts(
-            query: CompatibilityFactListQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityFactPageV1>;
-        fn search_compatibility_facts(
-            query: CompatibilityFactSearchQuery,
-        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
-        fn probe_compatibility_facts(
-            query: CompatibilityFactSearchQuery,
-        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
-        fn related_compatibility_facts(
-            query: CompatibilityFactSearchQuery,
-        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
-        fn reason_compatibility_facts(
-            query: CompatibilityFactSearchQuery,
-        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
-        fn find_compatibility_contradictions(
-            query: CompatibilityFactContradictionQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityFactContradictionPageV1>;
-        fn get_compatibility_fact(
-            target: CompatibilityFactTargetV1,
-        ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>>;
-        fn compatibility_fact_history(
-            query: CompatibilityFactHistoryQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityFactHistoryV1>;
-        fn compatibility_memory_status(
+        fn list_facts(
+            query: FactListQuery,
+        ) -> FactStoreResult<FactPage>;
+        fn search_facts(
+            query: FactSearchQuery,
+        ) -> FactStoreResult<FactSearchPage>;
+        fn probe_facts(
+            query: FactSearchQuery,
+        ) -> FactStoreResult<FactSearchPage>;
+        fn related_facts(
+            query: FactSearchQuery,
+        ) -> FactStoreResult<FactSearchPage>;
+        fn reason_facts(
+            query: FactSearchQuery,
+        ) -> FactStoreResult<FactSearchPage>;
+        fn find_contradictions(
+            query: FactContradictionQuery,
+        ) -> FactStoreResult<FactContradictionPage>;
+        fn get_fact(
+            target: FactTarget,
+        ) -> FactStoreResult<Option<FactProjection>>;
+        fn fact_history(
+            query: FactHistoryQuery,
+        ) -> FactStoreResult<FactHistory>;
+        fn memory_status(
             owner: FactOwnerV1,
-        ) -> FactCompatibilityResult<CompatibilityMemoryStatusV1>;
-        fn inspect_compatibility_fact(
-            target: CompatibilityFactTargetV1,
-        ) -> FactCompatibilityResult<Option<CompatibilityFactInspectionV1>>;
-        fn add_compatibility_fact(
-            request: CompatibilityFactAddCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityFactAddOutcomeV1>;
-        fn update_compatibility_fact(
-            request: CompatibilityFactUpdateCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityFactUpdateOutcomeV1>;
-        fn remove_compatibility_fact(
-            request: CompatibilityFactRemoveCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityFactRemoveOutcomeV1>;
-        fn record_compatibility_fact_feedback(
-            request: CompatibilityFactFeedbackCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1>;
-        fn compatibility_fact_feedback_history(
-            query: CompatibilityFactFeedbackHistoryQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1>;
-        fn find_compatibility_fact_by_content_digest(
-            query: CompatibilityFactContentDigestQueryV1,
-        ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>>;
-        fn apply_compatibility_fact_curation(
-            request: CompatibilityFactCurationBatchV1,
-        ) -> FactCompatibilityResult<CompatibilityFactCurationReceiptV1>;
-        fn merge_compatibility_facts(
-            request: CompatibilityFactMergeCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityFactMergeOutcomeV1>;
-        fn repair_compatibility_memory(
-            request: CompatibilityMemoryRepairCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1>;
-        fn dashboard_compatibility_memory_overview(
-            query: CompatibilityDashboardMemoryOverviewQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityDashboardMemoryOverviewV1>;
-        fn dashboard_compatibility_fact_detail(
-            query: CompatibilityDashboardFactDetailQueryV1,
-        ) -> FactCompatibilityResult<Option<CompatibilityDashboardFactDetailV1>>;
-        fn dashboard_compatibility_vector_points(
-            query: CompatibilityDashboardVectorPointsQueryV1,
-        ) -> FactCompatibilityResult<Vec<CompatibilityDashboardVectorPointV1>>;
-        fn dashboard_compatibility_memory_oplog(
-            query: CompatibilityDashboardOplogQueryV1,
-        ) -> FactCompatibilityResult<Vec<CompatibilityDashboardOplogEntryV1>>;
-        fn record_compatibility_fact_retrieval(
-            request: CompatibilityFactRetrievalCommandV1,
-        ) -> FactCompatibilityResult<Vec<CompatibilityFactProjectionV1>>;
-        fn submit_compatibility_fact_proposal(
+        ) -> FactStoreResult<MemoryStatus>;
+        fn inspect_fact(
+            target: FactTarget,
+        ) -> FactStoreResult<Option<FactInspection>>;
+        fn add_fact(
+            request: FactAddCommand,
+        ) -> FactStoreResult<FactAddOutcome>;
+        fn update_fact(
+            request: FactUpdateCommand,
+        ) -> FactStoreResult<FactUpdateOutcome>;
+        fn remove_fact(
+            request: FactRemoveCommand,
+        ) -> FactStoreResult<FactRemoveOutcome>;
+        fn record_fact_feedback(
+            request: FactFeedbackCommand,
+        ) -> FactStoreResult<FactFeedbackOutcome>;
+        fn fact_feedback_history(
+            query: FactFeedbackHistoryQuery,
+        ) -> FactStoreResult<FactFeedbackHistory>;
+        fn find_fact_by_content_digest(
+            query: FactContentDigestQuery,
+        ) -> FactStoreResult<Option<FactProjection>>;
+        fn apply_fact_curation(
+            request: FactCurationBatch,
+        ) -> FactStoreResult<FactCurationReceipt>;
+        fn merge_facts(
+            request: FactMergeCommand,
+        ) -> FactStoreResult<FactMergeOutcome>;
+        fn repair_memory(
+            request: MemoryRepairCommand,
+        ) -> FactStoreResult<MemoryRepairStats>;
+        fn dashboard_memory_overview(
+            query: DashboardMemoryOverviewQuery,
+        ) -> FactStoreResult<DashboardMemoryOverview>;
+        fn dashboard_fact_detail(
+            query: DashboardFactDetailQuery,
+        ) -> FactStoreResult<Option<DashboardFactDetail>>;
+        fn dashboard_vector_points(
+            query: DashboardVectorPointsQuery,
+        ) -> FactStoreResult<Vec<DashboardVectorPoint>>;
+        fn dashboard_memory_oplog(
+            query: DashboardOplogQuery,
+        ) -> FactStoreResult<Vec<DashboardOplogEntry>>;
+        fn record_fact_retrieval(
+            request: FactRetrievalCommand,
+        ) -> FactStoreResult<Vec<FactProjection>>;
+        fn submit_fact_proposal(
             proposal_id: ProvenanceId,
-            request: CompatibilityFactAddCommandV1,
+            request: FactAddCommand,
             submitter: Option<ActorId>,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
-        fn get_compatibility_fact_proposal(
+            evidence: FactProposalEvidence,
+        ) -> FactStoreResult<FactProposalRecord>;
+        fn get_fact_proposal(
             owner: FactOwnerV1,
             proposal_id: ProvenanceId,
-        ) -> FactCompatibilityResult<Option<CompatibilityFactProposalRecordV1>>;
-        fn list_compatibility_fact_proposals(
+        ) -> FactStoreResult<Option<FactProposalRecord>>;
+        fn list_fact_proposals(
             owner: FactOwnerV1,
-            state: Option<CompatibilityFactProposalStateV1>,
+            state: Option<FactProposalState>,
             after_proposal_id: Option<ProvenanceId>,
             limit: usize,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalPageV1>;
-        fn count_pending_compatibility_fact_proposals(
+        ) -> FactStoreResult<FactProposalPage>;
+        fn count_pending_fact_proposals(
             owner: FactOwnerV1,
-        ) -> FactCompatibilityResult<u64>;
-        fn reject_compatibility_fact_proposal(
+        ) -> FactStoreResult<u64>;
+        fn reject_fact_proposal(
             owner: FactOwnerV1,
             proposal_id: ProvenanceId,
-            expected_revision: CompatibilityFactProposalRevisionV1,
+            expected_revision: FactProposalRevision,
             reviewer: ActorId,
             reason: String,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
-        fn promote_compatibility_fact_proposal(
-            request: CompatibilityFactProposalPromotionV1,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
-        fn promote_compatibility_fact_proposal_with_disposition(
-            request: CompatibilityFactProposalPromotionV1,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalPromotionResultV1>;
+        ) -> FactStoreResult<FactProposalRecord>;
+        fn promote_fact_proposal(
+            request: FactProposalPromotion,
+        ) -> FactStoreResult<FactProposalRecord>;
+        fn promote_fact_proposal_with_disposition(
+            request: FactProposalPromotion,
+        ) -> FactStoreResult<FactProposalPromotionResult>;
     }
 }
 

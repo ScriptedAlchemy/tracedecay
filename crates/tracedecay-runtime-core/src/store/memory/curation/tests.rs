@@ -4,7 +4,7 @@ use crate::store::memory::DatabaseFactStore;
 use crate::store::memory::primitives::{OwnerKey, storage_message};
 use tempfile::tempdir;
 use tracedecay_domain::{Confidence, FactId, FactOwnerV1, ProjectId, UtcMicros};
-use tracedecay_store::{FactCompatibilityResult, FactCompatibilityStoreError, FactStoreError};
+use tracedecay_store::{FactLineageError, FactStoreError, FactStoreResult};
 
 async fn seed_fact(db: &crate::db::Database, owner: &FactOwnerV1, fact_id: &FactId) {
     let key = OwnerKey::new(owner).unwrap();
@@ -55,9 +55,9 @@ async fn curated_correction_provenance_is_exact_owner_scoped_and_replay_safe() {
         let source = source.clone();
         let evidence = evidence.clone();
         store
-            .compatibility_write(move |transaction| {
+            .write(move |transaction| {
                 Box::pin(async move {
-                    compatibility_record_curated_correction_provenance_tx(
+                    record_curated_correction_provenance_tx(
                         transaction,
                         &owner,
                         &source,
@@ -98,10 +98,7 @@ async fn curated_correction_provenance_is_exact_owner_scoped_and_replay_safe() {
         targets.push(row.get::<String>(0).unwrap());
         assert_eq!(row.get::<String>(1).unwrap(), "derived_from");
         assert!((row.get::<f64>(2).unwrap() - 0.91).abs() <= f64::EPSILON);
-        assert_eq!(
-            row.get::<String>(3).unwrap(),
-            "compatibility_curation_normalize_tags"
-        );
+        assert_eq!(row.get::<String>(3).unwrap(), "curation_normalize_tags");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&row.get::<String>(4).unwrap()).unwrap(),
             serde_json::json!({"actor_id": null, "operation": "normalize_tags"})
@@ -141,10 +138,10 @@ async fn curated_correction_provenance_rolls_back_with_its_transaction() {
     seed_fact(&db, &owner, &evidence).await;
 
     let store = DatabaseFactStore::new(&db);
-    let failed: FactCompatibilityResult<()> = store
-        .compatibility_write(move |transaction| {
+    let failed: FactStoreResult<()> = store
+        .write(move |transaction| {
             Box::pin(async move {
-                compatibility_record_curated_correction_provenance_tx(
+                record_curated_correction_provenance_tx(
                     transaction,
                     &owner,
                     &source,
@@ -198,10 +195,10 @@ async fn curated_correction_provenance_rejects_cross_owner_evidence() {
     seed_fact(&db, &evidence_owner, &evidence).await;
 
     let store = DatabaseFactStore::new(&db);
-    let failed: FactCompatibilityResult<()> = store
-        .compatibility_write(move |transaction| {
+    let failed: FactStoreResult<()> = store
+        .write(move |transaction| {
             Box::pin(async move {
-                compatibility_record_curated_correction_provenance_tx(
+                record_curated_correction_provenance_tx(
                     transaction,
                     &source_owner,
                     &source,
@@ -250,10 +247,10 @@ async fn curated_correction_rejects_self_only_evidence_without_writing_provenanc
     seed_fact(&db, &owner, &source).await;
 
     let store = DatabaseFactStore::new(&db);
-    let failed: FactCompatibilityResult<()> = store
-        .compatibility_write(move |transaction| {
+    let failed: FactStoreResult<()> = store
+        .write(move |transaction| {
             Box::pin(async move {
-                compatibility_record_curated_correction_provenance_tx(
+                record_curated_correction_provenance_tx(
                     transaction,
                     &owner,
                     &source,
@@ -268,8 +265,7 @@ async fn curated_correction_rejects_self_only_evidence_without_writing_provenanc
             })
         })
         .await;
-    let FactCompatibilityStoreError::Store(FactStoreError::Storage { source, .. }) =
-        failed.unwrap_err()
+    let FactStoreError::Store(FactLineageError::Storage { source, .. }) = failed.unwrap_err()
     else {
         panic!("self-only correction must fail as a storage contract violation");
     };

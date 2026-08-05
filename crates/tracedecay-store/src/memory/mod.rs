@@ -4,7 +4,6 @@ use tracedecay_domain::{
     LegacyFactMappingV1, PayloadAccessState, UtcMicros,
 };
 
-mod archive;
 mod compatibility;
 mod error;
 mod queries;
@@ -12,72 +11,45 @@ mod telemetry;
 mod traits;
 mod write;
 
-pub use archive::{
-    MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1, MemoryV2ArchiveConflictV1, MemoryV2ArchiveError,
-    MemoryV2ArchiveFamilyV1, MemoryV2ArchiveRecordV1, MemoryV2ArchiveReferenceV1,
-    MemoryV2ArchiveScalarV1, MemoryV2OwnerArchiveV1, MemoryV2OwnerMergePlanV1,
-    authoritative_memory_v2_archive_families, plan_memory_v2_owner_merge,
-};
 pub use compatibility::{
-    CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,
-    CompatibilityDashboardFactDetailV1, CompatibilityDashboardFactEntityLinkV1,
-    CompatibilityDashboardFactSummaryV1, CompatibilityDashboardGrowthPointV1,
-    CompatibilityDashboardHrrCoverageV1, CompatibilityDashboardHrrStateV1,
-    CompatibilityDashboardMemoryBankV1, CompatibilityDashboardMemoryOverviewQueryV1,
-    CompatibilityDashboardMemoryOverviewV1, CompatibilityDashboardNamedCountV1,
-    CompatibilityDashboardOplogDetailsV1, CompatibilityDashboardOplogEntryV1,
-    CompatibilityDashboardOplogQueryV1, CompatibilityDashboardVectorPointV1,
-    CompatibilityDashboardVectorPointsQueryV1, CompatibilityFactAddAliasV1,
-    CompatibilityFactAddCommandV1, CompatibilityFactAddDispositionV1,
-    CompatibilityFactAddOutcomeV1, CompatibilityFactAvailabilityV1,
-    CompatibilityFactContradictionPageV1, CompatibilityFactContradictionQueryV1,
-    CompatibilityFactContradictionV1, CompatibilityFactCurationBatchV1,
-    CompatibilityFactCurationOperationV1, CompatibilityFactCurationReceiptV1,
-    CompatibilityFactFeedbackCommandV1, CompatibilityFactFeedbackOutcomeV1,
-    CompatibilityFactHistoryV1, CompatibilityFactIdV1, CompatibilityFactInspectionV1,
-    CompatibilityFactLinkV1, CompatibilityFactMappingV1, CompatibilityFactMergeCommandV1,
-    CompatibilityFactMergeEntitiesV1, CompatibilityFactMergeOutcomeV1,
-    CompatibilityFactNormalizeTagsV1, CompatibilityFactPageV1, CompatibilityFactProjectionV1,
-    CompatibilityFactProposalPageV1, CompatibilityFactProposalPromotionDispositionV1,
-    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
-    CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
-    CompatibilityFactProposalStateV1, CompatibilityFactRelationV1,
-    CompatibilityFactRemoveCommandV1, CompatibilityFactRemoveOutcomeV1,
-    CompatibilityFactRepairVectorV1, CompatibilityFactRetrievalCommandV1,
-    CompatibilityFactSearchCursorV1, CompatibilityFactSearchFilterV1, CompatibilityFactSearchHitV1,
-    CompatibilityFactSearchKindV1, CompatibilityFactSearchPageV1, CompatibilityFactSearchScoresV1,
-    CompatibilityFactSourceV1, CompatibilityFactTargetV1, CompatibilityFactUnavailableV1,
-    CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
-    CompatibilityFactUpdatePatchV1, CompatibilityFactV1, CompatibilityLegacyEntityTargetV1,
-    CompatibilityMemoryRepairCommandV1, FactProposalPromotionStateV1, PromoteFactProposal,
+    DashboardEntity, DashboardFactDetail, DashboardFactDetailQuery, DashboardFactEntityLink,
+    DashboardFactSummary, DashboardGrowthPoint, DashboardHrrCoverage, DashboardHrrState,
+    DashboardMemoryBank, DashboardMemoryOverview, DashboardMemoryOverviewQuery,
+    DashboardNamedCount, DashboardOplogDetails, DashboardOplogEntry, DashboardOplogQuery,
+    DashboardVectorPoint, DashboardVectorPointsQuery, Fact, FactAddAlias, FactAddCommand,
+    FactAddDisposition, FactAddOutcome, FactAvailability, FactContradiction, FactContradictionPage,
+    FactContradictionQuery, FactCurationBatch, FactCurationOperation, FactCurationReceipt,
+    FactEntityTarget, FactFeedbackCommand, FactFeedbackOutcome, FactHistory, FactInspection,
+    FactLink, FactMapping, FactMergeCommand, FactMergeEntities, FactMergeOutcome,
+    FactNormalizeTags, FactPage, FactProjection, FactProposalEvidence, FactProposalPage,
+    FactProposalPromotion, FactProposalPromotionDisposition, FactProposalPromotionResult,
+    FactProposalPromotionStateV1, FactProposalRecord, FactProposalRevision, FactProposalState,
+    FactRelation, FactRemoveCommand, FactRemoveOutcome, FactRepairVector, FactRetrievalCommand,
+    FactSearchCursor, FactSearchFilter, FactSearchHit, FactSearchKind, FactSearchPage,
+    FactSearchScores, FactSource, FactTarget, FactUnavailable, FactUpdateCommand,
+    FactUpdateOutcome, FactUpdatePatch, MemoryRepairCommand, OwnedFactId, PromoteFactProposal,
     PromoteFactProposalOutcome,
 };
 pub use error::{
-    FactCompatibilityResult, FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,
-    FactStoreResult,
+    FactLineageError, FactLineageResult, FactProposalStoreError, FactStoreError, FactStoreResult,
 };
 pub use queries::{
-    CompatibilityFactContentDigestQueryV1, CompatibilityFactFeedbackHistoryQueryV1,
-    CompatibilityFactHistoryQueryV1, CompatibilityFactListQueryV1, CompatibilityFactSearchQuery,
-    CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContradictionStateV1,
-    FactCurrentQuery, FactCurrentResponseV1, FactLineageCursor, FactLineageQuery,
-    FactLineageResponseV1, FactQueryCoverageV1, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS,
+    CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContentDigestQuery,
+    FactContradictionStateV1, FactCurrentQuery, FactCurrentResponseV1, FactFeedbackHistoryQuery,
+    FactHistoryQuery, FactLineageCursor, FactLineageQuery, FactLineageResponseV1, FactListQuery,
+    FactQueryCoverageV1, FactSearchQuery, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS,
     RetrievalAnchorQuery,
 };
 pub use telemetry::{
-    CompatibilityFactFeedbackActionV1, CompatibilityFactFeedbackDetailsAvailabilityV1,
-    CompatibilityFactFeedbackHistoryEntryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactStatusV1, CompatibilityFactTelemetryV1, CompatibilityFeedbackRepairProgressV1,
-    CompatibilityMemoryAlgebraV1, CompatibilityMemoryFeedbackFunnelV1,
-    CompatibilityMemoryRepairStatsV1, CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1,
+    FactFeedbackAction, FactFeedbackDetailsAvailability, FactFeedbackHistory,
+    FactFeedbackHistoryEntry, FactStatus, FactTelemetry, FeedbackRepairProgress, MemoryAlgebra,
+    MemoryFeedbackFunnel, MemoryRepairStats, MemoryStatus, ProjectionState,
 };
-pub use traits::{FactCompatibilityStore, FactProposalStore, FactStore};
+pub use traits::{FactLineageStore, FactProposalStore, FactStore};
 pub use write::{FactCommitConflict, FactCommitOutcome, FactCommitReceipt, FactWriteBatch};
 
 #[cfg(test)]
-use compatibility::dashboard::{
-    MAX_COMPATIBILITY_DASHBOARD_OPLOG, MAX_COMPATIBILITY_DASHBOARD_VECTORS,
-};
+use compatibility::dashboard::{MAX_FACT_DASHBOARD_OPLOG, MAX_FACT_DASHBOARD_VECTORS};
 #[cfg(test)]
 use queries::MAX_LINEAGE_LIMIT;
 #[cfg(test)]
@@ -88,9 +60,9 @@ use tracedecay_domain::{
 #[cfg(test)]
 use write::{MAX_FACT_WRITE_BATCH_EVENTS, MAX_FACT_WRITE_BATCH_NEW_ANCHORS};
 
-const MAX_COMPATIBILITY_SEARCH_BYTES: usize = 4 * 1024;
+const MAX_FACT_SEARCH_BYTES: usize = 4 * 1024;
 
-const MAX_COMPATIBILITY_REASON_BYTES: usize = 4 * 1024;
+const MAX_FACT_REASON_BYTES: usize = 4 * 1024;
 
 /// Deterministic current or as-of projection of one fact's lineage.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,21 +90,21 @@ impl StoredFactV1 {
         last_event_id: FactEventId,
         legacy_mapping: Option<LegacyFactMappingV1>,
         projected_as_of: UtcMicros,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         fact_id.validate()?;
         owner.validate()?;
         validate_owned_fact_id(&fact_id, &owner)?;
         active_assertion_id.validate()?;
         last_event_id.validate()?;
         if payload.is_some() != (payload_access == PayloadAccessState::Eligible) {
-            return Err(FactStoreError::PayloadAccessMismatch);
+            return Err(FactLineageError::PayloadAccessMismatch);
         }
         if let Some(mapping) = &legacy_mapping {
             if mapping.fact_id() != &fact_id {
-                return Err(FactStoreError::FactMismatch);
+                return Err(FactLineageError::FactMismatch);
             }
             if mapping.owner() != &owner {
-                return Err(FactStoreError::OwnerMismatch);
+                return Err(FactLineageError::OwnerMismatch);
             }
         }
         Ok(Self {
@@ -185,10 +157,10 @@ impl StoredFactV1 {
     }
 }
 
-fn validate_owned_fact_id(fact_id: &FactId, owner: &FactOwnerV1) -> FactStoreResult<()> {
+fn validate_owned_fact_id(fact_id: &FactId, owner: &FactOwnerV1) -> FactLineageResult<()> {
     fact_id
         .validate_owner(owner)
-        .map_err(|_| FactStoreError::OwnerMismatch)
+        .map_err(|_| FactLineageError::OwnerMismatch)
 }
 
 #[cfg(test)]

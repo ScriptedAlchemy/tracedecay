@@ -10,10 +10,10 @@ mod purge;
 pub(in crate::db::memory_v2) use lineage::insert_event;
 
 pub(in crate::db) use compatibility_bank::{
-    clear_memory_v2_compatibility_bank_dirty_in_transaction,
-    delete_memory_v2_compatibility_bank_in_transaction,
-    mark_memory_v2_compatibility_bank_dirty_in_transaction,
-    upsert_memory_v2_compatibility_bank_in_transaction,
+    clear_memory_v2_bank_dirty_in_transaction,
+    delete_memory_v2_bank_in_transaction,
+    mark_memory_v2_bank_dirty_in_transaction,
+    upsert_memory_v2_bank_in_transaction,
 };
 pub(crate) use purge::MemoryV2LegacyPurgeReceipt;
 #[cfg(test)]

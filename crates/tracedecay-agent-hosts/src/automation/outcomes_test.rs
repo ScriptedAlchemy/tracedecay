@@ -377,7 +377,6 @@ async fn seed_applied_fact_database(
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
     let records = record_session_fact_proposals(
         &memory,
-        dashboard_root,
         "run-outcome-lock",
         None,
         &[json!({
@@ -395,7 +394,7 @@ async fn seed_applied_fact_database(
     )
     .await
     .unwrap();
-    apply_fact_proposal(&memory, dashboard_root, &records[0].proposal_id, None)
+    apply_fact_proposal(&memory, &records[0].proposal_id, None)
         .await
         .unwrap();
     database

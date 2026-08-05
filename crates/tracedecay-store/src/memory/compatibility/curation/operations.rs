@@ -2,30 +2,27 @@ use serde_json::Value;
 use tracedecay_domain::{ActorId, Confidence, DomainError, FactOwnerV1, ProvenanceId};
 
 use super::super::super::queries::validate_limit;
-use super::super::super::{CompatibilityMemoryRepairStatsV1, FactStoreError, FactStoreResult};
-use super::super::{
-    CompatibilityFactMappingV1, CompatibilityFactTargetV1, validate_compatibility_metadata,
-    validate_compatibility_text,
-};
+use super::super::super::{FactLineageError, FactLineageResult, MemoryRepairStats};
+use super::super::{FactMapping, FactTarget, validate_metadata, validate_text};
 use super::validate::{
     validate_curation_confidence, validate_curation_entity_target, validate_curation_evidence,
     validate_curation_fact_target,
 };
-use super::{MAX_COMPATIBILITY_CURATION_OPERATIONS, MAX_COMPATIBILITY_CURATION_TARGETS};
+use super::{MAX_FACT_CURATION_OPERATIONS, MAX_FACT_CURATION_TARGETS};
 
 /// Stable, owner-scoped identity for a historical integer entity row. This is
 /// only a compatibility target; it is never derived from a path or label.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CompatibilityLegacyEntityTargetV1 {
+pub struct FactEntityTarget {
     owner: FactOwnerV1,
     legacy_entity_id: i64,
 }
 
-impl CompatibilityLegacyEntityTargetV1 {
-    pub fn new(owner: FactOwnerV1, legacy_entity_id: i64) -> FactStoreResult<Self> {
+impl FactEntityTarget {
+    pub fn new(owner: FactOwnerV1, legacy_entity_id: i64) -> FactLineageResult<Self> {
         owner.validate()?;
         if legacy_entity_id <= 0 {
-            return Err(FactStoreError::InvalidLegacyFactId {
+            return Err(FactLineageError::InvalidLegacyFactId {
                 legacy_fact_id: legacy_entity_id,
             });
         }
@@ -43,10 +40,10 @@ impl CompatibilityLegacyEntityTargetV1 {
         self.legacy_entity_id
     }
 
-    pub(in crate::memory::compatibility) fn validate(&self) -> FactStoreResult<()> {
+    pub(in crate::memory::compatibility) fn validate(&self) -> FactLineageResult<()> {
         self.owner.validate()?;
         if self.legacy_entity_id <= 0 {
-            return Err(FactStoreError::InvalidLegacyFactId {
+            return Err(FactLineageError::InvalidLegacyFactId {
                 legacy_fact_id: self.legacy_entity_id,
             });
         }
@@ -58,7 +55,7 @@ impl CompatibilityLegacyEntityTargetV1 {
 /// `Supports` and `DerivedFrom` are persisted as typed relations rather than
 /// being misrepresented as a canonical lineage action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactRelationV1 {
+pub enum FactRelation {
     Supports,
     Contradicts,
     Supersedes,
@@ -66,28 +63,28 @@ pub enum CompatibilityFactRelationV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactNormalizeTagsV1 {
-    fact: CompatibilityFactTargetV1,
+pub struct FactNormalizeTags {
+    fact: FactTarget,
     tags: Vec<String>,
-    evidence_facts: Vec<CompatibilityFactTargetV1>,
+    evidence_facts: Vec<FactTarget>,
     confidence: Confidence,
 }
 
-impl CompatibilityFactNormalizeTagsV1 {
+impl FactNormalizeTags {
     pub fn new(
-        fact: CompatibilityFactTargetV1,
+        fact: FactTarget,
         tags: Vec<String>,
-        evidence_facts: Vec<CompatibilityFactTargetV1>,
+        evidence_facts: Vec<FactTarget>,
         confidence: Confidence,
-    ) -> FactStoreResult<Self> {
-        if tags.len() > MAX_COMPATIBILITY_CURATION_TARGETS {
-            return Err(FactStoreError::InvalidQueryLimit {
+    ) -> FactLineageResult<Self> {
+        if tags.len() > MAX_FACT_CURATION_TARGETS {
+            return Err(FactLineageError::InvalidQueryLimit {
                 limit: tags.len(),
-                max: MAX_COMPATIBILITY_CURATION_TARGETS,
+                max: MAX_FACT_CURATION_TARGETS,
             });
         }
         for tag in &tags {
-            validate_compatibility_text(tag, "compatibility curation tag")?;
+            validate_text(tag, "compatibility curation tag")?;
         }
         Ok(Self {
             fact,
@@ -97,7 +94,7 @@ impl CompatibilityFactNormalizeTagsV1 {
         })
     }
 
-    pub fn fact(&self) -> &CompatibilityFactTargetV1 {
+    pub fn fact(&self) -> &FactTarget {
         &self.fact
     }
 
@@ -105,7 +102,7 @@ impl CompatibilityFactNormalizeTagsV1 {
         &self.tags
     }
 
-    pub fn evidence_facts(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[FactTarget] {
         &self.evidence_facts
     }
 
@@ -115,20 +112,20 @@ impl CompatibilityFactNormalizeTagsV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactMergeEntitiesV1 {
-    winner: CompatibilityLegacyEntityTargetV1,
-    losers: Vec<CompatibilityLegacyEntityTargetV1>,
-    evidence_facts: Vec<CompatibilityFactTargetV1>,
+pub struct FactMergeEntities {
+    winner: FactEntityTarget,
+    losers: Vec<FactEntityTarget>,
+    evidence_facts: Vec<FactTarget>,
     confidence: Confidence,
 }
 
-impl CompatibilityFactMergeEntitiesV1 {
+impl FactMergeEntities {
     pub fn new(
-        winner: CompatibilityLegacyEntityTargetV1,
-        losers: Vec<CompatibilityLegacyEntityTargetV1>,
-        evidence_facts: Vec<CompatibilityFactTargetV1>,
+        winner: FactEntityTarget,
+        losers: Vec<FactEntityTarget>,
+        evidence_facts: Vec<FactTarget>,
         confidence: Confidence,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         validate_entity_merge(&winner, &losers)?;
         Ok(Self {
             winner,
@@ -138,15 +135,15 @@ impl CompatibilityFactMergeEntitiesV1 {
         })
     }
 
-    pub fn winner(&self) -> &CompatibilityLegacyEntityTargetV1 {
+    pub fn winner(&self) -> &FactEntityTarget {
         &self.winner
     }
 
-    pub fn losers(&self) -> &[CompatibilityLegacyEntityTargetV1] {
+    pub fn losers(&self) -> &[FactEntityTarget] {
         &self.losers
     }
 
-    pub fn evidence_facts(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[FactTarget] {
         &self.evidence_facts
     }
 
@@ -156,21 +153,21 @@ impl CompatibilityFactMergeEntitiesV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactAddAliasV1 {
-    entity: CompatibilityLegacyEntityTargetV1,
+pub struct FactAddAlias {
+    entity: FactEntityTarget,
     alias: String,
-    evidence_facts: Vec<CompatibilityFactTargetV1>,
+    evidence_facts: Vec<FactTarget>,
     confidence: Confidence,
 }
 
-impl CompatibilityFactAddAliasV1 {
+impl FactAddAlias {
     pub fn new(
-        entity: CompatibilityLegacyEntityTargetV1,
+        entity: FactEntityTarget,
         alias: String,
-        evidence_facts: Vec<CompatibilityFactTargetV1>,
+        evidence_facts: Vec<FactTarget>,
         confidence: Confidence,
-    ) -> FactStoreResult<Self> {
-        validate_compatibility_text(&alias, "compatibility curation alias")?;
+    ) -> FactLineageResult<Self> {
+        validate_text(&alias, "compatibility curation alias")?;
         Ok(Self {
             entity,
             alias,
@@ -179,7 +176,7 @@ impl CompatibilityFactAddAliasV1 {
         })
     }
 
-    pub fn entity(&self) -> &CompatibilityLegacyEntityTargetV1 {
+    pub fn entity(&self) -> &FactEntityTarget {
         &self.entity
     }
 
@@ -187,7 +184,7 @@ impl CompatibilityFactAddAliasV1 {
         &self.alias
     }
 
-    pub fn evidence_facts(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[FactTarget] {
         &self.evidence_facts
     }
 
@@ -197,34 +194,34 @@ impl CompatibilityFactAddAliasV1 {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CompatibilityFactLinkV1 {
-    source: CompatibilityFactTargetV1,
-    target: CompatibilityFactTargetV1,
-    relation: CompatibilityFactRelationV1,
-    evidence_facts: Vec<CompatibilityFactTargetV1>,
+pub struct FactLink {
+    source: FactTarget,
+    target: FactTarget,
+    relation: FactRelation,
+    evidence_facts: Vec<FactTarget>,
     confidence: Confidence,
     source_label: String,
     metadata: Value,
 }
 
-impl CompatibilityFactLinkV1 {
+impl FactLink {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        source: CompatibilityFactTargetV1,
-        target: CompatibilityFactTargetV1,
-        relation: CompatibilityFactRelationV1,
-        evidence_facts: Vec<CompatibilityFactTargetV1>,
+        source: FactTarget,
+        target: FactTarget,
+        relation: FactRelation,
+        evidence_facts: Vec<FactTarget>,
         confidence: Confidence,
         source_label: String,
         metadata: Value,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         if source == target {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility curation relation endpoints",
             }));
         }
-        validate_compatibility_text(&source_label, "compatibility curation relation source")?;
-        validate_compatibility_metadata(&metadata, "compatibility curation relation metadata")?;
+        validate_text(&source_label, "compatibility curation relation source")?;
+        validate_metadata(&metadata, "compatibility curation relation metadata")?;
         Ok(Self {
             source,
             target,
@@ -236,19 +233,19 @@ impl CompatibilityFactLinkV1 {
         })
     }
 
-    pub fn source(&self) -> &CompatibilityFactTargetV1 {
+    pub fn source(&self) -> &FactTarget {
         &self.source
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &FactTarget {
         &self.target
     }
 
-    pub fn relation(&self) -> CompatibilityFactRelationV1 {
+    pub fn relation(&self) -> FactRelation {
         self.relation
     }
 
-    pub fn evidence_facts(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[FactTarget] {
         &self.evidence_facts
     }
 
@@ -266,18 +263,14 @@ impl CompatibilityFactLinkV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactRepairVectorV1 {
-    fact: CompatibilityFactTargetV1,
-    evidence_facts: Vec<CompatibilityFactTargetV1>,
+pub struct FactRepairVector {
+    fact: FactTarget,
+    evidence_facts: Vec<FactTarget>,
     confidence: Confidence,
 }
 
-impl CompatibilityFactRepairVectorV1 {
-    pub fn new(
-        fact: CompatibilityFactTargetV1,
-        evidence_facts: Vec<CompatibilityFactTargetV1>,
-        confidence: Confidence,
-    ) -> Self {
+impl FactRepairVector {
+    pub fn new(fact: FactTarget, evidence_facts: Vec<FactTarget>, confidence: Confidence) -> Self {
         Self {
             fact,
             evidence_facts,
@@ -285,11 +278,11 @@ impl CompatibilityFactRepairVectorV1 {
         }
     }
 
-    pub fn fact(&self) -> &CompatibilityFactTargetV1 {
+    pub fn fact(&self) -> &FactTarget {
         &self.fact
     }
 
-    pub fn evidence_facts(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[FactTarget] {
         &self.evidence_facts
     }
 
@@ -301,16 +294,20 @@ impl CompatibilityFactRepairVectorV1 {
 /// Finite set of curation operations; this is intentionally not a generic
 /// command dispatcher.
 #[derive(Clone, Debug, PartialEq)]
-pub enum CompatibilityFactCurationOperationV1 {
-    NormalizeTags(CompatibilityFactNormalizeTagsV1),
-    MergeEntities(CompatibilityFactMergeEntitiesV1),
-    AddAlias(CompatibilityFactAddAliasV1),
-    LinkFacts(CompatibilityFactLinkV1),
-    RepairVector(CompatibilityFactRepairVectorV1),
+pub enum FactCurationOperation {
+    NormalizeTags(FactNormalizeTags),
+    MergeEntities(FactMergeEntities),
+    AddAlias(FactAddAlias),
+    LinkFacts(FactLink),
+    RepairVector(FactRepairVector),
 }
 
-impl CompatibilityFactCurationOperationV1 {
-    fn validate_for(&self, owner: &FactOwnerV1, min_confidence: Confidence) -> FactStoreResult<()> {
+impl FactCurationOperation {
+    fn validate_for(
+        &self,
+        owner: &FactOwnerV1,
+        min_confidence: Confidence,
+    ) -> FactLineageResult<()> {
         match self {
             Self::NormalizeTags(operation) => {
                 validate_curation_fact_target(owner, operation.fact())?;
@@ -346,28 +343,28 @@ impl CompatibilityFactCurationOperationV1 {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CompatibilityFactCurationBatchV1 {
+pub struct FactCurationBatch {
     owner: FactOwnerV1,
     operation_id: ProvenanceId,
     actor: Option<ActorId>,
     min_confidence: Confidence,
-    operations: Vec<CompatibilityFactCurationOperationV1>,
+    operations: Vec<FactCurationOperation>,
 }
 
-impl CompatibilityFactCurationBatchV1 {
+impl FactCurationBatch {
     pub fn new(
         owner: FactOwnerV1,
         operation_id: ProvenanceId,
         actor: Option<ActorId>,
         min_confidence: Confidence,
-        operations: Vec<CompatibilityFactCurationOperationV1>,
-    ) -> FactStoreResult<Self> {
+        operations: Vec<FactCurationOperation>,
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
         operation_id.validate()?;
         if let Some(actor) = &actor {
             actor.validate()?;
         }
-        validate_limit(operations.len(), MAX_COMPATIBILITY_CURATION_OPERATIONS)?;
+        validate_limit(operations.len(), MAX_FACT_CURATION_OPERATIONS)?;
         for operation in &operations {
             operation.validate_for(&owner, min_confidence)?;
         }
@@ -396,37 +393,37 @@ impl CompatibilityFactCurationBatchV1 {
         self.min_confidence
     }
 
-    pub fn operations(&self) -> &[CompatibilityFactCurationOperationV1] {
+    pub fn operations(&self) -> &[FactCurationOperation] {
         &self.operations
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactCurationReceiptV1 {
+pub struct FactCurationReceipt {
     owner: FactOwnerV1,
-    changed_facts: Vec<CompatibilityFactMappingV1>,
+    changed_facts: Vec<FactMapping>,
     normalized_tags: u64,
     merged_entities: u64,
     aliases_added: u64,
     facts_linked: u64,
     vectors_repaired: u64,
-    derived_repair: CompatibilityMemoryRepairStatsV1,
+    derived_repair: MemoryRepairStats,
 }
 
-impl CompatibilityFactCurationReceiptV1 {
+impl FactCurationReceipt {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner: FactOwnerV1,
-        changed_facts: Vec<CompatibilityFactMappingV1>,
+        changed_facts: Vec<FactMapping>,
         normalized_tags: u64,
         merged_entities: u64,
         aliases_added: u64,
         facts_linked: u64,
         vectors_repaired: u64,
-        derived_repair: CompatibilityMemoryRepairStatsV1,
-    ) -> FactStoreResult<Self> {
+        derived_repair: MemoryRepairStats,
+    ) -> FactLineageResult<Self> {
         owner.validate()?;
-        if changed_facts.len() > MAX_COMPATIBILITY_CURATION_TARGETS
+        if changed_facts.len() > MAX_FACT_CURATION_TARGETS
             || changed_facts
                 .iter()
                 .any(|mapping| mapping.owner() != &owner)
@@ -436,7 +433,7 @@ impl CompatibilityFactCurationReceiptV1 {
                     .any(|previous| previous.fact_id() == mapping.fact_id())
             })
         {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility curation receipt mappings",
             }));
         }
@@ -456,7 +453,7 @@ impl CompatibilityFactCurationReceiptV1 {
         &self.owner
     }
 
-    pub fn changed_facts(&self) -> &[CompatibilityFactMappingV1] {
+    pub fn changed_facts(&self) -> &[FactMapping] {
         &self.changed_facts
     }
 
@@ -480,19 +477,19 @@ impl CompatibilityFactCurationReceiptV1 {
         self.vectors_repaired
     }
 
-    pub fn derived_repair(&self) -> &CompatibilityMemoryRepairStatsV1 {
+    pub fn derived_repair(&self) -> &MemoryRepairStats {
         &self.derived_repair
     }
 }
 
 fn validate_entity_merge(
-    winner: &CompatibilityLegacyEntityTargetV1,
-    losers: &[CompatibilityLegacyEntityTargetV1],
-) -> FactStoreResult<()> {
-    if losers.is_empty() || losers.len() > MAX_COMPATIBILITY_CURATION_TARGETS {
-        return Err(FactStoreError::InvalidQueryLimit {
+    winner: &FactEntityTarget,
+    losers: &[FactEntityTarget],
+) -> FactLineageResult<()> {
+    if losers.is_empty() || losers.len() > MAX_FACT_CURATION_TARGETS {
+        return Err(FactLineageError::InvalidQueryLimit {
             limit: losers.len(),
-            max: MAX_COMPATIBILITY_CURATION_TARGETS,
+            max: MAX_FACT_CURATION_TARGETS,
         });
     }
     for (index, loser) in losers.iter().enumerate() {
@@ -500,7 +497,7 @@ fn validate_entity_merge(
             || loser == winner
             || losers[..index].iter().any(|previous| previous == loser)
         {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            return Err(FactLineageError::Contract(DomainError::NonCanonical {
                 field: "compatibility curation entity merge",
             }));
         }

@@ -30,7 +30,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
-    FactContradictionStateV1, FactCurrentQuery, FactLineageQuery, FactStore, FactStoreError,
+    FactContradictionStateV1, FactCurrentQuery, FactLineageQuery, FactLineageStore, FactLineageError,
     FactWriteBatch, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery,
     StoredFactV1,
 };
@@ -843,7 +843,7 @@ async fn contradictions_are_recorded_explicitly_in_lineage() {
     .unwrap();
     let error = store.commit_fact(batch).await.unwrap_err();
     assert!(
-        matches!(error, FactStoreError::Storage { .. }),
+        matches!(error, FactLineageError::Storage { .. }),
         "missing curation target should fail as a storage error, got {error:?}"
     );
     assert_eq!(lineage(&store, &owner, &first.fact_id).await.len(), 2);
@@ -914,7 +914,7 @@ async fn failed_fact_batch_rolls_back_identity_assertion_anchor_and_lineage() {
 
     let error = store.commit_fact(batch).await.unwrap_err();
     assert!(
-        matches!(error, FactStoreError::Storage { .. }),
+        matches!(error, FactLineageError::Storage { .. }),
         "missing curation target should fail after staged writes, got {error:?}"
     );
     assert!(current(&store, &owner, &fact_id).await.is_none());

@@ -3,7 +3,6 @@
 use crate::errors::Result;
 
 use super::super::{MemoryV2Executor, db_error};
-use super::proposals::{install_v20_integrity_triggers, install_v21_current_projection_indexes};
 
 /// Installs only additive storage. Legacy data movement is daemon-authorized
 /// and deliberately absent from bare schema creation and database open.
@@ -280,7 +279,7 @@ pub(in crate::db) async fn create_schema(
             project_id TEXT NOT NULL,
             previous_state TEXT,
             current_state TEXT NOT NULL CHECK(current_state IN (
-                'pending', 'applying', 'applied', 'rejected'
+                'pending', 'applied', 'rejected', 'quarantined'
             )),
             reviewer_json TEXT CHECK(reviewer_json IS NULL OR json_valid(reviewer_json)),
             validation_json TEXT CHECK(validation_json IS NULL OR json_valid(validation_json)),
@@ -300,7 +299,7 @@ pub(in crate::db) async fn create_schema(
             FOREIGN KEY(promoted_event_id, promoted_fact_id, owner_kind, project_id)
                 REFERENCES memory_v2_lineage_events(event_id, fact_id, owner_kind, project_id),
             CHECK(previous_state IS NULL OR previous_state IN (
-                'pending', 'applying', 'applied', 'rejected'
+                'pending', 'applied', 'rejected', 'quarantined'
             )),
             CHECK(
                 (current_state = 'applied'
@@ -317,9 +316,9 @@ pub(in crate::db) async fn create_schema(
             owner_kind TEXT NOT NULL,
             project_id TEXT NOT NULL,
             state TEXT NOT NULL CHECK(state IN (
-                'pending', 'applying', 'applied', 'rejected'
+                'pending', 'applied', 'rejected', 'quarantined'
             )),
-            revision INTEGER NOT NULL CHECK(revision >= 0),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
             last_transition_id TEXT NOT NULL,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY(proposal_id, owner_kind, project_id),
@@ -522,7 +521,5 @@ pub(in crate::db) async fn create_schema(
     )
     .await
     .map_err(|error| db_error(operation, error))?;
-    install_v20_integrity_triggers(conn, operation).await?;
-    install_v21_current_projection_indexes(conn, operation).await?;
     Ok(())
 }

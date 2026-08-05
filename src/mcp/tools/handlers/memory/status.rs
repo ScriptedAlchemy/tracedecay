@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_store::CompatibilityFeedbackRepairProgressV1;
+use tracedecay_store::FeedbackRepairProgress;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::Result;
@@ -19,13 +19,13 @@ use super::{
 };
 
 pub(super) fn feedback_history_repair_payload(
-    progress: CompatibilityFeedbackRepairProgressV1,
+    progress: FeedbackRepairProgress,
 ) -> Value {
     let state = match progress {
-        CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
-        CompatibilityFeedbackRepairProgressV1::NotRequired => "not_required",
-        CompatibilityFeedbackRepairProgressV1::Complete { .. } => "complete",
-        CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => "incomplete",
+        FeedbackRepairProgress::Unknown => "unknown",
+        FeedbackRepairProgress::NotRequired => "not_required",
+        FeedbackRepairProgress::Complete { .. } => "complete",
+        FeedbackRepairProgress::Incomplete { .. } => "incomplete",
     };
     json!({
         "state": state,

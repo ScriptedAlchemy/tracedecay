@@ -7,7 +7,7 @@ use tracedecay_domain::{
     PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId,
     ProvenanceId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2Parts,
     RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, UtcMicros,
     VectorWatermark,
 };
 
@@ -139,7 +139,7 @@ fn batch_rejects_owner_mismatch() {
         None,
     )
     .unwrap_err();
-    assert!(matches!(error, FactStoreError::OwnerMismatch));
+    assert!(matches!(error, FactLineageError::OwnerMismatch));
 }
 
 #[test]
@@ -162,7 +162,7 @@ fn batch_rejects_missing_and_cyclic_anchor_lineage() {
     .unwrap_err();
     assert!(matches!(
         error,
-        FactStoreError::MissingAnchorLineageSource { anchor_id }
+        FactLineageError::MissingAnchorLineageSource { anchor_id }
             if anchor_id == missing_id
     ));
 
@@ -187,7 +187,10 @@ fn batch_rejects_missing_and_cyclic_anchor_lineage() {
         None,
     )
     .unwrap_err();
-    assert!(matches!(error, FactStoreError::CyclicAnchorLineage { .. }));
+    assert!(matches!(
+        error,
+        FactLineageError::CyclicAnchorLineage { .. }
+    ));
 }
 
 #[test]
@@ -259,7 +262,7 @@ fn batch_rejects_missing_evidence_anchor() {
     .unwrap_err();
     assert!(matches!(
         error,
-        FactStoreError::MissingEvidenceAnchor { .. }
+        FactLineageError::MissingEvidenceAnchor { .. }
     ));
 }
 
@@ -279,7 +282,7 @@ fn batch_rejects_duplicate_replay_shape() {
         None,
     )
     .unwrap_err();
-    assert!(matches!(error, FactStoreError::DuplicateEventId { .. }));
+    assert!(matches!(error, FactLineageError::DuplicateEventId { .. }));
 }
 
 #[test]
@@ -326,7 +329,7 @@ fn batch_rejects_item_counts_over_the_limit() {
     .unwrap_err();
     assert!(matches!(
         error,
-        FactStoreError::BatchLimitExceeded { field, count, max }
+        FactLineageError::BatchLimitExceeded { field, count, max }
             if field == "fact write batch events"
                 && count == MAX_FACT_WRITE_BATCH_EVENTS + 1
                 && max == MAX_FACT_WRITE_BATCH_EVENTS
@@ -348,7 +351,7 @@ fn batch_rejects_item_counts_over_the_limit() {
     .unwrap_err();
     assert!(matches!(
         error,
-        FactStoreError::BatchLimitExceeded { field, count, max }
+        FactLineageError::BatchLimitExceeded { field, count, max }
             if field == "fact write batch new anchors"
                 && count == MAX_FACT_WRITE_BATCH_NEW_ANCHORS + 1
                 && max == MAX_FACT_WRITE_BATCH_NEW_ANCHORS
@@ -381,7 +384,7 @@ fn creation_identity_material_must_derive_the_batch_fact() {
 
     assert!(matches!(
         batch.with_identity_material(unrelated),
-        Err(FactStoreError::FactMismatch)
+        Err(FactLineageError::FactMismatch)
     ));
 }
 
@@ -401,7 +404,7 @@ fn tombstone_rejects_payload() {
         UtcMicros(2),
     )
     .unwrap_err();
-    assert!(matches!(error, FactStoreError::PayloadAccessMismatch));
+    assert!(matches!(error, FactLineageError::PayloadAccessMismatch));
 
     let fact_id = fact_id(FactOwnerV1::Profile, "operation.missing-payload");
     let error = StoredFactV1::new(
@@ -416,23 +419,23 @@ fn tombstone_rejects_payload() {
         UtcMicros(2),
     )
     .unwrap_err();
-    assert!(matches!(error, FactStoreError::PayloadAccessMismatch));
+    assert!(matches!(error, FactLineageError::PayloadAccessMismatch));
 }
 
 #[test]
 fn queries_enforce_bounds() {
     assert!(matches!(
         CurrentFactsQuery::new(FactOwnerV1::Profile, None, 0),
-        Err(FactStoreError::InvalidQueryLimit { .. })
+        Err(FactLineageError::InvalidQueryLimit { .. })
     ));
     let fact_id = fact_id(FactOwnerV1::Profile, "operation.query");
     assert!(matches!(
         FactLineageQuery::new(FactOwnerV1::Profile, fact_id, None, MAX_LINEAGE_LIMIT + 1,),
-        Err(FactStoreError::InvalidQueryLimit { .. })
+        Err(FactLineageError::InvalidQueryLimit { .. })
     ));
     assert!(matches!(
         LegacyFactQuery::new(FactOwnerV1::Profile, id("store.v1"), 0),
-        Err(FactStoreError::InvalidLegacyFactId { .. })
+        Err(FactLineageError::InvalidLegacyFactId { .. })
     ));
 }
 
@@ -479,29 +482,29 @@ fn projections_queries_and_receipts_reject_cross_owner_fact_ids() {
             None,
             UtcMicros(2),
         ),
-        Err(FactStoreError::OwnerMismatch)
+        Err(FactLineageError::OwnerMismatch)
     ));
     assert!(matches!(
         CurrentFactsQuery::new(project_owner.clone(), Some(profile_fact_id.clone()), 10,),
-        Err(FactStoreError::OwnerMismatch)
+        Err(FactLineageError::OwnerMismatch)
     ));
     assert!(matches!(
         FactCurrentQuery::new(project_owner.clone(), profile_fact_id.clone()),
-        Err(FactStoreError::OwnerMismatch)
+        Err(FactLineageError::OwnerMismatch)
     ));
     assert!(matches!(
         FactAsOfQuery::new(project_owner.clone(), profile_fact_id.clone(), UtcMicros(2),),
-        Err(FactStoreError::OwnerMismatch)
+        Err(FactLineageError::OwnerMismatch)
     ));
     assert!(matches!(
         FactLineageQuery::new(project_owner.clone(), profile_fact_id.clone(), None, 10,),
-        Err(FactStoreError::OwnerMismatch)
+        Err(FactLineageError::OwnerMismatch)
     ));
 
     let legacy = LegacyFactQuery::new(project_owner.clone(), id("store.v1"), 7).unwrap();
     assert!(matches!(
         legacy.validate_resolved_fact_id(&profile_fact_id),
-        Err(FactStoreError::OwnerMismatch)
+        Err(FactLineageError::OwnerMismatch)
     ));
 
     let event_id: FactEventId = id("event.fixture");
@@ -513,14 +516,14 @@ fn projections_queries_and_receipts_reject_cross_owner_fact_ids() {
             event_id,
             None,
         ),
-        Err(FactStoreError::OwnerMismatch)
+        Err(FactLineageError::OwnerMismatch)
     ));
 }
 
 #[test]
 fn proposal_record_projects_typed_automation_run_id() {
     let owner = FactOwnerV1::Profile;
-    let request = CompatibilityFactAddCommandV1::new(
+    let request = FactAddCommand::new(
         owner.clone(),
         id("operation.automation-proposal"),
         "durable proposal".to_owned(),
@@ -535,16 +538,19 @@ fn proposal_record_projects_typed_automation_run_id() {
     .unwrap()
     .with_automation_run_id("run.fixture.1".to_owned())
     .unwrap();
-    let record = CompatibilityFactProposalRecordV1::new(
+    let record = FactProposalRecord::new(
         id("proposal.automation.fixture"),
         owner,
-        CompatibilityFactProposalRevisionV1::new(1).unwrap(),
-        CompatibilityFactProposalStateV1::PendingApproval,
+        FactProposalRevision::new(1).unwrap(),
+        FactProposalState::PendingApproval,
         request,
         None,
         None,
+        FactProposalEvidence::default(),
         None,
         None,
+        UtcMicros(1),
+        UtcMicros(1),
     )
     .unwrap();
 
@@ -553,8 +559,8 @@ fn proposal_record_projects_typed_automation_run_id() {
 
 #[test]
 fn repair_stats_preserve_the_atomic_feedback_batch_outcome() {
-    let stats = CompatibilityMemoryRepairStatsV1::new(3, 2).with_feedback_history_repair(
-        CompatibilityFeedbackRepairProgressV1::Incomplete {
+    let stats = MemoryRepairStats::new(3, 2).with_feedback_history_repair(
+        FeedbackRepairProgress::Incomplete {
             processed: 512,
             remaining: Some(9),
         },
@@ -564,41 +570,34 @@ fn repair_stats_preserve_the_atomic_feedback_batch_outcome() {
     assert_eq!(stats.banks_rebuilt(), 2);
     assert_eq!(
         stats.feedback_history_repair(),
-        CompatibilityFeedbackRepairProgressV1::Incomplete {
+        FeedbackRepairProgress::Incomplete {
             processed: 512,
             remaining: Some(9),
         }
     );
     assert_eq!(
-        CompatibilityMemoryRepairStatsV1::default().feedback_history_repair(),
-        CompatibilityFeedbackRepairProgressV1::Unknown
+        MemoryRepairStats::default().feedback_history_repair(),
+        FeedbackRepairProgress::Unknown
     );
     // Saturation defaults off and round-trips through the builder without
     // disturbing the feedback-history outcome.
     assert!(!stats.saturated());
-    assert!(!CompatibilityMemoryRepairStatsV1::default().saturated());
+    assert!(!MemoryRepairStats::default().saturated());
     assert!(stats.with_saturated(true).saturated());
 }
 
 #[test]
 fn dashboard_queries_bound_the_finite_read_surface() {
     assert!(matches!(
-        CompatibilityDashboardMemoryOverviewQueryV1::new(FactOwnerV1::Profile, 0, 1),
-        Err(FactStoreError::InvalidQueryLimit { .. })
+        DashboardMemoryOverviewQuery::new(FactOwnerV1::Profile, 0, 1),
+        Err(FactLineageError::InvalidQueryLimit { .. })
     ));
     assert!(matches!(
-        CompatibilityDashboardVectorPointsQueryV1::new(
-            FactOwnerV1::Profile,
-            None,
-            MAX_COMPATIBILITY_DASHBOARD_VECTORS + 1,
-        ),
-        Err(FactStoreError::InvalidQueryLimit { .. })
+        DashboardVectorPointsQuery::new(FactOwnerV1::Profile, None, MAX_FACT_DASHBOARD_VECTORS + 1,),
+        Err(FactLineageError::InvalidQueryLimit { .. })
     ));
     assert!(matches!(
-        CompatibilityDashboardOplogQueryV1::new(
-            FactOwnerV1::Profile,
-            MAX_COMPATIBILITY_DASHBOARD_OPLOG + 1,
-        ),
-        Err(FactStoreError::InvalidQueryLimit { .. })
+        DashboardOplogQuery::new(FactOwnerV1::Profile, MAX_FACT_DASHBOARD_OPLOG + 1,),
+        Err(FactLineageError::InvalidQueryLimit { .. })
     ));
 }

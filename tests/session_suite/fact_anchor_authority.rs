@@ -32,10 +32,10 @@ use tracedecay_domain::{
     ScopeResolutionId, SensitivityV1, UtcMicros, VectorWatermark,
 };
 #[cfg(feature = "test-transport")]
-use tracedecay_store::FactStoreError;
+use tracedecay_store::FactLineageError;
 use tracedecay_store::{
     CurrentFactsQuery, FactCommitConflict, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
-    FactStore, FactWriteBatch, RetrievalAnchorQuery, StoredFactV1,
+    FactLineageStore, FactWriteBatch, RetrievalAnchorQuery, StoredFactV1,
 };
 
 fn profile_owner() -> FactOwnerV1 {
@@ -312,7 +312,7 @@ async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
         .await
         .expect_err("a write with a revoked authority must fail closed");
     match &error {
-        FactStoreError::Storage { operation, source } => {
+        FactLineageError::Storage { operation, source } => {
             assert_eq!(*operation, "commit canonical memory fact");
             assert!(
                 source

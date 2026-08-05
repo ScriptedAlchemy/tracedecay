@@ -5,7 +5,7 @@ use tracedecay_domain::{
     RetrievalAnchorId, RetrievalAnchorRecordV2,
 };
 
-use super::{FactStoreError, FactStoreResult, validate_owned_fact_id};
+use super::{FactLineageError, FactLineageResult, validate_owned_fact_id};
 
 pub(super) const MAX_FACT_WRITE_BATCH_EVENTS: usize = 256;
 
@@ -36,7 +36,7 @@ impl FactWriteBatch {
         referenced_anchor_ids: Vec<RetrievalAnchorId>,
         legacy_mapping: Option<LegacyFactMappingV1>,
         expected_last_event_id: Option<FactEventId>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         fact_id.validate()?;
         owner.validate()?;
         validate_owned_fact_id(&fact_id, &owner)?;
@@ -44,17 +44,17 @@ impl FactWriteBatch {
             event_id.validate()?;
         }
         if events.is_empty() {
-            return Err(FactStoreError::EmptyBatch);
+            return Err(FactLineageError::EmptyBatch);
         }
         if events.len() > MAX_FACT_WRITE_BATCH_EVENTS {
-            return Err(FactStoreError::BatchLimitExceeded {
+            return Err(FactLineageError::BatchLimitExceeded {
                 field: "fact write batch events",
                 count: events.len(),
                 max: MAX_FACT_WRITE_BATCH_EVENTS,
             });
         }
         if new_anchors.len() > MAX_FACT_WRITE_BATCH_NEW_ANCHORS {
-            return Err(FactStoreError::BatchLimitExceeded {
+            return Err(FactLineageError::BatchLimitExceeded {
                 field: "fact write batch new anchors",
                 count: new_anchors.len(),
                 max: MAX_FACT_WRITE_BATCH_NEW_ANCHORS,
@@ -63,10 +63,10 @@ impl FactWriteBatch {
 
         if let Some(assertion) = &assertion {
             if assertion.fact_id() != &fact_id {
-                return Err(FactStoreError::FactMismatch);
+                return Err(FactLineageError::FactMismatch);
             }
             if assertion.owner() != &owner {
-                return Err(FactStoreError::OwnerMismatch);
+                return Err(FactLineageError::OwnerMismatch);
             }
             let has_recording_event = events.iter().any(|event| {
                 matches!(
@@ -76,7 +76,7 @@ impl FactWriteBatch {
                 )
             });
             if !has_recording_event {
-                return Err(FactStoreError::MissingAssertionEvent {
+                return Err(FactLineageError::MissingAssertionEvent {
                     assertion_id: assertion.assertion_id().clone(),
                 });
             }
@@ -86,13 +86,13 @@ impl FactWriteBatch {
         let mut previous_event: Option<&FactLineageEventV1> = None;
         for event in &events {
             if event.fact_id() != &fact_id {
-                return Err(FactStoreError::FactMismatch);
+                return Err(FactLineageError::FactMismatch);
             }
             if event.owner() != &owner {
-                return Err(FactStoreError::OwnerMismatch);
+                return Err(FactLineageError::OwnerMismatch);
             }
             if !event_ids.insert(event.event_id()) {
-                return Err(FactStoreError::DuplicateEventId {
+                return Err(FactLineageError::DuplicateEventId {
                     event_id: event.event_id().clone(),
                 });
             }
@@ -100,17 +100,17 @@ impl FactWriteBatch {
                 (previous.occurred_at(), previous.event_id())
                     > (event.occurred_at(), event.event_id())
             }) {
-                return Err(FactStoreError::EventsOutOfOrder);
+                return Err(FactLineageError::EventsOutOfOrder);
             }
             previous_event = Some(event);
         }
 
         if let Some(mapping) = &legacy_mapping {
             if mapping.fact_id() != &fact_id {
-                return Err(FactStoreError::FactMismatch);
+                return Err(FactLineageError::FactMismatch);
             }
             if mapping.owner() != &owner {
-                return Err(FactStoreError::OwnerMismatch);
+                return Err(FactLineageError::OwnerMismatch);
             }
         }
 
@@ -118,7 +118,7 @@ impl FactWriteBatch {
         for anchor_id in &referenced_anchor_ids {
             anchor_id.validate()?;
             if !available_anchor_ids.insert(anchor_id) {
-                return Err(FactStoreError::DuplicateAnchorId {
+                return Err(FactLineageError::DuplicateAnchorId {
                     anchor_id: anchor_id.clone(),
                 });
             }
@@ -126,10 +126,10 @@ impl FactWriteBatch {
         for anchor in &new_anchors {
             anchor.validate()?;
             if FactOwnerV1::from(anchor.owner().clone()) != owner {
-                return Err(FactStoreError::OwnerMismatch);
+                return Err(FactLineageError::OwnerMismatch);
             }
             if !available_anchor_ids.insert(anchor.anchor_id()) {
-                return Err(FactStoreError::DuplicateAnchorId {
+                return Err(FactLineageError::DuplicateAnchorId {
                     anchor_id: anchor.anchor_id().clone(),
                 });
             }
@@ -138,7 +138,7 @@ impl FactWriteBatch {
         if let Some(assertion) = &assertion {
             for evidence in assertion.evidence() {
                 if !available_anchor_ids.contains(evidence.anchor_id()) {
-                    return Err(FactStoreError::MissingEvidenceAnchor {
+                    return Err(FactLineageError::MissingEvidenceAnchor {
                         anchor_id: evidence.anchor_id().clone(),
                     });
                 }
@@ -172,11 +172,11 @@ impl FactWriteBatch {
     pub fn with_identity_material(
         mut self,
         identity_material: FactIdentityMaterialV1,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         if identity_material.owner() != &self.owner
             || FactId::derive(&identity_material)? != self.fact_id
         {
-            return Err(FactStoreError::FactMismatch);
+            return Err(FactLineageError::FactMismatch);
         }
         self.identity_material = Some(identity_material);
         Ok(self)
@@ -241,7 +241,7 @@ impl FactWriteBatch {
 fn validate_anchor_lineage(
     new_anchors: &[RetrievalAnchorRecordV2],
     referenced_anchor_ids: &[RetrievalAnchorId],
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     let referenced = referenced_anchor_ids.iter().collect::<BTreeSet<_>>();
     let anchors = new_anchors
         .iter()
@@ -252,7 +252,7 @@ fn validate_anchor_lineage(
         for source in anchor.source_anchors() {
             if !referenced.contains(source.anchor_id()) && !anchors.contains_key(source.anchor_id())
             {
-                return Err(FactStoreError::MissingAnchorLineageSource {
+                return Err(FactLineageError::MissingAnchorLineageSource {
                     anchor_id: source.anchor_id().clone(),
                 });
             }
@@ -274,7 +274,7 @@ fn validate_anchor_lineage(
             let Some(anchor_id) = remaining.first().cloned() else {
                 break;
             };
-            return Err(FactStoreError::CyclicAnchorLineage { anchor_id });
+            return Err(FactLineageError::CyclicAnchorLineage { anchor_id });
         };
         remaining.remove(&anchor_id);
     }
@@ -297,19 +297,19 @@ impl FactCommitReceipt {
         committed_event_ids: Vec<FactEventId>,
         last_event_id: FactEventId,
         active_assertion_id: Option<FactAssertionId>,
-    ) -> FactStoreResult<Self> {
+    ) -> FactLineageResult<Self> {
         fact_id.validate()?;
         owner.validate()?;
         validate_owned_fact_id(&fact_id, &owner)?;
         last_event_id.validate()?;
         if committed_event_ids.is_empty() || committed_event_ids.last() != Some(&last_event_id) {
-            return Err(FactStoreError::InvalidCommitReceipt);
+            return Err(FactLineageError::InvalidCommitReceipt);
         }
         let mut seen = BTreeSet::new();
         for event_id in &committed_event_ids {
             event_id.validate()?;
             if !seen.insert(event_id) {
-                return Err(FactStoreError::DuplicateEventId {
+                return Err(FactLineageError::DuplicateEventId {
                     event_id: event_id.clone(),
                 });
             }

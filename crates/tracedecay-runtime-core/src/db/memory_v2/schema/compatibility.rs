@@ -11,7 +11,7 @@ pub(super) async fn install_v22_compatibility_schema(
     operation: &str,
 ) -> Result<()> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS memory_v2_compatibility_operation_receipts (
+        "CREATE TABLE IF NOT EXISTS memory_v2_operation_receipts (
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
             project_id TEXT NOT NULL,
             operation_id TEXT NOT NULL CHECK(length(operation_id) > 0),
@@ -150,8 +150,8 @@ pub(super) async fn install_v22_compatibility_schema(
             )
         );
 
-        CREATE INDEX IF NOT EXISTS idx_memory_v2_compatibility_receipts_fact
-            ON memory_v2_compatibility_operation_receipts(
+        CREATE INDEX IF NOT EXISTS idx_memory_v2_operation_receipts_fact
+            ON memory_v2_operation_receipts(
                 fact_id, owner_kind, project_id, recorded_at
             );
         CREATE INDEX IF NOT EXISTS idx_memory_v2_legacy_feedback_event_map_canonical
@@ -174,16 +174,16 @@ pub(super) async fn install_v22_compatibility_schema(
             ON memory_v2_fact_relations(
                 owner_kind, project_id, target_fact_id, relation, updated_at DESC
             );
-        CREATE TRIGGER IF NOT EXISTS memory_v2_compatibility_receipts_no_update
-        BEFORE UPDATE ON memory_v2_compatibility_operation_receipts BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 compatibility operation receipts are immutable');
+        CREATE TRIGGER IF NOT EXISTS memory_v2_operation_receipts_no_update
+        BEFORE UPDATE ON memory_v2_operation_receipts BEGIN
+            SELECT RAISE(ABORT, 'memory_v2 operation receipts are immutable');
         END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_compatibility_receipts_no_delete
-        BEFORE DELETE ON memory_v2_compatibility_operation_receipts BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 compatibility operation receipts are immutable');
+        CREATE TRIGGER IF NOT EXISTS memory_v2_operation_receipts_no_delete
+        BEFORE DELETE ON memory_v2_operation_receipts BEGIN
+            SELECT RAISE(ABORT, 'memory_v2 operation receipts are immutable');
         END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_compatibility_receipts_no_payload
-        BEFORE INSERT ON memory_v2_compatibility_operation_receipts
+        CREATE TRIGGER IF NOT EXISTS memory_v2_operation_receipts_no_payload
+        BEFORE INSERT ON memory_v2_operation_receipts
         WHEN EXISTS (
             SELECT 1 FROM json_tree(NEW.receipt_json)
             WHERE lower(CAST(key AS TEXT)) IN (
@@ -192,7 +192,7 @@ pub(super) async fn install_v22_compatibility_schema(
                 'vector_watermark', 'vector_watermark_json'
             )
         ) BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 compatibility receipts cannot retain payload data');
+            SELECT RAISE(ABORT, 'memory_v2 operation receipts cannot retain payload data');
         END;
         CREATE TRIGGER IF NOT EXISTS memory_v2_legacy_feedback_event_map_no_update
         BEFORE UPDATE ON memory_v2_legacy_feedback_event_map BEGIN
@@ -484,7 +484,7 @@ pub(super) async fn install_v23_compatibility_bank_schema(
     operation: &str,
 ) -> Result<()> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS memory_v2_compatibility_banks (
+        "CREATE TABLE IF NOT EXISTS memory_v2_banks (
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
             project_id TEXT NOT NULL,
             source_store_id TEXT NOT NULL
@@ -513,7 +513,7 @@ pub(super) async fn install_v23_compatibility_bank_schema(
                     AND json_extract(owner_json, '$.project_id') IS project_id)
             )
         );
-        CREATE TABLE IF NOT EXISTS memory_v2_compatibility_bank_dirty (
+        CREATE TABLE IF NOT EXISTS memory_v2_bank_dirty (
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
             project_id TEXT NOT NULL,
             source_store_id TEXT NOT NULL
@@ -534,16 +534,16 @@ pub(super) async fn install_v23_compatibility_bank_schema(
                     AND json_extract(owner_json, '$.project_id') IS project_id)
             )
         );
-        CREATE INDEX IF NOT EXISTS idx_memory_v2_compatibility_banks_owner
-            ON memory_v2_compatibility_banks(
+        CREATE INDEX IF NOT EXISTS idx_memory_v2_banks_owner
+            ON memory_v2_banks(
                 owner_kind, project_id, source_store_id, owner_json, updated_at DESC
             );
-        CREATE INDEX IF NOT EXISTS idx_memory_v2_compatibility_bank_dirty_owner
-            ON memory_v2_compatibility_bank_dirty(
+        CREATE INDEX IF NOT EXISTS idx_memory_v2_bank_dirty_owner
+            ON memory_v2_bank_dirty(
                 owner_kind, project_id, source_store_id, owner_json, updated_at ASC
             );
-        CREATE TRIGGER IF NOT EXISTS memory_v2_compatibility_banks_identity_guard
-        BEFORE UPDATE ON memory_v2_compatibility_banks
+        CREATE TRIGGER IF NOT EXISTS memory_v2_banks_identity_guard
+        BEFORE UPDATE ON memory_v2_banks
         WHEN NEW.owner_kind IS NOT OLD.owner_kind
             OR NEW.project_id IS NOT OLD.project_id
             OR NEW.source_store_id IS NOT OLD.source_store_id
@@ -553,8 +553,8 @@ pub(super) async fn install_v23_compatibility_bank_schema(
         BEGIN
             SELECT RAISE(ABORT, 'memory_v2 compatibility bank identity is immutable');
         END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_compatibility_bank_dirty_identity_guard
-        BEFORE UPDATE ON memory_v2_compatibility_bank_dirty
+        CREATE TRIGGER IF NOT EXISTS memory_v2_bank_dirty_identity_guard
+        BEFORE UPDATE ON memory_v2_bank_dirty
         WHEN NEW.owner_kind IS NOT OLD.owner_kind
             OR NEW.project_id IS NOT OLD.project_id
             OR NEW.source_store_id IS NOT OLD.source_store_id

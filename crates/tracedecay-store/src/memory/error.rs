@@ -7,7 +7,7 @@ use super::FactProposalPromotionStateV1;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum FactStoreError {
+pub enum FactLineageError {
     #[error("fact write batch must append at least one lineage event")]
     EmptyBatch,
     #[error("{field} count {count} exceeds the maximum of {max}")]
@@ -52,12 +52,12 @@ pub enum FactStoreError {
     },
 }
 
-pub type FactStoreResult<T> = Result<T, FactStoreError>;
+pub type FactLineageResult<T> = Result<T, FactLineageError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FactProposalStoreError {
     #[error("fact authority operation failed")]
-    Store(#[from] FactStoreError),
+    Store(#[from] FactLineageError),
     #[error("fact proposal {proposal_id} state changed before promotion")]
     ProposalStateConflict {
         proposal_id: ProvenanceId,
@@ -73,11 +73,11 @@ pub enum FactProposalStoreError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum FactCompatibilityStoreError {
+pub enum FactStoreError {
     #[error(transparent)]
-    Store(#[from] FactStoreError),
+    Store(#[from] FactLineageError),
     #[error(transparent)]
     Proposal(#[from] FactProposalStoreError),
 }
 
-pub type FactCompatibilityResult<T> = Result<T, FactCompatibilityStoreError>;
+pub type FactStoreResult<T> = Result<T, FactStoreError>;

@@ -428,23 +428,13 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
-    let pending = list_fact_proposals(
-        &memory,
-        &cg.store_layout().dashboard_root,
-        Some(FactProposalState::PendingApproval),
-        10,
-    )
-    .await
-    .unwrap();
+    let pending = list_fact_proposals(&memory, Some(FactProposalState::PendingApproval), 10)
+        .await
+        .unwrap();
     assert!(pending.is_empty());
-    let proposals = list_fact_proposals(
-        &memory,
-        &cg.store_layout().dashboard_root,
-        Some(FactProposalState::Applied),
-        10,
-    )
-    .await
-    .unwrap();
+    let proposals = list_fact_proposals(&memory, Some(FactProposalState::Applied), 10)
+        .await
+        .unwrap();
     assert_eq!(proposals.len(), 3);
     assert_eq!(proposals[0].run_id, run.run_id);
     assert_eq!(
@@ -647,28 +637,18 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
-    let pending = list_fact_proposals(
-        &memory,
-        &cg.store_layout().dashboard_root,
-        Some(FactProposalState::PendingApproval),
-        10,
-    )
-    .await
-    .unwrap();
+    let pending = list_fact_proposals(&memory, Some(FactProposalState::PendingApproval), 10)
+        .await
+        .unwrap();
     assert!(pending.is_empty());
-    let applied = list_fact_proposals(
-        &memory,
-        &cg.store_layout().dashboard_root,
-        Some(FactProposalState::Applied),
-        10,
-    )
-    .await
-    .unwrap();
+    let applied = list_fact_proposals(&memory, Some(FactProposalState::Applied), 10)
+        .await
+        .unwrap();
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0].run_id, HIGH_ENTROPY_RUN_ID);
 
     let typed_proposal = memory
-        .get_compatibility_fact_proposal(
+        .get_fact_proposal(
             tracedecay_domain::ProvenanceId::new(applied[0].proposal_id.clone()).unwrap(),
         )
         .await
@@ -683,13 +663,13 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
         .expect("auto-applied proposal has a canonical fact id")
         .clone();
     let projection = memory
-        .get_compatibility_fact(tracedecay_store::CompatibilityFactTargetV1::Canonical(
-            tracedecay_store::CompatibilityFactIdV1::new(owner, canonical_fact_id).unwrap(),
+        .get_compatibility_fact(tracedecay_store::FactTarget::Canonical(
+            tracedecay_store::OwnedFactId::new(owner, canonical_fact_id).unwrap(),
         ))
         .await
         .unwrap()
         .expect("auto-applied canonical fact is readable");
-    let tracedecay_store::CompatibilityFactProjectionV1::Available(fact) = projection else {
+    let tracedecay_store::FactProjection::Available(fact) = projection else {
         panic!("auto-applied fact must retain an available V1 projection");
     };
     assert_eq!(
@@ -855,7 +835,6 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
 
     let first = record_session_fact_proposals(
         &memory,
-        &dashboard_root,
         "run-a",
         Some("evidence-a"),
         std::slice::from_ref(&accepted),
@@ -865,7 +844,6 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
     .unwrap();
     let second = record_session_fact_proposals(
         &memory,
-        &dashboard_root,
         "run-a",
         Some("evidence-a"),
         std::slice::from_ref(&accepted),
@@ -874,8 +852,8 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
     .await
     .unwrap();
     let proposals = memory
-        .list_compatibility_fact_proposals(
-            Some(tracedecay_store::CompatibilityFactProposalStateV1::PendingApproval),
+        .list_fact_proposals(
+            Some(tracedecay_store::FactProposalState::PendingApproval),
             None,
             10,
         )
@@ -1515,16 +1493,9 @@ async fn session_fact_proposals_keep_paraphrases_distinct() {
         ),
     ];
 
-    let recorded = record_session_fact_proposals(
-        &memory,
-        &dashboard_root,
-        "run-a",
-        Some("evidence-a"),
-        &batch,
-        &[],
-    )
-    .await
-    .unwrap();
+    let recorded = record_session_fact_proposals(&memory, "run-a", Some("evidence-a"), &batch, &[])
+        .await
+        .unwrap();
     assert_eq!(
         recorded.len(),
         4,
@@ -1535,21 +1506,15 @@ async fn session_fact_proposals_keep_paraphrases_distinct() {
         "Require stable aggregate verification and live PR-state rechecks; never \
          merge the batch off one flaky green pass",
     )];
-    let second = record_session_fact_proposals(
-        &memory,
-        &dashboard_root,
-        "run-b",
-        Some("evidence-b"),
-        &restated,
-        &[],
-    )
-    .await
-    .unwrap();
+    let second =
+        record_session_fact_proposals(&memory, "run-b", Some("evidence-b"), &restated, &[])
+            .await
+            .unwrap();
     assert_eq!(second.len(), 1);
 
     let proposals = memory
-        .list_compatibility_fact_proposals(
-            Some(tracedecay_store::CompatibilityFactProposalStateV1::PendingApproval),
+        .list_fact_proposals(
+            Some(tracedecay_store::FactProposalState::PendingApproval),
             None,
             10,
         )
@@ -1603,7 +1568,6 @@ async fn session_fact_proposals_never_mutate_applied_records() {
     .unwrap();
     let applied = record_session_fact_proposals(
         &memory,
-        &dashboard_root,
         "run-old",
         Some("evidence-old"),
         &[json!({
@@ -1628,13 +1592,13 @@ async fn session_fact_proposals_never_mutate_applied_records() {
     assert_eq!(applied.len(), 1);
     let applied_id = tracedecay_domain::ProvenanceId::new(applied[0].proposal_id.clone()).unwrap();
     let submitted = memory
-        .get_compatibility_fact_proposal(applied_id.clone())
+        .get_fact_proposal(applied_id.clone())
         .await
         .unwrap()
         .expect("submitted authority proposal");
     memory
-        .promote_compatibility_fact_proposal(
-            tracedecay_store::CompatibilityFactProposalPromotionV1::new(
+        .promote_fact_proposal(
+            tracedecay_store::FactProposalPromotion::new(
                 owner,
                 applied_id.clone(),
                 submitted.revision(),
@@ -1645,13 +1609,13 @@ async fn session_fact_proposals_never_mutate_applied_records() {
         .await
         .unwrap();
     let applied_before = memory
-        .get_compatibility_fact_proposal(applied_id.clone())
+        .get_fact_proposal(applied_id.clone())
         .await
         .unwrap()
         .expect("applied authority proposal");
     assert_eq!(
         applied_before.state(),
-        tracedecay_store::CompatibilityFactProposalStateV1::Applied
+        tracedecay_store::FactProposalState::Applied
     );
 
     let paraphrase = json!({
@@ -1670,16 +1634,10 @@ async fn session_fact_proposals_never_mutate_applied_records() {
         },
         "proposal": { "content": "paraphrase" }
     });
-    let recorded = record_session_fact_proposals(
-        &memory,
-        &dashboard_root,
-        "run-new",
-        Some("evidence-new"),
-        &[paraphrase],
-        &[],
-    )
-    .await
-    .unwrap();
+    let recorded =
+        record_session_fact_proposals(&memory, "run-new", Some("evidence-new"), &[paraphrase], &[])
+            .await
+            .unwrap();
     assert_eq!(
         recorded.len(),
         1,
@@ -1687,10 +1645,7 @@ async fn session_fact_proposals_never_mutate_applied_records() {
     );
     assert_eq!(recorded[0].state, FactProposalState::PendingApproval);
 
-    let proposals = memory
-        .list_compatibility_fact_proposals(None, None, 10)
-        .await
-        .unwrap();
+    let proposals = memory.list_fact_proposals(None, None, 10).await.unwrap();
     assert_eq!(
         proposals.proposals().len(),
         2,

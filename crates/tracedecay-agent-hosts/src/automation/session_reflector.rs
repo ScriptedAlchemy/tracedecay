@@ -3,15 +3,16 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 use tracedecay_domain::PayloadAccessState;
 use tracedecay_store::{
-    CompatibilityFactAvailabilityV1, CompatibilityFactProjectionV1, FactCompatibilityStore,
+    FactAvailability, FactProjection, FactSearchFilter, FactSearchKind, FactSearchQuery, FactStore,
 };
 
+use super::config_error;
 use crate::application::memory::MemoryApplication;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
-use crate::memory::types::{AddFactRequest, MemoryCategory, SearchFactsRequest};
+use crate::memory::types::{AddFactRequest, MemoryCategory};
 
-pub(crate) async fn validate_fact_proposals<A: FactCompatibilityStore>(
+pub(crate) async fn validate_fact_proposals<A: FactStore>(
     memory: &MemoryApplication<A>,
     proposals: &[Value],
     evidence: &Value,
@@ -138,7 +139,7 @@ impl EvidenceCitationSet {
     }
 }
 
-async fn validate_fact_proposal<A: FactCompatibilityStore>(
+async fn validate_fact_proposal<A: FactStore>(
     memory: &MemoryApplication<A>,
     proposal: &Value,
     citations: &EvidenceCitationSet,
@@ -213,17 +214,8 @@ async fn validate_fact_proposal<A: FactCompatibilityStore>(
             )
         })? {
         None => None,
-        Some(CompatibilityFactProjectionV1::Available(fact)) => {
-            let Some(fact_id) = fact.legacy_fact_id() else {
-                return Ok(rejected_unavailable_exact_duplicate(
-                    proposal,
-                    "unavailable",
-                    "unknown",
-                ));
-            };
-            Some(fact_id)
-        }
-        Some(CompatibilityFactProjectionV1::Unavailable(unavailable)) => {
+        Some(FactProjection::Available(fact)) => Some(fact.fact_id().as_str().to_owned()),
+        Some(FactProjection::Unavailable(unavailable)) => {
             return Ok(rejected_unavailable_exact_duplicate(
                 proposal,
                 compatibility_availability_label(unavailable.availability()),
@@ -246,13 +238,21 @@ async fn validate_fact_proposal<A: FactCompatibilityStore>(
         ));
     }
     let matches = memory
-        .search_facts_untracked_v1(SearchFactsRequest {
-            query: content.clone(),
-            category: Some(category),
-            limit: Some(1),
-            min_trust: None,
-            include_why: false,
-        })
+        .search_facts(
+            FactSearchQuery::with_filter(
+                memory.owner().clone(),
+                FactSearchKind::Search,
+                Some(content.clone()),
+                FactSearchFilter::new(Some(category.into()), None, None).map_err(|error| {
+                    config_error(format!("build session reflector search filter: {error}"))
+                })?,
+                None,
+                1,
+            )
+            .map_err(|error| {
+                config_error(format!("build session reflector search query: {error}"))
+            })?,
+        )
         .await
         .map_err(|error| {
             TraceDecayError::database_operation(
@@ -260,17 +260,29 @@ async fn validate_fact_proposal<A: FactCompatibilityStore>(
                 error,
             )
         })?;
-    let nearest = matches.first().map(|existing| {
-        json!({
-            "fact_id": existing.fact.fact_id,
-            "score": existing.score,
-            "category": existing.fact.category,
+    let nearest_match = matches.hits().first().and_then(|existing| {
+        existing.fact().payload().map(|payload| {
+            (
+                existing.fact().fact_id().as_str().to_owned(),
+                f64::from(existing.score_millionths()) / 1_000_000.0,
+                MemoryCategory::from(payload.category()),
+            )
         })
     });
-    if let Some(existing) = matches.first().filter(|result| result.score >= 0.90) {
+    let nearest = nearest_match.as_ref().map(|(fact_id, score, category)| {
+        json!({
+            "fact_id": fact_id,
+            "score": score,
+            "category": category,
+        })
+    });
+    if let Some((fact_id, score, _)) = nearest_match
+        .as_ref()
+        .filter(|(_, score, _)| *score >= 0.90)
+    {
         let reason = format!(
             "near duplicate of fact #{} with score {:.3}",
-            existing.fact.fact_id, existing.score
+            fact_id, score
         );
         return Ok(rejected_fact_with_validation(
             proposal,
@@ -392,11 +404,11 @@ fn rejected_unavailable_exact_duplicate(
     )
 }
 
-fn compatibility_availability_label(value: CompatibilityFactAvailabilityV1) -> &'static str {
+fn compatibility_availability_label(value: FactAvailability) -> &'static str {
     match value {
-        CompatibilityFactAvailabilityV1::Deleted => "deleted",
-        CompatibilityFactAvailabilityV1::Quarantined => "quarantined",
-        CompatibilityFactAvailabilityV1::Unavailable => "unavailable",
+        FactAvailability::Deleted => "deleted",
+        FactAvailability::Quarantined => "quarantined",
+        FactAvailability::Unavailable => "unavailable",
     }
 }
 

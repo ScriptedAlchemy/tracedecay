@@ -28,7 +28,7 @@ mod workflow;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetainedSurfaceOperation {
-    FactStore,
+    FactLineageStore,
     FactFeedback,
     MemoryStatus,
     SessionRefresh,
@@ -51,7 +51,7 @@ pub enum RetainedSurfaceOperation {
 
 impl RetainedSurfaceOperation {
     pub const ALL: [Self; 19] = [
-        Self::FactStore,
+        Self::FactLineageStore,
         Self::FactFeedback,
         Self::MemoryStatus,
         Self::SessionRefresh,
@@ -74,7 +74,7 @@ impl RetainedSurfaceOperation {
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::FactStore => "fact_store",
+            Self::FactLineageStore => "fact_store",
             Self::FactFeedback => "fact_feedback",
             Self::MemoryStatus => "memory_status",
             Self::SessionRefresh => "session_refresh",

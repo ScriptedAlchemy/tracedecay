@@ -4,9 +4,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
-    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalStateV1, FactCompatibilityStoreError, FactProposalStoreError,
-    FactStoreError,
+    FactLineageError, FactProposalPromotion, FactProposalRecord, FactProposalState,
+    FactProposalStoreError, FactStoreError,
 };
 
 use crate::application::memory::{MemoryApplication, MemoryApplicationError};
@@ -119,10 +118,10 @@ fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
 
 fn fact_list_unavailable_payload(error: &MemoryApplicationError) -> Option<Value> {
     let reason = match error {
-        MemoryApplicationError::Compatibility(
-            FactCompatibilityStoreError::Store(FactStoreError::Storage { source, .. })
-            | FactCompatibilityStoreError::Proposal(
-                FactProposalStoreError::Store(FactStoreError::Storage { source, .. })
+        MemoryApplicationError::FactStore(
+            FactStoreError::Store(FactLineageError::Storage { source, .. })
+            | FactStoreError::Proposal(
+                FactProposalStoreError::Store(FactLineageError::Storage { source, .. })
                 | FactProposalStoreError::Storage { source, .. },
             ),
         ) => {
@@ -132,19 +131,17 @@ fn fact_list_unavailable_payload(error: &MemoryApplicationError) -> Option<Value
                     .iter()
                     .any(|table| message.contains(table))
             {
-                "compatibility_proposal_bank_absent"
+                "fact_proposal_bank_absent"
             } else if message.contains("no such column") {
-                "compatibility_proposal_authority_incompatible"
+                "fact_proposal_authority_incompatible"
             } else {
-                "compatibility_proposal_authority_unavailable"
+                "fact_proposal_authority_unavailable"
             }
         }
-        MemoryApplicationError::Compatibility(
-            FactCompatibilityStoreError::Store(FactStoreError::Contract(_))
-            | FactCompatibilityStoreError::Proposal(FactProposalStoreError::Store(
-                FactStoreError::Contract(_),
-            )),
-        ) => "compatibility_proposal_authority_incompatible",
+        MemoryApplicationError::FactStore(
+            FactStoreError::Store(FactLineageError::Contract(_))
+            | FactStoreError::Proposal(FactProposalStoreError::Store(FactLineageError::Contract(_))),
+        ) => "fact_proposal_authority_incompatible",
         _ => return None,
     };
     Some(json!({
@@ -170,14 +167,14 @@ fn cli_reviewer() -> Result<ActorId> {
     })
 }
 
-fn parse_fact_proposal_state(value: &str) -> Result<CompatibilityFactProposalStateV1> {
+fn parse_fact_proposal_state(value: &str) -> Result<FactProposalState> {
     let normalized = value.trim().replace('-', "_");
     match normalized.as_str() {
-        "pending" | "pending_approval" => Ok(CompatibilityFactProposalStateV1::PendingApproval),
-        "applying" => Ok(CompatibilityFactProposalStateV1::Applying),
-        "applied" => Ok(CompatibilityFactProposalStateV1::Applied),
-        "rejected" | "rejected_validation" => Ok(CompatibilityFactProposalStateV1::Rejected),
-        "quarantined" => Ok(CompatibilityFactProposalStateV1::Quarantined),
+        "pending" | "pending_approval" => Ok(FactProposalState::PendingApproval),
+        "applying" => Ok(FactProposalState::Applying),
+        "applied" => Ok(FactProposalState::Applied),
+        "rejected" | "rejected_validation" => Ok(FactProposalState::Rejected),
+        "quarantined" => Ok(FactProposalState::Quarantined),
         _ => Err(TraceDecayError::Config {
             message: format!(
                 "invalid fact proposal state `{value}`; expected pending_approval, applying, applied, rejected, or quarantined"
@@ -186,17 +183,17 @@ fn parse_fact_proposal_state(value: &str) -> Result<CompatibilityFactProposalSta
     }
 }
 
-fn fact_proposal_state_name(state: CompatibilityFactProposalStateV1) -> &'static str {
+fn fact_proposal_state_name(state: FactProposalState) -> &'static str {
     match state {
-        CompatibilityFactProposalStateV1::PendingApproval => "pending_approval",
-        CompatibilityFactProposalStateV1::Applying => "applying",
-        CompatibilityFactProposalStateV1::Applied => "applied",
-        CompatibilityFactProposalStateV1::Rejected => "rejected",
-        CompatibilityFactProposalStateV1::Quarantined => "quarantined",
+        FactProposalState::PendingApproval => "pending_approval",
+        FactProposalState::Applying => "applying",
+        FactProposalState::Applied => "applied",
+        FactProposalState::Rejected => "rejected",
+        FactProposalState::Quarantined => "quarantined",
     }
 }
 
-fn fact_proposal_json(proposal: &CompatibilityFactProposalRecordV1) -> Value {
+fn fact_proposal_json(proposal: &FactProposalRecord) -> Value {
     let request = proposal.request();
     let mut value = Map::from_iter([
         (
@@ -227,12 +224,9 @@ fn fact_proposal_json(proposal: &CompatibilityFactProposalRecordV1) -> Value {
     ]);
     if let Some(fact_id) = proposal.applied_fact_id() {
         value.insert(
-            "applied_canonical_fact_id".to_owned(),
+            "applied_fact_id".to_owned(),
             Value::String(fact_id.as_str().to_owned()),
         );
-    }
-    if let Some(legacy_fact_id) = proposal.legacy_fact_id() {
-        value.insert("applied_fact_id".to_owned(), json!(legacy_fact_id));
     }
     if let Some(reviewer) = proposal.reviewer() {
         value.insert(
@@ -377,10 +371,7 @@ pub(super) async fn handle_admin_project(
                 .as_deref()
                 .map(parse_fact_proposal_state)
                 .transpose()?;
-            match memory
-                .list_compatibility_fact_proposals(state, None, limit)
-                .await
-            {
+            match memory.list_fact_proposals(state, None, limit).await {
                 Ok(page) => {
                     let proposals = page
                         .proposals()
@@ -405,7 +396,7 @@ pub(super) async fn handle_admin_project(
             let db = cg.open_project_store_db().await?;
             let memory = project_memory_application(cg, &db)?;
             let proposal = memory
-                .get_compatibility_fact_proposal(proposal_id)
+                .get_fact_proposal(proposal_id)
                 .await
                 .map_err(memory_application_error)?
                 .ok_or_else(|| TraceDecayError::Config {
@@ -418,13 +409,13 @@ pub(super) async fn handle_admin_project(
             let db = cg.open_project_store_db().await?;
             let memory = project_memory_application(cg, &db)?;
             let proposal = memory
-                .get_compatibility_fact_proposal(proposal_id.clone())
+                .get_fact_proposal(proposal_id.clone())
                 .await
                 .map_err(memory_application_error)?
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "fact proposal not found".to_string(),
                 })?;
-            let promotion = CompatibilityFactProposalPromotionV1::new(
+            let promotion = FactProposalPromotion::new(
                 memory.owner().clone(),
                 proposal_id,
                 proposal.revision(),
@@ -434,7 +425,7 @@ pub(super) async fn handle_admin_project(
                 message: format!("invalid fact proposal promotion: {error}"),
             })?;
             let proposal = memory
-                .promote_compatibility_fact_proposal(promotion)
+                .promote_fact_proposal(promotion)
                 .await
                 .map_err(memory_application_error)?;
             crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
@@ -449,14 +440,14 @@ pub(super) async fn handle_admin_project(
             let db = cg.open_project_store_db().await?;
             let memory = project_memory_application(cg, &db)?;
             let current = memory
-                .get_compatibility_fact_proposal(proposal_id.clone())
+                .get_fact_proposal(proposal_id.clone())
                 .await
                 .map_err(memory_application_error)?
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "fact proposal not found".to_string(),
                 })?;
             let proposal = memory
-                .reject_compatibility_fact_proposal(
+                .reject_fact_proposal(
                     proposal_id,
                     current.revision(),
                     cli_reviewer()?,
@@ -597,19 +588,19 @@ mod tests {
         serde_json::from_str(text).expect("admin project result should be valid JSON")
     }
 
-    async fn seed_compatibility_fact_proposal(
+    async fn seed_fact_proposal(
         cg: &TraceDecay,
         proposal_id: &str,
         content: &str,
-    ) -> CompatibilityFactProposalRecordV1 {
+    ) -> FactProposalRecord {
         use tracedecay_domain::{Confidence, FactCategoryV1};
-        use tracedecay_store::CompatibilityFactAddCommandV1;
+        use tracedecay_store::{FactAddCommand, FactProposalEvidence};
 
         let owner = cg.project_memory_owner().unwrap();
         let db = cg.open_project_store_db().await.unwrap();
         let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
         let actor = ActorId::new("automation.session-reflector".to_owned()).unwrap();
-        let request = CompatibilityFactAddCommandV1::new(
+        let request = FactAddCommand::new(
             owner,
             ProvenanceId::new(format!("automation.operation.{proposal_id}")).unwrap(),
             content.to_owned(),
@@ -623,34 +614,33 @@ mod tests {
         )
         .unwrap();
         memory
-            .submit_compatibility_fact_proposal(
+            .submit_fact_proposal(
                 ProvenanceId::new(proposal_id.to_owned()).unwrap(),
                 request,
                 Some(actor),
+                FactProposalEvidence::default(),
             )
             .await
             .unwrap()
     }
 
     #[test]
-    fn missing_compatibility_proposal_bank_is_a_typed_unavailable_list() {
-        let error = MemoryApplicationError::Compatibility(
-            tracedecay_store::FactCompatibilityStoreError::Store(
-                tracedecay_store::FactStoreError::Storage {
-                    operation: "read compatibility fact projection",
-                    source: Box::new(std::io::Error::other(
-                        "no such table: memory_v2_proposal_current",
-                    )),
-                },
-            ),
-        );
+    fn missing_fact_proposal_bank_is_a_typed_unavailable_list() {
+        let error = MemoryApplicationError::FactStore(tracedecay_store::FactStoreError::Store(
+            tracedecay_store::FactLineageError::Storage {
+                operation: "read fact projection",
+                source: Box::new(std::io::Error::other(
+                    "no such table: memory_v2_proposal_current",
+                )),
+            },
+        ));
 
         assert_eq!(
             fact_list_unavailable_payload(&error),
             Some(json!({
                 "availability": {
                     "state": "unavailable",
-                    "reason": "compatibility_proposal_bank_absent",
+                    "reason": "fact_proposal_bank_absent",
                 },
                 "count": 0,
                 "proposals": [],
@@ -682,13 +672,8 @@ mod tests {
 
         let apply_id = "proposal.rpc.apply";
         let reject_id = "proposal.rpc.reject";
-        seed_compatibility_fact_proposal(
-            &cg,
-            apply_id,
-            "Admin project RPC applies this durable fact",
-        )
-        .await;
-        seed_compatibility_fact_proposal(
+        seed_fact_proposal(&cg, apply_id, "Admin project RPC applies this durable fact").await;
+        seed_fact_proposal(
             &cg,
             reject_id,
             "Admin project RPC rejects this durable fact",
@@ -746,7 +731,6 @@ mod tests {
         assert_eq!(viewed["proposal"]["add_fact_request"]["trust"], json!(0.9));
         assert!(viewed["proposal"]["add_fact_request"]["source"].is_null());
         let viewed_proposal = viewed["proposal"].as_object().unwrap();
-        assert!(!viewed_proposal.contains_key("applied_canonical_fact_id"));
         assert!(!viewed_proposal.contains_key("applied_fact_id"));
 
         let fact = tool_json(
@@ -762,11 +746,10 @@ mod tests {
         assert_eq!(fact["proposal"]["proposal_id"], apply_id);
         assert_eq!(fact["proposal"]["state"], "applied");
         assert_eq!(fact["proposal"]["reviewer"], "cli");
-        assert!(fact["proposal"]["applied_canonical_fact_id"].is_string());
         let applied_proposal = fact["proposal"].as_object().unwrap();
         assert!(matches!(
             applied_proposal.get("applied_fact_id"),
-            None | Some(Value::Number(_))
+            Some(Value::String(_))
         ));
 
         let rejected = tool_json(
@@ -916,15 +899,15 @@ mod tests {
         assert!(matches!(fact, AdminProjectAction::FactApply { id } if id == "fact_1"));
         assert_eq!(
             parse_fact_proposal_state("pending_approval").unwrap(),
-            CompatibilityFactProposalStateV1::PendingApproval
+            FactProposalState::PendingApproval
         );
         assert_eq!(
             parse_fact_proposal_state("rejected_validation").unwrap(),
-            CompatibilityFactProposalStateV1::Rejected
+            FactProposalState::Rejected
         );
         assert_eq!(
             parse_fact_proposal_state(" rejected-validation ").unwrap(),
-            CompatibilityFactProposalStateV1::Rejected
+            FactProposalState::Rejected
         );
 
         let run = serde_json::from_value::<AdminProjectAction>(json!({

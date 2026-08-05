@@ -33,7 +33,8 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tracedecay_store::FactCompatibilityStore;
+use tracedecay_domain::Confidence;
+use tracedecay_store::{FactListQuery, FactProjection, FactStore};
 
 use super::config_error;
 use crate::application::memory::MemoryApplication;
@@ -41,7 +42,7 @@ use crate::automation::config::AutomationConfig;
 use crate::automation::skill_targets::SkillInstallTarget;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::hygiene::detect_secret_like;
-use crate::memory::types::{FactRecord, MemoryCategory};
+use crate::memory::types::MemoryCategory;
 use crate::tracedecay::current_timestamp;
 
 pub const MEMORY_DIGEST_START: &str = "<!-- TRACEDECAY MEMORY DIGEST START -->";
@@ -57,6 +58,15 @@ const MEMORY_DIGEST_BODY_PREAMBLE: &str = "Curated durable facts from TraceDecay
 pub const DEFAULT_DIGEST_MIN_TRUST: f64 = 0.6;
 /// Char budget for the composed digest body (Hermes MEMORY.md analogue).
 pub const DEFAULT_DIGEST_CHAR_BUDGET: usize = 2000;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DigestFact {
+    fact_id: String,
+    content: String,
+    category: MemoryCategory,
+    trust_score: f64,
+    updated_at: i64,
+}
 
 const SNAPSHOT_FILE: &str = "memory_digest.json";
 const TARGETS_FILE: &str = "memory_digest_targets.json";
@@ -200,9 +210,9 @@ pub fn detect_injection_like(content: &str) -> Option<String> {
 /// injection-like content, applies trust threshold and category filters, and
 /// sorts by trust band (best first), then newest first within a band.
 pub fn select_digest_facts(
-    mut facts: Vec<FactRecord>,
+    mut facts: Vec<DigestFact>,
     options: &MemoryDigestOptions,
-) -> Vec<FactRecord> {
+) -> Vec<DigestFact> {
     facts.retain(|fact| {
         fact.trust_score >= options.min_trust
             && options
@@ -238,7 +248,7 @@ fn truncate_chars(content: &str, max_chars: usize) -> String {
     truncated
 }
 
-fn render_fact_line(fact: &FactRecord) -> String {
+fn render_fact_line(fact: &DigestFact) -> String {
     let content = truncate_chars(&flatten_whitespace(&fact.content), MAX_FACT_LINE_CHARS);
     format!(
         "- ({}, trust {:.2}) {}",
@@ -252,7 +262,7 @@ fn render_fact_line(fact: &FactRecord) -> String {
 pub fn build_project_section(
     project_key: &str,
     project_label: &str,
-    facts: Vec<FactRecord>,
+    facts: Vec<DigestFact>,
     options: &MemoryDigestOptions,
 ) -> ProjectDigestSection {
     let selected = select_digest_facts(facts, options);
@@ -853,19 +863,43 @@ fn project_label_for_root(project_root: &Path) -> String {
 
 /// Regenerates the project's digest section from the memory store and
 /// re-exports the snapshot into all recorded host channels.
-pub async fn refresh_project_memory_digest<A: FactCompatibilityStore>(
+pub async fn refresh_project_memory_digest<A: FactStore>(
     profile_root: &Path,
     memory: &MemoryApplication<A>,
     project_root: &Path,
     options: &MemoryDigestOptions,
 ) -> Result<()> {
-    let category = None;
-    let facts = memory
-        .list_facts_untracked_v1(category, Some(options.min_trust), FACT_FETCH_LIMIT)
+    let min_trust = Confidence::new(options.min_trust)
+        .map_err(|error| config_error(format!("invalid memory digest trust threshold: {error}")))?;
+    let page = memory
+        .list_facts(
+            FactListQuery::new(
+                memory.owner().clone(),
+                None,
+                Some(min_trust),
+                None,
+                FACT_FETCH_LIMIT,
+            )
+            .map_err(|error| config_error(format!("build memory digest query: {error}")))?,
+        )
         .await
         .map_err(|error| {
             TraceDecayError::database_operation("list memory digest facts through authority", error)
         })?;
+    let facts = page
+        .facts()
+        .iter()
+        .filter_map(|projection| match projection {
+            FactProjection::Available(fact) => fact.payload().map(|payload| DigestFact {
+                fact_id: fact.fact_id().as_str().to_owned(),
+                content: payload.content().to_owned(),
+                category: payload.category().into(),
+                trust_score: fact.fact().trust().as_f64(),
+                updated_at: fact.fact().projected_as_of().0,
+            }),
+            FactProjection::Unavailable(_) => None,
+        })
+        .collect();
     let section = build_project_section(
         &project_key_for_root(project_root),
         &project_label_for_root(project_root),
@@ -881,7 +915,7 @@ pub async fn refresh_project_memory_digest<A: FactCompatibilityStore>(
 /// automation config allows export. When disabled, any existing section for
 /// that project is removed and recorded host channels are refreshed so stale
 /// facts disappear from prompts.
-pub async fn refresh_memory_digest_after_memory_change_for_profile<A: FactCompatibilityStore>(
+pub async fn refresh_memory_digest_after_memory_change_for_profile<A: FactStore>(
     profile_root: &Path,
     memory: &MemoryApplication<A>,
     project_root: &Path,
@@ -904,7 +938,7 @@ pub async fn refresh_memory_digest_after_memory_change_for_profile<A: FactCompat
 /// Non-fatal wrapper for memory-mutating apply paths: resolves the profile
 /// root from the environment, honors the config gate, and logs (rather than
 /// propagates) failures so digest refresh never breaks an apply.
-pub async fn refresh_memory_digest_after_memory_change<A: FactCompatibilityStore>(
+pub async fn refresh_memory_digest_after_memory_change<A: FactStore>(
     memory: &MemoryApplication<A>,
     project_root: &Path,
 ) {

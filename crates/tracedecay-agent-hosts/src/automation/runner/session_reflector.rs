@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracedecay_domain::FactOwnerV1;
-use tracedecay_store::FactCompatibilityStore;
+use tracedecay_store::FactStore;
 
 use super::user_automation_root;
 use crate::application::memory::MemoryApplication;
@@ -27,7 +27,7 @@ use crate::automation::session_reflector::validate_fact_proposals;
 use crate::errors::{Result, TraceDecayError};
 use crate::ports::project_runtime::ProfileRuntime;
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
-use crate::store::memory::DatabaseFactStore;
+use crate::store::memory::{DatabaseFactStore, ProjectFactStore};
 use crate::tracedecay::{TraceDecay, current_timestamp};
 use tracedecay_global_db::RegisteredGlobalDb;
 
@@ -167,7 +167,7 @@ pub(super) fn build_session_reflector_prompt(evidence: &Value) -> String {
     )
 }
 
-pub(super) async fn validate_session_fact_proposals<A: FactCompatibilityStore>(
+pub(super) async fn validate_session_fact_proposals<A: FactStore>(
     memory: &MemoryApplication<A>,
     proposals: &[Value],
     evidence: &Value,
@@ -175,10 +175,9 @@ pub(super) async fn validate_session_fact_proposals<A: FactCompatibilityStore>(
     validate_fact_proposals(memory, proposals, evidence).await
 }
 
-pub(super) async fn auto_apply_session_fact_proposals<A: FactCompatibilityStore>(
+pub(super) async fn auto_apply_session_fact_proposals<A: FactStore>(
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
-    dashboard_root: &std::path::Path,
     proposal_records: Vec<FactProposalRecord>,
 ) -> Result<(Vec<FactProposalRecord>, bool)> {
     let mut applied = Vec::with_capacity(proposal_records.len());
@@ -190,7 +189,6 @@ pub(super) async fn auto_apply_session_fact_proposals<A: FactCompatibilityStore>
         }
         let result = match apply_fact_proposal_with_result(
             memory,
-            dashboard_root,
             &record.proposal_id,
             Some("session_reflector:auto_apply".to_string()),
         )
@@ -210,7 +208,7 @@ pub(super) async fn auto_apply_session_fact_proposals<A: FactCompatibilityStore>
     Ok((applied, newly_promoted))
 }
 
-async fn refresh_auto_apply_digest_for_new_promotions<A: FactCompatibilityStore>(
+async fn refresh_auto_apply_digest_for_new_promotions<A: FactStore>(
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
     newly_promoted: bool,
@@ -276,7 +274,7 @@ pub(super) struct ProposedAgentOutput<'a> {
     pub(super) proposals: &'a [Value],
 }
 
-pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore>(
+pub(super) async fn finalize_session_reflector_success<A: FactStore>(
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
     finalizer: &AgentRunFinalizer<'_>,
@@ -290,7 +288,6 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
         proposed_ops,
         proposals,
     } = output;
-    let dashboard_root = finalizer.dashboard_root();
     let run_id = finalizer.run_id();
     let (accepted_facts, rejected_facts) =
         validate_session_fact_proposals(memory, proposals, evidence).await?;
@@ -298,7 +295,6 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
     let rejected_count = rejected_facts.len();
     let mut proposal_records = record_session_fact_proposals(
         memory,
-        dashboard_root,
         run_id,
         evidence_hash.as_deref(),
         &accepted_facts,
@@ -310,7 +306,6 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
         let (records, _) = auto_apply_session_fact_proposals(
             memory,
             digest_root,
-            dashboard_root,
             std::mem::take(&mut proposal_records),
         )
         .await?;
@@ -330,15 +325,10 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
         .filter(|record| record.state == FactProposalState::Applied)
         .map(|record| record.proposal_id.clone())
         .collect();
-    let applied_canonical_fact_ids: Vec<String> = applied_fact_proposals
+    let applied_fact_ids: Vec<String> = applied_fact_proposals
         .iter()
         .filter(|record| record.state == FactProposalState::Applied)
-        .filter_map(|record| record.applied_canonical_fact_id.clone())
-        .collect();
-    let applied_legacy_fact_ids: Vec<i64> = applied_fact_proposals
-        .iter()
-        .filter(|record| record.state == FactProposalState::Applied)
-        .filter_map(|record| record.applied_fact_id)
+        .filter_map(|record| record.applied_fact_id.clone())
         .collect();
     let applied_count = applied_proposal_ids.len();
     let fully_applied = accepted_count > 0 && applied_count == accepted_count;
@@ -349,20 +339,7 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
             "applied_proposal_ids".to_string(),
             json!(applied_proposal_ids),
         );
-        object.insert(
-            "applied_canonical_fact_ids".to_string(),
-            json!(applied_canonical_fact_ids),
-        );
-        // Compatibility-only numeric mappings. Canonical IDs above are the
-        // primary fact identities reported by session reflection.
-        object.insert(
-            "applied_legacy_fact_ids".to_string(),
-            json!(applied_legacy_fact_ids),
-        );
-        object.insert(
-            "applied_fact_ids".to_string(),
-            json!(applied_legacy_fact_ids),
-        );
+        object.insert("applied_fact_ids".to_string(), json!(applied_fact_ids));
         object.insert("applied_count".to_string(), json!(applied_count));
         object.insert("fully_applied".to_string(), json!(fully_applied));
     }
@@ -433,7 +410,7 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn run_session_reflector_for_store<A: FactCompatibilityStore>(
+pub(super) async fn run_session_reflector_for_store<A: FactStore>(
     dashboard_root: PathBuf,
     sessions_db: Arc<RegisteredGlobalDb>,
     retrieval: &dyn AutomationSessionRetrieval,
@@ -578,13 +555,16 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
     let sessions_db = super::project_automation_sessions(cg).await?;
-    let memory =
-        MemoryApplication::new(cg.project_memory_owner()?, DatabaseFactStore::new(cg.db()))
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "could not initialize project session reflector memory authority: {error}"
-                ),
-            })?;
+    let project_memory = cg.open_project_store_db().await?;
+    let memory = MemoryApplication::new(
+        cg.project_memory_owner()?,
+        ProjectFactStore::owned(Box::new(project_memory)),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "could not initialize project session reflector memory authority: {error}"
+        ),
+    })?;
     run_session_reflector_for_store(
         cg.store_layout().dashboard_root.clone(),
         sessions_db,

@@ -4,8 +4,7 @@ use thiserror::Error;
 
 use tracedecay_domain::{DomainError, FactOwnerV1, SourceStoreId};
 use tracedecay_store::{
-    CompatibilityFeedbackRepairProgressV1, FactCompatibilityStoreError, FactProposalStoreError,
-    FactStoreError,
+    FactLineageError, FactProposalStoreError, FactStoreError, FeedbackRepairProgress,
 };
 
 use super::anchors::EvidenceAnchorResolutionError;
@@ -22,11 +21,11 @@ pub enum MemoryApplicationError {
         request_owner: FactOwnerV1,
     },
     #[error("fact store operation failed")]
-    Store(#[from] FactStoreError),
+    Store(#[from] FactLineageError),
     #[error("memory authority operation failed")]
     Authority(#[from] FactProposalStoreError),
-    #[error("memory compatibility authority operation failed")]
-    Compatibility(#[from] FactCompatibilityStoreError),
+    #[error("fact authority operation failed")]
+    FactStore(#[from] FactStoreError),
     #[error("memory compatibility input is invalid: {invariant}")]
     InvalidCompatibilityInput { invariant: &'static str },
     #[error("memory compatibility projection cannot be represented by the V1 surface: {invariant}")]
@@ -34,9 +33,7 @@ pub enum MemoryApplicationError {
     #[error("memory authority returned a result violating {invariant}")]
     InvalidAuthorityResult { invariant: &'static str },
     #[error("memory feedback history is unavailable while repair is {progress:?}")]
-    FeedbackHistoryUnavailable {
-        progress: CompatibilityFeedbackRepairProgressV1,
-    },
+    FeedbackHistoryUnavailable { progress: FeedbackRepairProgress },
     #[error("evidence anchor resolution failed")]
     EvidenceAnchor(#[from] EvidenceAnchorResolutionError),
 }

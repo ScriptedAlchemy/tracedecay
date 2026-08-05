@@ -107,23 +107,13 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
-    let pending = list_fact_proposals(
-        &memory,
-        &cg.store_layout().dashboard_root,
-        Some(FactProposalState::PendingApproval),
-        10,
-    )
-    .await
-    .unwrap();
+    let pending = list_fact_proposals(&memory, Some(FactProposalState::PendingApproval), 10)
+        .await
+        .unwrap();
     assert!(pending.is_empty());
-    let proposals = list_fact_proposals(
-        &memory,
-        &cg.store_layout().dashboard_root,
-        Some(FactProposalState::Applied),
-        10,
-    )
-    .await
-    .unwrap();
+    let proposals = list_fact_proposals(&memory, Some(FactProposalState::Applied), 10)
+        .await
+        .unwrap();
     assert!(proposals.is_empty());
     assert!(
         !profile_root
@@ -173,7 +163,7 @@ async fn combined_review_fails_closed_before_cross_authority_proposal_writes() {
     )
     .unwrap();
     assert!(
-        list_fact_proposals(&memory, &cg.store_layout().dashboard_root, None, 10,)
+        list_fact_proposals(&memory, None, 10)
             .await
             .unwrap()
             .is_empty()

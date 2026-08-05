@@ -1,18 +1,16 @@
-//! Proposal digests and submit/advance/reject/replay transitions.
+//! Proposal digests, submit/advance/reject/replay transitions, and legacy import.
 
-use super::super::crud::{compatibility_payload_metadata, proposal_transition_id};
+use super::super::crud::{payload_metadata, proposal_transition_id};
 use super::super::envelope::{
-    CompatibilityOperationReceiptV1, compatibility_digest,
-    compatibility_lookup_operation_receipt_tx, compatibility_record_operation_receipt_tx,
+    OperationReceipt, digest, lookup_operation_receipt_tx, record_operation_receipt_tx,
 };
 use super::super::primitives::{
-    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_category_label, compatibility_now,
-    row_string, storage_error, storage_message, to_json,
+    FACT_WRITE_OPERATION, OwnerKey, category_label, now, row_string, storage_error,
+    storage_message, to_json,
 };
 use super::{
-    compatibility_proposal_action_id, compatibility_proposal_record_tx,
-    compatibility_proposal_request_value, compatibility_proposal_state_label,
-    compatibility_proposal_transition_json,
+    proposal_action_id, proposal_record_tx, proposal_request_value, proposal_state_label,
+    proposal_transition_json,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
@@ -21,32 +19,29 @@ use tracedecay_domain::{
     ActorId, FactAssertionId, FactEventId, FactId, FactOwnerV1, ProvenanceId, UtcMicros,
 };
 use tracedecay_store::{
-    CompatibilityFactAddCommandV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1, FactCompatibilityResult,
-    FactStoreError, FactStoreResult,
+    FactAddCommand, FactLineageError, FactLineageResult, FactProposalEvidence, FactProposalRecord,
+    FactProposalRevision, FactProposalState, FactStoreResult,
 };
-fn compatibility_proposal_request_digest(
-    request: &CompatibilityFactAddCommandV1,
-) -> FactStoreResult<String> {
-    compatibility_digest(json!({
+fn proposal_request_digest(request: &FactAddCommand) -> FactLineageResult<String> {
+    digest(json!({
         "owner": request.owner(),
         "content": request.content(),
-        "category": compatibility_category_label(request.category()),
+        "category": category_label(request.category()),
         "source": request.source(),
         "tags": request.tags(),
         "entities": request.entities(),
-        "metadata": compatibility_payload_metadata(request.metadata()),
+        "metadata": payload_metadata(request.metadata()),
         "automation_run_id": request.automation_run_id(),
         "default_trust": request.default_trust().as_f64(),
         "actor": request.actor().map(ActorId::as_str),
     }))
 }
 
-async fn compatibility_proposal_digest_tx(
+async fn proposal_digest_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
-) -> FactStoreResult<Option<String>> {
+) -> FactLineageResult<Option<String>> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -55,25 +50,25 @@ async fn compatibility_proposal_digest_tx(
             params![proposal_id.as_str(), key.kind, key.project_id.as_str()],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?
     else {
         return Ok(None);
     };
-    if row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)? != key.json {
-        return Err(FactStoreError::OwnerMismatch);
+    if row_string(&row, 0, FACT_WRITE_OPERATION)? != key.json {
+        return Err(FactLineageError::OwnerMismatch);
     }
-    Ok(Some(row_string(&row, 1, COMPATIBILITY_WRITE_OPERATION)?))
+    Ok(Some(row_string(&row, 1, FACT_WRITE_OPERATION)?))
 }
 
-async fn compatibility_proposal_for_digest_tx(
+async fn proposal_for_digest_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     request_digest: &str,
-) -> FactStoreResult<Option<ProvenanceId>> {
+) -> FactLineageResult<Option<ProvenanceId>> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -82,81 +77,79 @@ async fn compatibility_proposal_for_digest_tx(
             params![key.kind, key.project_id.as_str(), request_digest],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?
     else {
         return Ok(None);
     };
-    if row_string(&row, 1, COMPATIBILITY_WRITE_OPERATION)? != key.json {
-        return Err(FactStoreError::OwnerMismatch);
+    if row_string(&row, 1, FACT_WRITE_OPERATION)? != key.json {
+        return Err(FactLineageError::OwnerMismatch);
     }
-    ProvenanceId::new(row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?)
+    ProvenanceId::new(row_string(&row, 0, FACT_WRITE_OPERATION)?)
         .map(Some)
-        .map_err(FactStoreError::from)
+        .map_err(FactLineageError::from)
 }
 
-fn compatibility_proposal_receipt_proposal_id(
-    receipt: &CompatibilityOperationReceiptV1,
-) -> FactStoreResult<ProvenanceId> {
+fn proposal_receipt_proposal_id(receipt: &OperationReceipt) -> FactLineageResult<ProvenanceId> {
     let proposal_id = receipt
         .receipt
         .get("proposal_id")
         .and_then(Value::as_str)
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                "compatibility proposal receipt is missing its proposal identity",
+                FACT_WRITE_OPERATION,
+                "fact proposal receipt is missing its proposal identity",
             )
         })?;
-    ProvenanceId::new(proposal_id.to_owned()).map_err(FactStoreError::from)
+    ProvenanceId::new(proposal_id.to_owned()).map_err(FactLineageError::from)
 }
 
-pub(in crate::store::memory) async fn compatibility_replay_proposal_tx(
+pub(in crate::store::memory) async fn replay_proposal_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
-    let proposal_id = compatibility_proposal_receipt_proposal_id(receipt)?;
-    compatibility_proposal_record_tx(transaction, owner, &proposal_id)
+    receipt: &OperationReceipt,
+) -> FactStoreResult<FactProposalRecord> {
+    let proposal_id = proposal_receipt_proposal_id(receipt)?;
+    proposal_record_tx(transaction, owner, &proposal_id)
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                "compatibility proposal replay target is missing",
+                FACT_WRITE_OPERATION,
+                "fact proposal replay target is missing",
             )
             .into()
         })
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn compatibility_insert_proposal_tx(
+async fn insert_proposal_tx(
     transaction: &Transaction<'_>,
     proposal_id: &ProvenanceId,
-    request: &CompatibilityFactAddCommandV1,
+    request: &FactAddCommand,
     idempotency_key: &ProvenanceId,
     request_digest: &str,
-    evidence: &Value,
-    state: CompatibilityFactProposalStateV1,
+    evidence: &FactProposalEvidence,
+    state: FactProposalState,
     reviewer: Option<&ActorId>,
     reason: Option<&str>,
     origin: &'static str,
     occurred_at: UtcMicros,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     let key = OwnerKey::new(request.owner())?;
-    let state_label = compatibility_proposal_state_label(state);
+    let state_label = proposal_state_label(state);
     if matches!(
         state,
-        CompatibilityFactProposalStateV1::Applying | CompatibilityFactProposalStateV1::Applied
+        FactProposalState::Applying | FactProposalState::Applied
     ) {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
-            "compatibility proposal initial state is not durable in V22",
+            FACT_WRITE_OPERATION,
+            "fact proposal initial state is not durable",
         ));
     }
-    let transition_json = compatibility_proposal_transition_json(
+    let transition_json = proposal_transition_json(
         proposal_id,
         None,
         state_label,
@@ -168,13 +161,13 @@ async fn compatibility_insert_proposal_tx(
     )?;
     let transition_id = proposal_transition_id(&transition_json);
     let reviewer_json = reviewer
-        .map(|value| to_json(value, "serialize compatibility proposal reviewer"))
+        .map(|value| to_json(value, "serialize fact proposal reviewer"))
         .transpose()?;
     let validation_json = reason
         .map(|value| {
             to_json(
                 &json!({ "reason": value }),
-                "serialize compatibility proposal validation",
+                "serialize fact proposal validation",
             )
         })
         .transpose()?;
@@ -192,15 +185,15 @@ async fn compatibility_insert_proposal_tx(
                 idempotency_key.as_str(),
                 request_digest,
                 to_json(
-                    &compatibility_proposal_request_value(request),
-                    "serialize compatibility proposal request",
+                    &proposal_request_value(request),
+                    "serialize fact proposal request",
                 )?,
-                to_json(evidence, "serialize compatibility proposal evidence")?,
+                to_json(evidence, "serialize fact proposal evidence")?,
                 occurred_at.0,
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     transaction
         .execute(
             "INSERT INTO memory_v2_proposal_transitions(
@@ -224,7 +217,7 @@ async fn compatibility_insert_proposal_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     transaction
         .execute(
             "INSERT INTO memory_v2_proposal_current(
@@ -241,18 +234,18 @@ async fn compatibility_insert_proposal_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
+pub(in crate::store::memory) async fn advance_proposal_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
-    expected_state: CompatibilityFactProposalStateV1,
-    expected_revision: CompatibilityFactProposalRevisionV1,
-    state: CompatibilityFactProposalStateV1,
+    expected_state: FactProposalState,
+    expected_revision: FactProposalRevision,
+    state: FactProposalState,
     reviewer: Option<&ActorId>,
     reason: Option<&str>,
     request_digest: &str,
@@ -260,11 +253,11 @@ pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
     promoted_assertion_id: Option<&FactAssertionId>,
     promoted_event_id: Option<&FactEventId>,
     occurred_at: UtcMicros,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     let key = OwnerKey::new(owner)?;
-    let expected_label = compatibility_proposal_state_label(expected_state);
-    let state_label = compatibility_proposal_state_label(state);
-    let applied = state == CompatibilityFactProposalStateV1::Applied;
+    let expected_label = proposal_state_label(expected_state);
+    let state_label = proposal_state_label(state);
+    let applied = state == FactProposalState::Applied;
     if applied != (promoted_fact_id.is_some() && promoted_event_id.is_some())
         || (!applied
             && (promoted_fact_id.is_some()
@@ -272,11 +265,11 @@ pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
                 || promoted_event_id.is_some()))
     {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
-            "compatibility proposal transition has inconsistent promoted identities",
+            FACT_WRITE_OPERATION,
+            "fact proposal transition has inconsistent promoted identities",
         ));
     }
-    let transition_json = compatibility_proposal_transition_json(
+    let transition_json = proposal_transition_json(
         proposal_id,
         Some(expected_label),
         state_label,
@@ -288,13 +281,13 @@ pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
     )?;
     let transition_id = proposal_transition_id(&transition_json);
     let reviewer_json = reviewer
-        .map(|value| to_json(value, "serialize compatibility proposal reviewer"))
+        .map(|value| to_json(value, "serialize fact proposal reviewer"))
         .transpose()?;
     let validation_json = reason
         .map(|value| {
             to_json(
                 &json!({ "reason": value }),
-                "serialize compatibility proposal validation",
+                "serialize fact proposal validation",
             )
         })
         .transpose()?;
@@ -324,7 +317,7 @@ pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     let changed = transaction
         .execute(
             "UPDATE memory_v2_proposal_current
@@ -342,31 +335,32 @@ pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
                 expected_label,
                 i64::try_from(expected_revision.get()).map_err(|_| {
                     storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        "compatibility proposal revision exceeds storage range",
+                        FACT_WRITE_OPERATION,
+                        "fact proposal revision exceeds storage range",
                     )
                 })?,
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     if changed != 1 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
-            "compatibility proposal revision or state changed before transition",
+            FACT_WRITE_OPERATION,
+            "fact proposal revision or state changed before transition",
         ));
     }
     Ok(())
 }
 
-pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
+pub(in crate::store::memory) async fn submit_fact_proposal_tx(
     transaction: &Transaction<'_>,
     proposal_id: ProvenanceId,
-    request: &CompatibilityFactAddCommandV1,
+    request: &FactAddCommand,
     submitter: Option<&ActorId>,
-) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
-    let request_digest = compatibility_proposal_request_digest(request)?;
-    if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
+    evidence: &FactProposalEvidence,
+) -> FactStoreResult<FactProposalRecord> {
+    let request_digest = proposal_request_digest(request)?;
+    if let Some(receipt) = lookup_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
@@ -375,31 +369,31 @@ pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
     )
     .await?
     {
-        return compatibility_replay_proposal_tx(transaction, request.owner(), &receipt).await;
+        return replay_proposal_tx(transaction, request.owner(), &receipt).await;
     }
     if let Some(existing_digest) =
-        compatibility_proposal_digest_tx(transaction, request.owner(), &proposal_id).await?
+        proposal_digest_tx(transaction, request.owner(), &proposal_id).await?
     {
         if existing_digest != request_digest {
             return Err(storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                "compatibility proposal id was reused with a different request",
+                FACT_WRITE_OPERATION,
+                "fact proposal id was reused with a different request",
             )
             .into());
         }
-        let proposal = compatibility_proposal_record_tx(transaction, request.owner(), &proposal_id)
+        let proposal = proposal_record_tx(transaction, request.owner(), &proposal_id)
             .await?
             .ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
-                    "compatibility proposal record is missing after identity lookup",
+                    FACT_WRITE_OPERATION,
+                    "fact proposal record is missing after identity lookup",
                 )
             })?;
         let receipt = json!({
             "proposal_id": proposal.proposal_id().as_str(),
-            "state": compatibility_proposal_state_label(proposal.state()),
+            "state": proposal_state_label(proposal.state()),
         });
-        compatibility_record_operation_receipt_tx(
+        record_operation_receipt_tx(
             transaction,
             request.owner(),
             request.operation_id(),
@@ -408,27 +402,27 @@ pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
             proposal.applied_fact_id(),
             None,
             &receipt,
-            compatibility_now()?,
+            now()?,
         )
         .await?;
         return Ok(proposal);
     }
     if let Some(existing_id) =
-        compatibility_proposal_for_digest_tx(transaction, request.owner(), &request_digest).await?
+        proposal_for_digest_tx(transaction, request.owner(), &request_digest).await?
     {
-        let proposal = compatibility_proposal_record_tx(transaction, request.owner(), &existing_id)
+        let proposal = proposal_record_tx(transaction, request.owner(), &existing_id)
             .await?
             .ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
-                    "compatibility proposal record is missing after digest lookup",
+                    FACT_WRITE_OPERATION,
+                    "fact proposal record is missing after digest lookup",
                 )
             })?;
         let receipt = json!({
             "proposal_id": proposal.proposal_id().as_str(),
-            "state": compatibility_proposal_state_label(proposal.state()),
+            "state": proposal_state_label(proposal.state()),
         });
-        compatibility_record_operation_receipt_tx(
+        record_operation_receipt_tx(
             transaction,
             request.owner(),
             request.operation_id(),
@@ -437,20 +431,20 @@ pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
             proposal.applied_fact_id(),
             None,
             &receipt,
-            compatibility_now()?,
+            now()?,
         )
         .await?;
         return Ok(proposal);
     }
-    let now = compatibility_now()?;
-    compatibility_insert_proposal_tx(
+    let now = now()?;
+    insert_proposal_tx(
         transaction,
         &proposal_id,
         request,
         request.operation_id(),
         &request_digest,
-        &json!({ "kind": "compatibility-proposal-v1" }),
-        CompatibilityFactProposalStateV1::PendingApproval,
+        evidence,
+        FactProposalState::PendingApproval,
         submitter,
         None,
         "runtime",
@@ -458,7 +452,7 @@ pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
     )
     .await?;
     let receipt = json!({ "proposal_id": proposal_id.as_str(), "state": "pending" });
-    compatibility_record_operation_receipt_tx(
+    record_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
@@ -470,10 +464,10 @@ pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
         now,
     )
     .await?;
-    compatibility_replay_proposal_tx(
+    replay_proposal_tx(
         transaction,
         request.owner(),
-        &CompatibilityOperationReceiptV1 {
+        &OperationReceipt {
             fact_id: None,
             event_id: None,
             receipt,
@@ -482,18 +476,18 @@ pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
     .await
 }
 
-pub(in crate::store::memory) async fn reject_compatibility_fact_proposal_tx(
+pub(in crate::store::memory) async fn reject_fact_proposal_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
-    expected_revision: CompatibilityFactProposalRevisionV1,
+    expected_revision: FactProposalRevision,
     reviewer: &ActorId,
     reason: &str,
-) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
+) -> FactStoreResult<FactProposalRecord> {
     if reason.trim().is_empty() || reason.len() > 4_096 {
         return Err(
-            FactStoreError::Contract(tracedecay_domain::DomainError::NonCanonical {
-                field: "compatibility fact proposal reason",
+            FactLineageError::Contract(tracedecay_domain::DomainError::NonCanonical {
+                field: "fact proposal reason",
             })
             .into(),
         );
@@ -504,9 +498,9 @@ pub(in crate::store::memory) async fn reject_compatibility_fact_proposal_tx(
         "reviewer": reviewer.as_str(),
         "reason": reason,
     });
-    let request_digest = compatibility_digest(material.clone())?;
-    let operation_id = compatibility_proposal_action_id("proposal-reject", material)?;
-    if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
+    let request_digest = digest(material.clone())?;
+    let operation_id = proposal_action_id("proposal-reject", material)?;
+    if let Some(receipt) = lookup_operation_receipt_tx(
         transaction,
         owner,
         &operation_id,
@@ -515,33 +509,28 @@ pub(in crate::store::memory) async fn reject_compatibility_fact_proposal_tx(
     )
     .await?
     {
-        return compatibility_replay_proposal_tx(transaction, owner, &receipt).await;
+        return replay_proposal_tx(transaction, owner, &receipt).await;
     }
-    let proposal = compatibility_proposal_record_tx(transaction, owner, proposal_id)
+    let proposal = proposal_record_tx(transaction, owner, proposal_id)
         .await?
-        .ok_or_else(|| {
-            storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                "compatibility proposal is missing",
-            )
-        })?;
-    if proposal.state() != CompatibilityFactProposalStateV1::PendingApproval
+        .ok_or_else(|| storage_message(FACT_WRITE_OPERATION, "fact proposal is missing"))?;
+    if proposal.state() != FactProposalState::PendingApproval
         || proposal.revision() != expected_revision
     {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
-            "compatibility proposal revision or state changed before rejection",
+            FACT_WRITE_OPERATION,
+            "fact proposal revision or state changed before rejection",
         )
         .into());
     }
-    let now = compatibility_now()?;
-    compatibility_advance_proposal_tx(
+    let now = now()?;
+    advance_proposal_tx(
         transaction,
         owner,
         proposal_id,
-        CompatibilityFactProposalStateV1::PendingApproval,
+        FactProposalState::PendingApproval,
         expected_revision,
-        CompatibilityFactProposalStateV1::Rejected,
+        FactProposalState::Rejected,
         Some(reviewer),
         Some(reason),
         &request_digest,
@@ -556,7 +545,7 @@ pub(in crate::store::memory) async fn reject_compatibility_fact_proposal_tx(
         "state": "rejected",
         "revision": expected_revision.get().saturating_add(1),
     });
-    compatibility_record_operation_receipt_tx(
+    record_operation_receipt_tx(
         transaction,
         owner,
         &operation_id,
@@ -568,10 +557,10 @@ pub(in crate::store::memory) async fn reject_compatibility_fact_proposal_tx(
         now,
     )
     .await?;
-    compatibility_replay_proposal_tx(
+    replay_proposal_tx(
         transaction,
         owner,
-        &CompatibilityOperationReceiptV1 {
+        &OperationReceipt {
             fact_id: None,
             event_id: None,
             receipt,

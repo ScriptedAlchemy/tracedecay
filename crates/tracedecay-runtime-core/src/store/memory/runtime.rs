@@ -4,17 +4,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay_domain::{FactEventId, FactOwnerV1, UtcMicros, canonical_sha256};
 use tracedecay_store::{
     CommandDigestV1, ConsistencyModeV1, DurabilityClassV1, FactCommitConflict, FactCommitOutcome,
-    FactCommitReceipt, FactCurrentQuery, FactLineageQuery, FactReadOperationV1, FactReadResultV1,
-    FactStoreError, FactStoreResult, FactWriteBatch, IdempotencyIdentityV1, OperationPriorityV1,
-    ProjectReadOperationV1, ProjectReadResultV1, RepositoryOperationEnvelopeV1,
-    RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
-    RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
-    RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
-    RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
-    StoreOperationMetadataV1, StoreRuntimeBindingV1, StoreShardScopeV1, StoredFactV1,
-    VerifiedStoreLocatorV1,
+    FactCommitReceipt, FactCurrentQuery, FactLineageError, FactLineageQuery, FactLineageResult,
+    FactReadOperationV1, FactReadResultV1, FactWriteBatch, IdempotencyIdentityV1,
+    OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1,
+    RepositoryOperationEnvelopeV1, RepositoryReadOperationV1, RepositoryReadResultV1,
+    RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1,
+    StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, StoreShardScopeV1,
+    StoredFactV1, VerifiedStoreLocatorV1,
 };
 
 use super::Database;
@@ -26,7 +26,9 @@ const COMMIT_OPERATION: &str = "commit fact through storage runtime";
 const CURRENT_OPERATION: &str = "query current fact through storage runtime";
 const LINEAGE_OPERATION: &str = "query fact lineage through storage runtime";
 
-pub(super) fn retained_fact_runtime(db: &Database) -> FactStoreResult<Option<&StoreRuntimeHandle>> {
+pub(super) fn retained_fact_runtime(
+    db: &Database,
+) -> FactLineageResult<Option<&StoreRuntimeHandle>> {
     let runtime = db.retained_runtime();
     if !fact_capable_scope(&runtime.binding().shard_id.scope) {
         return Ok(None);
@@ -35,7 +37,7 @@ pub(super) fn retained_fact_runtime(db: &Database) -> FactStoreResult<Option<&St
     Ok(Some(runtime))
 }
 
-fn validate_mount(db: &Database, runtime: &StoreRuntimeHandle) -> FactStoreResult<()> {
+fn validate_mount(db: &Database, runtime: &StoreRuntimeHandle) -> FactLineageResult<()> {
     let current_file_identity = crate::db::sqlite_generation_identity(db.canonical_database_path())
         .map_err(|error| {
             runtime_error(
@@ -62,7 +64,7 @@ fn validate_mount_parts(
     runtime_path: &std::path::Path,
     runtime_opened_file_identity: Option<u64>,
     current_file_identity: u64,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     if locator.shard_id != binding.shard_id
         || locator.incarnation != binding.incarnation
         || runtime_path != database_path
@@ -100,7 +102,7 @@ fn validate_owner_binding(
     binding: &StoreRuntimeBindingV1,
     owner: &FactOwnerV1,
     operation: &'static str,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     let exact = match (&binding.shard_id.scope, owner) {
         (StoreShardScopeV1::ProfileMemory, FactOwnerV1::Profile) => true,
         (
@@ -127,7 +129,7 @@ pub(super) async fn commit_fact(
     db: &Database,
     runtime: &StoreRuntimeHandle,
     batch: FactWriteBatch,
-) -> FactStoreResult<FactCommitOutcome> {
+) -> FactLineageResult<FactCommitOutcome> {
     validate_owner_binding(runtime.binding(), batch.owner(), COMMIT_OPERATION)?;
     let command = fact_command(&batch);
     let digest = canonical_sha256(&command)
@@ -136,7 +138,7 @@ pub(super) async fn commit_fact(
         .events()
         .last()
         .map(tracedecay_domain::FactLineageEventV1::event_id)
-        .ok_or(FactStoreError::EmptyBatch)?
+        .ok_or(FactLineageError::EmptyBatch)?
         .clone();
     let idempotency_key = format!(
         "fact.{}.{}",
@@ -203,7 +205,7 @@ fn finish_commit_outcome(
     last_event_id: FactEventId,
     current: Option<StoredFactV1>,
     replay: bool,
-) -> FactStoreResult<FactCommitOutcome> {
+) -> FactLineageResult<FactCommitOutcome> {
     if current
         .as_ref()
         .is_some_and(|current| current.last_event_id() != &last_event_id)
@@ -235,7 +237,7 @@ fn finish_commit_outcome(
 pub(super) fn query_fact_current(
     runtime: &StoreRuntimeHandle,
     query: FactCurrentQuery,
-) -> FactStoreResult<Option<StoredFactV1>> {
+) -> FactLineageResult<Option<StoredFactV1>> {
     validate_owner_binding(runtime.binding(), query.owner(), CURRENT_OPERATION)?;
     match dispatch_fact_read(
         runtime,
@@ -253,7 +255,7 @@ pub(super) fn query_fact_current(
 pub(super) fn query_fact_lineage(
     runtime: &StoreRuntimeHandle,
     query: FactLineageQuery,
-) -> FactStoreResult<Vec<tracedecay_domain::FactLineageEventV1>> {
+) -> FactLineageResult<Vec<tracedecay_domain::FactLineageEventV1>> {
     validate_owner_binding(runtime.binding(), query.owner(), LINEAGE_OPERATION)?;
     match dispatch_fact_read(
         runtime,
@@ -272,7 +274,7 @@ fn dispatch_fact_read(
     runtime: &StoreRuntimeHandle,
     operation: FactReadOperationV1,
     operation_name: &'static str,
-) -> FactStoreResult<FactReadResultV1> {
+) -> FactLineageResult<FactReadResultV1> {
     let request = build_read_request(runtime.binding(), operation, operation_name)?;
     let probe = RuntimeFactProbe::from_control(request.control());
     let outcome = runtime
@@ -311,7 +313,7 @@ fn build_read_request(
     binding: &StoreRuntimeBindingV1,
     operation: FactReadOperationV1,
     operation_name: &'static str,
-) -> FactStoreResult<RuntimeReadRequestV1> {
+) -> FactLineageResult<RuntimeReadRequestV1> {
     let owner = match &operation {
         FactReadOperationV1::Current(query) => query.owner(),
         FactReadOperationV1::Lineage(query) => query.owner(),
@@ -345,7 +347,7 @@ fn build_submit_request(
     command: &serde_json::Value,
     command_digest: &str,
     idempotency_key: &str,
-) -> FactStoreResult<RuntimeSubmitRequestV1> {
+) -> FactLineageResult<RuntimeSubmitRequestV1> {
     let admitted_at = runtime_now();
     let suffix = digest_suffix(command_digest, COMMIT_OPERATION)?;
     let metadata = StoreOperationMetadataV1 {
@@ -411,7 +413,7 @@ fn request_control(
     suffix: &str,
     requested_at: UtcMicros,
     operation: &'static str,
-) -> FactStoreResult<RuntimeRequestControlV1> {
+) -> FactLineageResult<RuntimeRequestControlV1> {
     Ok(RuntimeRequestControlV1 {
         requested_at,
         deadline: RuntimeDeadlineV1 {
@@ -431,7 +433,7 @@ fn request_control(
 fn digest_suffix<'digest>(
     digest: &'digest str,
     operation: &'static str,
-) -> FactStoreResult<&'digest str> {
+) -> FactLineageResult<&'digest str> {
     digest
         .strip_prefix("sha256:")
         .ok_or_else(|| runtime_error(operation, "canonical SHA-256 digest prefix missing"))
@@ -473,8 +475,8 @@ impl RuntimeRequestProbeV1 for RuntimeFactProbe {
     }
 }
 
-fn runtime_error(operation: &'static str, message: impl Into<String>) -> FactStoreError {
-    FactStoreError::Storage {
+fn runtime_error(operation: &'static str, message: impl Into<String>) -> FactLineageError {
+    FactLineageError::Storage {
         operation,
         source: Box::new(std::io::Error::other(message.into())),
     }

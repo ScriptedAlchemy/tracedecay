@@ -2,6 +2,7 @@ use super::*;
 use crate::application::memory::MemoryApplication;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::store::memory::DatabaseFactStore;
+use std::path::Path;
 use tracedecay_domain::FactOwnerV1;
 
 async fn database(path: &Path) -> Database {
@@ -29,7 +30,7 @@ fn live_command(
     run_id: &str,
     proposal_id: &str,
     content: &str,
-) -> tracedecay_store::CompatibilityFactAddCommandV1 {
+) -> tracedecay_store::FactAddCommand {
     automation_fact_proposal_add_command(owner, request(content), run_id, proposal_id, None)
         .unwrap()
 }
@@ -49,29 +50,34 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
     );
 
     let first = memory
-        .submit_compatibility_fact_proposal(proposal_id.clone(), command.clone(), None)
+        .submit_fact_proposal(
+            proposal_id.clone(),
+            command.clone(),
+            None,
+            FactProposalEvidence::default(),
+        )
         .await
         .unwrap();
     let replay = memory
-        .submit_compatibility_fact_proposal(proposal_id.clone(), command, None)
+        .submit_fact_proposal(
+            proposal_id.clone(),
+            command,
+            None,
+            FactProposalEvidence::default(),
+        )
         .await
         .unwrap();
     assert_eq!(first.proposal_id(), replay.proposal_id());
     assert_eq!(first.revision(), replay.revision());
-    assert_eq!(
-        first.state(),
-        CompatibilityFactProposalStateV1::PendingApproval
-    );
+    assert_eq!(first.state(), FactProposalState::PendingApproval);
 
-    let listed = list_fact_proposals(&memory, temp.path(), None, 10)
-        .await
-        .unwrap();
+    let listed = list_fact_proposals(&memory, None, 10).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].proposal_id, proposal_id.as_str());
 
     let reviewer = proposal_actor("test:reviewer").unwrap();
     let rejected = memory
-        .reject_compatibility_fact_proposal(
+        .reject_fact_proposal(
             proposal_id.clone(),
             first.revision(),
             reviewer.clone(),
@@ -79,10 +85,10 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
         )
         .await
         .unwrap();
-    assert_eq!(rejected.state(), CompatibilityFactProposalStateV1::Rejected);
+    assert_eq!(rejected.state(), FactProposalState::Rejected);
     assert!(
         memory
-            .reject_compatibility_fact_proposal(
+            .reject_fact_proposal(
                 proposal_id,
                 first.revision(),
                 reviewer,
@@ -95,11 +101,10 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
 }
 
 #[tokio::test]
-async fn authority_collapses_duplicate_semantic_submissions_and_preserves_submission_order() {
+async fn authority_collapses_duplicates_and_reads_canonical_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let db = database(&temp.path().join("memory.db")).await;
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&db)).unwrap();
-    let dashboard_root = temp.path().join("dashboard");
     let mut first = request("Keep the first submitted proposal first in the dashboard");
     first.metadata = serde_json::json!({
         "fixture": "fact-proposal-lifecycle",
@@ -134,16 +139,10 @@ async fn authority_collapses_duplicate_semantic_submissions_and_preserves_submis
         }),
     ];
 
-    let recorded = record_session_fact_proposals(
-        &memory,
-        &dashboard_root,
-        "run-duplicate-collapse",
-        None,
-        &accepted,
-        &[],
-    )
-    .await
-    .unwrap();
+    let recorded =
+        record_session_fact_proposals(&memory, "run-duplicate-collapse", None, &accepted, &[])
+            .await
+            .unwrap();
     assert_eq!(
         recorded.len(),
         2,
@@ -154,37 +153,34 @@ async fn authority_collapses_duplicate_semantic_submissions_and_preserves_submis
         Some(serde_json::json!({"source_index": 0}))
     );
 
-    let canonical = memory
-        .list_compatibility_fact_proposals(None, None, 10)
-        .await
-        .unwrap();
+    let canonical = memory.list_fact_proposals(None, None, 10).await.unwrap();
     assert_eq!(canonical.proposals().len(), 2);
 
     for record in &recorded {
-        apply_fact_proposal(&memory, &dashboard_root, &record.proposal_id, None)
+        apply_fact_proposal(&memory, &record.proposal_id, None)
             .await
             .unwrap();
     }
-    let applied = list_fact_proposals(
-        &memory,
-        &dashboard_root,
-        Some(FactProposalState::Applied),
-        10,
-    )
-    .await
-    .unwrap();
+    let applied = list_fact_proposals(&memory, Some(FactProposalState::Applied), 10)
+        .await
+        .unwrap();
     assert_eq!(applied.len(), 2);
+    let mut contents = applied
+        .iter()
+        .map(|record| record.add_fact_request.as_ref().unwrap().content.clone())
+        .collect::<Vec<_>>();
+    contents.sort();
     assert_eq!(
-        applied[0].add_fact_request.as_ref().unwrap().content,
-        "Keep the first submitted proposal first in the dashboard"
+        contents,
+        vec![
+            "Keep the first submitted proposal first in the dashboard".to_string(),
+            "Keep the later submitted proposal after the first one".to_string(),
+        ]
     );
-    assert_eq!(
-        applied[1].add_fact_request.as_ref().unwrap().content,
-        "Keep the later submitted proposal after the first one"
-    );
-    assert_eq!(
-        applied[0].validation,
-        Some(serde_json::json!({"source_index": 0}))
+    assert!(
+        applied
+            .iter()
+            .any(|record| { record.validation == Some(serde_json::json!({"source_index": 0})) })
     );
 }
 
@@ -196,7 +192,7 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
     let proposal_id = ProvenanceId::new("proposal-promotion".to_string()).unwrap();
     let submitted = memory
-        .submit_compatibility_fact_proposal(
+        .submit_fact_proposal(
             proposal_id.clone(),
             live_command(
                 owner.clone(),
@@ -205,12 +201,13 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
                 "Promote this proposal into one canonical fact",
             ),
             None,
+            FactProposalEvidence::default(),
         )
         .await
         .unwrap();
     let promoted = memory
-        .promote_compatibility_fact_proposal_with_disposition(
-            CompatibilityFactProposalPromotionV1::new(
+        .promote_fact_proposal_with_disposition(
+            FactProposalPromotion::new(
                 owner.clone(),
                 proposal_id.clone(),
                 submitted.revision(),
@@ -222,17 +219,14 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
         .unwrap();
     assert_eq!(
         promoted.disposition(),
-        CompatibilityFactProposalPromotionDispositionV1::NewlyPromoted
+        FactProposalPromotionDisposition::NewlyPromoted
     );
-    assert_eq!(
-        promoted.proposal().state(),
-        CompatibilityFactProposalStateV1::Applied
-    );
+    assert_eq!(promoted.proposal().state(), FactProposalState::Applied);
     assert!(promoted.proposal().applied_fact_id().is_some());
 
     let replayed = memory
-        .promote_compatibility_fact_proposal_with_disposition(
-            CompatibilityFactProposalPromotionV1::new(
+        .promote_fact_proposal_with_disposition(
+            FactProposalPromotion::new(
                 owner.clone(),
                 proposal_id.clone(),
                 submitted.revision(),
@@ -244,13 +238,13 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
         .unwrap();
     assert_eq!(
         replayed.disposition(),
-        CompatibilityFactProposalPromotionDispositionV1::AlreadyPromoted
+        FactProposalPromotionDisposition::AlreadyPromoted
     );
 
     assert!(
         memory
-            .promote_compatibility_fact_proposal_with_disposition(
-                CompatibilityFactProposalPromotionV1::new(
+            .promote_fact_proposal_with_disposition(
+                FactProposalPromotion::new(
                     owner.clone(),
                     proposal_id.clone(),
                     submitted.revision(),
@@ -265,7 +259,7 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
 
     assert!(
         memory
-            .reject_compatibility_fact_proposal(
+            .reject_fact_proposal(
                 proposal_id,
                 submitted.revision(),
                 proposal_actor("test:reviewer").unwrap(),

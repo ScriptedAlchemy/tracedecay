@@ -1,25 +1,19 @@
 //! Owner-entity resolution, entity merges/aliases, and curation oplog replay.
 
 use super::super::crud::{
-    compatibility_commit_batch_tx, compatibility_mark_owner_banks_dirty_tx,
-    compatibility_mirror_update_tx, compatibility_sanitize_payload, load_current_fact_tx,
+    commit_batch_tx, load_current_fact_tx, mark_owner_banks_dirty_tx, mirror_update_tx,
+    sanitize_payload,
 };
-use super::super::envelope::{
-    CompatibilityOperationReceiptV1, compatibility_receipt_u64, compatibility_target_digest,
-};
+use super::super::envelope::{OperationReceipt, receipt_u64, target_digest};
 use super::super::primitives::{
-    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_legacy_timestamp,
-    compatibility_source_store_id, from_json, row_i64, row_string, storage_error, storage_message,
-    to_json,
+    FACT_WRITE_OPERATION, OwnerKey, from_json, legacy_timestamp, row_i64, row_string,
+    source_store_id, storage_error, storage_message, to_json,
 };
-use super::super::projection::{
-    compatibility_required_mapping_tx, compatibility_source_for_fact_tx,
-};
-use super::super::proposals::compatibility_proposal_category;
+use super::super::projection::{required_mapping_tx, source_for_fact_tx};
+use super::super::proposals::proposal_category;
 use super::{
-    compatibility_curated_correction_batch, compatibility_curation_evidence_ids_tx,
-    compatibility_curation_mappings_from_ids_tx,
-    compatibility_record_curated_correction_provenance_tx, compatibility_relation_label,
+    curated_correction_batch, curation_evidence_ids_tx, curation_mappings_from_ids_tx,
+    record_curated_correction_provenance_tx, relation_label,
 };
 use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
@@ -28,18 +22,17 @@ use crate::memory::entities::normalize_entity;
 use serde_json::{Value, json};
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    CompatibilityFactAddAliasV1, CompatibilityFactCurationOperationV1,
-    CompatibilityFactCurationReceiptV1, CompatibilityFactMappingV1,
-    CompatibilityFactMergeEntitiesV1, CompatibilityFactTargetV1, CompatibilityLegacyEntityTargetV1,
-    CompatibilityMemoryRepairStatsV1, FactCompatibilityResult, FactStoreError, FactStoreResult,
+    FactAddAlias, FactCurationOperation, FactCurationReceipt, FactEntityTarget, FactLineageError,
+    FactLineageResult, FactMapping, FactMergeEntities, FactStoreResult, FactTarget,
+    MemoryRepairStats,
 };
-async fn compatibility_owner_entity_tx(
+async fn owner_entity_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_id: i64,
-) -> FactStoreResult<(String, Vec<String>)> {
+) -> FactLineageResult<(String, Vec<String>)> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
+    let source_store_id = source_store_id()?;
     let foreign_links = transaction
         .query(
             "SELECT COUNT(*)
@@ -63,21 +56,21 @@ async fn compatibility_owner_entity_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     let mut foreign_links = foreign_links;
     let row = foreign_links
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                FACT_WRITE_OPERATION,
                 "compatibility entity ownership count is missing",
             )
         })?;
-    if row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION)? != 0 {
+    if row_i64(&row, 0, FACT_WRITE_OPERATION)? != 0 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             "compatibility curation entity is shared outside this owner",
         ));
     }
@@ -88,34 +81,34 @@ async fn compatibility_owner_entity_tx(
             params![entity_id],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     let row = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                FACT_WRITE_OPERATION,
                 "compatibility curation entity is missing",
             )
         })?;
     Ok((
-        row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?,
+        row_string(&row, 0, FACT_WRITE_OPERATION)?,
         from_json::<Vec<String>>(
-            &row_string(&row, 1, COMPATIBILITY_WRITE_OPERATION)?,
-            COMPATIBILITY_WRITE_OPERATION,
+            &row_string(&row, 1, FACT_WRITE_OPERATION)?,
+            FACT_WRITE_OPERATION,
         )?,
     ))
 }
 
-async fn compatibility_entity_linked_to_evidence_tx(
+async fn entity_linked_to_evidence_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_id: i64,
     evidence_ids: &[FactId],
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
+    let source_store_id = source_store_id()?;
     let placeholders = std::iter::repeat_n("?", evidence_ids.len())
         .collect::<Vec<_>>()
         .join(",");
@@ -145,28 +138,28 @@ async fn compatibility_entity_linked_to_evidence_tx(
     let mut rows = transaction
         .query(&sql, values)
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     if rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?
         .is_none()
     {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             "compatibility curation entity is not linked to supplied evidence",
         ));
     }
     Ok(())
 }
 
-async fn compatibility_owner_entity_fact_ids_tx(
+async fn owner_entity_fact_ids_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_ids: &[i64],
-) -> FactStoreResult<Vec<FactId>> {
+) -> FactLineageResult<Vec<FactId>> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
+    let source_store_id = source_store_id()?;
     let placeholders = std::iter::repeat_n("?", entity_ids.len())
         .collect::<Vec<_>>()
         .join(",");
@@ -195,31 +188,31 @@ async fn compatibility_owner_entity_fact_ids_tx(
     let mut rows = transaction
         .query(&sql, values)
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     let mut fact_ids = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?
     {
         fact_ids.push(
-            FactId::new(row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?)
-                .map_err(FactStoreError::from)?,
+            FactId::new(row_string(&row, 0, FACT_WRITE_OPERATION)?)
+                .map_err(FactLineageError::from)?,
         );
     }
     if fact_ids.len() > 256 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             "compatibility entity curation exceeds the fixed 256-fact bound",
         ));
     }
     Ok(fact_ids)
 }
 
-async fn compatibility_fact_entities_tx(
+async fn fact_entities_tx(
     transaction: &Transaction<'_>,
     legacy_fact_id: i64,
-) -> FactStoreResult<Vec<String>> {
+) -> FactLineageResult<Vec<String>> {
     let mut rows = transaction
         .query(
             "SELECT entities.name
@@ -230,45 +223,41 @@ async fn compatibility_fact_entities_tx(
             params![legacy_fact_id],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     let mut entities = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?
     {
-        entities.push(row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?);
+        entities.push(row_string(&row, 0, FACT_WRITE_OPERATION)?);
     }
     Ok(entities)
 }
 
-pub(super) async fn compatibility_merge_entities_tx(
+pub(super) async fn merge_entities_tx(
     db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
-    operation: &CompatibilityFactMergeEntitiesV1,
+    operation: &FactMergeEntities,
     now: UtcMicros,
-) -> FactStoreResult<Vec<FactId>> {
-    let evidence =
-        compatibility_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
-            .await?;
+) -> FactLineageResult<Vec<FactId>> {
+    let evidence = curation_evidence_ids_tx(transaction, owner, operation.evidence_facts()).await?;
     let winner_id = operation.winner().legacy_entity_id();
-    let (winner_name, winner_aliases) =
-        compatibility_owner_entity_tx(transaction, owner, winner_id).await?;
-    compatibility_entity_linked_to_evidence_tx(transaction, owner, winner_id, &evidence).await?;
+    let (winner_name, winner_aliases) = owner_entity_tx(transaction, owner, winner_id).await?;
+    entity_linked_to_evidence_tx(transaction, owner, winner_id, &evidence).await?;
     let mut entity_ids = vec![winner_id];
     let mut aliases = winner_aliases;
     for loser in operation.losers() {
         let loser_id = loser.legacy_entity_id();
-        let (name, loser_aliases) =
-            compatibility_owner_entity_tx(transaction, owner, loser_id).await?;
-        compatibility_entity_linked_to_evidence_tx(transaction, owner, loser_id, &evidence).await?;
+        let (name, loser_aliases) = owner_entity_tx(transaction, owner, loser_id).await?;
+        entity_linked_to_evidence_tx(transaction, owner, loser_id, &evidence).await?;
         entity_ids.push(loser_id);
         aliases.push(name);
         aliases.extend(loser_aliases);
     }
-    let fact_ids = compatibility_owner_entity_fact_ids_tx(transaction, owner, &entity_ids).await?;
+    let fact_ids = owner_entity_fact_ids_tx(transaction, owner, &entity_ids).await?;
     let mut normalized_aliases = std::collections::BTreeMap::new();
     for alias in aliases {
         let alias = normalize_entity(&alias);
@@ -286,12 +275,12 @@ pub(super) async fn compatibility_merge_entities_tx(
                     &normalized_aliases.into_values().collect::<Vec<_>>(),
                     "serialize compatibility entity aliases",
                 )?,
-                compatibility_legacy_timestamp(now),
+                legacy_timestamp(now),
                 winner_id,
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     for loser in operation.losers() {
         let loser_id = loser.legacy_entity_id();
         transaction
@@ -301,14 +290,14 @@ pub(super) async fn compatibility_merge_entities_tx(
                 params![winner_id, loser_id],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
         transaction
             .execute(
                 "DELETE FROM memory_fact_entities WHERE entity_id = ?1",
                 params![loser_id],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
         transaction
             .execute(
                 "DELETE FROM memory_entities WHERE entity_id = ?1
@@ -316,7 +305,7 @@ pub(super) async fn compatibility_merge_entities_tx(
                 params![loser_id],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     }
     let owner_key = OwnerKey::new(owner)?;
     for fact_id in &fact_ids {
@@ -327,10 +316,9 @@ pub(super) async fn compatibility_merge_entities_tx(
         let Some(payload) = fact.payload() else {
             continue;
         };
-        let mapping = compatibility_required_mapping_tx(transaction, owner, fact_id).await?;
-        let entities =
-            compatibility_fact_entities_tx(transaction, mapping.legacy_fact_id()).await?;
-        let Some(sanitized) = compatibility_sanitize_payload(
+        let mapping = required_mapping_tx(transaction, owner, fact_id).await?;
+        let entities = fact_entities_tx(transaction, mapping.legacy_fact_id()).await?;
+        let Some(sanitized) = sanitize_payload(
             payload.content(),
             payload.category(),
             payload.tags(),
@@ -339,18 +327,14 @@ pub(super) async fn compatibility_merge_entities_tx(
         )?
         else {
             return Err(storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                FACT_WRITE_OPERATION,
                 "compatibility merged entities were rejected by the privacy sanitizer",
             ));
         };
-        let source = compatibility_source_for_fact_tx(transaction, &mapping).await?;
-        let batch = compatibility_curated_correction_batch(
-            &fact,
-            sanitized.payload.clone(),
-            actor.cloned(),
-            now,
-        )?;
-        compatibility_commit_batch_tx(transaction, &batch).await?;
+        let source = source_for_fact_tx(transaction, &mapping).await?;
+        let batch =
+            curated_correction_batch(&fact, sanitized.payload.clone(), actor.cloned(), now)?;
+        commit_batch_tx(transaction, &batch).await?;
         // The evidence facts are themselves linked to the merged entities, so
         // they are always members of `fact_ids`. Recording one as derived from
         // itself trips the self-reference guard and would roll back the whole
@@ -362,7 +346,7 @@ pub(super) async fn compatibility_merge_entities_tx(
             .cloned()
             .collect::<Vec<_>>();
         if !fact_evidence.is_empty() {
-            compatibility_record_curated_correction_provenance_tx(
+            record_curated_correction_provenance_tx(
                 transaction,
                 owner,
                 fact_id,
@@ -374,7 +358,7 @@ pub(super) async fn compatibility_merge_entities_tx(
             )
             .await?;
         }
-        compatibility_mirror_update_tx(
+        mirror_update_tx(
             db,
             transaction,
             owner,
@@ -389,23 +373,21 @@ pub(super) async fn compatibility_merge_entities_tx(
     Ok(fact_ids)
 }
 
-pub(super) async fn compatibility_add_entity_alias_tx(
+pub(super) async fn add_entity_alias_tx(
     db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    operation: &CompatibilityFactAddAliasV1,
+    operation: &FactAddAlias,
     now: UtcMicros,
-) -> FactStoreResult<Vec<FactId>> {
-    let evidence =
-        compatibility_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
-            .await?;
+) -> FactLineageResult<Vec<FactId>> {
+    let evidence = curation_evidence_ids_tx(transaction, owner, operation.evidence_facts()).await?;
     let entity_id = operation.entity().legacy_entity_id();
-    let (name, mut aliases) = compatibility_owner_entity_tx(transaction, owner, entity_id).await?;
-    compatibility_entity_linked_to_evidence_tx(transaction, owner, entity_id, &evidence).await?;
+    let (name, mut aliases) = owner_entity_tx(transaction, owner, entity_id).await?;
+    entity_linked_to_evidence_tx(transaction, owner, entity_id, &evidence).await?;
     let alias = normalize_entity(operation.alias());
     if alias.is_empty() || alias.eq_ignore_ascii_case(&name) {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            FACT_WRITE_OPERATION,
             "compatibility alias is not distinct from its entity",
         ));
     }
@@ -427,123 +409,122 @@ pub(super) async fn compatibility_add_entity_alias_tx(
                     &canonical_aliases.into_values().collect::<Vec<_>>(),
                     "serialize compatibility entity aliases",
                 )?,
-                compatibility_legacy_timestamp(now),
+                legacy_timestamp(now),
                 entity_id,
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-    let fact_ids = compatibility_owner_entity_fact_ids_tx(transaction, owner, &[entity_id]).await?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
+    let fact_ids = owner_entity_fact_ids_tx(transaction, owner, &[entity_id]).await?;
     for fact_id in &fact_ids {
-        let mapping = compatibility_required_mapping_tx(transaction, owner, fact_id).await?;
+        let mapping = required_mapping_tx(transaction, owner, fact_id).await?;
         let mut rows = transaction
             .query(
                 "SELECT category FROM memory_facts WHERE fact_id = ?1",
                 params![mapping.legacy_fact_id()],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
         let row = rows
             .next()
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+            .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?
             .ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    FACT_WRITE_OPERATION,
                     "compatibility alias fact is missing from the legacy mirror",
                 )
             })?;
-        let category =
-            compatibility_proposal_category(&row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?)?;
-        compatibility_mark_owner_banks_dirty_tx(db, transaction, owner, category, now).await?;
+        let category = proposal_category(&row_string(&row, 0, FACT_WRITE_OPERATION)?)?;
+        mark_owner_banks_dirty_tx(db, transaction, owner, category, now).await?;
     }
     Ok(fact_ids)
 }
 
-pub(super) fn compatibility_curation_operation_digest(
-    operation: &CompatibilityFactCurationOperationV1,
-) -> FactStoreResult<Value> {
-    let evidence = |targets: &[CompatibilityFactTargetV1]| {
+pub(super) fn curation_operation_digest(
+    operation: &FactCurationOperation,
+) -> FactLineageResult<Value> {
+    let evidence = |targets: &[FactTarget]| {
         targets
             .iter()
-            .map(compatibility_target_digest)
-            .collect::<FactStoreResult<Vec<_>>>()
+            .map(target_digest)
+            .collect::<FactLineageResult<Vec<_>>>()
     };
     match operation {
-        CompatibilityFactCurationOperationV1::NormalizeTags(operation) => Ok(json!({
+        FactCurationOperation::NormalizeTags(operation) => Ok(json!({
             "kind": "normalize_tags",
-            "fact": compatibility_target_digest(operation.fact())?,
+            "fact": target_digest(operation.fact())?,
             "tags": operation.tags(),
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
         })),
-        CompatibilityFactCurationOperationV1::MergeEntities(operation) => Ok(json!({
+        FactCurationOperation::MergeEntities(operation) => Ok(json!({
             "kind": "merge_entities",
             "winner": operation.winner().legacy_entity_id(),
-            "losers": operation.losers().iter().map(CompatibilityLegacyEntityTargetV1::legacy_entity_id).collect::<Vec<_>>(),
+            "losers": operation.losers().iter().map(FactEntityTarget::legacy_entity_id).collect::<Vec<_>>(),
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
         })),
-        CompatibilityFactCurationOperationV1::AddAlias(operation) => Ok(json!({
+        FactCurationOperation::AddAlias(operation) => Ok(json!({
             "kind": "add_alias",
             "entity": operation.entity().legacy_entity_id(),
             "alias": operation.alias(),
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
         })),
-        CompatibilityFactCurationOperationV1::LinkFacts(operation) => Ok(json!({
+        FactCurationOperation::LinkFacts(operation) => Ok(json!({
             "kind": "link_facts",
-            "source": compatibility_target_digest(operation.source())?,
-            "target": compatibility_target_digest(operation.target())?,
-            "relation": compatibility_relation_label(operation.relation()),
+            "source": target_digest(operation.source())?,
+            "target": target_digest(operation.target())?,
+            "relation": relation_label(operation.relation()),
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
             "source_label": operation.source_label(),
             "metadata": operation.metadata(),
         })),
-        CompatibilityFactCurationOperationV1::RepairVector(operation) => Ok(json!({
+        FactCurationOperation::RepairVector(operation) => Ok(json!({
             "kind": "repair_vector",
-            "fact": compatibility_target_digest(operation.fact())?,
+            "fact": target_digest(operation.fact())?,
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
         })),
     }
 }
 
-pub(super) async fn compatibility_record_oplog_tx(
+pub(super) async fn record_oplog_tx(
     transaction: &Transaction<'_>,
     operation: &str,
-    mapping: Option<&CompatibilityFactMappingV1>,
+    mapping: Option<&FactMapping>,
     detail: &Value,
     now: UtcMicros,
-) -> FactStoreResult<()> {
+) -> FactLineageResult<()> {
     transaction
         .execute(
             "INSERT INTO memory_oplog(ts, op, fact_id, detail_json) VALUES(?1, ?2, ?3, ?4)",
             params![
-                compatibility_legacy_timestamp(now),
+                legacy_timestamp(now),
                 operation,
-                mapping.and_then(CompatibilityFactMappingV1::legacy_fact_id),
+                mapping.and_then(FactMapping::legacy_fact_id),
                 to_json(detail, "serialize compatibility oplog detail")?,
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(FACT_WRITE_OPERATION, error))?;
     Ok(())
 }
 
-pub(super) async fn compatibility_replay_curation_tx(
+pub(super) async fn replay_curation_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<CompatibilityFactCurationReceiptV1> {
+    receipt: &OperationReceipt,
+) -> FactStoreResult<FactCurationReceipt> {
     let ids = receipt
         .receipt
         .get("changed_fact_ids")
         .and_then(Value::as_array)
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                FACT_WRITE_OPERATION,
                 "compatibility curation receipt changed facts are malformed",
             )
         })?;
@@ -552,27 +533,26 @@ pub(super) async fn compatibility_replay_curation_tx(
         fact_ids.push(
             FactId::new(id.as_str().ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    FACT_WRITE_OPERATION,
                     "compatibility curation receipt fact id is malformed",
                 )
             })?)
-            .map_err(FactStoreError::from)?,
+            .map_err(FactLineageError::from)?,
         );
     }
-    let mappings =
-        compatibility_curation_mappings_from_ids_tx(transaction, owner, &fact_ids).await?;
-    let derived_repair = CompatibilityMemoryRepairStatsV1::new(
-        compatibility_receipt_u64(&receipt.receipt, "missing_vectors_repaired")?,
-        compatibility_receipt_u64(&receipt.receipt, "banks_rebuilt")?,
+    let mappings = curation_mappings_from_ids_tx(transaction, owner, &fact_ids).await?;
+    let derived_repair = MemoryRepairStats::new(
+        receipt_u64(&receipt.receipt, "missing_vectors_repaired")?,
+        receipt_u64(&receipt.receipt, "banks_rebuilt")?,
     );
-    CompatibilityFactCurationReceiptV1::new(
+    FactCurationReceipt::new(
         owner.clone(),
         mappings,
-        compatibility_receipt_u64(&receipt.receipt, "normalized_tags")?,
-        compatibility_receipt_u64(&receipt.receipt, "merged_entities")?,
-        compatibility_receipt_u64(&receipt.receipt, "aliases_added")?,
-        compatibility_receipt_u64(&receipt.receipt, "facts_linked")?,
-        compatibility_receipt_u64(&receipt.receipt, "vectors_repaired")?,
+        receipt_u64(&receipt.receipt, "normalized_tags")?,
+        receipt_u64(&receipt.receipt, "merged_entities")?,
+        receipt_u64(&receipt.receipt, "aliases_added")?,
+        receipt_u64(&receipt.receipt, "facts_linked")?,
+        receipt_u64(&receipt.receipt, "vectors_repaired")?,
         derived_repair,
     )
     .map_err(Into::into)

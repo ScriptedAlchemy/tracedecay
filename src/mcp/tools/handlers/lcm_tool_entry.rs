@@ -110,7 +110,7 @@ pub(super) async fn dispatch_lcm_tool(
         RetainedSurfaceOperation::LcmSessionBoundary => {
             session::handle_lcm_session_boundary(context, args).await
         }
-        RetainedSurfaceOperation::FactStore
+        RetainedSurfaceOperation::FactLineageStore
         | RetainedSurfaceOperation::FactFeedback
         | RetainedSurfaceOperation::MemoryStatus
         | RetainedSurfaceOperation::SessionRefresh

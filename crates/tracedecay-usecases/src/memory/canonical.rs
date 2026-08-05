@@ -16,7 +16,7 @@ use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
     FactContradictionStateV1 as StoreFactContradictionStateV1, FactCurrentQuery,
     FactCurrentResponseV1, FactLineageQuery, FactProposalPromotionStateV1, FactProposalStore,
-    FactProposalStoreError, FactQueryCoverageV1, FactStore, FactStoreError, FactWriteBatch,
+    FactProposalStoreError, FactQueryCoverageV1, FactLineageStore, FactLineageError, FactWriteBatch,
     LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery,
     StoredFactV1,
 };
@@ -25,9 +25,9 @@ use super::{MemoryApplication, MemoryApplicationError};
 
 struct FactStoreAdapter<'a, A>(&'a A);
 
-impl<A: FactStore> CommitFactPort for FactStoreAdapter<'_, A> {
+impl<A: FactLineageStore> CommitFactPort for FactStoreAdapter<'_, A> {
     type Command = FactWriteBatch;
-    type Error = FactStoreError;
+    type Error = FactLineageError;
     type Output = FactCommitOutcome;
 
     async fn commit_fact(
@@ -45,8 +45,8 @@ impl<A: FactStore> CommitFactPort for FactStoreAdapter<'_, A> {
     }
 }
 
-impl<A: FactStore> CurrentFactsPort for FactStoreAdapter<'_, A> {
-    type Error = FactStoreError;
+impl<A: FactLineageStore> CurrentFactsPort for FactStoreAdapter<'_, A> {
+    type Error = FactLineageError;
     type Output = Vec<StoredFactV1>;
     type Query = CurrentFactsQuery;
 
@@ -60,8 +60,8 @@ impl<A: FactStore> CurrentFactsPort for FactStoreAdapter<'_, A> {
     }
 }
 
-impl<A: FactStore> FactAsOfPort for FactStoreAdapter<'_, A> {
-    type Error = FactStoreError;
+impl<A: FactLineageStore> FactAsOfPort for FactStoreAdapter<'_, A> {
+    type Error = FactLineageError;
     type Output = MemoryReadResultV1<Option<StoredFactV1>>;
     type Query = FactAsOfQuery;
 
@@ -79,8 +79,8 @@ impl<A: FactStore> FactAsOfPort for FactStoreAdapter<'_, A> {
     }
 }
 
-impl<A: FactStore> FactCurrentPort for FactStoreAdapter<'_, A> {
-    type Error = FactStoreError;
+impl<A: FactLineageStore> FactCurrentPort for FactStoreAdapter<'_, A> {
+    type Error = FactLineageError;
     type Output = MemoryReadResultV1<Option<StoredFactV1>>;
     type Query = FactCurrentQuery;
 
@@ -98,8 +98,8 @@ impl<A: FactStore> FactCurrentPort for FactStoreAdapter<'_, A> {
     }
 }
 
-impl<A: FactStore> FactLineagePort for FactStoreAdapter<'_, A> {
-    type Error = FactStoreError;
+impl<A: FactLineageStore> FactLineagePort for FactStoreAdapter<'_, A> {
+    type Error = FactLineageError;
     type Output = MemoryReadResultV1<Vec<FactLineageEventV1>>;
     type Query = FactLineageQuery;
 
@@ -118,8 +118,8 @@ impl<A: FactStore> FactLineagePort for FactStoreAdapter<'_, A> {
     }
 }
 
-impl<A: FactStore> LegacyFactPort for FactStoreAdapter<'_, A> {
-    type Error = FactStoreError;
+impl<A: FactLineageStore> LegacyFactPort for FactStoreAdapter<'_, A> {
+    type Error = FactLineageError;
     type Query = LegacyFactQuery;
 
     async fn resolve_legacy_fact(&self, query: Self::Query) -> Result<Option<FactId>, Self::Error> {
@@ -127,8 +127,8 @@ impl<A: FactStore> LegacyFactPort for FactStoreAdapter<'_, A> {
     }
 }
 
-impl<A: FactStore> RetrievalAnchorPort for FactStoreAdapter<'_, A> {
-    type Error = FactStoreError;
+impl<A: FactLineageStore> RetrievalAnchorPort for FactStoreAdapter<'_, A> {
+    type Error = FactLineageError;
     type Query = RetrievalAnchorQuery;
 
     async fn get_retrieval_anchor(
@@ -149,7 +149,7 @@ impl<A: FactProposalStore> PromoteFactProposalPort for FactStoreAdapter<'_, A> {
         &self,
         command: Self::Command,
     ) -> Result<PromoteFactProposalPortResultV1<Self::Output, Self::State>, Self::Error> {
-        let outcome = self.0.promote_fact_proposal(command).await?;
+        let outcome = self.0.commit_fact_proposal(command).await?;
         let (disposition, owner, fact_id) = commit_proof(outcome.commit());
         let proposal_id = outcome.proposal_id().clone();
         let previous_state = outcome.previous_state();
@@ -164,7 +164,7 @@ impl<A: FactProposalStore> PromoteFactProposalPort for FactStoreAdapter<'_, A> {
     }
 }
 
-impl<A: FactStore> MemoryApplication<A> {
+impl<A: FactLineageStore> MemoryApplication<A> {
     pub async fn commit_fact(
         &self,
         batch: FactWriteBatch,
@@ -259,7 +259,7 @@ impl<A: FactStore> MemoryApplication<A> {
 }
 
 impl<A: FactProposalStore> MemoryApplication<A> {
-    pub async fn promote_fact_proposal(
+    pub async fn commit_fact_proposal(
         &self,
         promotion: PromoteFactProposal,
     ) -> Result<PromoteFactProposalOutcome, MemoryApplicationError> {
@@ -360,7 +360,7 @@ fn commit_proof(
     }
 }
 
-fn store_error(error: MemoryUseCaseError<FactStoreError>) -> MemoryApplicationError {
+fn store_error(error: MemoryUseCaseError<FactLineageError>) -> MemoryApplicationError {
     match error {
         MemoryUseCaseError::Invariant(error) => invariant_error(error),
         MemoryUseCaseError::Authority(error) => MemoryApplicationError::Store(error),
