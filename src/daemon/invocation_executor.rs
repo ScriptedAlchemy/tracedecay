@@ -73,57 +73,21 @@ pub(super) fn unavailable_root_generation(
     .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)
 }
 
-pub(super) fn frozen_root_generation(
+pub(super) fn published_root_generation(
     scope: &tracedecay_application::ResolvedScope,
-    scope_set_digest: &tracedecay_domain::ManifestDigest,
-    source_revision: &str,
-    operation: &Value,
+    latest: &code_index_scheduler::LatestCompleteCodeIndexV1,
 ) -> std::result::Result<
     tracedecay_domain::RootGenerationV1,
     service::invocation::DaemonInvocationProblem,
 > {
-    let collection_digest = tracedecay_domain::canonical_sha256(&(
-        "tracedecay.multi-root.collection.v1",
-        scope,
-        source_revision,
-    ))
-    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
-    let collection_revision = tracedecay_domain::CollectionRevision::new(collection_digest)
-        .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
-    let stack_digest = tracedecay_domain::canonical_sha256(&(
-        "tracedecay.multi-root.stack.v1",
-        scope_set_digest,
-        operation,
-    ))
-    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
-    let stack_revision = tracedecay_domain::StackRevision::new(stack_digest)
-        .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+    let generation = latest.generation();
     tracedecay_domain::RootGenerationV1::new(
         scope.scope_digest.clone(),
-        collection_revision,
-        stack_revision,
+        generation.manifest().generation_id.clone(),
+        generation.manifest().snapshot_digest.clone(),
+        generation.projection().publication_digest().clone(),
     )
     .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)
-}
-
-pub(super) fn explicit_git_state(root: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(root)
-        .args([
-            "status",
-            "--porcelain=v2",
-            "--branch",
-            "--untracked-files=normal",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let head = String::from_utf8(output.stdout).ok()?;
-    let head = head.trim();
-    (!head.is_empty()).then(|| head.to_owned())
 }
 
 fn extract_application_payload<T: serde::Serialize>(
@@ -137,16 +101,33 @@ fn extract_application_payload<T: serde::Serialize>(
 
 pub(super) fn extract_work_application_payload(
     outcome: &service::invocation::WorkApplicationOutcomeV1,
-) -> std::result::Result<Value, service::invocation::DaemonInvocationProblem> {
-    match outcome {
+) -> std::result::Result<
+    (
+        Value,
+        Option<tracedecay_application::MultiRootRootContinuationV1>,
+    ),
+    service::invocation::DaemonInvocationProblem,
+> {
+    let (payload, cursor) = match outcome {
         service::invocation::WorkApplicationOutcomeV1::Snapshot(outcome) => {
-            extract_application_payload(outcome)
+            let payload = extract_application_payload(outcome)?;
+            let snapshot = serde_json::from_value::<tracedecay_domain::WorkProjectionSnapshotV1>(
+                payload.clone(),
+            )
+            .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+            (payload, snapshot.coverage().cursor().cloned())
         }
         service::invocation::WorkApplicationOutcomeV1::Delta(outcome) => {
-            extract_application_payload(outcome)
+            let payload = extract_application_payload(outcome)?;
+            let delta =
+                serde_json::from_value::<tracedecay_domain::WorkProjectionDeltaV1>(payload.clone())
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+            (payload, delta.coverage().cursor().cloned())
         }
-        _ => Err(service::invocation::DaemonInvocationProblem::InvalidRequest),
-    }
+        _ => return Err(service::invocation::DaemonInvocationProblem::InvalidRequest),
+    };
+    let cursor = cursor.map(tracedecay_application::MultiRootRootContinuationV1::Work);
+    Ok((payload, cursor))
 }
 
 pub(super) fn multi_root_family_allows(
@@ -194,6 +175,90 @@ pub(super) fn multi_root_family_allows(
                 | ApplicationSurfaceOperation::CodeReferences
         ),
         tracedecay_application::MultiRootOperationV1::Work { .. } => false,
+    }
+}
+
+pub(super) fn multi_root_operation_is_readable(operation: ApplicationSurfaceOperation) -> bool {
+    matches!(
+        operation,
+        ApplicationSurfaceOperation::GitStatus
+            | ApplicationSurfaceOperation::GitDiff
+            | ApplicationSurfaceOperation::GitHistory
+            | ApplicationSurfaceOperation::GitBlame
+            | ApplicationSurfaceOperation::GitHunks
+            | ApplicationSurfaceOperation::FeedbackDiagnostics
+            | ApplicationSurfaceOperation::FeedbackGet
+            | ApplicationSurfaceOperation::FeedbackExpand
+            | ApplicationSurfaceOperation::FeedbackList
+            | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+            | ApplicationSurfaceOperation::FeedbackImpact
+            | ApplicationSurfaceOperation::AffectedTests
+            | ApplicationSurfaceOperation::TestResults
+            | ApplicationSurfaceOperation::CodeExactOccurrence
+            | ApplicationSurfaceOperation::CodePhraseSearch
+            | ApplicationSurfaceOperation::CodeSymbolSearch
+            | ApplicationSurfaceOperation::CodeSignatureSearch
+            | ApplicationSurfaceOperation::CodeImplementations
+            | ApplicationSurfaceOperation::CodeTypeHierarchy
+            | ApplicationSurfaceOperation::CodeCallers
+            | ApplicationSurfaceOperation::CodeCallees
+            | ApplicationSurfaceOperation::CodeFacets
+            | ApplicationSurfaceOperation::CodeTimeline
+            | ApplicationSurfaceOperation::CodeDeclaration
+            | ApplicationSurfaceOperation::CodeDefinition
+            | ApplicationSurfaceOperation::CodeTypeDefinition
+            | ApplicationSurfaceOperation::CodeReferences
+    )
+}
+
+pub(super) fn multi_root_operation_authority(
+    operation: &tracedecay_application::MultiRootOperationV1,
+) -> std::result::Result<
+    (
+        tracedecay_tool_catalog::CapabilityId,
+        tracedecay_tool_catalog::UseCaseId,
+    ),
+    service::invocation::DaemonInvocationProblem,
+> {
+    match operation {
+        tracedecay_application::MultiRootOperationV1::Work { request } => {
+            let request =
+                serde_json::from_value::<service::invocation::WorkApplicationInvocationV1>(
+                    request.clone(),
+                )
+                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+            if !matches!(
+                request,
+                service::invocation::WorkApplicationInvocationV1::Snapshot(_)
+                    | service::invocation::WorkApplicationInvocationV1::Delta(_)
+            ) {
+                return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+            }
+            let operation_key = request.operation_key();
+            let (_, capability, use_case) =
+                tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+                    .iter()
+                    .find(|(candidate, _, _)| *candidate == operation_key)
+                    .ok_or(service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+            Ok((
+                tracedecay_tool_catalog::CapabilityId::new(*capability)
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?,
+                tracedecay_tool_catalog::UseCaseId::new(*use_case)
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?,
+            ))
+        }
+        tracedecay_application::MultiRootOperationV1::Git { request }
+        | tracedecay_application::MultiRootOperationV1::Feedback { request }
+        | tracedecay_application::MultiRootOperationV1::Impact { request }
+        | tracedecay_application::MultiRootOperationV1::Query { request } => {
+            let wire = serde_json::from_value::<FederatedSurfaceRequestV1>(request.clone())
+                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+            if !multi_root_family_allows(operation, wire.operation) {
+                return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+            }
+            crate::application_surface::application_surface_operation_authority(wire.operation)
+                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)
+        }
     }
 }
 

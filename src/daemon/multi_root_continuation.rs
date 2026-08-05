@@ -96,10 +96,12 @@ pub(super) fn open(
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::{MultiRootAuthorizationBindingV1, MultiRootContinuationStateV1};
+    use tracedecay_application::{
+        MultiRootAuthorizationBindingV1, MultiRootContinuationStateV1, MultiRootRootCursorV1,
+    };
     use tracedecay_domain::{
-        AuthorityEpoch, CollectionRevision, ManifestDigest, RootGenerationV1, RootScopeOutcomeV1,
-        ScopeOutcome, ScopeSetId, ScopeSetRevision, StackRevision,
+        AuthorityEpoch, CodeGenerationId, ManifestDigest, RootGenerationV1, RootScopeOutcomeV1,
+        ScopeOutcome, ScopeSetId, ScopeSetRevision,
     };
     use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
 
@@ -119,8 +121,9 @@ mod tests {
     fn state() -> MultiRootContinuationStateV1 {
         let generation = RootGenerationV1::new(
             digest('a'),
-            CollectionRevision::new(digest('b')).unwrap(),
-            StackRevision::new(digest('c')).unwrap(),
+            CodeGenerationId::new("generation.cursor.1").unwrap(),
+            digest('b'),
+            digest('c'),
         )
         .unwrap();
         MultiRootContinuationStateV1::new(
@@ -128,6 +131,7 @@ mod tests {
             ScopeSetRevision::new(7).unwrap(),
             digest('d'),
             vec![RootScopeOutcomeV1::new(digest('a'), ScopeOutcome::Exact(generation)).unwrap()],
+            vec![MultiRootRootCursorV1::new(digest('a'), None).unwrap()],
             digest('e'),
             digest('f'),
             MultiRootAuthorizationBindingV1 {

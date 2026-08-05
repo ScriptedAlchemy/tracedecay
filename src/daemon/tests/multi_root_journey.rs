@@ -9,11 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_application::{
-    CancellationContext, Deadline, MultiRootExecuteRequestV1, MultiRootOperationV1,
-    MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
-    RegisteredRootSelectorV1,
+    CancellationContext, CreateWorkCommand, Deadline, MultiRootExecuteRequestV1,
+    MultiRootOperationV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1,
+    MultiRootScopeSetReadRequestV1, RegisteredRootSelectorV1,
 };
-use tracedecay_domain::{ScopeSetId, UtcMicros};
+use tracedecay_domain::{ScopeSetId, TaskId, UtcMicros, WorkCommandId};
 
 use super::{
     enter_test_daemon_database_scope, test_client_identity_for, test_daemon_engine_for_profile,
@@ -21,7 +21,7 @@ use super::{
 };
 use crate::daemon::service::invocation::{
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
-    DaemonInvocationRequest, parse_daemon_invocation_request,
+    DaemonInvocationRequest, WorkApplicationInvocationV1, parse_daemon_invocation_request,
 };
 use crate::daemon::{
     DaemonHandshake, execute_daemon_invocation, execute_portable_daemon_invocation,
@@ -417,12 +417,21 @@ async fn run_authenticated_multi_root_journey() {
         lsp_scope_set_digest.is_some(),
         "federated initialize must report its scope set digest"
     );
+    let read_observed_at = now();
+    let (read_deadline, read_cancellation) = controls("lsp-scope-set-read", read_observed_at);
     for root in [first.path(), second.as_path()] {
         assert!(
             engine
                 .invocation
                 .service
-                .persisted_scope_set(root, &lsp_scope_set_id)
+                .persisted_scope_set(
+                    root,
+                    &lsp_scope_set_id,
+                    tracedecay_application::MultiRootApplicationOperation::ScopeSetRead,
+                    read_observed_at,
+                    &read_deadline,
+                    &read_cancellation,
+                )
                 .await
                 .is_some(),
             "federated admission must persist the scope set in every participating store"
@@ -472,12 +481,21 @@ async fn run_authenticated_multi_root_journey() {
     let stored = cas_result
         .scope_set
         .expect("applied CAS must return the scope set");
+    let read_observed_at = now();
+    let (read_deadline, read_cancellation) = controls("cas-scope-set-read", read_observed_at);
     for root in [first.path(), second.as_path(), third.path()] {
         assert_eq!(
             engine
                 .invocation
                 .service
-                .persisted_scope_set(root, &scope_set_id)
+                .persisted_scope_set(
+                    root,
+                    &scope_set_id,
+                    tracedecay_application::MultiRootApplicationOperation::ScopeSetRead,
+                    read_observed_at,
+                    &read_deadline,
+                    &read_cancellation,
+                )
                 .await
                 .as_ref(),
             Some(&stored),
@@ -629,11 +647,57 @@ async fn run_authenticated_multi_root_journey() {
         );
     }
 
+    // Seed enough real Work state in every root to require a second page.
+    for (root_ordinal, handshake) in [&first_handshake, &second_handshake, &third_handshake]
+        .into_iter()
+        .enumerate()
+    {
+        for task_ordinal in 0..2 {
+            let observed_at = now();
+            let (deadline, cancellation) = controls(
+                &format!("seed-work-{root_ordinal}-{task_ordinal}"),
+                observed_at,
+            );
+            let response = execute_daemon_invocation(
+                &engine,
+                handshake,
+                DaemonInvocationRequest::work_application(
+                    format!("request.multi-root.seed-work-{root_ordinal}-{task_ordinal}"),
+                    WorkApplicationInvocationV1::Create(CreateWorkCommand {
+                        task_id: TaskId::new(format!(
+                            "task.multi-root.{root_ordinal}.{task_ordinal}"
+                        ))
+                        .expect("task id"),
+                        title: format!("Multi-root task {root_ordinal}.{task_ordinal}"),
+                        dependencies: std::collections::BTreeSet::new(),
+                        command_id: WorkCommandId::new(format!(
+                            "command.multi-root.{root_ordinal}.{task_ordinal}"
+                        ))
+                        .expect("command id"),
+                        occurred_at: observed_at,
+                    }),
+                    observed_at,
+                    deadline,
+                    cancellation,
+                ),
+            )
+            .await;
+            assert!(
+                matches!(
+                    response.outcome,
+                    DaemonInvocationOutcome::WorkApplication { .. }
+                ),
+                "Work seed must use the production root runtime: {:?}",
+                response.outcome
+            );
+        }
+    }
+
     // A real result page resumes only through the durable authenticated cursor.
     let resumable_operation = MultiRootOperationV1::Work {
         request: json!({
             "operation": "snapshot",
-            "request": { "page_size": 100 }
+            "request": { "page_size": 1 }
         }),
     };
     let observed_at = now();
@@ -671,7 +735,10 @@ async fn run_authenticated_multi_root_journey() {
     else {
         panic!("real multi-root page must carry resumable evidence");
     };
-    let continuation = first_page.continuation.clone();
+    let continuation = first_page
+        .continuation
+        .clone()
+        .expect("first page must carry a continuation");
     let cursor_authenticator = registry
         .load_session_cursor_key_provider_result()
         .await
@@ -687,6 +754,12 @@ async fn run_authenticated_multi_root_journey() {
         continuation_state.root_generations.len(),
         stored.roots().len()
     );
+    assert!(continuation_state.root_cursors.iter().all(|root| {
+        matches!(
+            root.cursor.as_ref(),
+            Some(tracedecay_application::MultiRootRootContinuationV1::Work(_))
+        )
+    }));
     assert!(
         continuation_state.last_order_key.is_some(),
         "a page with emitted evidence must freeze its total-order key"
@@ -714,10 +787,37 @@ async fn run_authenticated_multi_root_journey() {
         ),
     )
     .await;
-    assert!(matches!(
-        resumed.outcome,
-        DaemonInvocationOutcome::MultiRootQueryPage { .. }
-    ));
+    let DaemonInvocationOutcome::MultiRootQueryPage {
+        outcome:
+            tracedecay_application::ApplicationOutcome::Evidence(
+                tracedecay_application::EvidencePacket {
+                    payload: Some(resumed_page),
+                    ..
+                },
+            ),
+        ..
+    } = resumed.outcome
+    else {
+        panic!("resumed Work page must carry multi-root evidence");
+    };
+    assert!(
+        resumed_page.continuation.is_none(),
+        "the second underlying Work page must terminate the aggregate cursor"
+    );
+    for root in resumed_page.roots {
+        let tracedecay_domain::ScopeOutcome::Exact(values) = root.outcome else {
+            panic!("each authorized Work root must resume exactly");
+        };
+        assert_eq!(
+            values
+                .first()
+                .and_then(|value| value.get("changed"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1),
+            "each root must advance to its second Work item instead of replaying page one"
+        );
+    }
 
     let mut tampered = continuation.as_str().to_owned();
     let replacement = if tampered.ends_with('0') { '1' } else { '0' };
@@ -769,12 +869,21 @@ async fn run_authenticated_multi_root_journey() {
         .open_project_server(&third_handshake)
         .await
         .expect("restarted distinct project owner");
+    let read_observed_at = now();
+    let (read_deadline, read_cancellation) = controls("restart-scope-set-read", read_observed_at);
     for root in [first.path(), second.as_path(), third.path()] {
         assert_eq!(
             restarted
                 .invocation
                 .service
-                .persisted_scope_set(root, &scope_set_id)
+                .persisted_scope_set(
+                    root,
+                    &scope_set_id,
+                    tracedecay_application::MultiRootApplicationOperation::ScopeSetRead,
+                    read_observed_at,
+                    &read_deadline,
+                    &read_cancellation,
+                )
                 .await
                 .as_ref(),
             Some(&stored),

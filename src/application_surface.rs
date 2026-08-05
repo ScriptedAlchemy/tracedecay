@@ -904,7 +904,7 @@ pub(crate) async fn invoke_multi_root_surface_request(
     deadline: Deadline,
     cancellation: tracedecay_application::CancellationSignal,
     body: Value,
-) -> Result<Value, ApplicationSurfaceAdapterError> {
+) -> Result<(Value, Option<OpaqueCursor>), ApplicationSurfaceAdapterError> {
     let request = parse_application_surface_request(operation, body)?;
     let dispatched = resolve_application_surface_dispatch_with_controls(
         BindingSurface::Http,
@@ -921,10 +921,23 @@ pub(crate) async fn invoke_multi_root_surface_request(
     let envelope = response
         .result
         .map_err(|_| ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
-    serde_json::to_value(envelope.outcome)
+    let payload = serde_json::to_value(envelope.outcome)
         .ok()
         .and_then(|value| value.get("value")?.get("payload").cloned())
-        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    let cursor = multi_root_payload_cursor(&payload)?;
+    Ok((payload, cursor))
+}
+
+fn multi_root_payload_cursor(
+    payload: &Value,
+) -> Result<Option<OpaqueCursor>, ApplicationSurfaceAdapterError> {
+    payload
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .map(OpaqueCursor::new)
+        .transpose()
+        .map_err(ApplicationSurfaceAdapterError::Contract)
 }
 
 fn work_application_router_with_executor(
@@ -2353,6 +2366,26 @@ pub(crate) fn application_surface_catalog_ref()
         Ok(catalog) => Ok(catalog),
         Err(error) => Err(ApplicationSurfaceAdapterError::Catalog(error.clone())),
     }
+}
+
+pub(crate) fn application_surface_operation_authority(
+    operation: ApplicationSurfaceOperation,
+) -> Result<(CapabilityId, UseCaseId), ApplicationSurfaceAdapterError> {
+    let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?;
+    let operation = SurfaceOperationName::new(operation.as_str())?;
+    let manifest = application_surface_catalog_ref()?
+        .resolve_binding(
+            &profile,
+            BindingSurface::Http,
+            &operation,
+            APPLICATION_PROTOCOL_REVISION,
+            &application_negotiated_features(),
+        )
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    Ok((
+        manifest.capability_id().clone(),
+        manifest.use_case_id().clone(),
+    ))
 }
 
 pub fn application_surface_catalog() -> Result<CatalogSnapshotV1, ApplicationSurfaceAdapterError> {

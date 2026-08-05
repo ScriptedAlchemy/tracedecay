@@ -2953,6 +2953,24 @@ fn production_owner_capabilities()
             }
         })?);
     }
+    for operation in crate::application_surface::APPLICATION_SURFACE_OPERATIONS
+        .into_iter()
+        .filter(|operation| multi_root_operation_is_readable(*operation))
+    {
+        let (capability, _) =
+            crate::application_surface::application_surface_operation_authority(operation)
+                .map_err(|_| ApplicationContractError::Inconsistent {
+                    field: "project-open application surface capability",
+                })?;
+        capabilities.insert(capability);
+    }
+    for operation in tracedecay_application::MultiRootApplicationOperation::ALL {
+        let (capability, _) = tracedecay_application::multi_root_operation_authority(operation)
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "project-open multi-root capability",
+            })?;
+        capabilities.insert(capability);
+    }
     Ok(capabilities)
 }
 

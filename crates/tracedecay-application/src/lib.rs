@@ -52,6 +52,7 @@ pub mod workflow_runtime;
 
 pub use multi_root_catalog::{
     MultiRootApplicationOperation, multi_root_executable_binding_registry,
+    multi_root_operation_authority,
 };
 
 mod error;

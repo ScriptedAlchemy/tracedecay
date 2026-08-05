@@ -19,7 +19,7 @@ mod locator;
 
 pub use continuation::{
     MultiRootAuthorizationBindingV1, MultiRootContinuationStateV1, MultiRootContinuationV1,
-    MultiRootTotalOrderKeyV1,
+    MultiRootRootContinuationV1, MultiRootRootCursorV1, MultiRootTotalOrderKeyV1,
 };
 pub use locator::{
     AuthorizedRoot, AuthorizedRootAdmission, RegisteredRootLocatorV1, RegisteredRootSelectorV1,
@@ -505,7 +505,7 @@ pub struct MultiRootQueryRequestV1<Q> {
     pub order_digest: ManifestDigest,
     pub page: u64,
     pub continuation: Option<MultiRootContinuationStateV1>,
-    pub next_continuation: MultiRootContinuationV1,
+    pub next_continuation: Option<MultiRootContinuationV1>,
 }
 
 /// One root-local query adapter. It receives only the exact admitted context
@@ -530,7 +530,7 @@ pub struct MultiRootQueryPageV1<T> {
     pub scope_set_digest: ManifestDigest,
     pub roots: Vec<RootScopeOutcomeV1<Vec<T>>>,
     pub aggregate: ScopeOutcome<Vec<T>>,
-    pub continuation: MultiRootContinuationV1,
+    pub continuation: Option<MultiRootContinuationV1>,
 }
 
 pub struct AuthorizedMultiRootQueryService<P> {

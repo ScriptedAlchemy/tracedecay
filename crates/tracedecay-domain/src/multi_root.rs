@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::canonical_text::validate_canonical_identity;
-use crate::{DomainError, ManifestDigest, canonical_sha256};
+use crate::{CodeGenerationId, DomainError, ManifestDigest, canonical_sha256};
 
 const ROOT_GENERATION_DIGEST_DOMAIN_V1: &str = "tracedecay.multi-root.generation.v1";
 
@@ -103,51 +103,14 @@ impl<'de> Deserialize<'de> for ScopeSetRevision {
     }
 }
 
-macro_rules! digest_revision {
-    ($name:ident, $field:literal) => {
-        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(ManifestDigest);
-
-        impl $name {
-            pub fn new(value: ManifestDigest) -> Result<Self, DomainError> {
-                value.validate()?;
-                Ok(Self(value))
-            }
-
-            pub fn digest(&self) -> &ManifestDigest {
-                &self.0
-            }
-
-            pub fn validate(&self) -> Result<(), DomainError> {
-                self.0
-                    .validate()
-                    .map_err(|_| DomainError::NonCanonical { field: $field })
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(ManifestDigest::deserialize(deserializer)?)
-                    .map_err(serde::de::Error::custom)
-            }
-        }
-    };
-}
-
-digest_revision!(CollectionRevision, "collection revision");
-digest_revision!(StackRevision, "stack revision");
-
-/// Immutable collection and stack revisions for one exact resolved root.
+/// Immutable identities of one exact root's published code generation.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RootGenerationV1 {
     pub scope_digest: ManifestDigest,
-    pub collection_revision: CollectionRevision,
-    pub stack_revision: StackRevision,
+    pub index_generation: CodeGenerationId,
+    pub snapshot_digest: ManifestDigest,
+    pub graph_publication_digest: ManifestDigest,
     pub generation_digest: ManifestDigest,
 }
 
@@ -155,8 +118,9 @@ pub struct RootGenerationV1 {
 #[serde(deny_unknown_fields)]
 struct RootGenerationWireV1 {
     scope_digest: ManifestDigest,
-    collection_revision: CollectionRevision,
-    stack_revision: StackRevision,
+    index_generation: CodeGenerationId,
+    snapshot_digest: ManifestDigest,
+    graph_publication_digest: ManifestDigest,
     generation_digest: ManifestDigest,
 }
 
@@ -168,8 +132,9 @@ impl<'de> Deserialize<'de> for RootGenerationV1 {
         let wire = RootGenerationWireV1::deserialize(deserializer)?;
         let generation = Self::new(
             wire.scope_digest,
-            wire.collection_revision,
-            wire.stack_revision,
+            wire.index_generation,
+            wire.snapshot_digest,
+            wire.graph_publication_digest,
         )
         .map_err(serde::de::Error::custom)?;
         if generation.generation_digest != wire.generation_digest {
@@ -184,22 +149,26 @@ impl<'de> Deserialize<'de> for RootGenerationV1 {
 impl RootGenerationV1 {
     pub fn new(
         scope_digest: ManifestDigest,
-        collection_revision: CollectionRevision,
-        stack_revision: StackRevision,
+        index_generation: CodeGenerationId,
+        snapshot_digest: ManifestDigest,
+        graph_publication_digest: ManifestDigest,
     ) -> Result<Self, DomainError> {
         scope_digest.validate()?;
-        collection_revision.validate()?;
-        stack_revision.validate()?;
+        index_generation.validate()?;
+        snapshot_digest.validate()?;
+        graph_publication_digest.validate()?;
         let generation_digest = canonical_sha256(&(
             ROOT_GENERATION_DIGEST_DOMAIN_V1,
             &scope_digest,
-            &collection_revision,
-            &stack_revision,
+            &index_generation,
+            &snapshot_digest,
+            &graph_publication_digest,
         ))?;
         Ok(Self {
             scope_digest,
-            collection_revision,
-            stack_revision,
+            index_generation,
+            snapshot_digest,
+            graph_publication_digest,
             generation_digest,
         })
     }
@@ -208,15 +177,17 @@ impl RootGenerationV1 {
         canonical_sha256(&(
             ROOT_GENERATION_DIGEST_DOMAIN_V1,
             &self.scope_digest,
-            &self.collection_revision,
-            &self.stack_revision,
+            &self.index_generation,
+            &self.snapshot_digest,
+            &self.graph_publication_digest,
         ))
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.scope_digest.validate()?;
-        self.collection_revision.validate()?;
-        self.stack_revision.validate()?;
+        self.index_generation.validate()?;
+        self.snapshot_digest.validate()?;
+        self.graph_publication_digest.validate()?;
         self.generation_digest.validate()?;
         if self.compute_digest()? != self.generation_digest {
             return Err(DomainError::DigestMismatch);

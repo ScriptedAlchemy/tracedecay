@@ -214,8 +214,8 @@ use invocation_dispatch::{
 mod invocation_executor;
 use invocation_executor::{
     FederatedSurfaceRequestV1, InProcessDaemonInvocationExecutor, PrecomputedMultiRootQueryPort,
-    denied_root_generation, explicit_git_state, extract_work_application_payload,
-    frozen_root_generation, invocation_is_git_operation, multi_root_family_allows,
+    denied_root_generation, extract_work_application_payload, invocation_is_git_operation,
+    multi_root_family_allows, multi_root_operation_is_readable, published_root_generation,
     unavailable_root_generation,
 };
 mod invocation_state;

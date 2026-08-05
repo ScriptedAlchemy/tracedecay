@@ -66,6 +66,16 @@ impl MultiRootApplicationOperation {
     }
 }
 
+pub fn multi_root_operation_authority(
+    operation: MultiRootApplicationOperation,
+) -> Result<(CapabilityId, UseCaseId), CatalogValidationError> {
+    let manifest = manifest(operation)?;
+    Ok((
+        manifest.capability_id().clone(),
+        manifest.use_case_id().clone(),
+    ))
+}
+
 pub fn multi_root_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     ExecutableBindingRegistryV1::new(vec![

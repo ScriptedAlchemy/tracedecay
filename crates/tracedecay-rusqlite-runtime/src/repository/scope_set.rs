@@ -18,11 +18,25 @@ use crate::exact_sql::{
 };
 
 pub const AUTHORIZED_SCOPE_SET_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS authorized_scope_sets (
+CREATE TABLE IF NOT EXISTS authorized_scope_sets_v1 (
     scope_set_id TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL CHECK (revision > 0),
     digest TEXT NOT NULL,
     canonical_payload BLOB NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS authorized_scope_set_transactions_v1 (
+    idempotency_key TEXT PRIMARY KEY NOT NULL,
+    command_digest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'conflict')),
+    next_payload BLOB NOT NULL,
+    result_payload BLOB
+) STRICT;
+CREATE TABLE IF NOT EXISTS authorized_scope_set_replica_receipts_v1 (
+    idempotency_key TEXT NOT NULL,
+    replica_digest TEXT NOT NULL,
+    PRIMARY KEY (idempotency_key, replica_digest),
+    FOREIGN KEY (idempotency_key)
+        REFERENCES authorized_scope_set_transactions_v1(idempotency_key)
 ) STRICT;
 ";
 
@@ -40,6 +54,8 @@ pub enum AuthorizedScopeSetStoreError {
     InvalidData(String),
     #[error("authorized scope-set actor does not match the stored owner")]
     OwnershipMismatch,
+    #[error("authorized scope-set idempotency key conflicts with a prior command")]
+    IdempotencyConflict,
     #[error(transparent)]
     RegisteredStore(#[from] ExactSqlError),
 }
@@ -104,7 +120,7 @@ impl AuthorizedScopeSetExecutor {
         match command.expected_revision {
             None => {
                 transaction.execute(
-                    "INSERT INTO authorized_scope_sets
+                    "INSERT INTO authorized_scope_sets_v1
                          (scope_set_id, revision, digest, canonical_payload)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![
@@ -117,7 +133,7 @@ impl AuthorizedScopeSetExecutor {
             }
             Some(expected) => {
                 let changed = transaction.execute(
-                    "UPDATE authorized_scope_sets
+                    "UPDATE authorized_scope_sets_v1
                      SET revision = ?2, digest = ?3, canonical_payload = ?4
                      WHERE scope_set_id = ?1 AND revision = ?5",
                     params![
@@ -144,6 +160,13 @@ impl AuthorizedScopeSetExecutor {
 #[derive(Clone)]
 pub struct AuthorizedScopeSetSqliteStorage {
     handle: ExactSqlHandle,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthorizedScopeSetDurableCasV1 {
+    Pending(AuthorizedScopeSet),
+    Applied(AuthorizedScopeSet),
+    Conflict(Option<AuthorizedScopeSet>),
 }
 
 impl AuthorizedScopeSetSqliteStorage {
@@ -190,7 +213,7 @@ impl AuthorizedScopeSetSqliteStorage {
         }
         let payload = serde_json::to_vec(next)?;
         transaction.execute(ExactSqlStatement::new(
-            "INSERT INTO authorized_scope_sets (
+            "INSERT INTO authorized_scope_sets_v1 (
                  scope_set_id, revision, digest, canonical_payload
              ) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(scope_set_id) DO UPDATE SET
@@ -215,6 +238,327 @@ impl AuthorizedScopeSetSqliteStorage {
             )?,
         ))
     }
+
+    pub fn begin_durable_compare_and_swap(
+        &self,
+        idempotency_key: &str,
+        command_digest: &ManifestDigest,
+        expected_revision: Option<ScopeSetRevision>,
+        next: &AuthorizedScopeSet,
+    ) -> Result<AuthorizedScopeSetDurableCasV1, AuthorizedScopeSetStoreError> {
+        if idempotency_key.is_empty() || idempotency_key.trim() != idempotency_key {
+            return Err(AuthorizedScopeSetStoreError::InvalidData(
+                "scope-set idempotency key is not canonical".to_owned(),
+            ));
+        }
+        command_digest
+            .validate()
+            .map_err(|error| AuthorizedScopeSetStoreError::InvalidData(error.to_string()))?;
+        next.validate()?;
+        let transaction = self.handle.begin_immediate()?;
+        if let Some(replay) = read_durable_cas(&transaction, idempotency_key, command_digest)? {
+            transaction.rollback()?;
+            return Ok(replay);
+        }
+        let current = decode_registered_rows(
+            transaction
+                .query(registered_read_statement(next.scope_set_id())?)?
+                .rows,
+        )?;
+        if current.as_ref().map(AuthorizedScopeSet::revision) != expected_revision {
+            insert_durable_cas(
+                &transaction,
+                idempotency_key,
+                command_digest,
+                "conflict",
+                next,
+                current.as_ref(),
+            )?;
+            transaction.commit()?;
+            return Ok(AuthorizedScopeSetDurableCasV1::Conflict(current));
+        }
+        if current
+            .as_ref()
+            .is_some_and(|current| current.actor_id() != next.actor_id())
+        {
+            transaction.rollback()?;
+            return Err(AuthorizedScopeSetStoreError::OwnershipMismatch);
+        }
+        write_registered_scope_set(&transaction, next)?;
+        insert_durable_cas(
+            &transaction,
+            idempotency_key,
+            command_digest,
+            "pending",
+            next,
+            None,
+        )?;
+        transaction.commit()?;
+        Ok(AuthorizedScopeSetDurableCasV1::Pending(next.clone()))
+    }
+
+    pub fn record_durable_replica(
+        &self,
+        idempotency_key: &str,
+        command_digest: &ManifestDigest,
+        replica_digest: &ManifestDigest,
+    ) -> Result<(), AuthorizedScopeSetStoreError> {
+        replica_digest
+            .validate()
+            .map_err(|error| AuthorizedScopeSetStoreError::InvalidData(error.to_string()))?;
+        let transaction = self.handle.begin_immediate()?;
+        let Some(state) = read_durable_cas(&transaction, idempotency_key, command_digest)? else {
+            transaction.rollback()?;
+            return Err(AuthorizedScopeSetStoreError::InvalidData(
+                "scope-set durable CAS journal is missing".to_owned(),
+            ));
+        };
+        if matches!(state, AuthorizedScopeSetDurableCasV1::Conflict(_)) {
+            transaction.rollback()?;
+            return Err(AuthorizedScopeSetStoreError::InvalidData(
+                "scope-set conflict cannot accept replica receipts".to_owned(),
+            ));
+        }
+        transaction.execute(ExactSqlStatement::new(
+            "INSERT OR IGNORE INTO authorized_scope_set_replica_receipts_v1
+                 (idempotency_key, replica_digest)
+             VALUES (?1, ?2)"
+                .to_owned(),
+            vec![
+                ExactSqlValue::Text(idempotency_key.to_owned()),
+                ExactSqlValue::Text(replica_digest.as_str().to_owned()),
+            ],
+        )?)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn complete_durable_compare_and_swap(
+        &self,
+        idempotency_key: &str,
+        command_digest: &ManifestDigest,
+        expected_replicas: &[ManifestDigest],
+    ) -> Result<AuthorizedScopeSetDurableCasV1, AuthorizedScopeSetStoreError> {
+        if expected_replicas.is_empty() {
+            return Err(AuthorizedScopeSetStoreError::InvalidData(
+                "scope-set durable CAS requires at least one replica".to_owned(),
+            ));
+        }
+        for replica in expected_replicas {
+            replica
+                .validate()
+                .map_err(|error| AuthorizedScopeSetStoreError::InvalidData(error.to_string()))?;
+        }
+        let transaction = self.handle.begin_immediate()?;
+        let Some(state) = read_durable_cas(&transaction, idempotency_key, command_digest)? else {
+            transaction.rollback()?;
+            return Err(AuthorizedScopeSetStoreError::InvalidData(
+                "scope-set durable CAS journal is missing".to_owned(),
+            ));
+        };
+        match state {
+            AuthorizedScopeSetDurableCasV1::Applied(_)
+            | AuthorizedScopeSetDurableCasV1::Conflict(_) => {
+                transaction.rollback()?;
+                return Ok(state);
+            }
+            AuthorizedScopeSetDurableCasV1::Pending(next) => {
+                let rows = transaction
+                    .query(ExactSqlStatement::new(
+                        "SELECT replica_digest
+                         FROM authorized_scope_set_replica_receipts_v1
+                         WHERE idempotency_key = ?1
+                         ORDER BY replica_digest"
+                            .to_owned(),
+                        vec![ExactSqlValue::Text(idempotency_key.to_owned())],
+                    )?)?
+                    .rows;
+                let mut actual = rows
+                    .into_iter()
+                    .map(|row| match row.values.as_slice() {
+                        [ExactSqlValue::Text(digest)] => ManifestDigest::new(digest.clone())
+                            .map_err(|error| {
+                                AuthorizedScopeSetStoreError::InvalidData(error.to_string())
+                            }),
+                        _ => Err(AuthorizedScopeSetStoreError::InvalidData(
+                            "scope-set replica receipt has an invalid shape".to_owned(),
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                actual.sort();
+                let mut expected = expected_replicas.to_vec();
+                expected.sort();
+                expected.dedup();
+                if actual != expected {
+                    transaction.rollback()?;
+                    return Ok(AuthorizedScopeSetDurableCasV1::Pending(next));
+                }
+                transaction.execute(ExactSqlStatement::new(
+                    "UPDATE authorized_scope_set_transactions_v1
+                     SET status = 'applied', result_payload = next_payload
+                     WHERE idempotency_key = ?1 AND status = 'pending'"
+                        .to_owned(),
+                    vec![ExactSqlValue::Text(idempotency_key.to_owned())],
+                )?)?;
+                transaction.commit()?;
+                Ok(AuthorizedScopeSetDurableCasV1::Applied(next))
+            }
+        }
+    }
+
+    pub fn conflict_durable_compare_and_swap(
+        &self,
+        idempotency_key: &str,
+        command_digest: &ManifestDigest,
+        current: Option<&AuthorizedScopeSet>,
+    ) -> Result<AuthorizedScopeSetDurableCasV1, AuthorizedScopeSetStoreError> {
+        let transaction = self.handle.begin_immediate()?;
+        let Some(state) = read_durable_cas(&transaction, idempotency_key, command_digest)? else {
+            transaction.rollback()?;
+            return Err(AuthorizedScopeSetStoreError::InvalidData(
+                "scope-set durable CAS journal is missing".to_owned(),
+            ));
+        };
+        match state {
+            AuthorizedScopeSetDurableCasV1::Applied(_)
+            | AuthorizedScopeSetDurableCasV1::Conflict(_) => {
+                transaction.rollback()?;
+                Ok(state)
+            }
+            AuthorizedScopeSetDurableCasV1::Pending(_) => {
+                let result_payload = current
+                    .map(serde_json::to_vec)
+                    .transpose()?
+                    .map_or(ExactSqlValue::Null, ExactSqlValue::Blob);
+                transaction.execute(ExactSqlStatement::new(
+                    "UPDATE authorized_scope_set_transactions_v1
+                     SET status = 'conflict', result_payload = ?2
+                     WHERE idempotency_key = ?1 AND status = 'pending'"
+                        .to_owned(),
+                    vec![
+                        ExactSqlValue::Text(idempotency_key.to_owned()),
+                        result_payload,
+                    ],
+                )?)?;
+                transaction.commit()?;
+                Ok(AuthorizedScopeSetDurableCasV1::Conflict(current.cloned()))
+            }
+        }
+    }
+}
+
+fn read_durable_cas(
+    transaction: &crate::exact_sql::ExactSqlTransaction,
+    idempotency_key: &str,
+    command_digest: &ManifestDigest,
+) -> Result<Option<AuthorizedScopeSetDurableCasV1>, AuthorizedScopeSetStoreError> {
+    let rows = transaction
+        .query(ExactSqlStatement::new(
+            "SELECT command_digest, status, next_payload, result_payload
+             FROM authorized_scope_set_transactions_v1
+             WHERE idempotency_key = ?1"
+                .to_owned(),
+            vec![ExactSqlValue::Text(idempotency_key.to_owned())],
+        )?)?
+        .rows;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let [
+        ExactSqlValue::Text(stored_digest),
+        ExactSqlValue::Text(status),
+        ExactSqlValue::Blob(next_payload),
+        result_payload,
+    ] = row.values.as_slice()
+    else {
+        return Err(AuthorizedScopeSetStoreError::InvalidData(
+            "scope-set durable CAS journal has an invalid shape".to_owned(),
+        ));
+    };
+    if stored_digest != command_digest.as_str() {
+        return Err(AuthorizedScopeSetStoreError::IdempotencyConflict);
+    }
+    let next = decode_scope_set_payload(next_payload)?;
+    match status.as_str() {
+        "pending" => Ok(Some(AuthorizedScopeSetDurableCasV1::Pending(next))),
+        "applied" => Ok(Some(AuthorizedScopeSetDurableCasV1::Applied(next))),
+        "conflict" => {
+            let current = match result_payload {
+                ExactSqlValue::Null => None,
+                ExactSqlValue::Blob(payload) => Some(decode_scope_set_payload(payload)?),
+                _ => {
+                    return Err(AuthorizedScopeSetStoreError::InvalidData(
+                        "scope-set conflict replay has an invalid result".to_owned(),
+                    ));
+                }
+            };
+            Ok(Some(AuthorizedScopeSetDurableCasV1::Conflict(current)))
+        }
+        _ => Err(AuthorizedScopeSetStoreError::InvalidData(
+            "scope-set durable CAS journal has an invalid status".to_owned(),
+        )),
+    }
+}
+
+fn insert_durable_cas(
+    transaction: &crate::exact_sql::ExactSqlTransaction,
+    idempotency_key: &str,
+    command_digest: &ManifestDigest,
+    status: &str,
+    next: &AuthorizedScopeSet,
+    result: Option<&AuthorizedScopeSet>,
+) -> Result<(), AuthorizedScopeSetStoreError> {
+    let result_payload = result
+        .map(serde_json::to_vec)
+        .transpose()?
+        .map_or(ExactSqlValue::Null, ExactSqlValue::Blob);
+    transaction.execute(ExactSqlStatement::new(
+        "INSERT INTO authorized_scope_set_transactions_v1 (
+             idempotency_key, command_digest, status, next_payload, result_payload
+         ) VALUES (?1, ?2, ?3, ?4, ?5)"
+            .to_owned(),
+        vec![
+            ExactSqlValue::Text(idempotency_key.to_owned()),
+            ExactSqlValue::Text(command_digest.as_str().to_owned()),
+            ExactSqlValue::Text(status.to_owned()),
+            ExactSqlValue::Blob(serde_json::to_vec(next)?),
+            result_payload,
+        ],
+    )?)?;
+    Ok(())
+}
+
+fn write_registered_scope_set(
+    transaction: &crate::exact_sql::ExactSqlTransaction,
+    next: &AuthorizedScopeSet,
+) -> Result<(), AuthorizedScopeSetStoreError> {
+    transaction.execute(ExactSqlStatement::new(
+        "INSERT INTO authorized_scope_sets_v1 (
+             scope_set_id, revision, digest, canonical_payload
+         ) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(scope_set_id) DO UPDATE SET
+             revision = excluded.revision,
+             digest = excluded.digest,
+             canonical_payload = excluded.canonical_payload"
+            .to_owned(),
+        vec![
+            ExactSqlValue::Text(next.scope_set_id().as_str().to_owned()),
+            ExactSqlValue::Integer(revision_to_i64(next.revision())?),
+            ExactSqlValue::Text(next.digest().as_str().to_owned()),
+            ExactSqlValue::Blob(serde_json::to_vec(next)?),
+        ],
+    )?)?;
+    Ok(())
+}
+
+fn decode_scope_set_payload(
+    payload: &[u8],
+) -> Result<AuthorizedScopeSet, AuthorizedScopeSetStoreError> {
+    let scope_set: AuthorizedScopeSet = serde_json::from_slice(payload)?;
+    scope_set
+        .validate()
+        .map_err(|error| AuthorizedScopeSetStoreError::InvalidData(error.to_string()))?;
+    Ok(scope_set)
 }
 
 fn registered_read_statement(
@@ -222,7 +566,7 @@ fn registered_read_statement(
 ) -> Result<ExactSqlStatement, AuthorizedScopeSetStoreError> {
     Ok(ExactSqlStatement::new(
         "SELECT revision, digest, canonical_payload
-         FROM authorized_scope_sets
+         FROM authorized_scope_sets_v1
          WHERE scope_set_id = ?1"
             .to_owned(),
         vec![ExactSqlValue::Text(scope_set_id.as_str().to_owned())],
@@ -266,7 +610,7 @@ fn read_record(
     let row = connection
         .query_row(
             "SELECT revision, digest, canonical_payload
-             FROM authorized_scope_sets
+             FROM authorized_scope_sets_v1
              WHERE scope_set_id = ?1",
             [scope_set_id.as_str()],
             |row| {
@@ -297,7 +641,7 @@ fn read_revision(
 ) -> Result<Option<ScopeSetRevision>, AuthorizedScopeSetStoreError> {
     connection
         .query_row(
-            "SELECT revision FROM authorized_scope_sets WHERE scope_set_id = ?1",
+            "SELECT revision FROM authorized_scope_sets_v1 WHERE scope_set_id = ?1",
             [scope_set_id.as_str()],
             |row| row.get::<_, i64>(0),
         )

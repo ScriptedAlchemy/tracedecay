@@ -1,6 +1,5 @@
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tracedecay_domain::{
@@ -14,18 +13,12 @@ use super::{
     SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
     SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
     SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
-    handle_message_search_with_registry, handle_message_search_with_service,
-    render_temporal_message_search_md,
+    handle_message_search_with_service, render_temporal_message_search_md,
 };
 use crate::application::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope,
 };
 use crate::errors::TraceDecayError;
-use crate::mcp::tools::handlers::project_registry::{
-    ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
-    ProjectRegistryListingCommand, ProjectRegistryListingFuture, ProjectRegistryListingOutcome,
-    ProjectRegistryListingView, ProjectRegistryReadPort,
-};
 use crate::sessions::{SessionMessageRecord, SessionMessageSearchResult, SessionRecord};
 use tracedecay_temporal_query::ports::{TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1};
 
@@ -62,168 +55,6 @@ impl SessionRetrievalServicePort for RecordingService {
             },
         );
         Box::pin(async move { outcome })
-    }
-}
-
-struct PrefixPagingService {
-    results: Vec<SessionMessageSearchResult>,
-    calls: AtomicU64,
-    drift_after_first_page: bool,
-}
-
-impl PrefixPagingService {
-    fn stable(results: Vec<SessionMessageSearchResult>) -> Self {
-        Self {
-            results,
-            calls: AtomicU64::new(0),
-            drift_after_first_page: false,
-        }
-    }
-
-    fn drifting(results: Vec<SessionMessageSearchResult>) -> Self {
-        Self {
-            results,
-            calls: AtomicU64::new(0),
-            drift_after_first_page: true,
-        }
-    }
-}
-
-impl SessionRetrievalServicePort for PrefixPagingService {
-    fn execute(&self, command: SessionRetrievalCommand) -> SessionRetrievalServiceFuture<'_> {
-        let call = self.calls.fetch_add(1, Ordering::Relaxed);
-        let limit = command.query().limit().min(self.results.len());
-        let results = self.results[..limit].to_vec();
-        let mut temporal = temporal();
-        temporal.cursor = (limit < self.results.len()).then(|| "root.next".to_string());
-        if self.drift_after_first_page && call > 0 {
-            temporal.watermarks.generation = 1;
-        }
-        Box::pin(async move {
-            SessionRetrievalServiceOutcome::Complete {
-                page: SessionRetrievalPageView { results, temporal },
-                freshness: SessionDataFreshness::Fresh,
-            }
-        })
-    }
-}
-
-struct ProjectOutcomeService {
-    outcomes: Vec<(String, SessionRetrievalServiceOutcome)>,
-}
-
-impl ProjectOutcomeService {
-    fn new(outcomes: Vec<(&str, SessionRetrievalServiceOutcome)>) -> Self {
-        Self {
-            outcomes: outcomes
-                .into_iter()
-                .map(|(project_id, outcome)| (project_id.to_string(), outcome))
-                .collect(),
-        }
-    }
-}
-
-impl SessionRetrievalServicePort for ProjectOutcomeService {
-    fn execute(&self, command: SessionRetrievalCommand) -> SessionRetrievalServiceFuture<'_> {
-        let project_id = command
-            .project_selector()
-            .and_then(|selector| selector.project_id.as_deref());
-        let outcome = self
-            .outcomes
-            .iter()
-            .find(|(id, _)| Some(id.as_str()) == project_id)
-            .map(|(_, outcome)| outcome.clone())
-            .unwrap_or(SessionRetrievalServiceOutcome::WrongScope);
-        Box::pin(async move { outcome })
-    }
-}
-
-fn ranked_result(message_id: &str, score: f64) -> SessionMessageSearchResult {
-    SessionMessageSearchResult {
-        session: SessionRecord {
-            provider: "claude".to_string(),
-            session_id: format!("session-{message_id}"),
-            project_key: "project".to_string(),
-            project_path: "/project".to_string(),
-            title: None,
-            started_at: Some(10),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        },
-        message: SessionMessageRecord {
-            provider: "claude".to_string(),
-            message_id: message_id.to_string(),
-            session_id: format!("session-{message_id}"),
-            role: "assistant".to_string(),
-            timestamp: Some(20),
-            ordinal: 1,
-            text: message_id.to_string(),
-            kind: None,
-            model: None,
-            tool_names: None,
-            source_path: None,
-            source_offset: None,
-            metadata_json: None,
-        },
-        score,
-    }
-}
-
-struct StubProjectRegistry {
-    projects: Vec<crate::project_registry::PublicCodeProject>,
-}
-
-impl StubProjectRegistry {
-    fn with_projects(ids: &[&str]) -> Self {
-        Self {
-            projects: ids
-                .iter()
-                .map(|id| crate::project_registry::PublicCodeProject {
-                    project_id: (*id).to_string(),
-                    label: (*id).to_string(),
-                    project_root: format!("/registered/{id}"),
-                    display_root: format!("/registered/{id}"),
-                    canonical_root: format!("/registered/{id}"),
-                    git_common_dir: None,
-                    default_branch: None,
-                    created_at: 0,
-                    last_seen_at: 0,
-                    is_active: None,
-                })
-                .collect(),
-        }
-    }
-}
-
-impl ProjectRegistryReadPort for StubProjectRegistry {
-    fn list(&self, _command: ProjectRegistryListingCommand) -> ProjectRegistryListingFuture<'_> {
-        let projects = self.projects.clone();
-        Box::pin(async move {
-            Ok(ProjectRegistryListingOutcome::Listing(
-                ProjectRegistryListingView {
-                    registry_path: std::path::PathBuf::from("/registry"),
-                    truncated: false,
-                    view: crate::project_registry::ProjectRegistryView {
-                        summary: crate::project_registry::ProjectRegistrySummary {
-                            project_count: projects.len(),
-                            repo_count: projects.len(),
-                            truncated: false,
-                        },
-                        project_tree: Vec::new(),
-                    },
-                    projects,
-                },
-            ))
-        })
-    }
-
-    fn context(&self, _command: ProjectRegistryContextCommand) -> ProjectRegistryContextFuture<'_> {
-        Box::pin(async move { Ok(ProjectRegistryContextOutcome::RegistryUnavailable) })
     }
 }
 
@@ -747,10 +578,9 @@ async fn fresh_partial_outcome_uses_cursor_without_requesting_refresh() {
 }
 
 #[tokio::test]
-async fn all_registered_searches_each_registry_project() {
+async fn all_registered_defers_without_invoking_retrieval() {
     let service = RecordingService::default();
-    let registry = StubProjectRegistry::with_projects(&["project.one", "project.two"]);
-    let result = handle_message_search_with_registry(
+    let result = handle_message_search_with_service(
         Some(Path::new("/repo")),
         SessionRetrievalStoreScope::Project,
         json!({
@@ -759,227 +589,15 @@ async fn all_registered_searches_each_registry_project() {
             "format": "json"
         }),
         Some(&service),
-        Some(&registry),
     )
     .await
     .unwrap();
     let payload = response_payload(&result);
 
-    assert_eq!(service.calls(), 2);
-    assert_eq!(payload["outcome"], "complete_zero");
+    assert_eq!(service.calls(), 0);
+    assert_eq!(payload["status"], "deferred");
+    assert_eq!(payload["outcome"], "deferred");
     assert_eq!(payload["project_scope"], "all_registered");
-    assert_eq!(payload["searched_project_count"], 2);
-    assert_eq!(payload["skipped_project_count"], 0);
-    let selected = service
-        .commands
-        .lock()
-        .unwrap()
-        .iter()
-        .filter_map(|command| command.project_selector()?.project_id.clone())
-        .collect::<Vec<_>>();
-    assert_eq!(selected, vec!["project.one", "project.two"]);
-}
-
-#[tokio::test]
-async fn all_registered_continuation_requeries_prefix_and_returns_page_two() {
-    let service = PrefixPagingService::stable(vec![
-        ranked_result("message-first", 2.0),
-        ranked_result("message-second", 1.0),
-    ]);
-    let registry = StubProjectRegistry::with_projects(&["project.one"]);
-    let first = handle_message_search_with_registry(
-        Some(Path::new("/repo")),
-        SessionRetrievalStoreScope::Project,
-        json!({
-            "query": "database backup",
-            "project_scope": "all_registered",
-            "limit": 1,
-            "format": "json"
-        }),
-        Some(&service),
-        Some(&registry),
-    )
-    .await
-    .unwrap();
-    let first = response_payload(&first);
-    let cursor = first["continuation"].as_str().unwrap().to_string();
-    assert_eq!(
-        first["results"][0]["message"]["message_id"],
-        "message-first"
-    );
-
-    let second = handle_message_search_with_registry(
-        Some(Path::new("/repo")),
-        SessionRetrievalStoreScope::Project,
-        json!({
-            "query": "database backup",
-            "project_scope": "all_registered",
-            "limit": 1,
-            "cursor": cursor,
-            "format": "json"
-        }),
-        Some(&service),
-        Some(&registry),
-    )
-    .await
-    .unwrap();
-    let second = response_payload(&second);
-
-    assert_eq!(second["status"], "ok");
-    assert_eq!(
-        second["results"][0]["message"]["message_id"],
-        "message-second"
-    );
-    assert!(second.get("continuation").is_none());
-}
-
-#[tokio::test]
-async fn all_registered_globally_ranks_opposite_registry_order_before_limiting() {
-    let service = ProjectOutcomeService::new(vec![
-        (
-            "project.one",
-            SessionRetrievalServiceOutcome::Complete {
-                page: SessionRetrievalPageView {
-                    results: vec![ranked_result("message-low", 1.0)],
-                    temporal: temporal(),
-                },
-                freshness: SessionDataFreshness::Fresh,
-            },
-        ),
-        (
-            "project.two",
-            SessionRetrievalServiceOutcome::Complete {
-                page: SessionRetrievalPageView {
-                    results: vec![ranked_result("message-high", 2.0)],
-                    temporal: temporal(),
-                },
-                freshness: SessionDataFreshness::Fresh,
-            },
-        ),
-    ]);
-    let registry = StubProjectRegistry::with_projects(&["project.two", "project.one"]);
-    let result = handle_message_search_with_registry(
-        Some(Path::new("/repo")),
-        SessionRetrievalStoreScope::Project,
-        json!({
-            "query": "database backup",
-            "project_scope": "all_registered",
-            "limit": 1,
-            "format": "json"
-        }),
-        Some(&service),
-        Some(&registry),
-    )
-    .await
-    .unwrap();
-    let payload = response_payload(&result);
-
-    assert_eq!(payload["results"][0]["project_id"], "project.two");
-    assert_eq!(
-        payload["results"][0]["message"]["message_id"],
-        "message-high"
-    );
-    assert!(payload.get("continuation").is_some());
-}
-
-#[tokio::test]
-async fn all_registered_continuation_rejects_changed_root_snapshot() {
-    let service = PrefixPagingService::drifting(vec![
-        ranked_result("message-first", 2.0),
-        ranked_result("message-second", 1.0),
-    ]);
-    let registry = StubProjectRegistry::with_projects(&["project.one"]);
-    let first = handle_message_search_with_registry(
-        Some(Path::new("/repo")),
-        SessionRetrievalStoreScope::Project,
-        json!({
-            "query": "database backup",
-            "project_scope": "all_registered",
-            "limit": 1,
-            "format": "json"
-        }),
-        Some(&service),
-        Some(&registry),
-    )
-    .await
-    .unwrap();
-    let cursor = response_payload(&first)["continuation"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let second = handle_message_search_with_registry(
-        Some(Path::new("/repo")),
-        SessionRetrievalStoreScope::Project,
-        json!({
-            "query": "database backup",
-            "project_scope": "all_registered",
-            "limit": 1,
-            "cursor": cursor,
-            "format": "json"
-        }),
-        Some(&service),
-        Some(&registry),
-    )
-    .await
-    .unwrap();
-    let payload = response_payload(&second);
-
-    assert_eq!(payload["status"], "unavailable");
-    assert_eq!(payload["error"]["code"], "all_registered_cursor_stale");
-}
-
-#[tokio::test]
-async fn all_registered_keeps_successful_hits_when_another_root_is_unavailable() {
-    let service = ProjectOutcomeService::new(vec![
-        (
-            "project.one",
-            SessionRetrievalServiceOutcome::Complete {
-                page: SessionRetrievalPageView {
-                    results: vec![ranked_result("message-success", 1.0)],
-                    temporal: temporal(),
-                },
-                freshness: SessionDataFreshness::Fresh,
-            },
-        ),
-        (
-            "project.two",
-            SessionRetrievalServiceOutcome::Unavailable(
-                SessionRetrievalUnavailable::routing_failure(
-                    SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
-                    "registered_project_graph_unavailable",
-                    "the selected project's graph is not mounted by the daemon",
-                    true,
-                ),
-            ),
-        ),
-    ]);
-    let registry = StubProjectRegistry::with_projects(&["project.one", "project.two"]);
-    let result = handle_message_search_with_registry(
-        Some(Path::new("/repo")),
-        SessionRetrievalStoreScope::Project,
-        json!({
-            "query": "database backup",
-            "project_scope": "all_registered",
-            "format": "json"
-        }),
-        Some(&service),
-        Some(&registry),
-    )
-    .await
-    .unwrap();
-    let payload = response_payload(&result);
-
-    assert_eq!(payload["status"], "partial");
-    assert_eq!(
-        payload["results"][0]["message"]["message_id"],
-        "message-success"
-    );
-    assert_eq!(payload["skipped_project_count"], 1);
-    assert_eq!(
-        payload["projects"][1]["error"]["code"],
-        "registered_project_graph_unavailable"
-    );
 }
 
 #[tokio::test]

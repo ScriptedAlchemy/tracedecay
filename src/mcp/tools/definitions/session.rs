@@ -212,7 +212,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Read session-temporal message evidence from one authorized project or profile root. This tool never ingests or refreshes provider history. Omitted catch_up is false; explicit catch_up=true requires fresh data and returns typed refresh guidance when the selected root is stale or partial. Set goals=true to list each session's latest thread goal; goals mode makes query optional. project_scope=all_registered searches a bounded registry page through each project's exact retained session-store route.",
+        "Read session-temporal message evidence from one authorized project or profile root. This tool never ingests or refreshes provider history. Omitted catch_up is false; explicit catch_up=true requires fresh data and returns typed refresh guidance when the selected root is stale or partial. Set goals=true to list each session's latest thread goal; goals mode makes query optional. project_scope=all_registered is accepted but returns a typed deferred result until MCP can supply an authorized immutable scope set and authenticated aggregate cursor.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -292,7 +292,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 },
                 "project_scope": {
                     "type": "string",
-                    "description": "Search up to 25 registered project session stores through their exact daemon-retained routes. Per-project unavailable or denied roots are reported as skipped. Cannot be combined with project_id, project_path, or project_selector.",
+                    "description": "Accepted compatibility selector. all_registered returns a typed deferred result without enumerating the profile registry or opening project stores. Cannot be combined with project_id, project_path, or project_selector.",
                     "enum": ["all_registered"]
                 },
                 "branch": git_scope::branch_schema("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),

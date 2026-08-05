@@ -7,9 +7,7 @@
 //! receives the actor's bounded responses through explicit frame operations.
 
 use std::any::Any;
-use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -191,6 +189,7 @@ mod dispatch;
 mod feedback;
 mod git;
 mod lsp;
+mod multi_root;
 mod plan26;
 mod primitive;
 mod registrars;

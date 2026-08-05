@@ -21,7 +21,6 @@ use crate::application::session::{
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::WorkflowScopeFilter;
 use crate::mcp::tools::ToolResult;
-use crate::mcp::tools::handlers::project_registry::ProjectRegistryReadPort;
 use crate::mcp::tools::handlers::support::{argument_error, tool_json_with_md};
 use crate::sessions::git_correlation::GitScopeFilter;
 use crate::sessions::{
@@ -555,9 +554,18 @@ fn retrieval_command_with_paging(
     )
 }
 
-#[path = "all_registered.rs"]
-mod all_registered;
-use all_registered::all_registered_message_search;
+fn deferred_all_registered_payload(request: &MessageSearchRequest<'_>) -> Result<Value> {
+    let mut payload = base_message_search_payload(request)?;
+    apply_typed_error(
+        &mut payload,
+        "deferred",
+        "session_retrieval_multi_root_deferred",
+        "multi-root session retrieval requires an authorized immutable scope set and is not mounted on this MCP operation",
+    )?;
+    payload_object_mut(&mut payload)?.insert("project_scope".to_string(), json!("all_registered"));
+    Ok(payload)
+}
+
 fn markdown_object<'a>(value: &'a Value, name: &str) -> Result<&'a Map<String, Value>> {
     value.as_object().ok_or_else(|| TraceDecayError::Config {
         message: format!("message search markdown requires {name} to be an object"),
@@ -686,16 +694,6 @@ pub(crate) async fn handle_message_search_with_service(
     args: Value,
     service: Option<&dyn SessionRetrievalServicePort>,
 ) -> Result<ToolResult> {
-    handle_message_search_with_registry(project_root, store_scope, args, service, None).await
-}
-
-pub(crate) async fn handle_message_search_with_registry(
-    project_root: Option<&Path>,
-    store_scope: SessionRetrievalStoreScope,
-    args: Value,
-    service: Option<&dyn SessionRetrievalServicePort>,
-    registry: Option<&dyn ProjectRegistryReadPort>,
-) -> Result<ToolResult> {
     let request = parse_message_search_request(&args)?;
     let project_selector = project_selector(&args)?;
     let has_project_selector = project_selector.is_some();
@@ -711,9 +709,7 @@ pub(crate) async fn handle_message_search_with_registry(
                 "project_scope cannot be combined with project_id, project_path, or project_selector",
             ));
         }
-        let payload =
-            all_registered_message_search(project_root, &request, store_scope, service, registry)
-                .await?;
+        let payload = deferred_all_registered_payload(&request)?;
         let markdown = render_temporal_message_search_md(&payload)?;
         return Ok(tool_json_with_md(
             project_root,

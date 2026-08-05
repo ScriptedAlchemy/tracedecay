@@ -6,13 +6,13 @@ use tracedecay_application::{
     AuthorizedMultiRootQueryService, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
     CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     MultiRootAuthorizationBindingV1, MultiRootContinuationStateV1, MultiRootContinuationV1,
-    MultiRootQueryError, MultiRootQueryPort, MultiRootQueryRequestV1, RequestContext, RequestId,
-    ResolvedScope,
+    MultiRootQueryError, MultiRootQueryPort, MultiRootQueryRequestV1, MultiRootRootCursorV1,
+    RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, CollectionRevision, ManifestDigest, ProjectId, RefId, RepositoryId, RootGenerationV1,
+    ActorId, CodeGenerationId, ManifestDigest, ProjectId, RefId, RepositoryId, RootGenerationV1,
     RootScopeOutcomeV1, ScopeOutcome, ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1,
-    StackRevision, UtcMicros, WorktreeId,
+    UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -95,8 +95,9 @@ fn generation(scope: &ResolvedScope, byte: char) -> RootScopeOutcomeV1<RootGener
         ScopeOutcome::Exact(
             RootGenerationV1::new(
                 scope.scope_digest.clone(),
-                CollectionRevision::new(digest(byte)).unwrap(),
-                StackRevision::new(digest(byte)).unwrap(),
+                CodeGenerationId::new(format!("generation.fixture.{byte}")).unwrap(),
+                digest(byte),
+                digest(byte),
             )
             .unwrap(),
         ),
@@ -160,8 +161,9 @@ fn request(
         order_digest: digest('e'),
         page,
         continuation,
-        next_continuation: MultiRootContinuationV1::from_opaque(format!("mr1.test.{page}"))
-            .unwrap(),
+        next_continuation: Some(
+            MultiRootContinuationV1::from_opaque(format!("mr1.test.{page}")).unwrap(),
+        ),
     }
 }
 
@@ -182,6 +184,13 @@ fn continuation_state(
         scope_set.revision(),
         scope_set.digest().clone(),
         generations,
+        scope_set
+            .roots()
+            .iter()
+            .map(|root| {
+                MultiRootRootCursorV1::new(root.scope().scope_digest.clone(), None).unwrap()
+            })
+            .collect(),
         query_digest,
         digest('e'),
         MultiRootAuthorizationBindingV1::from_contexts(contexts).unwrap(),
@@ -209,7 +218,11 @@ fn two_root_query_returns_partial_truth_and_frozen_continuation() {
         }
     ));
     assert!(matches!(page.roots[1].outcome, ScopeOutcome::Exact(_)));
-    assert!(page.continuation.as_str().starts_with("mr1."));
+    assert!(
+        page.continuation
+            .as_ref()
+            .is_some_and(|cursor| cursor.as_str().starts_with("mr1."))
+    );
 
     let continuation = continuation_state(&set, &contexts, digest('d'), 1);
     let next = AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Unavailable))

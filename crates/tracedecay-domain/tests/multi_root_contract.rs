@@ -1,7 +1,7 @@
 use schemars::schema_for;
 use tracedecay_domain::{
-    CollectionRevision, ManifestDigest, RootGenerationV1, ScopeOutcome, ScopePartialReasonV1,
-    ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, StackRevision,
+    CodeGenerationId, ManifestDigest, RootGenerationV1, ScopeOutcome, ScopePartialReasonV1,
+    ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1,
 };
 
 fn digest(byte: char) -> ManifestDigest {
@@ -17,21 +17,23 @@ fn scope_set_and_root_revision_identities_are_typed_and_nonzero() {
 
     let generation = RootGenerationV1::new(
         digest('a'),
-        CollectionRevision::new(digest('b')).unwrap(),
-        StackRevision::new(digest('c')).unwrap(),
+        CodeGenerationId::new("generation.fixture.1").unwrap(),
+        digest('b'),
+        digest('c'),
     )
     .unwrap();
     generation.validate().unwrap();
 
-    let changed_stack = RootGenerationV1::new(
+    let changed_graph_publication = RootGenerationV1::new(
         digest('a'),
-        CollectionRevision::new(digest('b')).unwrap(),
-        StackRevision::new(digest('d')).unwrap(),
+        CodeGenerationId::new("generation.fixture.1").unwrap(),
+        digest('b'),
+        digest('d'),
     )
     .unwrap();
     assert_ne!(
         generation.generation_digest,
-        changed_stack.generation_digest
+        changed_graph_publication.generation_digest
     );
 
     let mut tampered = serde_json::to_value(generation).unwrap();

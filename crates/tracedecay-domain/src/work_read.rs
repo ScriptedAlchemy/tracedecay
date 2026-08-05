@@ -223,6 +223,13 @@ impl WorkProjectionCoverageV1 {
         }
     }
 
+    pub fn cursor(&self) -> Option<&WorkProjectionResumeCursorV1> {
+        match self {
+            Self::Complete { .. } => None,
+            Self::Partial { cursor, .. } | Self::Capped { cursor, .. } => Some(cursor),
+        }
+    }
+
     pub const fn total(&self) -> u32 {
         match self {
             Self::Complete { total, .. }

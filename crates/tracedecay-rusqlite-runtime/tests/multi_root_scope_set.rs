@@ -16,7 +16,8 @@ use tracedecay_domain::{
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
 use tracedecay_rusqlite_runtime::repository::{
-    AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetExecutor, AuthorizedScopeSetSqliteStorage,
+    AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetDurableCasV1, AuthorizedScopeSetExecutor,
+    AuthorizedScopeSetSqliteStorage, AuthorizedScopeSetStoreError,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
@@ -282,7 +283,7 @@ fn scope_set_cas_rejects_cross_actor_update_without_changing_stored_bytes() {
     AuthorizedScopeSetExecutor::compare_and_swap(&mut connection, None, &first).unwrap();
     let before: Vec<u8> = connection
         .query_row(
-            "SELECT canonical_payload FROM authorized_scope_sets WHERE scope_set_id = ?1",
+            "SELECT canonical_payload FROM authorized_scope_sets_v1 WHERE scope_set_id = ?1",
             [first.scope_set_id().as_str()],
             |row| row.get(0),
         )
@@ -298,7 +299,7 @@ fn scope_set_cas_rejects_cross_actor_update_without_changing_stored_bytes() {
     );
     let after: Vec<u8> = connection
         .query_row(
-            "SELECT canonical_payload FROM authorized_scope_sets WHERE scope_set_id = ?1",
+            "SELECT canonical_payload FROM authorized_scope_sets_v1 WHERE scope_set_id = ?1",
             [first.scope_set_id().as_str()],
             |row| row.get(0),
         )
@@ -325,7 +326,7 @@ fn public_scope_set_store_rejects_invalid_revision_and_payload_edges() {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO authorized_scope_sets
+                "INSERT INTO authorized_scope_sets_v1
                      (scope_set_id, revision, digest, canonical_payload)
                  VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![
@@ -351,7 +352,7 @@ fn public_scope_set_store_rejects_invalid_revision_and_payload_edges() {
             .is_err()
     );
     let count: i64 = overflow_connection
-        .query_row("SELECT COUNT(*) FROM authorized_scope_sets", [], |row| {
+        .query_row("SELECT COUNT(*) FROM authorized_scope_sets_v1", [], |row| {
             row.get(0)
         })
         .unwrap();
@@ -361,7 +362,7 @@ fn public_scope_set_store_rejects_invalid_revision_and_payload_edges() {
     AuthorizedScopeSetExecutor::install_schema(&corrupt_connection).unwrap();
     corrupt_connection
         .execute(
-            "INSERT INTO authorized_scope_sets
+            "INSERT INTO authorized_scope_sets_v1
                  (scope_set_id, revision, digest, canonical_payload)
              VALUES (?1, 1, ?2, ?3)",
             rusqlite::params![
@@ -413,12 +414,142 @@ fn registered_scope_set_store_preserves_actor_and_checked_revisions() {
     assert!(store.storage.compare_and_swap(None, &oversized).is_err());
     store.inspect(|connection| {
         let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM authorized_scope_sets", [], |row| {
+            .query_row("SELECT COUNT(*) FROM authorized_scope_sets_v1", [], |row| {
                 row.get(0)
             })
             .unwrap();
         assert_eq!(count, 1);
     });
+}
+
+#[test]
+fn durable_scope_set_cas_replays_terminal_results_and_rejects_key_reuse() {
+    let store = RegisteredScopeSetStore::start("durable-replay", |_| {});
+    let first = scope_set_for_actor(1, "actor.owner");
+    let command_digest = digest('b');
+    let replica_digest = digest('c');
+    let idempotency_key = "request.scope-set.durable-replay";
+
+    assert_eq!(
+        store
+            .storage
+            .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &first)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Pending(first.clone())
+    );
+    assert_eq!(
+        store
+            .storage
+            .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &first)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Pending(first.clone())
+    );
+    store
+        .storage
+        .record_durable_replica(idempotency_key, &command_digest, &replica_digest)
+        .unwrap();
+    assert_eq!(
+        store
+            .storage
+            .complete_durable_compare_and_swap(idempotency_key, &command_digest, &[replica_digest],)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Applied(first.clone())
+    );
+    assert_eq!(
+        store
+            .storage
+            .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &first)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Applied(first)
+    );
+    assert!(matches!(
+        store.storage.begin_durable_compare_and_swap(
+            idempotency_key,
+            &digest('d'),
+            None,
+            &scope_set_for_id_actor(1, "scope-set.other", "actor.owner"),
+        ),
+        Err(AuthorizedScopeSetStoreError::IdempotencyConflict)
+    ));
+}
+
+#[test]
+fn durable_scope_set_cas_requires_exact_replica_receipts() {
+    let store = RegisteredScopeSetStore::start("durable-replicas", |_| {});
+    let first = scope_set_for_actor(1, "actor.owner");
+    let command_digest = digest('e');
+    let replica_a = digest('f');
+    let replica_b = digest('0');
+    let idempotency_key = "request.scope-set.durable-replicas";
+
+    assert!(matches!(
+        store
+            .storage
+            .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &first)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Pending(_)
+    ));
+    store
+        .storage
+        .record_durable_replica(idempotency_key, &command_digest, &replica_a)
+        .unwrap();
+    assert!(matches!(
+        store
+            .storage
+            .complete_durable_compare_and_swap(
+                idempotency_key,
+                &command_digest,
+                &[replica_a.clone(), replica_b.clone()],
+            )
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Pending(_)
+    ));
+    store
+        .storage
+        .record_durable_replica(idempotency_key, &command_digest, &replica_b)
+        .unwrap();
+    assert_eq!(
+        store
+            .storage
+            .complete_durable_compare_and_swap(
+                idempotency_key,
+                &command_digest,
+                &[replica_a, replica_b],
+            )
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Applied(first)
+    );
+}
+
+#[test]
+fn durable_scope_set_cas_persists_replica_conflict_for_replay() {
+    let store = RegisteredScopeSetStore::start("durable-conflict", |_| {});
+    let first = scope_set_for_actor(1, "actor.owner");
+    let divergent = scope_set_for_id_actor(1, "scope-set.divergent", "actor.owner");
+    let command_digest = digest('1');
+    let idempotency_key = "request.scope-set.durable-conflict";
+
+    assert!(matches!(
+        store
+            .storage
+            .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &first)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Pending(_)
+    ));
+    assert_eq!(
+        store
+            .storage
+            .conflict_durable_compare_and_swap(idempotency_key, &command_digest, Some(&divergent),)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Conflict(Some(divergent.clone()))
+    );
+    assert_eq!(
+        store
+            .storage
+            .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &first)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Conflict(Some(divergent))
+    );
 }
 
 #[test]
@@ -438,7 +569,7 @@ fn registered_scope_set_store_rejects_zero_negative_and_corrupt_rows() {
                 .unwrap();
             connection
                 .execute(
-                    "INSERT INTO authorized_scope_sets
+                    "INSERT INTO authorized_scope_sets_v1
                          (scope_set_id, revision, digest, canonical_payload)
                      VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params![id, revision, digest, payload],
@@ -451,7 +582,7 @@ fn registered_scope_set_store_rejects_zero_negative_and_corrupt_rows() {
     let corrupt = RegisteredScopeSetStore::start("corrupt-payload", move |connection| {
         connection
             .execute(
-                "INSERT INTO authorized_scope_sets
+                "INSERT INTO authorized_scope_sets_v1
                      (scope_set_id, revision, digest, canonical_payload)
                  VALUES (?1, 1, ?2, ?3)",
                 rusqlite::params![id, digest, b"{".as_slice()],

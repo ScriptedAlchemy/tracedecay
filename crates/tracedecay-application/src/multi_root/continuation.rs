@@ -6,11 +6,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     AuthorityEpoch, ManifestDigest, RootGenerationV1, RootScopeOutcomeV1, ScopeSetId,
-    ScopeSetRevision, UtcMicros, canonical_sha256,
+    ScopeSetRevision, UtcMicros, WorkProjectionResumeCursorV1, canonical_sha256,
 };
 
 use super::MultiRootQueryError;
-use crate::RequestContext;
+use crate::{OpaqueCursor, RequestContext};
 
 const MULTI_ROOT_AUTHORIZATION_BINDING_DOMAIN_V1: &str =
     "tracedecay.application.multi-root-authorization-binding.v1";
@@ -71,6 +71,38 @@ impl MultiRootTotalOrderKeyV1 {
     }
 }
 
+/// Per-root continuation owned by the root's canonical application surface.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum MultiRootRootContinuationV1 {
+    Page(OpaqueCursor),
+    Work(WorkProjectionResumeCursorV1),
+    Complete,
+}
+
+/// Per-root continuation owned by the root's canonical application surface.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MultiRootRootCursorV1 {
+    pub scope_digest: ManifestDigest,
+    pub cursor: Option<MultiRootRootContinuationV1>,
+}
+
+impl MultiRootRootCursorV1 {
+    pub fn new(
+        scope_digest: ManifestDigest,
+        cursor: Option<MultiRootRootContinuationV1>,
+    ) -> Result<Self, MultiRootQueryError> {
+        scope_digest
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        Ok(Self {
+            scope_digest,
+            cursor,
+        })
+    }
+}
+
 /// Current authorization identity revalidated on every continuation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -127,6 +159,7 @@ pub struct MultiRootContinuationStateV1 {
     pub scope_set_revision: ScopeSetRevision,
     pub scope_set_digest: ManifestDigest,
     pub root_generations: Vec<RootScopeOutcomeV1<RootGenerationV1>>,
+    pub root_cursors: Vec<MultiRootRootCursorV1>,
     pub query_digest: ManifestDigest,
     pub order_digest: ManifestDigest,
     pub authorization: MultiRootAuthorizationBindingV1,
@@ -143,6 +176,7 @@ impl MultiRootContinuationStateV1 {
         scope_set_revision: ScopeSetRevision,
         scope_set_digest: ManifestDigest,
         root_generations: Vec<RootScopeOutcomeV1<RootGenerationV1>>,
+        root_cursors: Vec<MultiRootRootCursorV1>,
         query_digest: ManifestDigest,
         order_digest: ManifestDigest,
         authorization: MultiRootAuthorizationBindingV1,
@@ -156,6 +190,7 @@ impl MultiRootContinuationStateV1 {
             scope_set_revision,
             scope_set_digest,
             root_generations,
+            root_cursors,
             query_digest,
             order_digest,
             authorization,
@@ -198,12 +233,21 @@ impl MultiRootContinuationStateV1 {
                 "multi-root continuation state is not canonical".to_owned(),
             ));
         }
+        if self.root_cursors.len() != self.root_generations.len() {
+            return Err(MultiRootQueryError::RootSetMismatch);
+        }
         let mut scopes = BTreeMap::new();
-        for generation in &self.root_generations {
+        for (generation, cursor) in self.root_generations.iter().zip(&self.root_cursors) {
             generation
                 .validate_generation()
                 .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
-            if scopes.insert(&generation.scope_digest, ()).is_some() {
+            cursor
+                .scope_digest
+                .validate()
+                .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+            if cursor.scope_digest != generation.scope_digest
+                || scopes.insert(&generation.scope_digest, ()).is_some()
+            {
                 return Err(MultiRootQueryError::RootSetMismatch);
             }
         }

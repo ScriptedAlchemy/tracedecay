@@ -86,30 +86,92 @@ impl DaemonInvocationService {
         scope: &ResolvedScope,
         ordinal: usize,
         observed_at: UtcMicros,
-    ) -> Option<(RequestContext, ManifestDigest)> {
-        let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
-        if grant.scope != *scope {
+        deadline: &Deadline,
+        cancellation: &CancellationContext,
+        capability: &CapabilityId,
+        use_case: &UseCaseId,
+    ) -> Option<RequestContext> {
+        if cancellation.is_cancelled() || deadline.is_elapsed_at(observed_at) {
             return None;
         }
-        let digest = grant.digest.clone();
-        let context = RequestContext::new(
-            grant.issuer.clone(),
+        let registered = self
+            .project_runtimes
+            .get::<RegisteredCallableCodeRuntime>(project_root)
+            .await?;
+        if registered.scope != *scope {
+            return None;
+        }
+        let access = registered.authorization.current(observed_at).await.ok()?;
+        if access.scope != *scope
+            || observed_at >= access.grant_expires_at
+            || !access.effective_capabilities.contains(capability)
+        {
+            return None;
+        }
+        let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
+        let grant_digest = canonical_sha256(&(
+            "tracedecay.daemon.multi-root-operation-grant.v1",
+            &access.scope,
+            &access.requester,
+            &access.configuration_digest,
+            capability,
+            use_case,
+        ))
+        .ok()?;
+        let grant = CapabilityGrantSnapshot::new(
+            tracedecay_application::CapabilityGrantId::new(format!(
+                "grant.daemon.multi-root.{}",
+                grant_digest.as_str().trim_start_matches("sha256:")
+            ))
+            .ok()?,
+            1,
+            grant_digest,
+            access.requester.clone(),
+            observed_at,
+            expires_at,
+            scope.clone(),
+            BTreeSet::from([capability.clone()]),
+            BTreeSet::from([use_case.clone()]),
+            tracedecay_application::DisclosureClass::Sensitive,
+        )
+        .ok()?;
+        RequestContext::new(
+            access.requester,
             scope.clone(),
             grant,
             RequestId::new(format!("request.multi-root.query.{ordinal}")).ok()?,
-            Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000))).ok()?,
-            CancellationContext::active(format!("cancel.multi-root.query.{ordinal}")).ok()?,
+            Deadline::new(expires_at).ok()?,
+            cancellation.clone(),
         )
-        .ok()?;
-        Some((context, digest))
+        .ok()
     }
 
     pub(crate) async fn persisted_scope_set(
         &self,
         project_root: &Path,
         scope_set_id: &ScopeSetId,
+        operation: tracedecay_application::MultiRootApplicationOperation,
+        observed_at: UtcMicros,
+        deadline: &Deadline,
+        cancellation: &CancellationContext,
     ) -> Option<AuthorizedScopeSet> {
+        let (capability, use_case) =
+            tracedecay_application::multi_root_operation_authority(operation).ok()?;
+        let registered = self
+            .project_runtimes
+            .get::<RegisteredCallableCodeRuntime>(project_root)
+            .await?;
+        self.multi_root_query_context(
+            project_root,
+            &registered.scope,
+            0,
+            observed_at,
+            deadline,
+            cancellation,
+            &capability,
+            &use_case,
+        )
+        .await?;
         self.lsp_owner(Some(project_root))
             .await?
             .scope_set_storage?
@@ -240,108 +302,6 @@ impl DaemonInvocationService {
         Some(workspace)
     }
 
-    pub(crate) async fn compare_and_swap_scope_set(
-        &self,
-        active_project_root: &Path,
-        request: MultiRootScopeSetCasRequestV1,
-        mut roots: Vec<(
-            PathBuf,
-            ResolvedScope,
-            tracedecay_application::RegisteredRootLocatorV1,
-        )>,
-        observed_at: UtcMicros,
-    ) -> Option<(ResolvedScope, MultiRootScopeSetCasResultV1)> {
-        request.validate().ok()?;
-        roots.sort_by(|left, right| left.1.scope_digest.cmp(&right.1.scope_digest));
-        if roots.is_empty()
-            || roots
-                .windows(2)
-                .any(|pair| pair[0].1.scope_digest == pair[1].1.scope_digest)
-        {
-            return None;
-        }
-        let active_owner = self.lsp_owner(Some(active_project_root)).await?;
-        let active_scope = active_owner.scope_grant.as_ref()?.scope.clone();
-        let active_storage = active_owner.scope_set_storage?;
-        let current = active_storage.read(&request.scope_set_id).ok()?;
-        let next_revision = match (request.expected_revision, current.as_ref()) {
-            (None, None) => ScopeSetRevision::new(1).ok()?,
-            (Some(expected), Some(current)) if current.revision() == expected => {
-                ScopeSetRevision::new(expected.get().checked_add(1)?).ok()?
-            }
-            _ => {
-                return Some((
-                    active_scope,
-                    MultiRootScopeSetCasResultV1 {
-                        status: MultiRootScopeSetCasStatusV1::Conflict,
-                        scope_set: current,
-                    },
-                ));
-            }
-        };
-        let capability =
-            CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
-                .ok()?;
-        let use_case =
-            UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
-                .ok()?;
-        let mut admissions = Vec::with_capacity(roots.len());
-        let mut storages = vec![active_storage.clone()];
-        for (ordinal, (project_root, scope, locator)) in roots.iter().enumerate() {
-            let owner = self.lsp_owner(Some(project_root)).await?;
-            let grant = owner.scope_grant?;
-            if grant.scope != *scope {
-                return None;
-            }
-            if let Some(storage) = owner.scope_set_storage {
-                storages.push(storage);
-            }
-            let context = RequestContext::new(
-                grant.issuer.clone(),
-                scope.clone(),
-                grant,
-                RequestId::new(format!("request.multi-root.cas.{ordinal}")).ok()?,
-                Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000))).ok()?,
-                CancellationContext::active(format!("cancel.multi-root.cas.{ordinal}")).ok()?,
-            )
-            .ok()?;
-            admissions.push(
-                tracedecay_application::AuthorizedRootAdmission::new(context, locator.clone())
-                    .ok()?,
-            );
-        }
-        let next = AuthorizedScopeSetAuthority::authorize_registered(
-            request.scope_set_id,
-            next_revision,
-            admissions,
-            &capability,
-            &use_case,
-            observed_at,
-        )
-        .ok()?;
-        for storage in storages {
-            match storage
-                .compare_and_swap(request.expected_revision, &next)
-                .ok()?
-            {
-                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_) => {}
-                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. } => {
-                    let stored = storage.read(next.scope_set_id()).ok()?;
-                    if stored.as_ref() != Some(&next) {
-                        return None;
-                    }
-                }
-            }
-        }
-        Some((
-            active_scope,
-            MultiRootScopeSetCasResultV1 {
-                status: MultiRootScopeSetCasStatusV1::Applied,
-                scope_set: Some(next),
-            },
-        ))
-    }
-
     pub(crate) async fn multi_root_evidence<T>(
         &self,
         project_root: &Path,
@@ -355,13 +315,37 @@ impl DaemonInvocationService {
     where
         T: Serialize,
     {
-        let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
-        let scope = grant.scope.clone();
+        let operation = match operation_key {
+            "scope_set_read" => tracedecay_application::MultiRootApplicationOperation::ScopeSetRead,
+            "scope_set_compare_and_swap" => {
+                tracedecay_application::MultiRootApplicationOperation::ScopeSetCompareAndSwap
+            }
+            "execute" => tracedecay_application::MultiRootApplicationOperation::Execute,
+            _ => return None,
+        };
+        let (capability, use_case) =
+            tracedecay_application::multi_root_operation_authority(operation).ok()?;
+        let registered = self
+            .project_runtimes
+            .get::<RegisteredCallableCodeRuntime>(project_root)
+            .await?;
+        let scope = registered.scope.clone();
+        let admitted = self
+            .multi_root_query_context(
+                project_root,
+                &scope,
+                usize::MAX,
+                observed_at,
+                &deadline,
+                &cancellation,
+                &capability,
+                &use_case,
+            )
+            .await?;
         let context = RequestContext::new(
-            grant.issuer.clone(),
+            admitted.actor().clone(),
             scope.clone(),
-            grant.clone(),
+            admitted.grant().clone(),
             request_id,
             deadline.clone(),
             cancellation,
@@ -369,7 +353,7 @@ impl DaemonInvocationService {
         .ok()?;
         let policy_digest = canonical_sha256(&(
             "tracedecay.daemon.multi-root-policy.v1",
-            &grant.digest,
+            &context.grant().digest,
             operation_key,
         ))
         .ok()?;

@@ -78,3 +78,128 @@ pub(super) async fn resolve_authorized_root(
     }
     Ok(exact_root)
 }
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute_one_multi_root_operation(
+    state: &DaemonInvocationState,
+    store_administration: &StoreAdministration,
+    root: &std::path::Path,
+    scope: &tracedecay_application::ResolvedScope,
+    ordinal: usize,
+    operation: &tracedecay_application::MultiRootOperationV1,
+    root_cursor: Option<&tracedecay_application::MultiRootRootContinuationV1>,
+    observed_at: tracedecay_domain::UtcMicros,
+    deadline: tracedecay_application::Deadline,
+    cancellation: tracedecay_application::CancellationContext,
+) -> std::result::Result<
+    (
+        Value,
+        Option<tracedecay_application::MultiRootRootContinuationV1>,
+    ),
+    service::invocation::DaemonInvocationProblem,
+> {
+    match operation {
+        tracedecay_application::MultiRootOperationV1::Work { request } => {
+            let mut request = serde_json::from_value::<
+                service::invocation::WorkApplicationInvocationV1,
+            >(request.clone())
+            .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+            if !matches!(
+                request,
+                service::invocation::WorkApplicationInvocationV1::Snapshot(_)
+                    | service::invocation::WorkApplicationInvocationV1::Delta(_)
+            ) {
+                return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+            }
+            if let Some(root_cursor) = root_cursor {
+                let tracedecay_application::MultiRootRootContinuationV1::Work(cursor) = root_cursor
+                else {
+                    return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+                };
+                let page_size = match &request {
+                    service::invocation::WorkApplicationInvocationV1::Snapshot(request) => {
+                        request.page_size
+                    }
+                    service::invocation::WorkApplicationInvocationV1::Delta(request) => {
+                        request.page_size
+                    }
+                    _ => return Err(service::invocation::DaemonInvocationProblem::InvalidRequest),
+                };
+                request = service::invocation::WorkApplicationInvocationV1::Delta(
+                    tracedecay_application::WorkProjectionDeltaRequestV1 {
+                        cursor: cursor.clone(),
+                        page_size,
+                    },
+                );
+            }
+            let response = Box::pin(state.invoke_for_project(
+                store_administration,
+                Some(root),
+                DaemonInvocationRequest::work_application(
+                    format!("request.multi-root.work.{ordinal}"),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                ),
+            ))
+            .await;
+            let service::invocation::DaemonInvocationOutcome::WorkApplication {
+                scope: actual_scope,
+                outcome,
+            } = response.outcome
+            else {
+                return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+            };
+            if &actual_scope != scope {
+                return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
+            }
+            extract_work_application_payload(&outcome)
+        }
+        tracedecay_application::MultiRootOperationV1::Git { request }
+        | tracedecay_application::MultiRootOperationV1::Feedback { request }
+        | tracedecay_application::MultiRootOperationV1::Impact { request }
+        | tracedecay_application::MultiRootOperationV1::Query { request } => {
+            let wire = serde_json::from_value::<FederatedSurfaceRequestV1>(request.clone())
+                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+            if !multi_root_family_allows(operation, wire.operation) {
+                return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+            }
+            let page_cursor = match root_cursor {
+                Some(tracedecay_application::MultiRootRootContinuationV1::Page(cursor)) => {
+                    Some(cursor.clone())
+                }
+                Some(
+                    tracedecay_application::MultiRootRootContinuationV1::Work(_)
+                    | tracedecay_application::MultiRootRootContinuationV1::Complete,
+                ) => return Err(service::invocation::DaemonInvocationProblem::InvalidRequest),
+                None => None,
+            };
+            let (payload, cursor) = crate::application_surface::invoke_multi_root_surface_request(
+                Arc::new(InProcessDaemonInvocationExecutor::new(
+                    state.clone(),
+                    store_administration.clone(),
+                    root.to_path_buf(),
+                    scope.clone(),
+                )),
+                wire.operation,
+                tracedecay_application::RequestId::new(format!(
+                    "request.multi-root.surface.{ordinal}"
+                ))
+                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?,
+                tracedecay_application::PageRequest::new(100, page_cursor)
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?,
+                deadline,
+                tracedecay_application::CancellationSignal::active(cancellation.token_id.as_str())
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?,
+                wire.request,
+            )
+            .await
+            .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+            Ok((
+                payload,
+                cursor.map(tracedecay_application::MultiRootRootContinuationV1::Page),
+            ))
+        }
+    }
+}

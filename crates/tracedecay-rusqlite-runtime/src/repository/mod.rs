@@ -63,8 +63,8 @@ pub use observation::ObservationExecutor;
 pub use project::ProjectExecutor;
 pub use retrieval_anchor::RetrievalAnchorExecutor;
 pub use scope_set::{
-    AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetExecutor, AuthorizedScopeSetSqliteStorage,
-    AuthorizedScopeSetStoreError,
+    AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetDurableCasV1, AuthorizedScopeSetExecutor,
+    AuthorizedScopeSetSqliteStorage, AuthorizedScopeSetStoreError,
 };
 pub use session::SessionExecutor;
 
