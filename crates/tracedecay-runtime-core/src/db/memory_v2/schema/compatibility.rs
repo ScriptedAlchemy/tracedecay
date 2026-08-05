@@ -18,7 +18,7 @@ pub(super) async fn install_v22_compatibility_schema(
             operation_kind TEXT NOT NULL CHECK(operation_kind IN (
                 'add', 'update', 'remove', 'feedback', 'retrieval',
                 'curation', 'merge', 'repair', 'proposal_submit',
-                'proposal_reject', 'proposal_promote', 'proposal_import'
+                'proposal_reject', 'proposal_promote'
             )),
             request_digest TEXT NOT NULL CHECK(length(request_digest) > 0),
             fact_id TEXT,

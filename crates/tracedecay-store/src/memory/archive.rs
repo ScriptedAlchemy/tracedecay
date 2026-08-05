@@ -41,7 +41,6 @@ pub enum MemoryV2ArchiveFamilyV1 {
     Proposal,
     ProposalTransition,
     ProposalCurrent,
-    LegacyProposalMap,
 }
 
 pub fn authoritative_memory_v2_archive_families() -> BTreeSet<MemoryV2ArchiveFamilyV1> {
@@ -51,10 +50,9 @@ pub fn authoritative_memory_v2_archive_families() -> BTreeSet<MemoryV2ArchiveFam
         EvidenceOccurrenceSet, EvidenceOccurrenceSetMember, EvidenceRetrieverContribution,
         EvidenceSourceOccurrence, EvidenceSpan, EvidenceSpanMember, EvidenceSpanProjectionReceipt,
         Fact, FactEvidence, FactRelation, FeedbackHistory, LegacyFactMap, LegacyFeedbackEventMap,
-        LegacyProposalMap, LegacyQuarantine, LineageEvent, Proposal, ProposalCurrent,
-        ProposalTransition, RetrievalAnchor, RetrievalAnchorAlias,
-        RetrievalAnchorDerivativeTombstone, RetrievalAnchorDisposition,
-        RetrievalAnchorReverseLineage,
+        LegacyQuarantine, LineageEvent, Proposal, ProposalCurrent, ProposalTransition,
+        RetrievalAnchor, RetrievalAnchorAlias, RetrievalAnchorDerivativeTombstone,
+        RetrievalAnchorDisposition, RetrievalAnchorReverseLineage,
     };
 
     BTreeSet::from([
@@ -90,7 +88,6 @@ pub fn authoritative_memory_v2_archive_families() -> BTreeSet<MemoryV2ArchiveFam
         Proposal,
         ProposalTransition,
         ProposalCurrent,
-        LegacyProposalMap,
     ])
 }
 
@@ -720,7 +717,6 @@ mod tests {
             MemoryV2ArchiveFamilyV1::Proposal,
             MemoryV2ArchiveFamilyV1::ProposalTransition,
             MemoryV2ArchiveFamilyV1::ProposalCurrent,
-            MemoryV2ArchiveFamilyV1::LegacyProposalMap,
         ]);
         assert_eq!(authoritative_memory_v2_archive_families(), expected);
         assert!(MemoryV2OwnerArchiveV1::new(owner(), BTreeSet::new(), Vec::new()).is_err());

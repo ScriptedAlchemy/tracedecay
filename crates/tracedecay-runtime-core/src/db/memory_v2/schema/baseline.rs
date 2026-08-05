@@ -330,21 +330,6 @@ pub(in crate::db) async fn create_schema(
                     transition_id, proposal_id, owner_kind, project_id
                 )
         );
-        CREATE TABLE IF NOT EXISTS memory_v2_legacy_proposal_map (
-            owner_kind TEXT NOT NULL,
-            project_id TEXT NOT NULL,
-            source_store_id TEXT NOT NULL,
-            legacy_proposal_id TEXT NOT NULL,
-            proposal_id TEXT NOT NULL,
-            history_coverage TEXT NOT NULL CHECK(history_coverage IN ('complete', 'unknown')),
-            import_receipt_json TEXT NOT NULL CHECK(json_valid(import_receipt_json)),
-            imported_at INTEGER NOT NULL,
-            PRIMARY KEY(owner_kind, project_id, source_store_id, legacy_proposal_id),
-            UNIQUE(proposal_id, owner_kind, project_id, source_store_id),
-            FOREIGN KEY(proposal_id, owner_kind, project_id)
-                REFERENCES memory_v2_proposals(proposal_id, owner_kind, project_id)
-        );
-
         CREATE INDEX IF NOT EXISTS idx_memory_v2_assertions_fact
             ON memory_v2_assertions(fact_id, owner_kind, project_id, asserted_at);
         CREATE INDEX IF NOT EXISTS idx_memory_v2_events_fact
@@ -448,13 +433,6 @@ pub(in crate::db) async fn create_schema(
         BEFORE DELETE ON memory_v2_proposal_transitions BEGIN
             SELECT RAISE(ABORT, 'memory_v2 proposal transitions are immutable');
         END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_legacy_proposal_map_no_update
-        BEFORE UPDATE ON memory_v2_legacy_proposal_map BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 legacy proposal mappings are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_legacy_proposal_map_no_delete
-        BEFORE DELETE ON memory_v2_legacy_proposal_map BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 legacy proposal mappings are immutable');
         END;",
     )
     .await
