@@ -143,6 +143,267 @@
     }
 
     #[test]
+    fn explicit_import_atomically_retains_and_restores_the_verified_rollback_artifact() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            scoped_hub_source(root.path()),
+        )
+        .unwrap();
+        let first_manifest = tiny_manifest(&model);
+        let first = owner
+            .import_local_artifact(&model_id, &first_manifest, fixture.path(), 10)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let mut second_manifest = first_manifest;
+        second_manifest.payload.resource_ceiling.max_resident_bytes += 1;
+        let second = owner
+            .import_local_artifact(&model_id, &second_manifest, fixture.path(), 20)
+            .unwrap();
+
+        let rolled_back = owner.rollback_to_previous().unwrap();
+
+        assert_ne!(
+            first.state.as_ref().unwrap().artifact_digest(),
+            second.state.as_ref().unwrap().artifact_digest()
+        );
+        assert_eq!(
+            rolled_back.state.as_ref().unwrap().artifact_digest(),
+            first.state.as_ref().unwrap().artifact_digest()
+        );
+        let active = owner
+            .artifact_store
+            .artifact_digest_for_lease(
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Active,
+                30,
+            )
+            .unwrap();
+        let retained = owner
+            .artifact_store
+            .artifact_digest_for_lease(
+                EMBEDDING_ROLLBACK_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Rollback,
+                30,
+            )
+            .unwrap();
+        assert_eq!(
+            active.unwrap().to_string(),
+            first.state.unwrap().artifact_digest()
+        );
+        assert_eq!(
+            retained.unwrap().to_string(),
+            second.state.unwrap().artifact_digest()
+        );
+    }
+
+    #[test]
+    fn failed_lifecycle_persist_restores_the_prior_active_artifact_lease() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog.clone(),
+            scoped_hub_source(root.path()),
+        )
+        .unwrap();
+        let first_manifest = tiny_manifest(&model);
+        let first = owner
+            .import_local_artifact(&model_id, &first_manifest, fixture.path(), 10)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let durable_bytes = fs::read(root.path().join("lifecycle.json")).unwrap();
+        fs::remove_file(root.path().join("lifecycle.json")).unwrap();
+        fs::create_dir(root.path().join("lifecycle.json")).unwrap();
+        let mut second_manifest = first_manifest;
+        second_manifest.payload.resource_ceiling.max_resident_bytes += 1;
+
+        assert_eq!(
+            owner
+                .import_local_artifact(&model_id, &second_manifest, fixture.path(), 20)
+                .unwrap_err(),
+            ModelLifecycleErrorV1::StoreUnavailable
+        );
+        let active = owner
+            .artifact_store
+            .artifact_digest_for_lease(
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Active,
+                30,
+            )
+            .unwrap();
+        assert_eq!(
+            active.unwrap().to_string(),
+            first.state.as_ref().unwrap().artifact_digest()
+        );
+        assert_eq!(
+            owner.status().state.as_ref().unwrap().artifact_digest(),
+            first.state.as_ref().unwrap().artifact_digest()
+        );
+
+        fs::remove_dir(root.path().join("lifecycle.json")).unwrap();
+        fs::write(root.path().join("lifecycle.json"), durable_bytes).unwrap();
+        let restarted =
+            SemanticModelLifecycleOwnerV1::open(root.path(), catalog, scoped_hub_source(root.path()))
+                .unwrap();
+        assert_eq!(
+            restarted.status().state.as_ref().unwrap().artifact_digest(),
+            first.state.unwrap().artifact_digest()
+        );
+    }
+
+    #[test]
+    fn restart_reconciles_an_inventory_rotation_that_never_committed_lifecycle_state() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog.clone(),
+            scoped_hub_source(root.path()),
+        )
+        .unwrap();
+        let first_manifest = tiny_manifest(&model);
+        let first = owner
+            .import_local_artifact(&model_id, &first_manifest, fixture.path(), 10)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let mut uncommitted_manifest = first_manifest;
+        uncommitted_manifest
+            .payload
+            .resource_ceiling
+            .max_resident_bytes += 1;
+        let uncommitted = owner
+            .artifact_store
+            .import_local_directory(&uncommitted_manifest, fixture.path(), 20)
+            .unwrap();
+        owner
+            .artifact_store
+            .activate_artifact_with_rollback(
+                &uncommitted.artifact_digest,
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
+                EMBEDDING_ROLLBACK_LEASE_ID_V1,
+                20,
+            )
+            .unwrap();
+        drop(owner);
+
+        let restarted =
+            SemanticModelLifecycleOwnerV1::open(root.path(), catalog, scoped_hub_source(root.path()))
+                .unwrap();
+        let active = restarted
+            .artifact_store
+            .artifact_digest_for_lease(
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Active,
+                30,
+            )
+            .unwrap();
+        assert_eq!(
+            active.unwrap().to_string(),
+            first.state.unwrap().artifact_digest()
+        );
+        assert_eq!(
+            restarted
+                .artifact_store
+                .artifact_digest_for_lease(
+                    EMBEDDING_ROLLBACK_LEASE_ID_V1,
+                    ArtifactLeaseKindV1::Rollback,
+                    30,
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn concurrent_publication_and_rollback_leave_one_matching_active_identity() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = Arc::new(
+            SemanticModelLifecycleOwnerV1::open(
+                root.path(),
+                catalog,
+                scoped_hub_source(root.path()),
+            )
+            .unwrap(),
+        );
+        let first_manifest = tiny_manifest(&model);
+        owner
+            .import_local_artifact(&model_id, &first_manifest, fixture.path(), 10)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let mut second_manifest = first_manifest.clone();
+        second_manifest.payload.resource_ceiling.max_resident_bytes += 1;
+        owner
+            .import_local_artifact(&model_id, &second_manifest, fixture.path(), 20)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let mut third_manifest = first_manifest;
+        third_manifest.payload.resource_ceiling.max_resident_bytes += 2;
+        let start = Arc::new(Barrier::new(3));
+        let publisher = {
+            let owner = Arc::clone(&owner);
+            let start = Arc::clone(&start);
+            let model_id = model_id.clone();
+            let source = fixture.path().to_path_buf();
+            std::thread::spawn(move || {
+                start.wait();
+                owner.import_local_artifact(&model_id, &third_manifest, &source, 30)
+            })
+        };
+        let rollback = {
+            let owner = Arc::clone(&owner);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                owner.rollback_to_previous()
+            })
+        };
+        start.wait();
+        publisher.join().unwrap().unwrap();
+        rollback.join().unwrap().unwrap();
+
+        let status = owner.status();
+        let active = owner
+            .artifact_store
+            .artifact_digest_for_lease(
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Active,
+                40,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            active.to_string(),
+            status.state.as_ref().unwrap().artifact_digest()
+        );
+        let rolled_back = owner.rollback_to_previous().unwrap();
+        let active = owner
+            .artifact_store
+            .artifact_digest_for_lease(
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Active,
+                40,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            active.to_string(),
+            rolled_back.state.unwrap().artifact_digest()
+        );
+    }
+
+    #[test]
     fn restart_rejects_corrupt_lifecycle_state_instead_of_reconstructing_installation() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("lifecycle.json"), b"{not-json").unwrap();

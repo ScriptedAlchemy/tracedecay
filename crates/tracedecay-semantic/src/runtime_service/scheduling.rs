@@ -85,11 +85,11 @@ impl SemanticRuntimeScheduleCancellationV1 {
             .fetch_max(completed_units.min(self.total_units), Ordering::AcqRel);
     }
 
-    fn completed_units(&self) -> u64 {
+    pub(crate) fn completed_units(&self) -> u64 {
         self.completed_units.load(Ordering::Acquire)
     }
 
-    fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
 }

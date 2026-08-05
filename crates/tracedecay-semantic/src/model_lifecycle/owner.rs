@@ -61,7 +61,7 @@ impl SemanticModelLifecycleOwnerV1 {
             },
         )?;
         let durable = load_or_default_durable(&root, &catalog)?;
-        Ok(Self {
+        let owner = Self {
             root,
             catalog,
             source,
@@ -69,7 +69,15 @@ impl SemanticModelLifecycleOwnerV1 {
             inner: Arc::new(Mutex::new(LifecycleInner { durable })),
             worker: Mutex::new(AcquisitionWorkerStateV1::default()),
             acquisition: Arc::new(AcquisitionControlV1::default()),
-        })
+        };
+        let durable = owner
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .durable
+            .clone();
+        owner.reconcile_embedding_artifact_leases(&durable, current_unix_seconds()?)?;
+        Ok(owner)
     }
 
     pub fn open_default(root: impl Into<PathBuf>) -> Result<Self, ModelLifecycleErrorV1> {
@@ -283,36 +291,20 @@ impl SemanticModelLifecycleOwnerV1 {
         record: ArtifactInventoryRecordV1,
         now_unix: u64,
     ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
-        let lease_id = format!("active:{}:{}", model.model_id, model.source.revision);
-        self.artifact_store.acquire_artifact_lease(
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let prior_durable = guard.durable.clone();
+        self.artifact_store.activate_artifact_with_rollback(
             &record.artifact_digest,
-            ArtifactLeaseV1 {
-                lease_id,
-                kind: ArtifactLeaseKindV1::Active,
-                expires_at_unix: u64::MAX,
-            },
+            EMBEDDING_ACTIVE_LEASE_ID_V1,
+            EMBEDDING_ROLLBACK_LEASE_ID_V1,
             now_unix,
         )?;
         let install_path = self
             .artifact_store
             .installed_directory(&record.artifact_digest);
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(previous @ SemanticModelLifecycleStateV1::Ready { .. }) =
             guard.durable.state.clone()
         {
-            if let Ok(previous_digest) =
-                super::manifest::Sha256DigestHex::new(previous.artifact_digest().to_owned())
-            {
-                let _ = self.artifact_store.acquire_artifact_lease(
-                    &previous_digest,
-                    ArtifactLeaseV1 {
-                        lease_id: format!("rollback:{}", previous.model_id()),
-                        kind: ArtifactLeaseKindV1::Rollback,
-                        expires_at_unix: u64::MAX,
-                    },
-                    now_unix,
-                );
-            }
             guard.durable.previous_ready = Some(previous);
         }
         guard.durable.selected_model = Some(model.model_id.clone());
@@ -322,7 +314,11 @@ impl SemanticModelLifecycleOwnerV1 {
             artifact_digest: record.artifact_digest.to_string(),
             install_path,
         });
-        persist_durable(&self.root, &guard.durable)?;
+        if let Err(error) = persist_durable(&self.root, &guard.durable) {
+            guard.durable = prior_durable.clone();
+            self.reconcile_embedding_artifact_leases(&prior_durable, now_unix)?;
+            return Err(error);
+        }
         drop(guard);
         Ok(self.status())
     }
@@ -463,13 +459,12 @@ impl SemanticModelLifecycleOwnerV1 {
             .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
         let environment = RuntimeEnvironmentV1::detect_fastembed_process()
             .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        let lease_id = format!("active:{}:{}", model.model_id, model.source.revision);
         let admitted = self
             .artifact_store
             .admit_leased_for_runtime_by_digest(
                 &digest,
                 &environment,
-                &lease_id,
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
                 ArtifactLeaseKindV1::Active,
                 current_unix_seconds()?,
             )
@@ -536,15 +531,15 @@ impl SemanticModelLifecycleOwnerV1 {
             return Err(ModelLifecycleErrorV1::Rejected);
         }
         self.cancel_and_join_background_acquisition()?;
-        if let Some(state) = &status.state
-            && let Ok(digest) =
-                super::manifest::Sha256DigestHex::new(state.artifact_digest().to_owned())
         {
-            let _ = self.artifact_store.release_artifact_lease(
-                &digest,
-                &format!("active:{}:{}", state.model_id(), state_revision(state)),
-                ArtifactLeaseKindV1::Active,
-            );
+            let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            let prior = guard.durable.clone();
+            guard.durable.state = None;
+            if let Err(error) = persist_durable(&self.root, &guard.durable) {
+                guard.durable = prior;
+                return Err(error);
+            }
+            self.reconcile_embedding_artifact_leases(&guard.durable, current_unix_seconds()?)?;
         }
         if let Some(state) = &status.state
             && let Some(path) = install_path_of(state)
@@ -553,13 +548,8 @@ impl SemanticModelLifecycleOwnerV1 {
                 // Store bytes remain inventory-owned and become eligible only
                 // under a later daemon GC lease.
             } else {
-                let _ = fs::remove_dir_all(path);
+                fs::remove_dir_all(path).map_err(|_| ModelLifecycleErrorV1::InstallFailed)?;
             }
-        }
-        {
-            let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-            guard.durable.state = None;
-            persist_durable(&self.root, &guard.durable)?;
         }
         let model_id = status.selected_model.clone();
         self.select_model(model_id.as_deref(), status.auto_download)
@@ -582,9 +572,7 @@ impl SemanticModelLifecycleOwnerV1 {
 
     /// Cancel and join the daemon-owned acquisition worker before its model
     /// state or staged files are mutated by another lifecycle operation.
-    pub fn cancel_and_join_background_acquisition(
-        &self,
-    ) -> Result<(), ModelLifecycleErrorV1> {
+    pub fn cancel_and_join_background_acquisition(&self) -> Result<(), ModelLifecycleErrorV1> {
         let mut worker = self.worker.lock().unwrap_or_else(PoisonError::into_inner);
         self.cancel_background_acquisition();
         if let Some(error) = worker.outcome.clone() {
@@ -643,39 +631,19 @@ impl SemanticModelLifecycleOwnerV1 {
         if !matches!(previous, SemanticModelLifecycleStateV1::Ready { .. }) {
             return Err(ModelLifecycleErrorV1::Rejected);
         }
-        if let Some(current) = &guard.durable.state
-            && let Ok(digest) =
-                super::manifest::Sha256DigestHex::new(current.artifact_digest().to_owned())
-        {
-            let _ = self.artifact_store.release_artifact_lease(
-                &digest,
-                &format!("active:{}:{}", current.model_id(), state_revision(current)),
-                ArtifactLeaseKindV1::Active,
-            );
-        }
+        let prior_durable = guard.durable.clone();
         if install_path_of(&previous).is_some_and(|path| {
             path.starts_with(self.root.join("verified-artifacts").join("artifacts"))
-        }) && let Ok(digest) =
-            super::manifest::Sha256DigestHex::new(previous.artifact_digest().to_owned())
-        {
-            self.artifact_store.acquire_artifact_lease(
+        }) {
+            let digest =
+                super::manifest::Sha256DigestHex::new(previous.artifact_digest().to_owned())
+                    .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+            self.artifact_store.activate_artifact_with_rollback(
                 &digest,
-                ArtifactLeaseV1 {
-                    lease_id: format!(
-                        "active:{}:{}",
-                        previous.model_id(),
-                        state_revision(&previous)
-                    ),
-                    kind: ArtifactLeaseKindV1::Active,
-                    expires_at_unix: u64::MAX,
-                },
-                0,
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
+                EMBEDDING_ROLLBACK_LEASE_ID_V1,
+                current_unix_seconds()?,
             )?;
-            let _ = self.artifact_store.release_artifact_lease(
-                &digest,
-                &format!("rollback:{}", previous.model_id()),
-                ArtifactLeaseKindV1::Rollback,
-            );
         }
         if let Some(SemanticModelLifecycleStateV1::Ready { .. }) = &guard.durable.state {
             let ready_state = guard.durable.state.clone();
@@ -683,7 +651,11 @@ impl SemanticModelLifecycleOwnerV1 {
         }
         guard.durable.selected_model = Some(previous.model_id().to_owned());
         guard.durable.state = Some(previous);
-        persist_durable(&self.root, &guard.durable)?;
+        if let Err(error) = persist_durable(&self.root, &guard.durable) {
+            guard.durable = prior_durable.clone();
+            self.reconcile_embedding_artifact_leases(&prior_durable, current_unix_seconds()?)?;
+            return Err(error);
+        }
         drop(guard);
         Ok(self.status())
     }

@@ -17,6 +17,12 @@ use super::runtime_service::{
 use super::session_pool::SessionPoolConfigV1;
 use super::{LoadedSemanticArtifactV1, RuntimeChunkVectorEncoderV1};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticEvaluationProjectionCancellationV1 {
+    pub projection_calls: u64,
+    pub chunks_added_or_changed: u64,
+}
+
 #[derive(Clone)]
 pub struct SemanticEvaluationQueryFactoryV1 {
     inner: Arc<PooledSemanticQueryEmbedderFactory<FastEmbedEmbeddingRuntime>>,
@@ -68,6 +74,114 @@ pub fn prepare_semantic_evaluation_projection(
         ),
         prepared,
     })
+}
+
+/// Execute one genuine model batch and then cancel before a complete
+/// evaluator projection can be returned or published.
+pub fn measure_semantic_evaluation_projection_cancellation(
+    artifact: LoadedSemanticArtifactV1,
+    request: ProjectionBatchRequestV1,
+    canonical_chunks: &[CodeSearchChunkV1],
+    max_sessions: usize,
+    memory_ceiling_bytes: u64,
+) -> Result<SemanticEvaluationProjectionCancellationV1, SemanticRuntimeScheduleFailureV1> {
+    if request.changes.added_or_changed.is_empty() {
+        return Err(SemanticRuntimeScheduleFailureV1::Projection);
+    }
+    let chunks_added_or_changed = request.changes.added_or_changed.len() as u64;
+    let authority = artifact.into_authority();
+    let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
+        fastembed_runtime_factory();
+    let runtime = SemanticRuntimeService::new_owned(
+        Arc::clone(&authority),
+        factory,
+        SessionPoolConfigV1 {
+            max_sessions,
+            max_queued_waiters: 0,
+            idle_timeout: std::time::Duration::from_mins(5),
+            memory_ceiling_bytes,
+        },
+    )
+    .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+    let progress = Arc::new(SemanticRuntimeScheduleCancellationV1::new(
+        request.changes.added_or_changed.len() as u64,
+    ));
+    let inner = RuntimeChunkVectorEncoderV1::new(Arc::clone(&runtime), Arc::clone(&progress));
+    let mut encoder = CancelAfterFirstModelBatchV1 {
+        inner,
+        progress: Arc::clone(&progress),
+    };
+    if prepare_vector_generation(
+        authority.projection(),
+        request,
+        canonical_chunks,
+        &mut encoder,
+    )
+    .is_ok()
+    {
+        return Err(SemanticRuntimeScheduleFailureV1::Projection);
+    }
+    let projection_calls = progress.completed_units();
+    if projection_calls == 0 || projection_calls >= chunks_added_or_changed || !progress.cancelled()
+    {
+        return Err(SemanticRuntimeScheduleFailureV1::Projection);
+    }
+    Ok(SemanticEvaluationProjectionCancellationV1 {
+        projection_calls,
+        chunks_added_or_changed,
+    })
+}
+
+struct CancelAfterFirstModelBatchV1 {
+    inner: RuntimeChunkVectorEncoderV1<FastEmbedEmbeddingRuntime>,
+    progress: Arc<SemanticRuntimeScheduleCancellationV1>,
+}
+
+impl super::projector::CanonicalChunkVectorEncoderV1 for CancelAfterFirstModelBatchV1 {
+    fn encode(
+        &mut self,
+        key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+        chunk: &CodeSearchChunkV1,
+    ) -> Result<Vec<f32>, String> {
+        let encoded = self.inner.encode(key, chunk)?;
+        self.progress.cancel();
+        Err(if encoded.is_empty() {
+            "semantic projection produced no work before cancellation".to_owned()
+        } else {
+            "semantic projection cancelled after observed work".to_owned()
+        })
+    }
+
+    fn encode_batch(
+        &mut self,
+        key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<Vec<f32>>, String> {
+        let encoded = self.inner.encode_batch(key, chunks)?;
+        self.progress.cancel();
+        Err(if encoded.is_empty() {
+            "semantic projection produced no work before cancellation".to_owned()
+        } else {
+            "semantic projection cancelled after observed work".to_owned()
+        })
+    }
+
+    fn encode_batches(
+        &mut self,
+        key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+        groups: &[&[&CodeSearchChunkV1]],
+    ) -> Result<Vec<Vec<Vec<f32>>>, String> {
+        let first = groups
+            .first()
+            .ok_or_else(|| "semantic projection cancellation received no work".to_owned())?;
+        let encoded = self.inner.encode_batch(key, first)?;
+        self.progress.cancel();
+        Err(if encoded.is_empty() {
+            "semantic projection produced no work before cancellation".to_owned()
+        } else {
+            "semantic projection cancelled after observed work".to_owned()
+        })
+    }
 }
 
 impl SemanticEvaluationQueryFactoryV1 {
