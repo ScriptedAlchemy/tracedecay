@@ -20,7 +20,7 @@ pub(in super::super) async fn install_final_schema(
     let schema = format!(
         r#"CREATE TABLE IF NOT EXISTS git_history_index_progress (
             activity_timestamp INTEGER NOT NULL,
-            source_rowid INTEGER NOT NULL,
+            source_rowid INTEGER NOT NULL PRIMARY KEY,
             provider TEXT NOT NULL,
             session_id TEXT NOT NULL,
             project_path TEXT NOT NULL,
@@ -55,7 +55,6 @@ pub(in super::super) async fn install_final_schema(
             emitted_count INTEGER NOT NULL CHECK(emitted_count >= 0),
             consulted_ref_seal_json TEXT NOT NULL
                 CHECK(length(consulted_ref_seal_json) <= {max_ref_seal_bytes}),
-            PRIMARY KEY(activity_timestamp, source_rowid),
             CHECK(window_start <= window_end),
             CHECK(reflog_byte_offset <= reflog_byte_length),
             CHECK(capture_target_offset IS NULL OR capture_target_offset <= reflog_byte_length),
@@ -94,7 +93,6 @@ pub(in super::super) async fn install_final_schema(
             )
         );
         CREATE TABLE IF NOT EXISTS git_history_index_segments (
-            activity_timestamp INTEGER NOT NULL,
             source_rowid INTEGER NOT NULL,
             ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
             branch TEXT,
@@ -103,31 +101,29 @@ pub(in super::super) async fn install_final_schema(
             tip_oid TEXT NOT NULL,
             applied INTEGER NOT NULL DEFAULT 0 CHECK(applied IN (0, 1)),
             completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
-            PRIMARY KEY(activity_timestamp, source_rowid, ordinal),
-            FOREIGN KEY(activity_timestamp, source_rowid)
-                REFERENCES git_history_index_progress(activity_timestamp, source_rowid)
+            PRIMARY KEY(source_rowid, ordinal),
+            FOREIGN KEY(source_rowid)
+                REFERENCES git_history_index_progress(source_rowid)
                 ON DELETE CASCADE,
             CHECK(start_ts <= end_ts),
             CHECK(completed = 0 OR applied = 1)
         );
         CREATE TABLE IF NOT EXISTS git_history_index_pending (
-            activity_timestamp INTEGER NOT NULL,
             source_rowid INTEGER NOT NULL,
             segment_ordinal INTEGER NOT NULL CHECK(segment_ordinal >= 0),
             oid TEXT NOT NULL,
-            PRIMARY KEY(activity_timestamp, source_rowid, segment_ordinal, oid),
-            FOREIGN KEY(activity_timestamp, source_rowid, segment_ordinal)
-                REFERENCES git_history_index_segments(activity_timestamp, source_rowid, ordinal)
+            PRIMARY KEY(source_rowid, segment_ordinal, oid),
+            FOREIGN KEY(source_rowid, segment_ordinal)
+                REFERENCES git_history_index_segments(source_rowid, ordinal)
                 ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS git_history_index_seen (
-            activity_timestamp INTEGER NOT NULL,
             source_rowid INTEGER NOT NULL,
             segment_ordinal INTEGER NOT NULL CHECK(segment_ordinal >= 0),
             oid TEXT NOT NULL,
-            PRIMARY KEY(activity_timestamp, source_rowid, segment_ordinal, oid),
-            FOREIGN KEY(activity_timestamp, source_rowid, segment_ordinal)
-                REFERENCES git_history_index_segments(activity_timestamp, source_rowid, ordinal)
+            PRIMARY KEY(source_rowid, segment_ordinal, oid),
+            FOREIGN KEY(source_rowid, segment_ordinal)
+                REFERENCES git_history_index_segments(source_rowid, ordinal)
                 ON DELETE CASCADE
         );"#,
         initial = INITIAL_REFLOG_CONTENT_CHAIN,
@@ -140,7 +136,6 @@ pub(in super::super) async fn install_final_schema(
 /// Exact session-activity row whose native history scan is in progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct GitHistoryProgressKey {
-    pub activity_timestamp: i64,
     pub source_rowid: i64,
 }
 
@@ -199,6 +194,7 @@ impl GitHistoryCursorHeadState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct GitHistoryProgressRow {
     pub key: GitHistoryProgressKey,
+    pub activity_timestamp: i64,
     pub provider: String,
     pub session_id: String,
     pub project_path: String,
@@ -276,8 +272,33 @@ pub(super) async fn read_progress(
                     cursor_head_state, cursor_head_branch, cursor_oid, segment_end,
                     segment_tip_oid, segment_cursor, emitted_count, consulted_ref_seal_json
                FROM git_history_index_progress
-              WHERE activity_timestamp = ?1 AND source_rowid = ?2",
+              WHERE source_rowid = ?1",
             key_params(key),
+        )
+        .await?;
+    rows.next()
+        .await?
+        .map(|row| progress_from_row(&row))
+        .transpose()
+}
+
+pub(super) async fn read_oldest_progress(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<Option<GitHistoryProgressRow>, GitCorrelationError> {
+    let mut rows = conn
+        .query(
+            "SELECT activity_timestamp, source_rowid, provider, session_id,
+                    project_path, window_start, window_end, worktree, worktree_identity,
+                    git_dir, git_dir_identity, common_dir, common_dir_identity, generation,
+                    scan_mode, reflog_path, reflog_byte_offset, reflog_byte_length,
+                    source_generation, reflog_digest, capture_target_offset,
+                    verify_byte_offset, verify_digest, source_head_referent, source_head_oid,
+                    cursor_head_state, cursor_head_branch, cursor_oid, segment_end,
+                    segment_tip_oid, segment_cursor, emitted_count, consulted_ref_seal_json
+               FROM git_history_index_progress
+              ORDER BY activity_timestamp ASC, source_rowid ASC
+              LIMIT 1",
+            (),
         )
         .await?;
     rows.next()
@@ -310,7 +331,7 @@ pub(super) async fn insert_progress(
                     ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
                     ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33
                  )
-                 ON CONFLICT(activity_timestamp, source_rowid) DO NOTHING",
+                 ON CONFLICT(source_rowid) DO NOTHING",
             progress_params(progress, &consulted_ref_seal_json),
         )
         .await?;
@@ -421,7 +442,7 @@ pub(super) async fn compare_and_swap_progress(
                 next.segment_cursor,
                 next.emitted_count,
                 &consulted_ref_seal_json,
-                next.key.activity_timestamp,
+                next.activity_timestamp,
                 next.key.source_rowid,
                 expected_generation,
                 &next.provider,
@@ -454,7 +475,7 @@ pub(super) async fn reset_progress(
     Ok(conn
         .execute(
             "DELETE FROM git_history_index_progress
-              WHERE activity_timestamp = ?1 AND source_rowid = ?2",
+              WHERE source_rowid = ?1",
             key_params(key),
         )
         .await?
@@ -468,13 +489,12 @@ pub(super) async fn read_segment(
 ) -> Result<Option<GitHistorySegmentRow>, GitCorrelationError> {
     let mut rows = conn
         .query(
-            "SELECT activity_timestamp, source_rowid, ordinal, branch,
+            "SELECT source_rowid, ordinal, branch,
                     start_ts, end_ts, tip_oid, applied, completed
                FROM git_history_index_segments
-              WHERE activity_timestamp = ?1
-                AND source_rowid = ?2
-                AND ordinal = ?3",
-            params![key.activity_timestamp, key.source_rowid, ordinal],
+              WHERE source_rowid = ?1
+                AND ordinal = ?2",
+            params![key.source_rowid, ordinal],
         )
         .await?;
     rows.next()
@@ -491,11 +511,11 @@ pub(super) async fn upsert_segment(
     let changed = conn
         .execute(
             "INSERT INTO git_history_index_segments (
-                    activity_timestamp, source_rowid, ordinal, branch,
+                    source_rowid, ordinal, branch,
                     start_ts, end_ts, tip_oid, applied, completed
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(activity_timestamp, source_rowid, ordinal) DO UPDATE SET
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(source_rowid, ordinal) DO UPDATE SET
                     applied = excluded.applied,
                     completed = excluded.completed
                  WHERE git_history_index_segments.branch IS excluded.branch
@@ -503,7 +523,6 @@ pub(super) async fn upsert_segment(
                    AND git_history_index_segments.end_ts = excluded.end_ts
                    AND git_history_index_segments.tip_oid = excluded.tip_oid",
             params![
-                segment.key.activity_timestamp,
                 segment.key.source_rowid,
                 segment.ordinal,
                 segment.branch.as_deref(),
@@ -536,19 +555,13 @@ pub(super) async fn read_pending_page(
     })?;
     let mut rows = conn
         .query(
-            "SELECT activity_timestamp, source_rowid, segment_ordinal, oid
+            "SELECT source_rowid, segment_ordinal, oid
                FROM git_history_index_pending
-              WHERE activity_timestamp = ?1
-                AND source_rowid = ?2
-                AND segment_ordinal = ?3
+              WHERE source_rowid = ?1
+                AND segment_ordinal = ?2
               ORDER BY oid ASC
-              LIMIT ?4",
-            params![
-                key.activity_timestamp,
-                key.source_rowid,
-                segment_ordinal,
-                limit,
-            ],
+              LIMIT ?3",
+            params![key.source_rowid, segment_ordinal, limit],
         )
         .await?;
     let mut pending = Vec::new();
@@ -565,21 +578,19 @@ pub(super) async fn upsert_pending(
     let changed = conn
         .execute(
             "INSERT INTO git_history_index_pending (
-                activity_timestamp, source_rowid, segment_ordinal, oid
+                source_rowid, segment_ordinal, oid
              )
-             SELECT ?1, ?2, ?3, ?4
+             SELECT ?1, ?2, ?3
               WHERE NOT EXISTS (
                     SELECT 1
                       FROM git_history_index_seen
-                     WHERE activity_timestamp = ?1
-                       AND source_rowid = ?2
-                       AND segment_ordinal = ?3
-                       AND oid = ?4
+                     WHERE source_rowid = ?1
+                       AND segment_ordinal = ?2
+                       AND oid = ?3
               )
-             ON CONFLICT(activity_timestamp, source_rowid, segment_ordinal, oid)
+             ON CONFLICT(source_rowid, segment_ordinal, oid)
              DO NOTHING",
             params![
-                pending.key.activity_timestamp,
                 pending.key.source_rowid,
                 pending.segment_ordinal,
                 &pending.oid,
@@ -598,16 +609,10 @@ pub(super) async fn delete_pending(
     Ok(conn
         .execute(
             "DELETE FROM git_history_index_pending
-              WHERE activity_timestamp = ?1
-                AND source_rowid = ?2
-                AND segment_ordinal = ?3
-                AND oid = ?4",
-            params![
-                key.activity_timestamp,
-                key.source_rowid,
-                segment_ordinal,
-                oid,
-            ],
+              WHERE source_rowid = ?1
+                AND segment_ordinal = ?2
+                AND oid = ?3",
+            params![key.source_rowid, segment_ordinal, oid],
         )
         .await?
         == 1)
@@ -620,17 +625,12 @@ pub(super) async fn insert_seen(
     Ok(conn
         .execute(
             "INSERT INTO git_history_index_seen (
-                    activity_timestamp, source_rowid, segment_ordinal, oid
+                    source_rowid, segment_ordinal, oid
                  )
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(activity_timestamp, source_rowid, segment_ordinal, oid)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(source_rowid, segment_ordinal, oid)
                  DO NOTHING",
-            params![
-                seen.key.activity_timestamp,
-                seen.key.source_rowid,
-                seen.segment_ordinal,
-                &seen.oid,
-            ],
+            params![seen.key.source_rowid, seen.segment_ordinal, &seen.oid,],
         )
         .await?
         == 1)
@@ -639,9 +639,9 @@ pub(super) async fn insert_seen(
 fn progress_from_row(row: &Row) -> Result<GitHistoryProgressRow, GitCorrelationError> {
     Ok(GitHistoryProgressRow {
         key: GitHistoryProgressKey {
-            activity_timestamp: row.get(0)?,
             source_rowid: row.get(1)?,
         },
+        activity_timestamp: row.get(0)?,
         provider: row.get(2)?,
         session_id: row.get(3)?,
         project_path: row.get(4)?,
@@ -679,27 +679,25 @@ fn progress_from_row(row: &Row) -> Result<GitHistoryProgressRow, GitCorrelationE
 fn segment_from_row(row: &Row) -> Result<GitHistorySegmentRow, GitCorrelationError> {
     Ok(GitHistorySegmentRow {
         key: GitHistoryProgressKey {
-            activity_timestamp: row.get(0)?,
-            source_rowid: row.get(1)?,
+            source_rowid: row.get(0)?,
         },
-        ordinal: row.get(2)?,
-        branch: row.get(3)?,
-        start_ts: row.get(4)?,
-        end_ts: row.get(5)?,
-        tip_oid: row.get(6)?,
-        applied: stored_bool(row.get(7)?, "applied")?,
-        completed: stored_bool(row.get(8)?, "completed")?,
+        ordinal: row.get(1)?,
+        branch: row.get(2)?,
+        start_ts: row.get(3)?,
+        end_ts: row.get(4)?,
+        tip_oid: row.get(5)?,
+        applied: stored_bool(row.get(6)?, "applied")?,
+        completed: stored_bool(row.get(7)?, "completed")?,
     })
 }
 
 fn pending_from_row(row: &Row) -> Result<GitHistoryPendingRow, GitCorrelationError> {
     Ok(GitHistoryPendingRow {
         key: GitHistoryProgressKey {
-            activity_timestamp: row.get(0)?,
-            source_rowid: row.get(1)?,
+            source_rowid: row.get(0)?,
         },
-        segment_ordinal: row.get(2)?,
-        oid: row.get(3)?,
+        segment_ordinal: row.get(1)?,
+        oid: row.get(2)?,
     })
 }
 
@@ -708,7 +706,7 @@ fn progress_params(
     consulted_ref_seal_json: &str,
 ) -> impl tracedecay_runtime_core::db::engine::IntoParams {
     params![
-        progress.key.activity_timestamp,
+        progress.activity_timestamp,
         progress.key.source_rowid,
         &progress.provider,
         &progress.session_id,
@@ -745,7 +743,7 @@ fn progress_params(
 }
 
 fn key_params(key: GitHistoryProgressKey) -> impl tracedecay_runtime_core::db::engine::IntoParams {
-    params![key.activity_timestamp, key.source_rowid]
+    params![key.source_rowid]
 }
 
 fn validate_progress(progress: &GitHistoryProgressRow) -> Result<(), GitCorrelationError> {

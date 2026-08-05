@@ -109,6 +109,17 @@ where
             interruption,
         ));
     }
+    let active_progress = if opts.dry_run {
+        None
+    } else {
+        history_progress::read_oldest_progress(&snapshot).await?
+    };
+    if let Some(progress) = active_progress {
+        drop(snapshot);
+        return Ok(
+            resume_active_progress_page(session_store, progress, frontier, opts, control).await,
+        );
+    }
     let requested = opts.limit_sessions.saturating_add(1);
     let mut rows = session_activity_page_after(
         &snapshot,
@@ -235,6 +246,61 @@ where
     })
 }
 
+async fn resume_active_progress_page<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    progress: GitHistoryProgressRow,
+    mut frontier: GitHistoryIndexFrontier,
+    opts: &BackfillOptions,
+    control: &BoundedGitControl,
+) -> BoundedBackfillOutcome {
+    let mut stats = BackfillStats {
+        sessions_scanned: 1,
+        ..BackfillStats::default()
+    };
+    let mut committed = false;
+    let result = resume_git_evidence(
+        session_store,
+        progress.key,
+        opts,
+        control,
+        &mut stats,
+        &mut committed,
+    )
+    .await;
+    match result {
+        Ok(StreamGitEvidenceOutcome::Applied(Some(persisted))) => {
+            frontier = persisted;
+            BoundedBackfillOutcome {
+                stats,
+                committed,
+                frontier,
+                remaining_sessions: 1,
+                interruption: None,
+            }
+        }
+        Ok(StreamGitEvidenceOutcome::Applied(None) | StreamGitEvidenceOutcome::Progressed) => {
+            BoundedBackfillOutcome {
+                stats,
+                committed,
+                frontier,
+                remaining_sessions: 1,
+                interruption: None,
+            }
+        }
+        Ok(StreamGitEvidenceOutcome::Skip(reason)) => {
+            stats.record_skip(reason);
+            BoundedBackfillOutcome {
+                stats,
+                committed,
+                frontier,
+                remaining_sessions: 1,
+                interruption: Some(BoundedBackfillInterruption::SourceUnavailable),
+            }
+        }
+        Err(interruption) => interrupted_outcome(stats, committed, frontier, interruption),
+    }
+}
+
 fn interrupted_outcome(
     stats: BackfillStats,
     committed: bool,
@@ -305,9 +371,64 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
         return Ok(StreamGitEvidenceOutcome::Applied(None));
     }
     let key = GitHistoryProgressKey {
-        activity_timestamp: candidate_frontier.activity_timestamp,
         source_rowid: candidate_frontier.source_rowid,
     };
+    let snapshot = session_store
+        .read_snapshot()
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let progress = history_progress::read_progress(&snapshot, key)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    drop(snapshot);
+    if progress.is_none() {
+        let native_control = control.clone();
+        let native_path = project_path;
+        let cursor = tokio::task::spawn_blocking(move || {
+            native::initialize_reflog_cursor(&native_path, window_end, &native_control)
+        })
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+        let progress = progress_from_cursor(
+            key,
+            candidate_frontier.activity_timestamp,
+            row,
+            window_start,
+            window_end,
+            cursor,
+        )?;
+        let transaction = session_store
+            .open_write_transaction()
+            .await
+            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+        control.check()?;
+        let inserted = history_progress::insert_progress(&transaction, &progress)
+            .await
+            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+        if inserted {
+            control.check()?;
+            GitCorrelationWriteTxn::commit(transaction)
+                .await
+                .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+            *committed = true;
+        } else {
+            drop(transaction);
+        }
+        if control.should_soft_stop(Duration::from_millis(750))? {
+            return Ok(StreamGitEvidenceOutcome::Progressed);
+        }
+    }
+    resume_git_evidence(session_store, key, opts, control, stats, committed).await
+}
+
+async fn resume_git_evidence<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    key: GitHistoryProgressKey,
+    opts: &BackfillOptions,
+    control: &BoundedGitControl,
+    stats: &mut BackfillStats,
+    committed: &mut bool,
+) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
     loop {
         let snapshot = session_store
             .read_snapshot()
@@ -318,43 +439,11 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
             .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
         drop(snapshot);
         let Some(progress) = progress else {
-            let native_control = control.clone();
-            let native_path = project_path.clone();
-            let cursor = tokio::task::spawn_blocking(move || {
-                native::initialize_reflog_cursor(&native_path, window_end, &native_control)
-            })
-            .await
-            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
-            let progress = progress_from_cursor(key, row, window_start, window_end, cursor)?;
-            let transaction = session_store
-                .open_write_transaction()
-                .await
-                .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-            control.check()?;
-            let inserted = history_progress::insert_progress(&transaction, &progress)
-                .await
-                .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-            if inserted {
-                control.check()?;
-                GitCorrelationWriteTxn::commit(transaction)
-                    .await
-                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-                *committed = true;
-            }
-            if control.should_soft_stop(Duration::from_millis(750))? {
-                return Ok(StreamGitEvidenceOutcome::Progressed);
-            }
-            continue;
-        };
-        if progress.provider != row.provider
-            || progress.session_id != row.session_id
-            || progress.project_path != row.project_path
-            || progress.window_start != window_start
-            || progress.window_end != window_end
-        {
-            reset_exact_progress(session_store, &progress, control, committed).await?;
             return Ok(StreamGitEvidenceOutcome::Progressed);
-        }
+        };
+        let project_path = std::path::PathBuf::from(progress.project_path.trim());
+        let row = session_row_from_progress(&progress);
+        let candidate_frontier = progress_frontier(&progress);
         let result = match progress.scan_mode {
             GitHistoryScanMode::ReflogCapture => {
                 advance_reflog_capture(session_store, &project_path, &progress, control, committed)
@@ -374,7 +463,7 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
                 advance_graph(
                     session_store,
                     &project_path,
-                    row,
+                    &row,
                     candidate_frontier,
                     &progress,
                     opts,
@@ -402,8 +491,28 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
     }
 }
 
+fn session_row_from_progress(progress: &GitHistoryProgressRow) -> SessionActivityRow {
+    SessionActivityRow {
+        provider: progress.provider.clone(),
+        session_id: progress.session_id.clone(),
+        project_path: progress.project_path.clone(),
+        started_at: Some(progress.window_start),
+        ended_at: Some(progress.window_end),
+        message_min_ts: None,
+        message_max_ts: None,
+    }
+}
+
+const fn progress_frontier(progress: &GitHistoryProgressRow) -> GitHistoryIndexFrontier {
+    GitHistoryIndexFrontier {
+        activity_timestamp: progress.activity_timestamp,
+        source_rowid: progress.key.source_rowid,
+    }
+}
+
 fn progress_from_cursor(
     key: GitHistoryProgressKey,
+    activity_timestamp: i64,
     row: &SessionActivityRow,
     window_start: i64,
     window_end: i64,
@@ -418,6 +527,7 @@ fn progress_from_cursor(
     let reflog_byte_length = cursor.byte_offset;
     Ok(GitHistoryProgressRow {
         key,
+        activity_timestamp,
         provider: row.provider.clone(),
         session_id: row.session_id.clone(),
         project_path: row.project_path.clone(),

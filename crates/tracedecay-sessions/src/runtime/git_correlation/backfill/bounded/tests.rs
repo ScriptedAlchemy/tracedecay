@@ -194,6 +194,71 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
 }
 
 #[tokio::test]
+async fn activity_change_finishes_sealed_candidate_before_newer_row() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions.db");
+    let store = prepare_store(&database, repository.path()).await;
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET ended_at = 100 WHERE session_id = 'session-1'",
+            (),
+        )
+        .await
+        .unwrap();
+    let partial = run_bounded_history_index_page(
+        &store,
+        &options(false),
+        &BoundedGitControl::new(
+            ObservationCancellation::default(),
+            Duration::from_millis(700),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(partial.frontier.activity_timestamp, -1);
+    assert_eq!(
+        scalar(
+            &store,
+            "SELECT activity_timestamp FROM git_history_index_progress"
+        )
+        .await,
+        100
+    );
+
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET ended_at = 200 WHERE session_id = 'session-1'",
+            (),
+        )
+        .await
+        .unwrap();
+    let resumed = run_bounded_history_index_page(
+        &store,
+        &options(false),
+        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.frontier.activity_timestamp, 100);
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
+        0
+    );
+
+    let newer = run_bounded_history_index_page(
+        &store,
+        &options(false),
+        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(newer.frontier.activity_timestamp, 200);
+}
+
+#[tokio::test]
 async fn dry_run_leaves_progress_evidence_and_frontier_untouched() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
