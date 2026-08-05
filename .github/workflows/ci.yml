@@ -782,6 +782,55 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  mcp-catalog-sweep:
+    name: Negotiated MCP catalog sweep
+    needs: dashboard-assets
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Test sweep harness contracts
+        run: |
+          python3 -m unittest discover -s tests/tool_sweep_suite -p 'test_*.py'
+          bash -n scripts/tool-sweep.sh
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-mcp-catalog-sweep-release-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Build production sweep binary
+        run: cargo build --locked --release --bin tracedecay
+
+      - name: Sweep negotiated MCP surfaces
+        run: scripts/tool-sweep.sh --whole-run-deadline-ms 1800000
+
+      - name: Upload MCP sweep artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mcp-catalog-sweep
+          path: target/tool-sweep/
+          if-no-files-found: warn
+          retention-days: 14
+
   clippy:
     name: Clippy
     needs: dashboard-assets
