@@ -318,7 +318,7 @@ const DAEMON_SOCKET_MODE: u32 = 0o600;
 
 /// Refuse to publish a socket in a directory other users can traverse.
 #[cfg(unix)]
-fn ensure_private_socket_parent(path: &Path) -> Result<()> {
+pub(super) fn ensure_private_socket_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
