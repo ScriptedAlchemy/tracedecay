@@ -264,7 +264,8 @@ pub(super) async fn production_project_server(
         semantic_config.auto_download && runtime.semantic_auto_download();
     let semantic_startup_selection = semantic_config.selected_model.clone();
     let semantic_database = cg.dashboard_database_guard();
-    let project_database_is_read_only = cg.db().filesystem_is_read_only();
+    let project_database = cg.retained_project_store_db()?;
+    let project_database_is_read_only = project_database.filesystem_is_read_only();
     let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
     let existing = {
         let mut servers = store_administration.project_servers().lock().await;
@@ -796,7 +797,7 @@ pub(super) async fn production_project_server(
                 canonical_project_path.to_path_buf(),
                 code_search_project_id.clone(),
                 cg.store_layout().clone(),
-                cg.db().clone(),
+                project_database.clone(),
                 Arc::clone(&registry_db),
                 Arc::clone(&user_session_db),
                 Arc::clone(&session_db),

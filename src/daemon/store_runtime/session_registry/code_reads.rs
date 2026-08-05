@@ -143,39 +143,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(reservation)
     }
 
-    pub(crate) async fn close_code_graph_paths(
-        &self,
-        database_paths: impl IntoIterator<Item = PathBuf>,
-    ) -> Result<()> {
-        for database_path in database_paths {
-            let closed = self
-                .registry
-                .close_path(&database_path)
-                .await
-                .map_err(|error| {
-                    session_registry_error(
-                        "close registered code-shard runtime",
-                        format!("{error:?}"),
-                    )
-                })?;
-            if let Some(closed) = closed {
-                self.resolver
-                    .retire_code_authority(&closed.binding().shard_id, closed.path())
-                    .map_err(|error| {
-                        session_registry_error(
-                            "retire registered code-shard authority",
-                            format!("{error:?}"),
-                        )
-                    })?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Mounts the mutable graph for this exact project/repository/worktree
-    /// identity. The checkout path is used only by the Git identity authority;
-    /// it is never itself the shard identity.
-    pub(crate) async fn code_graph_worktree(
+    /// Mounts the project-wide mutable graph. The checkout path is exact route
+    /// provenance; the canonical database locator is supplied by StoreLayout.
+    pub(crate) async fn project_graph(
         &self,
         _project_root: &Path,
         project_id: ProjectId,
@@ -187,58 +157,13 @@ impl DaemonSessionRuntimeRegistryV1 {
             .await
     }
 
-    /// Mounts the mutable graph for an exact named Git ref in this worktree.
-    /// The ref is normalized to its full `refs/heads/*` identity before it
-    /// enters the shard key.
-    pub(crate) async fn code_graph_branch(
+    pub(crate) async fn project_graph_registered(
         &self,
-        project_root: &Path,
         project_id: ProjectId,
-        branch_name: &str,
-        database_path: PathBuf,
-        database_authority: DatabaseAuthority,
-        access: DatabaseAccessMode,
-    ) -> Result<Database> {
-        self.code_graph_branch_with_authority(
-            project_root,
-            project_id,
-            branch_name,
-            database_path,
-            Some(database_authority),
-            access,
-        )
-        .await
-    }
-
-    pub(crate) async fn code_graph_branch_registered(
-        &self,
-        project_root: &Path,
-        project_id: ProjectId,
-        branch_name: &str,
         database_path: PathBuf,
         access: DatabaseAccessMode,
     ) -> Result<Database> {
-        self.code_graph_branch_with_authority(
-            project_root,
-            project_id,
-            branch_name,
-            database_path,
-            None,
-            access,
-        )
-        .await
-    }
-
-    async fn code_graph_branch_with_authority(
-        &self,
-        _project_root: &Path,
-        project_id: ProjectId,
-        _branch_name: &str,
-        database_path: PathBuf,
-        database_authority: Option<DatabaseAuthority>,
-        access: DatabaseAccessMode,
-    ) -> Result<Database> {
-        self.project_graph_database(project_id, database_path, database_authority, access)
+        self.project_graph_database(project_id, database_path, None, access)
             .await
     }
 }

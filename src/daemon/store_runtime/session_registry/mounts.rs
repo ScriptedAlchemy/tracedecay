@@ -208,51 +208,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
-    /// Mounts one project graph/memory database through the retained registry.
-    ///
-    /// The typed project id and enrollment roots authorize the resolver; the
-    /// returned database remains cached so migration and live use share one
-    /// writer authority.
-    pub(crate) async fn project_memory(
-        &self,
-        project_id: ProjectId,
-        enrollment_roots: impl IntoIterator<Item = PathBuf>,
-    ) -> Result<Arc<Database>> {
-        self.resolver
-            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
-                project_id.clone(),
-                enrollment_roots,
-            ))
-            .map_err(|error| {
-                session_registry_error("register project memory authority", format!("{error:?}"))
-            })?;
-        let mut mounted = self.project_memory.lock().await;
-        if let Some(database) = mounted.get(&project_id) {
-            return Ok(Arc::clone(database));
-        }
-        let shard_id = StoreShardIdV1::project(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-            project_id.clone(),
-        );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id,
-            self.incarnation,
-            Some(self.profile_pin.clone()),
-            None,
-            true,
-            "mount project memory store",
-        )
-        .await?;
-        let database =
-            Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
-        crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
-        mounted.insert(project_id, Arc::clone(&database));
-        Ok(database)
-    }
-
     /// Mounts an existing project-memory shard without initializing it or
     /// verifying its schema, and exposes only a read-only database facade.
     pub(crate) async fn project_memory_read_only(

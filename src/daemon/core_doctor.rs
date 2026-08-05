@@ -182,40 +182,26 @@ fn doctor_runtime_store_paths(
 fn doctor_runtime_store_paths_for_branch(
     project_path: &Path,
     profile_root: &Path,
-    branch: Option<&str>,
+    _branch: Option<&str>,
 ) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
-    let layout = match crate::storage::read_enrollment_marker(project_path) {
-        Ok(Some(marker)) => {
-            crate::storage::profile_sharded_layout(project_path, profile_root, &marker)
-                .map_err(|_| "project_store_schema_unsupported")?
+    let layout = if let Some(layout) =
+        crate::storage::resolve_persisted_layout(project_path, profile_root)
+            .map_err(|_| "project_store_schema_unsupported")?
+    {
+        layout
+    } else {
+        let data_root = crate::config::get_tracedecay_dir(project_path);
+        let legacy_paths = (
+            data_root.join(crate::config::db_filename(&data_root)),
+            data_root.join("sessions.db"),
+        );
+        if legacy_paths.0.is_file() {
+            return Ok(legacy_paths);
         }
-        Ok(None) => {
-            if let Some(layout) =
-                crate::storage::resolve_persisted_layout(project_path, profile_root)
-                    .map_err(|_| "project_store_schema_unsupported")?
-            {
-                layout
-            } else {
-                let data_root = crate::config::get_tracedecay_dir(project_path);
-                let legacy_paths = (
-                    data_root.join(crate::config::db_filename(&data_root)),
-                    data_root.join("sessions.db"),
-                );
-                if legacy_paths.0.is_file() {
-                    return Ok(legacy_paths);
-                }
-                crate::storage::default_profile_sharded_layout(project_path, profile_root)
-                    .map_err(|_| "project_store_schema_unsupported")?
-            }
-        }
-        Err(_) => return Err("project_store_schema_unsupported"),
+        crate::storage::default_profile_sharded_layout(project_path, profile_root)
+            .map_err(|_| "project_store_schema_unsupported")?
     };
-    let (graph_path, _, _) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
-        project_path,
-        &layout.data_root,
-        branch,
-    );
-    Ok((graph_path, layout.sessions_db_path))
+    Ok((layout.graph_db_path, layout.sessions_db_path))
 }
 
 async fn doctor_literal_workspace_placeholder_paths(

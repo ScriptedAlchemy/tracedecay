@@ -844,7 +844,7 @@ async fn current_project_store_surfaces_split_identity_conflict()
         )?;
         let db = runtime
             ._registry
-            .code_graph_worktree(
+            .project_graph(
                 &project_root,
                 tracedecay_store::ProjectId::new(project_id.to_string())?,
                 layout.graph_db_path.clone(),

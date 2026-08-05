@@ -331,13 +331,8 @@ impl ProductionProjectCompositionHarnessV1 {
         query: &str,
     ) -> Result<(Option<String>, Option<String>, bool, bool)> {
         let graph = self.server(project_root)?.cg().await;
-        let (database_path, _, _) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
-            graph.project_root(),
-            &graph.store_layout().data_root,
-            Some(branch),
-        );
         let branch_graph = graph
-            .sync_retained_worktree_branch(worktree_root.as_ref(), branch, &database_path)
+            .sync_retained_worktree_branch(worktree_root.as_ref(), branch)
             .await?;
         let contains_query = !branch_graph.search(query, 10).await?.is_empty();
         Ok((
