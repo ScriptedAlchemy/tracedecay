@@ -198,16 +198,20 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
             .await
             .unwrap()
     );
+    let mut publish = advanced.clone();
+    publish.generation = 5;
+    publish.scan_mode = GitHistoryScanMode::Publish;
+    assert!(compare_and_swap_progress(&conn, 4, &publish).await.unwrap());
     let mut backslid = advanced.clone();
-    backslid.generation = 5;
+    backslid.generation = 6;
     backslid.segment_cursor = 1;
     backslid.emitted_count = 0;
     assert!(
-        !compare_and_swap_progress(&conn, 4, &backslid)
+        !compare_and_swap_progress(&conn, 5, &backslid)
             .await
             .unwrap()
     );
-    assert_eq!(read_progress(&conn, key).await.unwrap(), Some(advanced));
+    assert_eq!(read_progress(&conn, key).await.unwrap(), Some(publish));
 }
 
 #[tokio::test]
@@ -278,6 +282,30 @@ async fn exact_reset_cascades_children_and_transaction_rollback_leaves_no_state(
         "bbbbbbbb"
     );
     assert!(read_pending_page(&conn, key, 0, 0).await.is_err());
+    let span = GitHistoryStagedSpanRow {
+        key,
+        segment_ordinal: 0,
+        boundary: 0,
+        branch: Some("main".to_string()),
+        timestamp: 100,
+    };
+    let commit = GitHistoryStagedCommitRow {
+        key,
+        segment_ordinal: 0,
+        oid: "eeeeeeee".to_string(),
+        branch: Some("main".to_string()),
+        committed_at: 150,
+    };
+    assert!(upsert_staged_span(&conn, &span).await.unwrap());
+    assert!(upsert_staged_commit(&conn, &commit).await.unwrap());
+    assert_eq!(
+        read_staged_span_page(&conn, key, 128).await.unwrap(),
+        vec![span]
+    );
+    assert_eq!(
+        read_staged_commit_page(&conn, key, 128).await.unwrap(),
+        vec![commit]
+    );
 
     assert!(reset_progress(&conn, key).await.unwrap());
     assert!(read_segment(&conn, key, 0).await.unwrap().is_none());
@@ -288,6 +316,18 @@ async fn exact_reset_cascades_children_and_transaction_rollback_leaves_no_state(
             .is_empty()
     );
     assert!(insert_seen(&conn, &seen).await.is_err());
+    assert!(
+        read_staged_span_page(&conn, key, 128)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        read_staged_commit_page(&conn, key, 128)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     let rolled_back_key = GitHistoryProgressKey { source_rowid: 8 };
     let transaction = conn

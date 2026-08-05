@@ -21,7 +21,8 @@ use progress::{
     repository_seal_from_progress, session_row_from_progress,
 };
 use state::{
-    advance_graph, advance_reflog_capture, advance_reflog_verification, reset_exact_progress,
+    advance_graph, advance_publish, advance_reflog_capture, advance_reflog_verification,
+    reset_exact_progress,
 };
 #[derive(Clone)]
 pub struct BoundedGitControl {
@@ -65,6 +66,7 @@ pub enum BoundedBackfillInterruption {
     HistoryLimitReached,
     DryRunFrontierLimitReached,
     UnsupportedSourceFraming,
+    UnsupportedCanonicalWorktreeEncoding,
     SourceChanged,
     SourceUnavailable,
 }
@@ -524,6 +526,16 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
                 advance_graph(
                     session_store,
                     &project_path,
+                    &progress,
+                    opts,
+                    control,
+                    committed,
+                )
+                .await
+            }
+            GitHistoryScanMode::Publish => {
+                advance_publish(
+                    session_store,
                     &row,
                     candidate_frontier,
                     &progress,
@@ -536,7 +548,10 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
             }
         };
         let result = match result {
-            Err(BoundedBackfillInterruption::UnsupportedSourceFraming) => {
+            Err(
+                BoundedBackfillInterruption::UnsupportedSourceFraming
+                | BoundedBackfillInterruption::UnsupportedCanonicalWorktreeEncoding,
+            ) => {
                 return history_failures::record_progress(
                     session_store,
                     &progress,
@@ -547,7 +562,7 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
             }
             result => result,
         };
-        if progress.scan_mode != GitHistoryScanMode::Graph
+        if progress.scan_mode != GitHistoryScanMode::Publish
             && matches!(result, Err(BoundedBackfillInterruption::SourceChanged))
         {
             reset_exact_progress(session_store, &progress, control, committed).await?;

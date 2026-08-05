@@ -5,6 +5,9 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::GitCorrelationError;
 
+mod staged;
+pub(super) use staged::*;
+
 const MAX_CONSULTED_REF_SEAL_JSON_BYTES: usize = 256 * 1024;
 pub(super) const MAX_PENDING_PAGE_ROWS: usize = 128;
 const INITIAL_REFLOG_CONTENT_CHAIN: &str =
@@ -34,7 +37,7 @@ pub(in super::super) async fn install_final_schema(
             common_dir_identity BLOB NOT NULL,
             generation INTEGER NOT NULL CHECK(generation >= 0),
             scan_mode TEXT NOT NULL
-                CHECK(scan_mode IN ('reflog_capture', 'reflog_verify', 'graph')),
+                CHECK(scan_mode IN ('reflog_capture', 'reflog_verify', 'graph', 'publish')),
             reflog_path BLOB NOT NULL,
             reflog_byte_offset INTEGER NOT NULL CHECK(reflog_byte_offset >= 0),
             reflog_byte_length INTEGER NOT NULL CHECK(reflog_byte_length >= 0),
@@ -79,7 +82,7 @@ pub(in super::super) async fn install_final_schema(
                 )
                 OR
                 (
-                    scan_mode = 'graph'
+                    scan_mode IN ('graph', 'publish')
                     AND capture_target_offset IS NOT NULL
                     AND reflog_byte_offset = capture_target_offset
                     AND verify_byte_offset = capture_target_offset
@@ -130,6 +133,7 @@ pub(in super::super) async fn install_final_schema(
         max_ref_seal_bytes = MAX_CONSULTED_REF_SEAL_JSON_BYTES,
     );
     conn.execute_batch(&schema).await?;
+    staged::install_schema(conn).await?;
     Ok(())
 }
 
@@ -145,6 +149,7 @@ pub(super) enum GitHistoryScanMode {
     ReflogCapture,
     ReflogVerify,
     Graph,
+    Publish,
 }
 
 impl GitHistoryScanMode {
@@ -153,6 +158,7 @@ impl GitHistoryScanMode {
             Self::ReflogCapture => "reflog_capture",
             Self::ReflogVerify => "reflog_verify",
             Self::Graph => "graph",
+            Self::Publish => "publish",
         }
     }
 
@@ -161,6 +167,7 @@ impl GitHistoryScanMode {
             "reflog_capture" => Ok(Self::ReflogCapture),
             "reflog_verify" => Ok(Self::ReflogVerify),
             "graph" => Ok(Self::Graph),
+            "publish" => Ok(Self::Publish),
             other => Err(invalid_stored_value("scan_mode", other)),
         }
     }
@@ -414,7 +421,7 @@ pub(super) async fn compare_and_swap_progress(
                         AND emitted_count = ?14)
                     OR
                     (scan_mode = 'graph'
-                        AND ?2 = 'graph'
+                        AND ?2 IN ('graph', 'publish')
                         AND capture_target_offset IS ?5
                         AND reflog_digest = ?4
                         AND consulted_ref_seal_json = ?15
@@ -425,6 +432,19 @@ pub(super) async fn compare_and_swap_progress(
                         AND segment_tip_oid = ?12
                         AND ?13 >= segment_cursor
                         AND ?14 >= emitted_count)
+                    OR
+                    (scan_mode = 'publish'
+                        AND ?2 = 'publish'
+                        AND capture_target_offset IS ?5
+                        AND reflog_digest = ?4
+                        AND consulted_ref_seal_json = ?15
+                        AND cursor_head_state = ?8
+                        AND cursor_head_branch IS ?9
+                        AND cursor_oid = ?10
+                        AND segment_end = ?11
+                        AND segment_tip_oid = ?12
+                        AND segment_cursor = ?13
+                        AND emitted_count = ?14)
                 )",
             params![
                 next.generation,
@@ -777,7 +797,7 @@ fn validate_progress(progress: &GitHistoryProgressRow) -> Result<(), GitCorrelat
                 && (target..=progress.reflog_byte_length).contains(&progress.verify_byte_offset)
                 && progress.emitted_count == 0
         }
-        (GitHistoryScanMode::Graph, Some(target)) => {
+        (GitHistoryScanMode::Graph | GitHistoryScanMode::Publish, Some(target)) => {
             progress.reflog_byte_offset == target
                 && progress.verify_byte_offset == target
                 && progress.verify_digest == progress.reflog_digest

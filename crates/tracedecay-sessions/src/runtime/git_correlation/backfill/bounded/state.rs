@@ -137,12 +137,9 @@ pub(super) async fn advance_reflog_verification<S: GitCorrelationSessionStore>(
 pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
     session_store: &S,
     project_path: &Path,
-    row: &SessionActivityRow,
-    candidate_frontier: GitHistoryIndexFrontier,
     progress: &GitHistoryProgressRow,
     opts: &BackfillOptions,
     control: &BoundedGitControl,
-    stats: &mut BackfillStats,
     committed: &mut bool,
 ) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
     let segment_ordinal = progress.segment_cursor;
@@ -168,29 +165,13 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
     drop(snapshot);
     let repository_seal = repository_seal_from_progress(progress)?;
     let Some(segment) = segment else {
-        verify_repository_without_writer(project_path, &repository_seal, control).await?;
-        return finalize_session(
-            session_store,
-            candidate_frontier,
-            progress,
-            control,
-            committed,
-        )
-        .await;
+        let source = cursor_from_progress(progress)?;
+        verify_source_without_writer(project_path, &source, control).await?;
+        return seal_for_publish(session_store, progress, control, committed).await;
     };
     if !segment.applied {
         verify_repository_without_writer(project_path, &repository_seal, control).await?;
-        return apply_segment(
-            session_store,
-            row,
-            progress,
-            segment,
-            opts,
-            control,
-            stats,
-            committed,
-        )
-        .await;
+        return apply_segment(session_store, progress, segment, control, committed).await;
     }
     if pending.is_empty() {
         verify_repository_without_writer(project_path, &repository_seal, control).await?;
@@ -226,17 +207,7 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
         )
     })
     .await?;
-    apply_graph_chunk(
-        session_store,
-        row,
-        progress,
-        segment,
-        chunk,
-        control,
-        stats,
-        committed,
-    )
-    .await
+    apply_graph_chunk(session_store, progress, segment, chunk, control, committed).await
 }
 
 async fn verify_repository_without_writer(
@@ -269,30 +240,32 @@ async fn verify_source_without_writer(
 
 async fn apply_segment<S: GitCorrelationSessionStore>(
     session_store: &S,
-    row: &SessionActivityRow,
     progress: &GitHistoryProgressRow,
     mut segment: GitHistorySegmentRow,
-    opts: &BackfillOptions,
     control: &BoundedGitControl,
-    stats: &mut BackfillStats,
     committed: &mut bool,
 ) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
-    let worktree = normalize_worktree(progress.project_path.trim());
     let transaction = session_store
         .open_write_transaction()
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    for timestamp in [segment.start_ts, segment.end_ts] {
-        record_span_in_transaction(
+    for (boundary, timestamp) in [segment.start_ts, segment.end_ts].into_iter().enumerate() {
+        if !history_progress::upsert_staged_span(
             &transaction,
-            segment.branch.as_deref(),
-            row,
-            &worktree,
-            timestamp,
-            opts.merge_gap_secs,
-            control,
+            &history_progress::GitHistoryStagedSpanRow {
+                key: progress.key,
+                segment_ordinal: segment.ordinal,
+                boundary: u8::try_from(boundary)
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?,
+                branch: segment.branch.clone(),
+                timestamp,
+            },
         )
-        .await?;
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+        {
+            return Err(BoundedBackfillInterruption::SourceUnavailable);
+        }
     }
     segment.applied = true;
     if !history_progress::upsert_segment(&transaction, &segment)
@@ -329,7 +302,6 @@ async fn apply_segment<S: GitCorrelationSessionStore>(
     GitCorrelationWriteTxn::commit(transaction)
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    stats.spans_written = stats.spans_written.saturating_add(1);
     *committed = true;
     Ok(StreamGitEvidenceOutcome::Progressed)
 }
@@ -378,34 +350,32 @@ async fn complete_segment<S: GitCorrelationSessionStore>(
 
 async fn apply_graph_chunk<S: GitCorrelationSessionStore>(
     session_store: &S,
-    row: &SessionActivityRow,
     progress: &GitHistoryProgressRow,
     segment: GitHistorySegmentRow,
     chunk: native::GraphChunk,
     control: &BoundedGitControl,
-    stats: &mut BackfillStats,
     committed: &mut bool,
 ) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
-    let worktree = normalize_worktree(progress.project_path.trim());
     let transaction = session_store
         .open_write_transaction()
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     control.check()?;
-    let mut inserted_commits = 0_usize;
     for commit in &chunk.commits {
-        if record_commit_in_transaction(
+        if !history_progress::upsert_staged_commit(
             &transaction,
-            row,
-            segment.branch.as_deref(),
-            &worktree,
-            &commit.oid,
-            commit.committed_at,
-            control,
+            &history_progress::GitHistoryStagedCommitRow {
+                key: progress.key,
+                segment_ordinal: segment.ordinal,
+                oid: commit.oid.clone(),
+                branch: segment.branch.clone(),
+                committed_at: commit.committed_at,
+            },
         )
-        .await?
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
         {
-            inserted_commits = inserted_commits.saturating_add(1);
+            return Err(BoundedBackfillInterruption::SourceUnavailable);
         }
     }
     for oid in &chunk.newly_seen {
@@ -463,7 +433,153 @@ async fn apply_graph_chunk<S: GitCorrelationSessionStore>(
     GitCorrelationWriteTxn::commit(transaction)
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    stats.commits_attributed = stats.commits_attributed.saturating_add(inserted_commits);
+    *committed = true;
+    Ok(StreamGitEvidenceOutcome::Progressed)
+}
+
+async fn seal_for_publish<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    progress: &GitHistoryProgressRow,
+    control: &BoundedGitControl,
+    committed: &mut bool,
+) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
+    let transaction = session_store
+        .open_write_transaction()
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    control.check()?;
+    let mut next = progress.clone();
+    next.generation = next
+        .generation
+        .checked_add(1)
+        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+    next.scan_mode = GitHistoryScanMode::Publish;
+    if !history_progress::compare_and_swap_progress(&transaction, progress.generation, &next)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+    {
+        return Ok(StreamGitEvidenceOutcome::Progressed);
+    }
+    control.check()?;
+    GitCorrelationWriteTxn::commit(transaction)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    *committed = true;
+    Ok(StreamGitEvidenceOutcome::Progressed)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    row: &SessionActivityRow,
+    candidate_frontier: GitHistoryIndexFrontier,
+    progress: &GitHistoryProgressRow,
+    opts: &BackfillOptions,
+    control: &BoundedGitControl,
+    stats: &mut BackfillStats,
+    committed: &mut bool,
+) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
+    let snapshot = session_store
+        .read_snapshot()
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let spans = history_progress::read_staged_span_page(
+        &snapshot,
+        progress.key,
+        history_progress::MAX_STAGED_PAGE_ROWS,
+    )
+    .await
+    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let commits = if spans.is_empty() {
+        history_progress::read_staged_commit_page(
+            &snapshot,
+            progress.key,
+            history_progress::MAX_STAGED_PAGE_ROWS,
+        )
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+    } else {
+        Vec::new()
+    };
+    drop(snapshot);
+    if spans.is_empty() && commits.is_empty() {
+        return finalize_session(
+            session_store,
+            candidate_frontier,
+            progress,
+            control,
+            committed,
+        )
+        .await;
+    }
+
+    let worktree = normalize_worktree(progress.project_path.trim());
+    let transaction = session_store
+        .open_write_transaction()
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    control.check()?;
+    let mut published_spans = 0_usize;
+    for span in &spans {
+        record_span_in_transaction(
+            &transaction,
+            span.branch.as_deref(),
+            row,
+            &worktree,
+            span.timestamp,
+            opts.merge_gap_secs,
+            control,
+        )
+        .await?;
+        if !history_progress::delete_staged_span(&transaction, span)
+            .await
+            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+        {
+            return Err(BoundedBackfillInterruption::SourceUnavailable);
+        }
+        if span.boundary == 0 {
+            published_spans = published_spans.saturating_add(1);
+        }
+    }
+    let mut published_commits = 0_usize;
+    for commit in &commits {
+        if record_commit_in_transaction(
+            &transaction,
+            row,
+            commit.branch.as_deref(),
+            &worktree,
+            &commit.oid,
+            commit.committed_at,
+            control,
+        )
+        .await?
+        {
+            published_commits = published_commits.saturating_add(1);
+        }
+        if !history_progress::delete_staged_commit(&transaction, commit)
+            .await
+            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+        {
+            return Err(BoundedBackfillInterruption::SourceUnavailable);
+        }
+    }
+    let mut next = progress.clone();
+    next.generation = next
+        .generation
+        .checked_add(1)
+        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+    if !history_progress::compare_and_swap_progress(&transaction, progress.generation, &next)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+    {
+        return Ok(StreamGitEvidenceOutcome::Progressed);
+    }
+    control.check()?;
+    GitCorrelationWriteTxn::commit(transaction)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    stats.spans_written = stats.spans_written.saturating_add(published_spans);
+    stats.commits_attributed = stats.commits_attributed.saturating_add(published_commits);
     *committed = true;
     Ok(StreamGitEvidenceOutcome::Progressed)
 }
