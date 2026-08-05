@@ -50,7 +50,6 @@ pub fn application_catalog_contributions()
         crate::lsp_context_catalog::lsp_context_catalog_contribution()?,
         crate::retained_surfaces::retained_surface_catalog_contribution()?,
         crate::source_edit::source_edit_catalog_contribution()?,
-        crate::api_migration::api_migration_catalog_contribution()?,
     ])
 }
 
