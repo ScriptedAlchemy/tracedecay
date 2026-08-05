@@ -2,11 +2,11 @@
 
 ## Status / role
 
-Status: active PR9 implementation and product-test authority. The current
+Status: active code-intelligence implementation and product-test authority. The current
 checkout contains callable deterministic indexing, chunk/lineage, Git/impact,
-diagnostic/test, exact, lexical, and graph paths. PR9 is not complete until the
+diagnostic/test, exact, lexical, and graph paths. Delivery is not complete until the
 direct behavioral tests, Plan 15 Linux evaluation, and normal CI pass.
-PR9 must deliver one complete single-root vertical:
+The product must deliver one complete single-root vertical:
 deterministic code indexing, immutable generations, generation-bound Git/
 diagnostic/test evidence, and accepted exact/lexical/graph retrieval. Start as
 a focused module; extract `tracedecay-code-index` only when independent reuse,
@@ -18,7 +18,7 @@ Generation-bound diagnostics compose with the daemon gateway defined by
 [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 [Plan 15](15-search-quality-evaluation-and-retrieval-research.md) exclusively
 owns retrieval-research design, corpus/label policy, quality metrics, candidate
-profile comparison, thresholds, and activation recommendations. PR9 implements the
+profile comparison, thresholds, and activation recommendations. Plan 25 implements the
 versioned lexical/chunk contracts and emits measurements; it does not tune or
 activate retrieval policy.
 
@@ -29,15 +29,15 @@ and successful reconcile atomically replaces it. Shutdown cancellation is
 checked before and during snapshot capture so work that cannot publish exits
 cooperatively. Direct regressions cover both behaviors.
 
-This closes serve-during-refresh and cooperative-shutdown behavior, not PR9
+This closes serve-during-refresh and cooperative-shutdown behavior, not full
 acceptance or freshness cadence. A live profile was observed 237 minutes stale,
 and the index reported refresh beginning only after 285 minutes while the plan
-reconciliation was checked. The PR9/Plan 25 owner must diagnose hint/reconcile
+reconciliation was checked. The Plan 25 owner must diagnose hint/reconcile
 cadence and complete the event-to-ready measurements; serving an old complete
 generation truthfully is not permission to leave it stale indefinitely.
 
 Plan 25 owns code-generation, chunking, graph, and generation-bound evidence
-semantics for PR9. Plan 15 owns quality evaluation. Plan 31 is the later PR10
+semantics. Plan 15 owns quality evaluation. Plan 31 consumes the tested
 consumer of tested chunks and lexical/graph fallback behavior; application,
 transport, and dashboard plans consume the tested operations later. None of
 those consumers must reproduce an old module path, Rust type spelling, suite
@@ -48,10 +48,10 @@ spine, fixture filename, or benchmark script.
 TraceDecay builds deterministic, immutable code-intelligence generations from
 sanitized repository snapshots. Incremental builds reuse unchanged work,
 preserve symbol lineage, and attach Git, diagnostics, and tests to the exact
-source generation they describe. PR9 then serves those generations through the
+source generation they describe. The retrieval service then serves those generations through the
 Plan 15 exact/lexical/graph contracts with a non-demotable exact tier,
 deterministic compact-candidate fusion, late hydration, and a versioned
-lexical profile whose named fallback subpayload PR10 must preserve byte-for-byte
+lexical profile whose named fallback subpayload semantic retrieval preserves byte-for-byte
 when semantics are unavailable.
 
 ## Owns
@@ -93,7 +93,8 @@ when semantics are unavailable.
   indexing overlays captured from repository state. Unsaved per-client LSP
   document overlays are separate Plan 35 daemon session state.
 - Logical generation planning, sealing, digests, and lineage evidence.
-- Read-only conversion of V1 graph records into the V2 logical model.
+- Native historical source acquisition sanitized into the final logical model;
+  old TraceDecay graph-store bytes are never conversion input.
 
 ## Does not own
 
@@ -419,7 +420,7 @@ pub struct ProjectionBatchReceiptV1 {
 
 ### Exact, lexical, graph, Git, and diagnostic retrieval
 
-- PR9 lands the shared Plan 15 types in
+- Plan 25 lands the shared Plan 15 types in
   `crates/tracedecay-domain/src/retrieval.rs` and the query implementation in
   `src/query/retrieval/`. Code search does not define parallel
   `RankedChannelList`, fusion-profile, contribution, candidate, cursor, or
@@ -433,44 +434,47 @@ pub struct ProjectionBatchReceiptV1 {
   errors, CLI flags, tool names, configuration keys, and commit identifiers
   form the non-demotable exact tier. An approximate, graph-only, or later
   semantic candidate cannot precede an eligible exact result.
-- PR9 remains explicitly single-root. "Federation" in Plan 15 means composing
+- This indexing boundary is explicitly single-root. "Federation" in Plan 15 means composing
   independent evidence lanes within one authorized root; Plan 16's multi-root
   scope-set resolution, per-shard continuations, and cross-root rank fallback
   remain owned by [Plan 16](16-cross-project-repository-worktree-scope.md).
 - `src/query/retrieval/{fusion,dedupe,diversity,hydrate}.rs` operates on compact
-  candidates. The promoted PR9 profile uses deterministic fixed-point
+  candidates. The promoted lexical profile uses deterministic fixed-point
   contributions, complete comparator provenance, source/file caps, and bounded
   late hydration. RRF may be evaluated, but no constant or weight is production
   authority before Plan 15 accepts it.
-- The canonical PR9 fallback is the complete accepted exact+lexical+graph
+- The canonical exact/lexical/graph fallback is the complete accepted result,
   result, including IDs, order, contributions, explanations, coverage, and
-  cursor bytes. Those fields form Plan 15's named PR9 fallback subpayload.
-  PR10 must preserve that subpayload byte-for-byte whenever the semantic or
+  cursor bytes. Those fields form Plan 15's named fallback subpayload.
+  Semantic retrieval must preserve that subpayload byte-for-byte whenever the
   rerank stage is disabled, unavailable, rejected, or cancelled; a typed
   semantic/rerank outcome may exist only outside its digest and cursor identity.
 - Plan 36 owns native read-only status, working/staged/range diff, history,
-  blame, rename, binary, merge, and `HunkRef` semantics. PR9 adapters join those
+  blame, rename, binary, merge, and `HunkRef` semantics. Code adapters join those
   typed results to exact code-generation symbols, callers, hazards,
   diagnostics, and affected-test candidates; they never reconstruct Git
   objects or patches from indexed rows.
 - Generation-bound diagnostics are persisted only for matching sanitized clean
   content with producer/configuration provenance and clearing/supersession
-  state. The PR9 query adapter reads this evidence; Plan 35's live analyzer
+  state. The canonical query adapter reads this evidence; Plan 35's live analyzer
   broker and unsaved overlays remain later daemon-gateway work.
 - Every lane reports freshness, examined/eligible/excluded/capped/unknown
   coverage, cancellation, and partial/unavailable state independently. Missing
   authority is capability-reported, never simulated or replaced with a
   heuristic lookalike.
 
-### V1 migration
+### Final-shape initialization
 
-- Consume logical batches emitted by the store-owned, read-only V1 importer through the sanitizer boundary.
-- Preserve source generation and migration provenance, rebuild deterministic V2 identities, and verify counts and digests before publication.
-- Never open a V1 database from the indexer.
+- Consume only sanitized native-source logical batches through the canonical
+  capture boundary.
+- Preserve source generation and acquisition provenance, build deterministic
+  final identities, and verify counts and digests before publication.
+- Never open or convert an old TraceDecay database from the indexer; a
+  non-final store is rejected with `ResetRequired`.
 
-## PR9 behavioral delivery and verification
+## Behavioral delivery and verification
 
-PR9 remains unfinished. The checkpoints below describe required product
+Delivery remains unfinished. The checkpoints below describe required product
 behavior and direct evidence. Paths, symbol names, test-module registration,
 fixture filenames, benchmark entrypoints, and old acceptance-spine names are
 historical implementation suggestions only. Completion uses callable
@@ -509,11 +513,11 @@ normal CI.
    independent provenance. Direct regressions cover working/staged/range
    hunks, mismatch/binary/rename/deletion cases, current/stale/cleared
    diagnostics, and every declared attribution evidence class.
-6. **Projection boundary and V1 migration:** prove receipt conformance with
+6. **Projection boundary and final-shape admission:** prove receipt conformance with
    reordered, duplicate, missing, extra, wrong-generation, and wrong-digest
-   fixtures without a model runtime or concrete store adapter. Prove migration
-   counts, digests, duplicates, unsupported rows, cancellation, and the
-   no-database-open boundary.
+   fixtures without a model runtime or concrete store adapter. Prove native
+   acquisition counts, digests, duplicates, unsupported rows, cancellation,
+   final-shape rejection, and the no-database-open boundary.
 7. **Exact, lexical, and graph retrieval:** implement independently disableable
    exact and lexical lanes; graph consumes only generation-matched Plan 25
    evidence. Quality fixtures and direct regressions cover exact admission,
@@ -524,7 +528,7 @@ normal CI.
 8. **Lexical evaluation and activation:** run Plan 15's direct comparisons on
    the sanitized Linux workload and report `pass`, `fail`, or `pending`.
    Preserve the versioned exact-tier rules, profile digest, and named
-   fallback-subpayload bytes as PR10 inputs; do not create a holdout, run
+   fallback-subpayload bytes as semantic-retrieval inputs; do not create a holdout, run
    manifest, owner receipt, or promotion packet.
 9. **Measurement and verification:** use a reproducible checked-in Linux
    workload and retained raw samples to record clean, warm one-file, deletion,
@@ -538,7 +542,7 @@ normal CI.
    cache state. Retain the raw samples needed for every reported statistic.
    Run focused direct regressions, architecture boundaries, migration/privacy
    tests, the applicable all-feature CI, and the Plan 15 comparison before
-   declaring PR9 complete.
+   declaring code intelligence complete.
 
 ## Acceptance
 
@@ -604,7 +608,8 @@ normal CI.
   durable generation, and matching saved content preserves producer provenance
   through capture and publication.
 - Crash, cancellation, disk-full, stale-snapshot, and concurrent-build tests publish either one complete generation or none.
-- V1 fixtures migrate through logical batches with no indexer database open and no lost or duplicate supported records.
+- Native historical-source fixtures ingest through sanitized logical batches
+  with no indexer database open and no lost or duplicate supported records.
 - Boundary regressions construct the indexer only through its validated intake
   and projection interfaces and reject filesystem, database, model-runtime,
   and transport authority in the indexing boundary; together they enforce

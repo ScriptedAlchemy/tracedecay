@@ -132,19 +132,20 @@ declarations or file layout.
   store must not create a generic or monolithic embeddings authority.
 
 An audit of this completed slice must map these behaviors to the current store
-ports, daemon adapter, migration, and direct regressions. A missing historical
-name or reorganized schema is not a gap if callable behavior and regression
-coverage remain.
+ports, daemon adapter, final-shape admission, and direct regressions. A missing
+historical name or reorganized schema is not a gap if callable behavior and
+regression coverage remain.
 
-## Migration and regression evidence
+## Final-shape admission and regression evidence
 
-The migration remains additive: create required state and invariants; publish
-definitions; create or backfill only provable bindings; seed each binding's
-empty or proven partition and aggregate frontier; mark ambiguous scope or
-cursor history blocked/unknown rather than guessing; record one idempotent
-migration receipt; then enable the writer. Definitions precede bindings,
-bindings precede frontiers, source commit precedes projection commit, and
-projection cutover precedes old-state retirement.
+TraceDecay creates a clean final-shape store with all required state and
+invariants, then publishes definitions and exact bindings before enabling the
+writer. Non-final or old TraceDecay store bytes return `ResetRequired`; they
+are never read, converted, backfilled, dual-written, or used to seed final
+state. External historical host records remain valid acquisition inputs and
+are sanitized through the ordinary final-store writer. Definitions precede
+bindings, bindings precede frontiers, and source commit precedes projection
+commit.
 
 Checked-in native Plan 27 acquisition bytes and recorded origin/version/digest
 are the fixture authority. Store expectations reference those same bytes after
