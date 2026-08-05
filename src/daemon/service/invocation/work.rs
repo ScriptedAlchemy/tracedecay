@@ -265,6 +265,90 @@ pub(super) async fn execute_workflow_application(
             deadline,
             WorkflowApplicationOutcome::RegisterDefinition,
         ),
+        WorkflowApplicationInvocation::ValidateDefinition(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .validate(request.definition)
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::ValidateDefinition,
+        ),
+        WorkflowApplicationInvocation::GetDefinition(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .get(&request.definition_id, request.definition_version)
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::GetDefinition,
+        ),
+        WorkflowApplicationInvocation::ListDefinitions(_) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .list()
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::ListDefinitions,
+        ),
+        WorkflowApplicationInvocation::DefinitionHistory(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .history(&request.definition_id)
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::DefinitionHistory,
+        ),
+        WorkflowApplicationInvocation::DiffDefinition(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .diff(
+                    &request.definition_id,
+                    request.from_version,
+                    request.to_version,
+                )
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::DiffDefinition,
+        ),
         WorkflowApplicationInvocation::ActivateDefinition(request) => complete_workflow_effect(
             &registered,
             request_id,
@@ -284,6 +368,25 @@ pub(super) async fn execute_workflow_application(
             observed_at,
             deadline,
             WorkflowApplicationOutcome::ActivateDefinition,
+        ),
+        WorkflowApplicationInvocation::RetireDefinition(request) => complete_workflow_effect(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .retire(
+                    &request.definition_id,
+                    Some(request.expected_active_version),
+                )
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::RetireDefinition,
         ),
         WorkflowApplicationInvocation::ExecuteFanOut(request) => {
             let request = *request;
@@ -371,6 +474,55 @@ pub(super) async fn execute_workflow_application(
             )
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_workflow_read<T>(
+    registered: &RegisteredWorkRuntime,
+    request_id: String,
+    context: &RequestContext,
+    canonical_request_id: RequestId,
+    operation_key: &str,
+    use_case: UseCaseId,
+    input_digest: ManifestDigest,
+    result: Result<T, DaemonInvocationProblem>,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    wrap: fn(ApplicationOutcome<T>) -> WorkflowApplicationOutcome,
+) -> DaemonInvocationResponse
+where
+    T: Serialize,
+{
+    let result = match result {
+        Ok(result) => result,
+        Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+    };
+    let outcome = match work_evidence_packet(
+        registered,
+        context,
+        canonical_request_id,
+        operation_key,
+        use_case,
+        input_digest,
+        result,
+        observed_at,
+        deadline,
+    ) {
+        Ok(evidence) => wrap(ApplicationOutcome::Evidence(evidence)),
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    DaemonInvocationResponse::with_outcome(
+        request_id,
+        DaemonInvocationOutcome::WorkflowApplication {
+            scope: context.scope().clone(),
+            outcome,
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
