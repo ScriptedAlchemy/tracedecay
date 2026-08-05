@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-hooks"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "Bounded Hook V2 and Context Scout contracts for TraceDecay"
