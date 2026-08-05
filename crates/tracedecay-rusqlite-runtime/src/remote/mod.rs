@@ -44,6 +44,7 @@ use tracedecay_application::{
 const READ_WAIT: Duration = Duration::from_secs(5);
 mod crypto;
 mod enrollment;
+mod policy;
 mod replay_authority;
 mod schema;
 mod status;

@@ -8,8 +8,13 @@ use tracedecay_application::remote::{
         AdmittedRemoteCaptureV1, RemoteCaptureDispositionV1, RemoteCapturePersistenceErrorV1,
         RemoteCapturePortV1, RemoteCaptureSequenceV1, RemoteWriterAuthorityV1,
     },
-    replay::RemoteReplayFrameLookupPortV1,
+    replay::{
+        RemoteReplayApplicationErrorV1, RemoteReplayFrameLookupPortV1,
+        RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidencePortV1,
+        RemoteReplayPolicyEvidenceV1,
+    },
 };
+use tracedecay_application::{PolicyDecisionRef, ResolvedScope};
 use tracedecay_domain::{
     ComponentVersion, DurableObservationV1, EntityId, LocatorDigest, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
@@ -405,5 +410,54 @@ fn capture_enforces_the_registered_spool_event_bound() {
     assert_eq!(
         storage.capture_pending(&second),
         Err(RemoteCapturePersistenceErrorV1::Overflow)
+    );
+}
+
+#[test]
+fn replay_policy_is_revision_guarded_and_loaded_from_the_final_store() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let capture = admitted();
+    let repository_scope = capture.writer.scope.clone();
+    let scope = ResolvedScope::new(
+        repository_scope.project_id.clone(),
+        repository_scope.repository_id.clone(),
+        repository_scope.worktree_id.clone(),
+        repository_scope.reference.clone(),
+    )
+    .unwrap();
+    let digest = ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap();
+    let evidence = RemoteReplayPolicyEvidenceV1 {
+        scope,
+        repository_scope,
+        policy_revision: 1,
+        decision: RemoteReplayPolicyDecisionV1::Admit,
+        policy: PolicyDecisionRef::new(
+            "policy.remote.replay",
+            1,
+            digest.clone(),
+            ComponentVersion::new("policy.remote.replay.v2").unwrap(),
+        )
+        .unwrap(),
+        configuration_digest: digest.clone(),
+        catalog_digest: digest.clone(),
+        privacy_digest: digest,
+        revalidated_at: UtcMicros(10),
+    };
+    storage.store_replay_policy(&evidence).unwrap();
+    let frame = RemoteReplayFrameV1 {
+        event_id: canonical_remote_event_id_v1(&capture).unwrap(),
+        capture,
+    };
+    assert_eq!(
+        storage.current_policy_evidence(&frame).unwrap(),
+        evidence
+    );
+
+    let mut conflict = evidence;
+    conflict.decision = RemoteReplayPolicyDecisionV1::Quarantine;
+    assert_eq!(
+        storage.store_replay_policy(&conflict),
+        Err(RemoteReplayApplicationErrorV1::PolicyMismatch)
     );
 }

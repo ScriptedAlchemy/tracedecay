@@ -1,4 +1,8 @@
 use super::*;
+use tracedecay_application::remote::auth::{
+    RemoteAuthenticationError, RemoteAuthorityAuthenticationPort,
+};
+use tracedecay_domain::EnrollmentCredentialStateV1;
 
 pub(super) fn load_authority_state(
     handle: &ExactSqlHandle,
@@ -68,5 +72,27 @@ pub(super) fn map_enrollment_error(
             RemoteEnrollmentAuthorityErrorV1::IdentityConflict
         }
         _ => RemoteEnrollmentAuthorityErrorV1::Unavailable,
+    }
+}
+
+impl RemoteAuthorityAuthenticationPort for RemoteSqliteStorageV1 {
+    fn authenticate_connected_authority(
+        &self,
+        expected_authority: &tracedecay_domain::CurrentRemoteAuthorityV1,
+        expected_credential: &EnrollmentCredentialRecordV1,
+        observed_at: UtcMicros,
+    ) -> Result<(), RemoteAuthenticationError> {
+        let persisted = self
+            .enrollment_by_id(&expected_credential.enrollment_id)
+            .map_err(|_| RemoteAuthenticationError::AuthorityAuthenticationFailed)?;
+        if persisted != *expected_credential
+            || persisted.brain_id != expected_authority.fence.brain_id
+            || persisted.node_id != expected_authority.fence.authority_node_id
+            || persisted.revision != expected_authority.credential_revision
+            || persisted.state_at(observed_at) != EnrollmentCredentialStateV1::Active
+        {
+            return Err(RemoteAuthenticationError::InvalidAuthorityCredential);
+        }
+        Ok(())
     }
 }

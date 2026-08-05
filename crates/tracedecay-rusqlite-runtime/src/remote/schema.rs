@@ -35,6 +35,18 @@ CREATE TABLE remote_enrollments (
     UNIQUE (brain_id, node_id, revision)
 ) STRICT;
 
+CREATE TABLE remote_replay_policies (
+    scope_digest TEXT PRIMARY KEY,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+    evidence_json TEXT NOT NULL CHECK (json_valid(evidence_json))
+) STRICT;
+
+CREATE TABLE remote_query_policies (
+    scope_digest TEXT PRIMARY KEY,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+    record_json TEXT NOT NULL CHECK (json_valid(record_json))
+) STRICT;
+
 CREATE TABLE remote_spool_frames (
     event_id TEXT PRIMARY KEY,
     enrollment_id TEXT NOT NULL,
@@ -64,6 +76,8 @@ pub(super) const REMOTE_NODE_LOCAL_TABLES: &[&str] = &[
     "remote_authorities",
     "remote_enrollment_grants",
     "remote_enrollments",
+    "remote_query_policies",
+    "remote_replay_policies",
     "remote_spool_frames",
     "remote_store_contract",
 ];
