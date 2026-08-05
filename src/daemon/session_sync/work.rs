@@ -842,7 +842,13 @@ const fn git_history_interruption_reason(
         BoundedBackfillInterruption::DryRunFrontierLimitReached => {
             "git_dry_run_frontier_limit_reached"
         }
+        BoundedBackfillInterruption::HistoryTraversalBudgetReached => {
+            "git_history_traversal_budget_reached"
+        }
         BoundedBackfillInterruption::UnsupportedSourceFraming => "git_unsupported_source_framing",
+        BoundedBackfillInterruption::UnsupportedCanonicalWorktreeEncoding => {
+            "git_unsupported_canonical_worktree_encoding"
+        }
         BoundedBackfillInterruption::SourceChanged => "git_source_changed",
         BoundedBackfillInterruption::SourceUnavailable => "git_source_unavailable",
     }
