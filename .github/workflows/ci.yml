@@ -336,7 +336,7 @@ jobs:
         # The ONLY default-feature (not --all-features) lifecycle run.
         run: >-
           cargo nextest run --locked
-          --test pr13_host_bundle_acceptance
+          --test host_bundle_acceptance
           --no-tests=fail
 
       - name: FastEmbed fixture pin check
@@ -677,7 +677,7 @@ jobs:
         shell: bash
         run: >-
           cargo nextest run --locked
-          --test pr13_host_bundle_acceptance
+          --test host_bundle_acceptance
           --no-tests=fail
 
       - name: Merge Windows junit

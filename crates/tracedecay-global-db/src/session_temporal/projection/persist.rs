@@ -6,6 +6,7 @@ use tracedecay_domain::{
     TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_sessions::compatibility::projected_content_hash;
 use tracedecay_store::{
     SessionStoreError, SessionStoreResult, SessionTemporalProjectionBatchReceiptV1,
     SessionTemporalProjectionBatchV1,
@@ -147,15 +148,17 @@ pub async fn seed_active_projection_in_transaction(
          FROM session_agents WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_occurrences (
             session_id, generation, occurrence_id, source_observation_id,
-            projection_output_ordinal, retrieval_anchor_id, thread_id,
+            source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
             thread_grouping_json, turn_id, turn_grouping_json, message_id,
             agent_id, role, knowledge_at, valid_time_json, evidence_json,
+            sanitized_content_digest, sanitized_content_bytes,
             snippet_text, index_text
          )
          SELECT session_id, ?2, occurrence_id, source_observation_id,
-                projection_output_ordinal, retrieval_anchor_id, thread_id,
+                source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
                 thread_grouping_json, turn_id, turn_grouping_json, message_id,
                 agent_id, role, knowledge_at, valid_time_json, evidence_json,
+                sanitized_content_digest, sanitized_content_bytes,
                 snippet_text, index_text
          FROM session_occurrences WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_logical_copy_edges (
@@ -388,23 +391,29 @@ pub(super) async fn persist_occurrence(
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let evidence = serde_json::to_string(&occurrence.evidence)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let sanitized_content = output.message().text.as_str();
+    let sanitized_content_digest = projected_content_hash(sanitized_content);
+    let sanitized_content_bytes = i64::try_from(sanitized_content.len())
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let inserted = conn
         .execute(
             "INSERT OR IGNORE INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                projection_output_ordinal, retrieval_anchor_id,
+                source_provider, projection_output_ordinal, retrieval_anchor_id,
                 thread_id, thread_grouping_json, turn_id, turn_grouping_json,
                 message_id, agent_id, role, knowledge_at, valid_time_json,
-                evidence_json, snippet_text, index_text
+                evidence_json, sanitized_content_digest, sanitized_content_bytes,
+                snippet_text, index_text
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
              )",
             params![
                 batch.session_id().as_str(),
                 generation,
                 occurrence.occurrence_id.as_str(),
                 occurrence.source_observation_id.as_str(),
+                output.message().provider.as_str(),
                 i64::from(occurrence.projection_output_ordinal.value()),
                 occurrence.retrieval_anchor_id.as_str(),
                 occurrence
@@ -429,15 +438,24 @@ pub(super) async fn persist_occurrence(
                 occurrence.knowledge_at.0,
                 valid_time,
                 evidence,
-                output.message().text.as_str(),
-                output.message().text.as_str(),
+                sanitized_content_digest,
+                sanitized_content_bytes,
+                sanitized_content,
+                sanitized_content,
             ],
         )
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?
         == 1;
     if !inserted {
-        require_exact_occurrence(conn, batch, occurrence, output.message().text.as_str()).await?;
+        require_exact_occurrence(
+            conn,
+            batch,
+            occurrence,
+            output.message().provider.as_str(),
+            output.message().text.as_str(),
+        )
+        .await?;
     }
     if let Some(turn_id) = &occurrence.turn_id {
         conn.execute(
@@ -643,6 +661,7 @@ pub(super) async fn require_exact_occurrence(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     occurrence: &MessageOccurrenceRecordV1,
+    source_provider: &str,
     text: &str,
 ) -> SessionStoreResult<()> {
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
@@ -650,6 +669,7 @@ pub(super) async fn require_exact_occurrence(
         .query(
             "SELECT json_object(
                 'source_observation_id', source_observation_id,
+                'source_provider', source_provider,
                 'projection_output_ordinal', projection_output_ordinal,
                 'retrieval_anchor_id', retrieval_anchor_id,
                 'thread_id', thread_id,
@@ -662,6 +682,8 @@ pub(super) async fn require_exact_occurrence(
                 'knowledge_at', knowledge_at,
                 'valid_time_json', json(valid_time_json),
                 'evidence_json', json(evidence_json),
+                'sanitized_content_digest', sanitized_content_digest,
+                'sanitized_content_bytes', sanitized_content_bytes,
                 'snippet_text', snippet_text,
                 'index_text', index_text
              )
@@ -693,6 +715,7 @@ pub(super) async fn require_exact_occurrence(
         serde_json::to_value(occurrence.role).map_err(|error| storage(PERSIST_OPERATION, error))?;
     let expected = json!({
         "source_observation_id": occurrence.source_observation_id.as_str(),
+        "source_provider": source_provider,
         "projection_output_ordinal": occurrence.projection_output_ordinal.value(),
         "retrieval_anchor_id": occurrence.retrieval_anchor_id.as_str(),
         "thread_id": occurrence.thread_id.as_ref().map(tracedecay_domain::ThreadId::as_str),
@@ -705,6 +728,8 @@ pub(super) async fn require_exact_occurrence(
         "knowledge_at": occurrence.knowledge_at.0,
         "valid_time_json": occurrence.valid_time,
         "evidence_json": occurrence.evidence,
+        "sanitized_content_digest": projected_content_hash(text),
+        "sanitized_content_bytes": text.len(),
         "snippet_text": text,
         "index_text": text,
     });

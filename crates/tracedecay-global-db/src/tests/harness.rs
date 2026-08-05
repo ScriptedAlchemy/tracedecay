@@ -641,6 +641,12 @@ impl HostAdmissionTestRuntimeV1 {
         let external_content = "canonical external payload";
         let external_hash =
             tracedecay_sessions::runtime::lcm::util::sha256_hex(external_content.as_bytes());
+        let raw_hash =
+            tracedecay_sessions::runtime::lcm::util::sha256_hex(b"canonical raw message");
+        let child_summary_hash =
+            tracedecay_sessions::runtime::lcm::util::sha256_hex(b"canonical child summary");
+        let parent_summary_hash =
+            tracedecay_sessions::runtime::lcm::util::sha256_hex(b"canonical parent summary");
         let payload_dir = database
             .db_path()
             .parent()
@@ -670,7 +676,7 @@ impl HostAdmissionTestRuntimeV1 {
                     index_text, legacy_source, legacy_truncated, metadata_json
                  ) VALUES (
                     'codex', 'message-a', 'session-a', 11, 'assistant', 0, 11,
-                    'canonical raw message', 'raw-hash-a', 'inline', NULL,
+                    'canonical raw message', '{raw_hash}', 'inline', NULL,
                     'canonical raw message', 'canonical raw message', 0, 0, NULL
                  );
                  INSERT INTO lcm_raw_messages(
@@ -688,7 +694,7 @@ impl HostAdmissionTestRuntimeV1 {
                     source_time_start, source_time_end, expand_hint, metadata_json, created_at
                  ) VALUES (
                     'summary-child', 'codex', 'session-a', 'session-a', 0,
-                    'canonical child summary', 'summary-child-hash', 3, 3,
+                    'canonical child summary', '{child_summary_hash}', 3, 3,
                     11, 11, NULL, NULL, 13
                  );
                  INSERT INTO lcm_summary_nodes(
@@ -697,7 +703,7 @@ impl HostAdmissionTestRuntimeV1 {
                     source_time_start, source_time_end, expand_hint, metadata_json, created_at
                  ) VALUES (
                     'summary-parent', 'codex', 'session-a', 'session-a', 1,
-                    'canonical parent summary', 'summary-parent-hash', 3, 6,
+                    'canonical parent summary', '{parent_summary_hash}', 3, 6,
                     11, 12, NULL, NULL, 14
                  );
                  INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)

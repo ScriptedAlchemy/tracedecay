@@ -38,7 +38,7 @@ use super::context::{MemoryOperationContext, validate_operation_component};
 use super::error::{
     MemoryApplicationError, MemoryCompatibilityScope, RUNTIME_MEMORY_COMPATIBILITY_SOURCE_STORE,
 };
-use super::sanitize::sanitize_add_fact_request;
+use super::sanitize::{SanitizedAddFactRequestV1, sanitize_add_fact_request};
 
 /// Converts one legacy proposal payload into the portable command consumed by
 /// the authoritative proposal import. The operation identity is deterministic
@@ -126,9 +126,10 @@ pub fn with_automation_run_id(
 
 pub(super) fn compatibility_add_command(
     owner: FactOwnerV1,
-    request: AddFactRequest,
+    request: SanitizedAddFactRequestV1,
     context: &MemoryOperationContext,
 ) -> Result<CompatibilityFactAddCommandV1, MemoryApplicationError> {
+    let (request, sanitization_receipt) = request.into_parts();
     let trust = Confidence::new(request.trust.unwrap_or(DEFAULT_TRUST)).map_err(|_| {
         MemoryApplicationError::InvalidCompatibilityInput {
             invariant: "trust must be between 0.0 and 1.0",
@@ -143,6 +144,7 @@ pub(super) fn compatibility_add_command(
         request.tags,
         request.entities,
         request.metadata,
+        sanitization_receipt,
         trust,
         context.actor().cloned(),
     )

@@ -1,16 +1,44 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
+#[cfg(test)]
+use serde_json::Value as JsonValue;
+use serde_json::{Map, json};
 use tracedecay_domain::HydrationStateV1;
 
 use crate::compatibility::projected_content_hash;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
+use tracedecay_runtime_core::privacy::{
+    bind_sanitized_lcm_payload_text, sanitize_lcm_payload_text, sanitize_provider_metadata_json,
+};
 
 use super::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
 use super::{
-    LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmSourceRef, LcmSummaryExpansion,
-    LcmSummaryNode, LcmSummaryNodeDraft, raw,
+    LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmRawMessageMetadata, LcmSourceRef,
+    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, raw,
 };
+
+#[derive(Clone)]
+enum RawMessageRow {
+    Hydrated(LcmRawMessage),
+    Metadata(LcmRawMessageMetadata),
+}
+
+impl RawMessageRow {
+    fn provider(&self) -> &str {
+        match self {
+            Self::Hydrated(raw) => &raw.provider,
+            Self::Metadata(raw) => &raw.provider,
+        }
+    }
+
+    fn session_id(&self) -> &str {
+        match self {
+            Self::Hydrated(raw) => &raw.session_id,
+            Self::Metadata(raw) => &raw.session_id,
+        }
+    }
+}
 
 pub trait LcmSummaryPublicationPort {
     fn publish_immutable_summary(
@@ -23,6 +51,7 @@ pub async fn insert_summary_node(
     publisher: &impl LcmSummaryPublicationPort,
     draft: LcmSummaryNodeDraft,
 ) -> Result<LcmSummaryNode, LcmError> {
+    let draft = sanitize_summary_draft(draft)?;
     let summary_hash = projected_content_hash(&draft.summary_text);
     let node_id = summary_node_id(
         &draft.provider,
@@ -40,6 +69,67 @@ pub async fn insert_summary_node(
         })
         .await
         .map(|receipt| receipt.summary)
+}
+
+pub fn sanitize_summary_draft(
+    mut draft: LcmSummaryNodeDraft,
+) -> Result<LcmSummaryNodeDraft, LcmError> {
+    const MAX_SUMMARY_METADATA_BYTES: u64 = 1_048_576;
+
+    let summary = sanitize_lcm_payload_text(&draft.summary_text)
+        .map_err(|error| LcmError::Db(format!("summary privacy sanitization failed: {error}")))?;
+    draft.summary_text = summary.sanitized_text().to_owned();
+
+    let hint = draft
+        .expand_hint
+        .as_deref()
+        .map(sanitize_lcm_payload_text)
+        .transpose()
+        .map_err(|error| LcmError::Db(format!("summary hint sanitization failed: {error}")))?;
+    draft.expand_hint = hint
+        .as_ref()
+        .map(|sanitization| sanitization.sanitized_text().to_owned());
+
+    let raw_metadata = draft.metadata_json.as_deref().unwrap_or("{}");
+    let mut metadata = sanitize_provider_metadata_json(raw_metadata, MAX_SUMMARY_METADATA_BYTES)
+        .ok_or_else(|| LcmError::Db("summary metadata sanitization failed".to_owned()))?;
+    if !metadata.is_object() {
+        return Err(LcmError::Db(
+            "summary metadata sanitization failed: metadata must be a JSON object".to_owned(),
+        ));
+    }
+    let sanitized_metadata = serde_json::to_string(&metadata)
+        .map_err(|error| LcmError::Db(format!("summary metadata encoding failed: {error}")))?;
+    let metadata_receipt = bind_sanitized_lcm_payload_text(raw_metadata, &sanitized_metadata)
+        .map_err(|error| LcmError::Db(format!("summary metadata receipt failed: {error}")))?;
+    let mut receipts = Map::new();
+    receipts.insert(
+        "summary_text".to_owned(),
+        serde_json::to_value(summary.receipt())
+            .map_err(|error| LcmError::Db(format!("summary receipt encoding failed: {error}")))?,
+    );
+    if let Some(hint) = hint {
+        receipts.insert(
+            "expand_hint".to_owned(),
+            serde_json::to_value(hint.receipt()).map_err(|error| {
+                LcmError::Db(format!("summary hint receipt encoding failed: {error}"))
+            })?,
+        );
+    }
+    receipts.insert(
+        "metadata".to_owned(),
+        serde_json::to_value(metadata_receipt.receipt()).map_err(|error| {
+            LcmError::Db(format!("summary metadata receipt encoding failed: {error}"))
+        })?,
+    );
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "tracedecay_privacy".to_owned(),
+            json!({"sanitization_receipts": receipts}),
+        );
+    }
+    draft.metadata_json = Some(metadata.to_string());
+    Ok(draft)
 }
 
 pub async fn expand_summary_node(
@@ -81,9 +171,13 @@ async fn expand_summary_node_with_content(
                     .get(store_id)
                     .cloned()
                     .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-                if raw.provider != provider || raw.session_id != session_id {
+                if raw.provider() != provider || raw.session_id() != session_id {
                     return Err(LcmError::SummarySourceNotOwnedBySession);
                 }
+                let (content, raw_message, raw_message_metadata) = match raw {
+                    RawMessageRow::Hydrated(raw) => (raw.content.clone(), Some(raw), None),
+                    RawMessageRow::Metadata(raw) => (String::new(), None, Some(raw)),
+                };
                 sources.push(LcmExpandedSummarySource {
                     source_ref: source_ref.clone(),
                     state: if include_content {
@@ -91,10 +185,11 @@ async fn expand_summary_node_with_content(
                     } else {
                         HydrationStateV1::RetainedButUnavailable
                     },
-                    content: raw.content.clone(),
+                    content,
                     content_range: None,
                     content_truncated: false,
-                    raw_message: Some(raw),
+                    raw_message,
+                    raw_message_metadata,
                     summary_node: None,
                 });
             }
@@ -119,6 +214,7 @@ async fn expand_summary_node_with_content(
                     content_range: None,
                     content_truncated: false,
                     raw_message: None,
+                    raw_message_metadata: None,
                     summary_node: Some(Box::new(child)),
                 });
             }
@@ -213,24 +309,26 @@ pub async fn load_uncondensed_summary_nodes(
         .await?;
     let mut nodes = Vec::new();
     while let Some(row) = rows.next().await? {
+        let node = LcmSummaryNode {
+            node_id: row.get(0)?,
+            provider: row.get(1)?,
+            conversation_id: row.get(2)?,
+            session_id: row.get(3)?,
+            depth: row.get(4)?,
+            summary_text: row.get(5)?,
+            summary_hash: row.get(6)?,
+            summary_token_count: row.get(7)?,
+            source_token_count: row.get(8)?,
+            source_time_start: row.get(9)?,
+            source_time_end: row.get(10)?,
+            expand_hint: row.get(11)?,
+            metadata_json: row.get(12)?,
+            created_at: row.get(13)?,
+            source_refs: Vec::new(),
+        };
+        verify_summary_content(&node.summary_text, &node.summary_hash)?;
         nodes.push(LcmUncondensedSummaryNode {
-            node: LcmSummaryNode {
-                node_id: row.get(0)?,
-                provider: row.get(1)?,
-                conversation_id: row.get(2)?,
-                session_id: row.get(3)?,
-                depth: row.get(4)?,
-                summary_text: row.get(5)?,
-                summary_hash: row.get(6)?,
-                summary_token_count: row.get(7)?,
-                source_token_count: row.get(8)?,
-                source_time_start: row.get(9)?,
-                source_time_end: row.get(10)?,
-                expand_hint: row.get(11)?,
-                metadata_json: row.get(12)?,
-                created_at: row.get(13)?,
-                source_refs: Vec::new(),
-            },
+            node,
             first_source_store_id: row.get(14)?,
         });
     }
@@ -289,7 +387,7 @@ async fn load_summary_node_by_id(
     let mut rows = conn.query(&sql, params![node_id]).await?;
     let row = rows.next().await?.ok_or(LcmError::SummaryNodeNotFound)?;
     let source_refs = load_summary_source_refs(conn, node_id).await?;
-    Ok(LcmSummaryNode {
+    let node = LcmSummaryNode {
         node_id: row.get(0)?,
         provider: row.get(1)?,
         conversation_id: row.get(2)?,
@@ -305,7 +403,11 @@ async fn load_summary_node_by_id(
         metadata_json: row.get(12)?,
         created_at: row.get(13)?,
         source_refs,
-    })
+    };
+    if include_content {
+        verify_summary_content(&node.summary_text, &node.summary_hash)?;
+    }
+    Ok(node)
 }
 
 async fn load_summary_source_refs(
@@ -334,7 +436,7 @@ async fn load_raw_messages_by_store_ids(
     conn: &(impl QueryExecutor + ?Sized),
     store_ids: &[i64],
     include_content: bool,
-) -> Result<BTreeMap<i64, LcmRawMessage>, LcmError> {
+) -> Result<BTreeMap<i64, RawMessageRow>, LcmError> {
     let unique_store_ids = store_ids
         .iter()
         .copied()
@@ -368,8 +470,16 @@ async fn load_raw_messages_by_store_ids(
         .await?;
     let mut out = BTreeMap::new();
     while let Some(row) = rows.next().await? {
-        let raw = raw::raw_message_from_row(&row)?;
-        out.insert(raw.store_id, raw);
+        let raw = if include_content {
+            RawMessageRow::Hydrated(raw::verified_raw_message_from_row(&row)?)
+        } else {
+            RawMessageRow::Metadata(raw::raw_message_metadata_from_row(&row)?)
+        };
+        let store_id = match &raw {
+            RawMessageRow::Hydrated(raw) => raw.store_id,
+            RawMessageRow::Metadata(raw) => raw.store_id,
+        };
+        out.insert(store_id, raw);
     }
     Ok(out)
 }
@@ -411,26 +521,27 @@ async fn load_summary_nodes_by_ids(
     let mut nodes = BTreeMap::new();
     while let Some(row) = node_rows.next().await? {
         let node_id: String = row.get(0)?;
-        nodes.insert(
-            node_id.clone(),
-            LcmSummaryNode {
-                node_id,
-                provider: row.get(1)?,
-                conversation_id: row.get(2)?,
-                session_id: row.get(3)?,
-                depth: row.get(4)?,
-                summary_text: row.get(5)?,
-                summary_hash: row.get(6)?,
-                summary_token_count: row.get(7)?,
-                source_token_count: row.get(8)?,
-                source_time_start: row.get(9)?,
-                source_time_end: row.get(10)?,
-                expand_hint: row.get(11)?,
-                metadata_json: row.get(12)?,
-                created_at: row.get(13)?,
-                source_refs: Vec::new(),
-            },
-        );
+        let node = LcmSummaryNode {
+            node_id: node_id.clone(),
+            provider: row.get(1)?,
+            conversation_id: row.get(2)?,
+            session_id: row.get(3)?,
+            depth: row.get(4)?,
+            summary_text: row.get(5)?,
+            summary_hash: row.get(6)?,
+            summary_token_count: row.get(7)?,
+            source_token_count: row.get(8)?,
+            source_time_start: row.get(9)?,
+            source_time_end: row.get(10)?,
+            expand_hint: row.get(11)?,
+            metadata_json: row.get(12)?,
+            created_at: row.get(13)?,
+            source_refs: Vec::new(),
+        };
+        if include_content {
+            verify_summary_content(&node.summary_text, &node.summary_hash)?;
+        }
+        nodes.insert(node_id, node);
     }
     let source_sql = format!(
         "SELECT node_id, source_kind, source_id
@@ -451,6 +562,16 @@ async fn load_summary_nodes_by_ids(
     Ok(nodes)
 }
 
+pub(crate) fn verify_summary_content(
+    summary_text: &str,
+    summary_hash: &str,
+) -> Result<(), LcmError> {
+    if projected_content_hash(summary_text) != summary_hash {
+        return Err(LcmError::PayloadIntegrityMismatch);
+    }
+    Ok(())
+}
+
 fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef, LcmError> {
     match source_kind {
         "raw_message" => source_id
@@ -463,5 +584,40 @@ fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef
         _ => Err(LcmError::Db(format!(
             "invalid summary source_kind: {source_kind}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+
+    #[test]
+    fn summary_text_hint_and_metadata_are_sanitized_before_publication() {
+        let secret = "sk-summary-canary-1234567890abcdef";
+        let draft = LcmSummaryNodeDraft {
+            provider: "codex".to_owned(),
+            conversation_id: "conversation-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            depth: 0,
+            summary_text: format!("api_key={secret}"),
+            source_refs: vec![LcmSourceRef::RawMessage { store_id: 1 }],
+            source_token_count: 1,
+            summary_token_count: 1,
+            source_time_start: None,
+            source_time_end: None,
+            expand_hint: Some(format!("Bearer {secret}")),
+            metadata_json: Some(json!({"authorization": secret}).to_string()),
+        };
+
+        let sanitized = sanitize_summary_draft(draft).expect("sanitize summary draft");
+        let durable = serde_json::to_string(&sanitized).expect("serialize sanitized draft");
+        assert!(!durable.contains(secret));
+        let metadata: JsonValue =
+            serde_json::from_str(sanitized.metadata_json.as_deref().expect("metadata"))
+                .expect("decode sanitized metadata");
+        assert_eq!(
+            metadata["tracedecay_privacy"]["sanitization_receipts"]["summary_text"]["disposition"],
+            "redacted"
+        );
     }
 }

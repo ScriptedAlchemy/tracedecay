@@ -33,6 +33,20 @@ fn fact_id(owner: FactOwnerV1, operation: &str) -> FactId {
     .unwrap()
 }
 
+fn receipt_for(material: &serde_json::Value) -> SanitizationReceiptV1 {
+    SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            id::<SanitizationReceiptId>("receipt.fact.store.fixture"),
+            id::<ComponentVersion>("sanitizer.fixture.v1"),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(PayloadReferenceV1::for_payload(material).unwrap()),
+    )
+    .unwrap()
+}
+
 fn payload() -> FactPayloadV1 {
     let material = json!({
         "content": "The daemon is the only writer.",
@@ -41,17 +55,7 @@ fn payload() -> FactPayloadV1 {
         "entities": ["TraceDecay"],
         "metadata": {},
     });
-    let receipt = SanitizationReceiptV1::new(
-        SanitizationReceiptRefV1::new(
-            id::<SanitizationReceiptId>("receipt.fact.store.fixture"),
-            id::<ComponentVersion>("sanitizer.fixture.v1"),
-        )
-        .unwrap(),
-        SanitizerDispositionV1::Accepted,
-        SensitivityV1::NonSensitive,
-        Some(PayloadReferenceV1::for_payload(&material).unwrap()),
-    )
-    .unwrap();
+    let receipt = receipt_for(&material);
     FactPayloadV1::new(
         "The daemon is the only writer.".to_owned(),
         FactCategoryV1::Project,
@@ -520,6 +524,13 @@ fn projections_queries_and_receipts_reject_cross_owner_fact_ids() {
 #[test]
 fn proposal_record_projects_typed_automation_run_id() {
     let owner = FactOwnerV1::Profile;
+    let material = serde_json::json!({
+        "content": "durable proposal",
+        "category": "decision",
+        "tags": [],
+        "entities": [],
+        "metadata": {},
+    });
     let request = CompatibilityFactAddCommandV1::new(
         owner.clone(),
         id("operation.automation-proposal"),
@@ -529,6 +540,7 @@ fn proposal_record_projects_typed_automation_run_id() {
         vec![],
         vec![],
         serde_json::json!({}),
+        receipt_for(&material),
         Confidence::new(0.5).unwrap(),
         None,
     )

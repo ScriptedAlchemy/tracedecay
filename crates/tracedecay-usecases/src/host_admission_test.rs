@@ -59,6 +59,17 @@ fn replay_statuses_serialize_without_provider_content() {
 }
 
 #[test]
+fn pending_external_source_projection_is_a_typed_durable_success() {
+    let outcome = HostAdmissionOutcome::external_source_projection_pending();
+    assert_eq!(outcome.status, HostAdmissionStatus::AcceptedForReplay);
+    assert_eq!(
+        outcome.reason_code,
+        Some("external_source_projection_pending")
+    );
+    assert!(!outcome.retryable);
+}
+
+#[test]
 fn quarantine_outcomes_serialize_as_static_payload_free_dispositions() {
     for outcome in [
         HostAdmissionOutcome::quarantine_full(),

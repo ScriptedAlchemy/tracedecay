@@ -23,7 +23,8 @@ use tracedecay_store::{
     RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
     SourceCommitReceiptV1, SourceCommitV1, SourceObjectMutationV1, SourceObjectTransitionV1,
-    SourceObservationEvidenceV1, SourceStoreStateV1, StorageRuntimeReadPort,
+    SourceObservationEvidenceV1, SourcePendingProjectionV1, SourceProjectionCommitV1,
+    SourceStoreStateV1, StorageRuntimeReadPort, build_source_projection,
 };
 
 use crate::request_identity::{LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency};
@@ -41,12 +42,34 @@ pub enum RuntimeExternalSourceErrorV1 {
     IdempotencyConflict,
 }
 
+const HOST_EXTERNAL_SOURCE_PROJECTOR: &str = "projector.host-observation.external-source.v1";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeSourceCaptureOutcomeV1 {
+    Projected(SourceCommitReceiptV1),
+    ProjectionPending(SourceCommitReceiptV1),
+}
+
+pub(crate) enum RuntimeSourceCaptureAuthorityV1<'a> {
+    Poll,
+    CanonicalRefetch(&'a SourceCanonicalRefetchAuthorityV1),
+}
+
+impl RuntimeSourceCaptureAuthorityV1<'_> {
+    fn canonical_refetch(&self) -> Option<&SourceCanonicalRefetchAuthorityV1> {
+        match self {
+            Self::Poll => None,
+            Self::CanonicalRefetch(authority) => Some(authority),
+        }
+    }
+}
+
 pub(crate) struct RuntimeSourceCaptureRequestV1<'a> {
     pub(crate) definition: SourceDefinitionV1,
     pub(crate) binding: SourceBindingV1,
     pub(crate) refresh: SourceRefreshReceiptV1,
     pub(crate) provider_envelope: SourceProviderEnvelopeV1,
-    pub(crate) canonical_refetch: Option<&'a SourceCanonicalRefetchAuthorityV1>,
+    pub(crate) authority: RuntimeSourceCaptureAuthorityV1<'a>,
     pub(crate) expected_frontier: Option<SourceAggregateFrontierV1>,
     pub(crate) next_partition: SourcePartitionFrontierV1,
     pub(crate) previous_whole_root_stage: Option<&'a SourceWholeRootStageV1>,
@@ -82,27 +105,25 @@ impl RuntimeExternalSourceStore {
         &self,
         capture: &SourceCaptureApplicationV1,
         request: RuntimeSourceCaptureRequestV1<'_>,
-        projector: ComponentVersion,
-    ) -> Result<SourceCommitReceiptV1, RuntimeExternalSourceErrorV1> {
+    ) -> Result<RuntimeSourceCaptureOutcomeV1, RuntimeExternalSourceErrorV1> {
         let requested_binding = request.binding.immutable_identity().map_err(invalid)?;
-        if let Some(state) = self.read_state(requested_binding).await? {
+        if let Some(state) = self.read_state(requested_binding.clone()).await? {
             if state.definition() != &request.definition || state.binding() != &request.binding {
                 return Err(RuntimeExternalSourceErrorV1::Invalid(
                     "external source replay authority differs from durable definition or binding"
                         .to_owned(),
                 ));
             }
-            if let Some(receipt) = state.receipt_by_idempotency_key(&request.idempotency_key) {
-                return if receipt.request_digest() == &request.request_digest {
-                    Ok(receipt.clone())
-                } else {
-                    Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
-                };
+            if let Some(receipt) = self
+                .read_receipt(requested_binding.clone(), request.idempotency_key.clone())
+                .await?
+            {
+                if receipt.request_digest() != &request.request_digest {
+                    return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
+                }
+                return self.finish_capture(requested_binding, receipt).await;
             }
         }
-        projector
-            .validate()
-            .map_err(|error| RuntimeExternalSourceErrorV1::Invalid(error.to_string()))?;
         let observations = request
             .mutations
             .iter()
@@ -113,7 +134,7 @@ impl RuntimeExternalSourceStore {
             request.binding,
             request.refresh,
             request.provider_envelope,
-            request.canonical_refetch,
+            request.authority.canonical_refetch(),
             request.expected_frontier,
             request.next_partition,
             request.previous_whole_root_stage,
@@ -150,7 +171,6 @@ impl RuntimeExternalSourceStore {
             definition,
             binding,
             envelope.partition().clone(),
-            projector,
             idempotency_key,
             request_digest,
             expected_frontier,
@@ -160,7 +180,12 @@ impl RuntimeExternalSourceStore {
         )
         .map_err(invalid)?;
         let payload = RepositoryWritePayloadV1::ExternalSource(Box::new(commit.clone()));
-        let request = runtime_submit_request(self.runtime.binding(), payload, &commit)?;
+        let request = runtime_submit_request(
+            self.runtime.binding(),
+            payload,
+            &commit,
+            commit.idempotency_key(),
+        )?;
         let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         match self
             .runtime
@@ -171,7 +196,11 @@ impl RuntimeExternalSourceStore {
             RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
             | RuntimeSubmitOutcomeV1::ExactReplay { .. } => {
-                self.read_receipt(binding_identity).await
+                let receipt = self
+                    .read_receipt(binding_identity.clone(), commit.idempotency_key().clone())
+                    .await?
+                    .ok_or(RuntimeExternalSourceErrorV1::Unavailable)?;
+                self.finish_capture(binding_identity, receipt).await
             }
             RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
                 Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
@@ -183,7 +212,7 @@ impl RuntimeExternalSourceStore {
     pub(crate) async fn capture_host_observation(
         &self,
         receipt: &tracedecay_store::ObservationCommitReceipt,
-    ) -> Result<SourceCommitReceiptV1, RuntimeExternalSourceErrorV1> {
+    ) -> Result<RuntimeSourceCaptureOutcomeV1, RuntimeExternalSourceErrorV1> {
         let observation = receipt.observation();
         let provider = observation.source().provider().clone();
         let definition = host_source_definition(provider.clone())?;
@@ -236,26 +265,34 @@ impl RuntimeExternalSourceStore {
             "tracedecay.host-observation.request.v1",
             observation.observation_id(),
             observation.payload_reference(),
+            receipt.sanitization_receipt().receipt(),
             receipt.committed_cursor(),
             receipt.retrieval_anchor(),
+            receipt.retrieval_anchor_id(),
             receipt.projection_generation(),
+            &authorization,
         ))
         .map_err(invalid)?;
         let current = self.read_state(binding_identity.clone()).await?;
-        if let Some(state) = current.as_ref()
-            && let Some(existing) = state.receipt_by_idempotency_key(&idempotency_key)
-        {
+        if let Some(state) = current.as_ref() {
             if state.definition() != &definition || state.binding() != &binding {
                 return Err(RuntimeExternalSourceErrorV1::Invalid(
                     "host source replay authority differs from durable definition or binding"
                         .to_owned(),
                 ));
             }
-            return if state.projected_objects().get(&native_object) == Some(&source_observation) {
-                Ok(existing.clone())
-            } else {
-                Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
-            };
+            if let Some(existing) = self
+                .read_receipt(binding_identity.clone(), idempotency_key.clone())
+                .await?
+            {
+                if existing.request_digest() != &request_digest {
+                    return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
+                }
+                if state.observed_objects().get(&native_object) != Some(&source_observation) {
+                    return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
+                }
+                return self.finish_capture(binding_identity, existing).await;
+            }
         }
 
         let expected_frontier = current
@@ -369,7 +406,7 @@ impl RuntimeExternalSourceStore {
                 binding,
                 refresh,
                 provider_envelope: envelope,
-                canonical_refetch: None,
+                authority: RuntimeSourceCaptureAuthorityV1::Poll,
                 expected_frontier,
                 next_partition,
                 previous_whole_root_stage: None,
@@ -377,23 +414,153 @@ impl RuntimeExternalSourceStore {
                 idempotency_key,
                 request_digest,
             },
-            ComponentVersion::new("projector.host-observation.external-source.v1")
-                .map_err(invalid)?,
         )
         .await
+    }
+
+    async fn finish_capture(
+        &self,
+        binding: tracedecay_domain::SourceBindingIdentityV1,
+        receipt: SourceCommitReceiptV1,
+    ) -> Result<RuntimeSourceCaptureOutcomeV1, RuntimeExternalSourceErrorV1> {
+        if self
+            .read_pending_projection(Some(binding.clone()))
+            .await?
+            .is_some()
+        {
+            Ok(RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt))
+        } else {
+            Ok(RuntimeSourceCaptureOutcomeV1::Projected(receipt))
+        }
+    }
+
+    /// The daemon-owned host-admission drain invokes this bounded operation;
+    /// capture never creates detached replay tasks. Restart resumes from the
+    /// durable predecessor chain on the next admission drain.
+    pub(crate) async fn drain_host_projection_replay(
+        &self,
+        max: usize,
+        cancellation: &crate::observation::ObservationCancellation,
+    ) -> Result<usize, RuntimeExternalSourceErrorV1> {
+        self.drain_projection_replay(None, host_external_source_projector()?, max, cancellation)
+            .await
+    }
+
+    pub(crate) async fn drain_projection_replay(
+        &self,
+        binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
+        projector: ComponentVersion,
+        max: usize,
+        cancellation: &crate::observation::ObservationCancellation,
+    ) -> Result<usize, RuntimeExternalSourceErrorV1> {
+        projector
+            .validate()
+            .map_err(|error| RuntimeExternalSourceErrorV1::Invalid(error.to_string()))?;
+        let mut projected = 0;
+        while projected < max && !cancellation.is_cancelled() {
+            let Some(pending) = self.read_pending_projection(binding.clone()).await? else {
+                break;
+            };
+            let projection =
+                build_source_projection(&pending, projector.clone()).map_err(invalid)?;
+            self.submit_projection(projection).await?;
+            projected = projected.saturating_add(1);
+        }
+        Ok(projected)
     }
 
     async fn read_receipt(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
-    ) -> Result<SourceCommitReceiptV1, RuntimeExternalSourceErrorV1> {
-        self.read_state(binding)
-            .await?
-            .map(|state| state.receipt().clone())
-            .ok_or(RuntimeExternalSourceErrorV1::Unavailable)
+        idempotency_key: ManifestDigest,
+    ) -> Result<Option<SourceCommitReceiptV1>, RuntimeExternalSourceErrorV1> {
+        let operation = ExternalSourceReadOperationV1::CommitReceipt {
+            binding,
+            idempotency_key,
+        };
+        let request = runtime_read_request(self.runtime.binding(), operation)?;
+        let probe = ExternalSourceRuntimeProbe::from_control(request.control());
+        let outcome = self
+            .runtime
+            .read(request, &probe)
+            .await
+            .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?;
+        if !matches!(
+            outcome.coverage(),
+            RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
+        ) {
+            return Err(RuntimeExternalSourceErrorV1::Unavailable);
+        }
+        match outcome.value() {
+            Some(RuntimeReadResultV1::Repository {
+                result:
+                    RepositoryReadResultV1::ExternalSource(ExternalSourceReadResultV1::CommitReceipt(
+                        receipt,
+                    )),
+            }) => Ok(receipt.as_ref().map(|receipt| receipt.as_ref().clone())),
+            _ => Err(RuntimeExternalSourceErrorV1::Unavailable),
+        }
     }
 
-    async fn read_state(
+    async fn read_pending_projection(
+        &self,
+        binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
+    ) -> Result<Option<SourcePendingProjectionV1>, RuntimeExternalSourceErrorV1> {
+        let operation = ExternalSourceReadOperationV1::NextPendingProjection { binding };
+        let request = runtime_read_request(self.runtime.binding(), operation)?;
+        let probe = ExternalSourceRuntimeProbe::from_control(request.control());
+        let outcome = self
+            .runtime
+            .read(request, &probe)
+            .await
+            .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?;
+        if !matches!(
+            outcome.coverage(),
+            RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
+        ) {
+            return Err(RuntimeExternalSourceErrorV1::Unavailable);
+        }
+        match outcome.value() {
+            Some(RuntimeReadResultV1::Repository {
+                result:
+                    RepositoryReadResultV1::ExternalSource(
+                        ExternalSourceReadResultV1::PendingProjection(pending),
+                    ),
+            }) => Ok(pending.as_ref().map(|pending| pending.as_ref().clone())),
+            _ => Err(RuntimeExternalSourceErrorV1::Unavailable),
+        }
+    }
+
+    async fn submit_projection(
+        &self,
+        projection: SourceProjectionCommitV1,
+    ) -> Result<(), RuntimeExternalSourceErrorV1> {
+        let payload =
+            RepositoryWritePayloadV1::ExternalSourceProjection(Box::new(projection.clone()));
+        let request = runtime_submit_request(
+            self.runtime.binding(),
+            payload,
+            &projection,
+            projection.receipt_digest(),
+        )?;
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
+        match self
+            .runtime
+            .dispatch_submit_authorized(request, probe, self.authority.clone())
+            .await
+            .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?
+        {
+            RuntimeSubmitOutcomeV1::Committed { .. }
+            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+            | RuntimeSubmitOutcomeV1::ExactReplay { .. } => Ok(()),
+            RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
+                Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
+            }
+            _ => Err(RuntimeExternalSourceErrorV1::Unavailable),
+        }
+    }
+
+    pub(crate) async fn read_state(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
     ) -> Result<Option<SourceStoreStateV1>, RuntimeExternalSourceErrorV1> {
@@ -526,15 +693,16 @@ fn validate_host_source_shard(
     }
 }
 
-fn runtime_submit_request(
+fn runtime_submit_request<T: serde::Serialize>(
     binding: &tracedecay_store::StoreRuntimeBindingV1,
     payload: RepositoryWritePayloadV1,
-    commit: &SourceCommitV1,
+    command: &T,
+    idempotency_key: &ManifestDigest,
 ) -> Result<tracedecay_store::RuntimeSubmitRequestV1, RuntimeExternalSourceErrorV1> {
-    let command_digest = canonical_sha256(commit).map_err(invalid)?;
+    let command_digest = canonical_sha256(command).map_err(invalid)?;
     let command_suffix = digest_suffix(command_digest.as_str())?;
-    let identity_suffix = digest_suffix(commit.idempotency_key().as_str())?;
-    let admitted_at = runtime_now();
+    let identity_suffix = digest_suffix(idempotency_key.as_str())?;
+    let admitted_at = runtime_now()?;
     let metadata = tracedecay_store::StoreOperationMetadataV1 {
         operation_id: tracedecay_store::StoreOperationIdV1::new(format!(
             "operation.external-source.{command_suffix}"
@@ -555,7 +723,7 @@ fn runtime_submit_request(
         },
         durability: tracedecay_store::DurabilityClassV1::Full,
         priority: tracedecay_store::OperationPriorityV1::Foreground,
-        admission_bytes: serialized_len(commit)?,
+        admission_bytes: serialized_len(command)?,
         admitted_at,
     };
     let compatibility = tracedecay_store::RuntimeBatchCompatibilityV1::from_operation(&metadata)
@@ -583,7 +751,7 @@ fn runtime_read_request(
 ) -> Result<tracedecay_store::RuntimeReadRequestV1, RuntimeExternalSourceErrorV1> {
     let digest = canonical_sha256(&operation).map_err(invalid)?;
     let suffix = digest_suffix(digest.as_str())?;
-    let requested_at = runtime_now();
+    let requested_at = runtime_now()?;
     tracedecay_store::RuntimeReadRequestV1::new(
         binding.clone(),
         tracedecay_store::ConsistencyModeV1::LatestAvailable,
@@ -627,18 +795,19 @@ fn digest_suffix(digest: &str) -> Result<&str, RuntimeExternalSourceErrorV1> {
     })
 }
 
-fn runtime_now() -> UtcMicros {
+fn runtime_now() -> Result<UtcMicros, RuntimeExternalSourceErrorV1> {
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_err(invalid)?
         .as_micros();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
+    Ok(UtcMicros(i64::try_from(micros).map_err(invalid)?))
 }
 
 fn serialized_len<T: serde::Serialize>(value: &T) -> Result<u64, RuntimeExternalSourceErrorV1> {
     serde_json::to_vec(value)
-        .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX).max(1))
         .map_err(invalid)
+        .and_then(|bytes| u64::try_from(bytes.len()).map_err(invalid))
+        .map(|length| length.max(1))
 }
 
 struct ExternalSourceRuntimeProbe {
@@ -672,3 +841,10 @@ impl tracedecay_store::RuntimeRequestProbeV1 for ExternalSourceRuntimeProbe {
 fn invalid(error: impl std::fmt::Display) -> RuntimeExternalSourceErrorV1 {
     RuntimeExternalSourceErrorV1::Invalid(error.to_string())
 }
+
+fn host_external_source_projector() -> Result<ComponentVersion, RuntimeExternalSourceErrorV1> {
+    ComponentVersion::new(HOST_EXTERNAL_SOURCE_PROJECTOR).map_err(invalid)
+}
+
+#[path = "external_source_store_acquisition.rs"]
+pub(crate) mod acquisition;
