@@ -6,6 +6,7 @@ use tracedecay_domain::ObservationScopeV1;
 
 use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
 use crate::observation::ObservationCancellation;
+use crate::runtime::source::TranscriptIngestError;
 
 use super::{OpenCodeSource, capture_opencode_observations};
 
@@ -481,14 +482,14 @@ async fn wrong_typed_sqlite_ids_and_data_are_row_local_non_durable_records() {
 }
 
 #[tokio::test]
-async fn cancellation_between_scan_pages_joins_without_materializing_payloads() {
+async fn cancellation_during_admission_is_typed_and_persists_no_payloads() {
     let (_temp, project, database) = fixture();
     let source = OpenCodeSource::with_database_for_project(database, project);
     let admission = MemoryHostAdmission::default();
     let cancellation = ObservationCancellation::default();
     admission.cancel_on_next_cursor_read(cancellation.clone());
 
-    let outcome = capture_opencode_observations(
+    let error = capture_opencode_observations(
         &admission,
         &source,
         ObservationScopeV1::Profile,
@@ -496,11 +497,17 @@ async fn cancellation_between_scan_pages_joins_without_materializing_payloads() 
         &cancellation,
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    assert!(outcome.deferred_by_byte_cap);
-    assert!(outcome.scan_cancelled);
-    assert_eq!(outcome.bytes_consumed, 0);
+    assert!(matches!(
+        error,
+        TranscriptIngestError::NonDurableRecord {
+            provider: "opencode",
+            offset: 0,
+            end_offset: 0,
+            reason: "admission_cancelled",
+        }
+    ));
     assert!(admission.observations().is_empty());
 }
 
