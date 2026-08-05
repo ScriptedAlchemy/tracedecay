@@ -9,13 +9,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::{TempDir, tempdir};
 use tracedecay_application::{
-    ApiMigrationApplyResultV1, ApiMigrationOperationRequestV1, ApiMigrationPlanRequestV1,
-    ApiMigrationPlanV1, ApiMigrationSymbolV1, ApplicationOperation, AuthorityReceipt,
-    CancellationContext, CancellationSignal, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    EffectTermination, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
-    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditEffectProofV1,
-    SourceEditEffectRequestV1, SourceEditRequest, api_migration_definition_digest,
-    source_edit_operation, source_edit_reconciliation_operation,
+    ApplicationOperation, AuthorityReceipt, CancellationContext, CancellationSignal,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, EffectTermination, IdempotencyKey,
+    PolicyDecisionRef, RequestContext, RequestId, ResolvedScope, SourceEditAuthorizationFuture,
+    SourceEditAuthorizationPort, SourceEditEffectProofV1, SourceEditEffectRequestV1,
+    SourceEditRequest, source_edit_operation, source_edit_reconciliation_operation,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
@@ -112,103 +110,6 @@ pub(super) fn git(project_root: &Path, args: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success(), "git {args:?} must succeed");
-}
-
-pub(super) async fn indexed_api_migration_fixture(
-    initial_source: &str,
-) -> (TempDir, TraceDecay, crate::db::DaemonDatabaseScope) {
-    let project = tempdir().unwrap();
-    fs::create_dir_all(project.path().join("src")).unwrap();
-    fs::write(project.path().join("src/lib.rs"), initial_source).unwrap();
-    git(
-        project.path(),
-        &["init", "--quiet", "--initial-branch=main"],
-    );
-    git(project.path(), &["add", "src/lib.rs"]);
-    git(
-        project.path(),
-        &[
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "--quiet",
-            "-m",
-            "fixture",
-        ],
-    );
-    let (graph, database_scope) = fixture_graph(project.path()).await;
-    let indexed = graph.index_all().await.unwrap();
-    assert!(indexed.node_count > 0);
-    (project, graph, database_scope)
-}
-
-pub(super) async fn api_migration_symbol(graph: &TraceDecay, name: &str) -> ApiMigrationSymbolV1 {
-    api_migration_symbol_in(graph, name, "src/lib.rs").await
-}
-
-pub(super) async fn api_migration_symbol_in(
-    graph: &TraceDecay,
-    name: &str,
-    file: &str,
-) -> ApiMigrationSymbolV1 {
-    let node = graph
-        .get_nodes_by_name(name)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|node| node.file_path == file)
-        .unwrap_or_else(|| panic!("indexed fixture symbol {name} in {file}"));
-    ApiMigrationSymbolV1 {
-        node_id: node.id,
-        qualified_name: node.qualified_name,
-        kind: node.kind.as_str().to_owned(),
-        file: node.file_path,
-        old_name: node.name,
-    }
-}
-
-pub(super) async fn plan_api_migration_fixture(
-    graph: &TraceDecay,
-    family_id: &str,
-    operation: ApiMigrationOperationRequestV1,
-) -> ApiMigrationPlanV1 {
-    crate::application::api_migration::plan_api_migration(
-        graph,
-        ApiMigrationPlanRequestV1 {
-            family_id: family_id.to_owned(),
-            operations: vec![operation],
-        },
-    )
-    .await
-    .unwrap()
-}
-
-pub(super) async fn apply_api_migration_fixture(
-    graph: &TraceDecay,
-    plan: ApiMigrationPlanV1,
-) -> ApiMigrationApplyResultV1 {
-    let edit = SourceEditRequest::ApiMigrationApply {
-        plan: plan.clone(),
-        plan_digest: plan.plan_digest.clone(),
-        dry_run: false,
-        verify: false,
-    };
-    let expected_state = preview_source_edit_expected_state(graph, edit.clone())
-        .await
-        .unwrap();
-    let mut request = fixture_request_for_edit(edit, "source-edit.api-migration-fixture");
-    request.expected_state = expected_state;
-    let operation = source_edit_operation(request.edit.kind()).unwrap();
-    let authorization = fixture_authorization(&request);
-    let result = execute_source_edit(graph, &operation, request, &authorization)
-        .await
-        .unwrap();
-    match result.outcome {
-        SourceEditOutcome::ApiMigration(result) => result,
-        unexpected => panic!("unexpected API migration outcome: {unexpected:?}"),
-    }
 }
 
 pub(super) fn fixture_request() -> SourceEditEffectRequestV1 {
@@ -383,22 +284,62 @@ pub(super) struct EffectUnknownFixture {
     pub(super) result: SourceEditApplicationResult,
 }
 
-pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
-    const INITIAL_A: &str = "pub fn old_a() {}\n";
-    const INTENDED_A: &str = "pub fn new_a() {}\n";
-    const INITIAL_B: &str = "pub fn old_b() {}\n";
-    const INTENDED_B: &str = "pub fn new_b() {}\n";
+const MOVE_SOURCE_PREIMAGE: &[u8] = b"pub fn keep() {}\n\npub fn moved() {}\n";
+const MOVE_SOURCE_POSTIMAGE: &[u8] = b"pub fn keep() {}\n";
+const MOVE_DESTINATION_PREIMAGE: &[u8] = b"pub fn existing() {}\n";
+const MOVE_DESTINATION_POSTIMAGE: &[u8] = b"pub fn existing() {}\n\npub fn moved() {}\n";
 
+impl EffectUnknownFixture {
+    fn source_path(&self) -> std::path::PathBuf {
+        self.project.path().join("src/locked/a.rs")
+    }
+
+    fn destination_path(&self) -> std::path::PathBuf {
+        self.project.path().join("src/b.rs")
+    }
+
+    pub(super) fn write_partial_postimage(&self) {
+        fs::write(self.destination_path(), MOVE_DESTINATION_POSTIMAGE).unwrap();
+    }
+
+    pub(super) fn write_all_postimages(&self) {
+        fs::write(self.source_path(), MOVE_SOURCE_POSTIMAGE).unwrap();
+        fs::write(self.destination_path(), MOVE_DESTINATION_POSTIMAGE).unwrap();
+    }
+
+    pub(super) fn assert_preimages(&self) {
+        assert_eq!(fs::read(self.source_path()).unwrap(), MOVE_SOURCE_PREIMAGE);
+        assert_eq!(
+            fs::read(self.destination_path()).unwrap(),
+            MOVE_DESTINATION_PREIMAGE
+        );
+    }
+
+    pub(super) fn assert_postimages(&self) {
+        assert_eq!(fs::read(self.source_path()).unwrap(), MOVE_SOURCE_POSTIMAGE);
+        assert_eq!(
+            fs::read(self.destination_path()).unwrap(),
+            MOVE_DESTINATION_POSTIMAGE
+        );
+    }
+
+    #[cfg(unix)]
+    pub(super) fn permission_preserving_path(&self) -> std::path::PathBuf {
+        self.destination_path()
+    }
+}
+
+pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     let project = tempdir().unwrap();
     let locked_directory = project.path().join("src/locked");
     fs::create_dir_all(&locked_directory).unwrap();
-    fs::write(project.path().join("src/a.rs"), INITIAL_A).unwrap();
-    fs::write(locked_directory.join("b.rs"), INITIAL_B).unwrap();
+    fs::write(locked_directory.join("a.rs"), MOVE_SOURCE_PREIMAGE).unwrap();
+    fs::write(project.path().join("src/b.rs"), MOVE_DESTINATION_PREIMAGE).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(
-            project.path().join("src/a.rs"),
+            project.path().join("src/b.rs"),
             fs::Permissions::from_mode(0o755),
         )
         .unwrap();
@@ -407,7 +348,7 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
         project.path(),
         &["init", "--quiet", "--initial-branch=main"],
     );
-    git(project.path(), &["add", "src/a.rs", "src/locked/b.rs"]);
+    git(project.path(), &["add", "src/locked/a.rs", "src/b.rs"]);
     git(
         project.path(),
         &[
@@ -424,42 +365,11 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     let (graph, database_scope) = fixture_graph(project.path()).await;
     let indexed = graph.index_all().await.unwrap();
     assert!(indexed.node_count >= 2);
-    let plan = crate::application::api_migration::plan_api_migration(
-        &graph,
-        ApiMigrationPlanRequestV1 {
-            family_id: "family.recovery".to_owned(),
-            operations: vec![
-                ApiMigrationOperationRequestV1::ReplaceDefinition {
-                    operation_id: "replace-a".to_owned(),
-                    depends_on: Vec::new(),
-                    symbol: api_migration_symbol_in(&graph, "old_a", "src/a.rs").await,
-                    expected_definition_digest: api_migration_definition_digest(INITIAL_A).unwrap(),
-                    replacement_definition: INTENDED_A.to_owned(),
-                },
-                ApiMigrationOperationRequestV1::ReplaceDefinition {
-                    operation_id: "replace-b".to_owned(),
-                    depends_on: Vec::new(),
-                    symbol: api_migration_symbol_in(&graph, "old_b", "src/locked/b.rs").await,
-                    expected_definition_digest: api_migration_definition_digest(INITIAL_B).unwrap(),
-                    replacement_definition: INTENDED_B.to_owned(),
-                },
-            ],
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        plan.files
-            .iter()
-            .map(|file| file.path.as_str())
-            .collect::<Vec<_>>(),
-        ["src/a.rs", "src/locked/b.rs"]
-    );
-    let edit = SourceEditRequest::ApiMigrationApply {
-        plan: plan.clone(),
-        plan_digest: plan.plan_digest.clone(),
+    let edit = SourceEditRequest::MoveSymbol {
+        symbol: "moved".to_owned(),
+        dest_file: "src/b.rs".to_owned(),
         dry_run: false,
-        verify: false,
+        update_references: false,
     };
     let expected_state = preview_source_edit_expected_state(&graph, edit.clone())
         .await
@@ -485,21 +395,14 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
         result.effect.as_ref().unwrap().receipt.outcome,
         EffectTermination::EffectUnknown
     );
-    assert_eq!(
-        fs::read_to_string(project.path().join("src/a.rs")).unwrap(),
-        INITIAL_A
-    );
-    assert_eq!(
-        fs::read_to_string(project.path().join("src/locked/b.rs")).unwrap(),
-        INITIAL_B
-    );
-
-    EffectUnknownFixture {
+    let fixture = EffectUnknownFixture {
         project,
         graph,
         _database_scope: database_scope,
         request,
         authorization,
         result,
-    }
+    };
+    fixture.assert_preimages();
+    fixture
 }
