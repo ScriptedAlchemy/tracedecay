@@ -9,7 +9,13 @@ use std::sync::Arc;
 
 use tracedecay_query::code_search;
 
-use super::{code_index_scheduler, project_open_owners, query_mcp_admission};
+use super::{
+    code_index_scheduler, code_index_task_support, project_open_owners, query_mcp_admission,
+};
+use code_index_task_support::{
+    code_index_scope_unavailable, code_index_search_hydration_budget,
+    code_index_search_unavailable, code_index_search_unavailable_for_generation,
+};
 
 const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize = 1;
 
@@ -43,37 +49,6 @@ pub(super) fn mcp_search_request_termination(
         .then_some(code_search::CodeIndexSearchUnavailableReasonV1::TimedOut)
 }
 
-/// Builds the `Unavailable` search outcome, optionally naming the code
-/// generation the caller had already resolved.
-///
-/// Reaching here means no lane could serve: the coverage marker says every
-/// lane is down for `semantic_reason`, so the transport reports a typed
-/// failure immediately instead of waiting on an in-progress rebuild. A
-/// request that still had one ready lane never lands here.
-fn code_index_search_unavailable_for_generation(
-    code_generation: Option<String>,
-    reason: code_search::CodeIndexSearchUnavailableReasonV1,
-    semantic_reason: &'static str,
-) -> code_search::CodeIndexSearchOutcomeV1 {
-    code_search::CodeIndexSearchOutcomeV1::Unavailable(code_search::CodeIndexSearchUnavailableV1 {
-        code_generation,
-        reason,
-        semantic: code_search::CodeIndexSemanticStatusV1::Unavailable {
-            reason: semantic_reason,
-        },
-        coverage: code_search::CodeIndexSearchCoverageV1::unavailable(semantic_reason),
-    })
-}
-
-/// [`code_index_search_unavailable_for_generation`] for the paths that fail
-/// before any generation is known.
-fn code_index_search_unavailable(
-    reason: code_search::CodeIndexSearchUnavailableReasonV1,
-    semantic_reason: &'static str,
-) -> code_search::CodeIndexSearchOutcomeV1 {
-    code_index_search_unavailable_for_generation(None, reason, semantic_reason)
-}
-
 /// The authority check repeated at every point a search may still be abandoned:
 /// the request itself may have been cancelled or timed out, or the MCP read
 /// route may have been revoked underneath it. `Some` means stop and return.
@@ -96,20 +71,6 @@ fn search_terminated(
             "route_revoked",
         )
     })
-}
-
-pub(super) fn code_index_scope_unavailable() -> code_search::CodeIndexSearchOutcomeV1 {
-    code_index_search_unavailable(
-        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-        "scope_unavailable",
-    )
-}
-
-pub(super) fn code_index_search_hydration_budget(
-    accepted_semantic_budget: Option<&tracedecay_domain::RetrievalBudget>,
-    query_budget: &tracedecay_domain::RetrievalBudget,
-) -> tracedecay_domain::RetrievalBudget {
-    accepted_semantic_budget.copied().unwrap_or(*query_budget)
 }
 
 struct CodeIndexSearchHydrationSourceV1<A, P, H> {
@@ -394,6 +355,7 @@ pub(super) fn code_index_search_executor(
                 }
             };
             let terminal_expected_authority = authority.clone();
+            let request_cursor = request.cursor.clone();
             let policy = match (
                 tracedecay_domain::SanitizerRevision::new(
                     tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1,
@@ -442,10 +404,19 @@ pub(super) fn code_index_search_executor(
             let project_root = request.project_root;
             let source_revision = request.source_revision;
             let source_tree = request.source_tree;
-            if source_revision.is_some() != source_tree.is_some() {
+            let source_reference = request.source_reference;
+            if !code_index_task_support::exact_source_is_complete(
+                source_reference.as_ref(),
+                source_revision.as_ref(),
+                source_tree.as_ref(),
+            ) || (source_revision.is_none()
+                && request_cursor
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.code_source.is_some()))
+            {
                 return code_index_search_unavailable(
                     code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
-                    "revision_tree_pair_required",
+                    "exact_source_binding_required",
                 );
             }
             let mode = request.mode;
@@ -484,13 +455,15 @@ pub(super) fn code_index_search_executor(
                 let execution_control = Arc::clone(&control);
                 let execution_source_revision = source_revision.clone();
                 let execution_source_tree = source_tree.clone();
+                let execution_source_reference = source_reference.clone();
+                let execution_cursor = request_cursor.clone();
                 let execution_request =
                     code_index_scheduler::query_runtime::QuerySearchExecutionRequestV1::new(
                         request.query,
                         policy,
                     );
                 let runtime = tokio::runtime::Handle::current();
-                let mut execution = tokio::task::spawn_blocking(move || {
+                let execution = tokio::task::spawn_blocking(move || {
                     let _execution_permit = execution_permit;
                     runtime.block_on(async move {
                         let Some(revision) = execution_source_revision else {
@@ -509,6 +482,11 @@ pub(super) fn code_index_search_executor(
                                 code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable,
                             ),
                         )?;
+                        let reference = execution_source_reference.ok_or(
+                            code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
+                                code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactCursorInvalid,
+                            ),
+                        )?;
                         let control = code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
                             deadline: execution_control.deadline.clone(),
                             cancellation: execution_control.cancellation.clone(),
@@ -516,8 +494,10 @@ pub(super) fn code_index_search_executor(
                         let generations = execution_schedulers
                             .generations_for_revisions(
                                 &execution_scope,
+                                &reference,
                                 &revision,
                                 &tree,
+                                &reference,
                                 &revision,
                                 &tree,
                                 control,
@@ -528,6 +508,24 @@ pub(super) fn code_index_search_executor(
                                     code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactGenerationUnavailable(reason),
                                 )
                             })?;
+                        let exact_source = tracedecay_domain::CodeSourceCursorBindingV1 {
+                            reference,
+                            commit: revision,
+                            tree,
+                            generation: generations
+                                .base
+                                .generation()
+                                .manifest()
+                                .generation_id
+                                .clone(),
+                        };
+                        code_index_task_support::verify_exact_source_cursor(
+                            &execution_schedulers,
+                            &execution_scope,
+                            execution_cursor.as_ref(),
+                            &exact_source,
+                        )
+                        .await?;
                         let query = execution_schedulers
                             .execute_query_search_on_generation(
                                 &execution_scope,
@@ -566,26 +564,21 @@ pub(super) fn code_index_search_executor(
                         })
                     })
                 });
-                let mut control_poll = tokio::time::interval(std::time::Duration::from_millis(10));
-                control_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        result = &mut execution => match result {
-                            Ok(result) => break result,
-                            Err(_) => return code_index_search_unavailable(
-                                code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                                "search_task_failed",
-                            ),
-                        },
-                        _ = control_poll.tick() => {
-                            if let Some(outcome) =
-                                search_terminated(&control, &admission_provider, None)
-                            {
-                                execution.abort();
-                                return outcome;
-                            }
-                        }
+                match code_index_task_support::settle_owned_blocking_task(
+                    execution,
+                    std::time::Duration::from_millis(10),
+                    || search_terminated(&control, &admission_provider, None),
+                )
+                .await
+                {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => {
+                        return code_index_search_unavailable(
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                            "search_task_failed",
+                        );
                     }
+                    Err(outcome) => return outcome,
                 }
             };
             if let Some(outcome) = search_terminated(&control, &admission_provider, None) {
@@ -636,6 +629,10 @@ pub(super) fn code_index_search_executor(
                         QuerySearchExecutionErrorV1::ExactGenerationUnavailable(reason) => {
                             (reason, reason.as_str())
                         }
+                        QuerySearchExecutionErrorV1::ExactCursorInvalid => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                            "exact_cursor_mismatch",
+                        ),
                         QuerySearchExecutionErrorV1::InvalidScope(_)
                         | QuerySearchExecutionErrorV1::InvalidPolicy(_) => (
                             code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
@@ -699,7 +696,7 @@ pub(super) fn code_index_search_executor(
                     "authorization_changed_before_publication",
                 );
             }
-            let (semantic, ordered_candidates, next_cursor, accepted_semantic_budget) =
+            let (semantic, ordered_candidates, mut next_cursor, accepted_semantic_budget) =
                 match &executed.semantic {
                 code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Augmented(
                     augmented,
@@ -771,6 +768,44 @@ pub(super) fn code_index_search_executor(
                         HydrationAuthorizationV1::Authorized
                     }
                 };
+            let exact_source = source_reference
+                .as_ref()
+                .zip(source_revision.as_ref())
+                .zip(source_tree.as_ref())
+                .map(
+                    |((reference, commit), tree)| tracedecay_domain::CodeSourceCursorBindingV1 {
+                        reference: reference.clone(),
+                        commit: commit.clone(),
+                        tree: tree.clone(),
+                        generation: executed.query.generation.clone(),
+                    },
+                );
+            if let Err(error) = code_index_task_support::bind_exact_source_cursor(
+                &schedulers,
+                &terminal_scope,
+                next_cursor.as_mut(),
+                exact_source,
+            )
+            .await
+            {
+                use code_index_task_support::ExactCursorPublicationErrorV1;
+                return match error {
+                    ExactCursorPublicationErrorV1::AuthorityUnavailable => {
+                        code_index_search_unavailable_for_generation(
+                            Some(executed.query.generation.as_str().to_owned()),
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            "query_authority_unavailable",
+                        )
+                    }
+                    ExactCursorPublicationErrorV1::BindingFailed => {
+                        code_index_search_unavailable_for_generation(
+                            Some(executed.query.generation.as_str().to_owned()),
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                            "cursor_binding_failed",
+                        )
+                    }
+                };
+            }
             let preflight =
                 |request: &tracedecay_domain::RetrievalRequest,
                  candidate: &tracedecay_domain::RankedCandidate,

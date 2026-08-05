@@ -134,6 +134,10 @@ pub(super) fn def_branch_search() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of results to return (default: 10)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Authenticated continuation cursor returned by the preceding exact branch-search page"
                 }
             },
             "required": ["branch", "query"]
@@ -168,6 +172,10 @@ pub(super) fn def_branch_diff() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum combined added, removed, and changed results (default: 100, maximum: 256)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Authenticated continuation cursor returned by the preceding exact branch-diff page"
                 }
             }
         }),

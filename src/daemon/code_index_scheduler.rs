@@ -405,6 +405,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
         CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string())
     }
 
+    fn corruption(error: impl std::fmt::Display) -> CodeIndexPublicationStoreErrorV1 {
+        CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(error.to_string())
+    }
+
     fn sync_directory(path: &Path) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict)
             .map_err(Self::unavailable)
@@ -456,20 +460,21 @@ impl DaemonCodeIndexPublicationStoreV1 {
             Err(error) => return Err(Self::unavailable(error)),
         };
         if metadata.len() > MAX_DURABLE_PUBLICATION_POINTER_BYTES {
-            return Err(Self::unavailable(
+            return Err(Self::corruption(
                 "durable code-generation index exceeds its byte bound",
             ));
         }
         let bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
         let pointer: DurablePublicationPointerV1 =
             serde_json::from_slice(&bytes).map_err(|error| {
-                Self::unavailable(format!(
+                Self::corruption(format!(
                     "active code-generation pointer is corrupt: {error}"
                 ))
             })?;
-        Self::validate_generation_file(&pointer.generation_file)?;
+        Self::validate_generation_file(&pointer.generation_file)
+            .map_err(|error| Self::corruption(error.to_string()))?;
         if pointer.generation_index.len() > MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 {
-            return Err(Self::unavailable(
+            return Err(Self::corruption(
                 "durable code-generation index exceeds its entry bound",
             ));
         }
@@ -482,7 +487,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     )? => {}
             None if pointer.generation_index.is_empty() && !pointer.generation_index_truncated => {}
             _ => {
-                return Err(Self::unavailable(
+                return Err(Self::corruption(
                     "durable code-generation index digest does not match its entries",
                 ));
             }
@@ -491,43 +496,52 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let mut exact_revisions = BTreeSet::new();
         let mut prior_order = None;
         for entry in &pointer.generation_index {
-            Self::validate_generation_file(&entry.generation_file)?;
-            CodeGenerationId::new(entry.generation_id.clone()).map_err(Self::unavailable)?;
+            Self::validate_generation_file(&entry.generation_file)
+                .map_err(|error| Self::corruption(error.to_string()))?;
+            CodeGenerationId::new(entry.generation_id.clone()).map_err(Self::corruption)?;
             ContentDigest::new(entry.snapshot_content_identity.clone())
-                .map_err(Self::unavailable)?;
+                .map_err(Self::corruption)?;
             if !entry.state_digest.starts_with("sha256:")
                 || entry.state_digest.len() != "sha256:".len() + 64
             {
-                return Err(Self::unavailable(
+                return Err(Self::corruption(
                     "durable code-generation index contains an invalid sealed digest",
                 ));
             }
             if !generations.insert(entry.generation_id.as_str()) {
-                return Err(Self::unavailable(
+                return Err(Self::corruption(
                     "durable code-generation index contains a duplicate generation",
                 ));
             }
-            match (&entry.source_revision, &entry.source_tree) {
-                (Some(revision), Some(tree)) => {
-                    tracedecay_domain::GitOidV1::new(revision.clone())
-                        .map_err(Self::unavailable)?;
-                    tracedecay_domain::GitOidV1::new(tree.clone()).map_err(Self::unavailable)?;
-                    if !exact_revisions.insert((revision.as_str(), tree.as_str())) {
-                        return Err(Self::unavailable(
+            match (
+                &entry.source_reference,
+                &entry.source_revision,
+                &entry.source_tree,
+            ) {
+                (Some(reference), Some(revision), Some(tree)) => {
+                    tracedecay_domain::RefId::new(reference.clone()).map_err(Self::corruption)?;
+                    tracedecay_domain::GitOidV1::new(revision.clone()).map_err(Self::corruption)?;
+                    tracedecay_domain::GitOidV1::new(tree.clone()).map_err(Self::corruption)?;
+                    if !exact_revisions.insert((
+                        reference.as_str(),
+                        revision.as_str(),
+                        tree.as_str(),
+                    )) {
+                        return Err(Self::corruption(
                             "durable code-generation index contains duplicate Git evidence",
                         ));
                     }
                 }
-                (None, None) => {}
+                (None, None, None) => {}
                 _ => {
-                    return Err(Self::unavailable(
+                    return Err(Self::corruption(
                         "durable code-generation index contains incomplete Git evidence",
                     ));
                 }
             }
             let order = (entry.sealed_at_micros, entry.generation_id.as_str());
             if prior_order.is_some_and(|prior| prior >= order) {
-                return Err(Self::unavailable(
+                return Err(Self::corruption(
                     "durable code-generation index is not canonically ordered",
                 ));
             }
@@ -610,7 +624,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 .unwrap_or(&entry.state_digest)
         );
         if entry.generation_file != expected_file {
-            return Err(Self::unavailable(
+            return Err(Self::corruption(
                 "durable code-generation index file does not match its sealed digest",
             ));
         }
@@ -621,13 +635,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .file_type()
             .is_file()
         {
-            return Err(Self::unavailable(
+            return Err(Self::corruption(
                 "durable code-generation index target is not a file",
             ));
         }
         let bytes = std::fs::read(path).map_err(Self::unavailable)?;
         if Self::state_digest(&bytes) != entry.state_digest {
-            return Err(Self::unavailable(
+            return Err(Self::corruption(
                 "indexed code-generation bytes do not match their sealed digest",
             ));
         }
@@ -638,10 +652,18 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         self.cache.note_decode();
         let generation =
-            CodeIndexPublishedGenerationV1::decode_sealed(&bytes).map_err(Self::unavailable)?;
+            CodeIndexPublishedGenerationV1::decode_sealed(&bytes).map_err(Self::corruption)?;
         if generation.manifest().generation_id != *generation_id
             || generation.snapshot().content_identity.as_str() != entry.snapshot_content_identity
             || generation.manifest().seal.sealed_at.0 != entry.sealed_at_micros
+            || entry.source_reference.as_ref().is_some_and(|reference| {
+                generation
+                    .snapshot()
+                    .reference
+                    .as_ref()
+                    .map(|snapshot_reference| snapshot_reference.as_str())
+                    != Some(reference.as_str())
+            })
             || generation
                 .snapshot()
                 .source_revision
@@ -649,7 +671,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 .map(|revision| revision.as_str())
                 != entry.source_revision.as_deref()
         {
-            return Err(Self::unavailable(
+            return Err(Self::corruption(
                 "durable code-generation index does not match its sealed generation",
             ));
         }
@@ -790,7 +812,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn exact_git_evidence(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
-    ) -> Result<Option<(String, String)>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<(String, String, String)>, CodeIndexPublicationStoreErrorV1> {
         let Some(source_revision) = generation.snapshot().source_revision.as_ref() else {
             return Ok(None);
         };
@@ -815,7 +837,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
         {
             return Ok(None);
         }
+        let Some(reference) = generation.snapshot().reference.as_ref() else {
+            return Ok(None);
+        };
         Ok(Some((
+            reference.as_str().to_owned(),
             source_revision.as_str().to_owned(),
             head_tree.as_str().to_owned(),
         )))
@@ -918,10 +944,13 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .unwrap_or_default();
         generation_index.retain(|entry| {
             entry.generation_id != generation.manifest().generation_id.as_str()
-                && exact_git_evidence.as_ref().is_none_or(|(revision, tree)| {
-                    entry.source_revision.as_ref() != Some(revision)
-                        || entry.source_tree.as_ref() != Some(tree)
-                })
+                && exact_git_evidence
+                    .as_ref()
+                    .is_none_or(|(reference, revision, tree)| {
+                        entry.source_reference.as_ref() != Some(reference)
+                            || entry.source_revision.as_ref() != Some(revision)
+                            || entry.source_tree.as_ref() != Some(tree)
+                    })
         });
         generation_index.push(DurableGenerationIndexEntryV1 {
             generation_id: generation.manifest().generation_id.as_str().to_owned(),
@@ -929,10 +958,13 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             sealed_at_micros: generation.manifest().seal.sealed_at.0,
             generation_file: generation_file.clone(),
             state_digest: state_digest.clone(),
+            source_reference: exact_git_evidence
+                .as_ref()
+                .map(|(reference, _, _)| reference.clone()),
             source_revision: exact_git_evidence
                 .as_ref()
-                .map(|(revision, _)| revision.clone()),
-            source_tree: exact_git_evidence.map(|(_, tree)| tree),
+                .map(|(_, revision, _)| revision.clone()),
+            source_tree: exact_git_evidence.map(|(_, _, tree)| tree),
         });
         generation_index.sort_by(|left, right| {
             (left.sealed_at_micros, left.generation_id.as_str())

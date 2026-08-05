@@ -195,7 +195,7 @@ fn branch_search_unavailable(
     revision: &tracedecay_domain::GitOidV1,
     unavailable: &crate::mcp::server::CodeIndexSearchUnavailableV1,
 ) -> ToolResult {
-    let reason = unavailable.reason.as_str();
+    let (reason, retryable) = branch_unavailable_wire(unavailable.reason);
     generic_tool_result(
         Some(cg.project_root()),
         args,
@@ -205,11 +205,7 @@ fn branch_search_unavailable(
             "source_revision": revision.as_str(),
             "code_generation": unavailable.code_generation,
             "reason": reason,
-            "retryable": matches!(
-                unavailable.reason,
-                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
-                    | crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
-            ),
+            "retryable": retryable,
         }),
         vec![],
     )
@@ -218,6 +214,27 @@ fn branch_search_unavailable(
         "branch '{branch}' search is unavailable for commit {}: {reason}",
         revision.as_str()
     ))
+}
+
+fn branch_unavailable_wire(
+    reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1,
+) -> (&'static str, bool) {
+    (
+        reason.as_str(),
+        matches!(
+            reason,
+            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
+                | crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
+        ),
+    )
+}
+
+fn branch_search_page_status(has_more: bool) -> (&'static str, Option<&'static str>) {
+    if has_more {
+        ("partial", Some("result_limit"))
+    } else {
+        ("complete", None)
+    }
 }
 
 /// Searches the generation sealed for the selected local ref's exact commit.
@@ -249,6 +266,7 @@ pub(crate) async fn handle_branch_search(
         .get("limit")
         .and_then(Value::as_u64)
         .map_or(10, |value| value.min(500) as usize);
+    let cursor = super::super::support::retrieval_cursor(&args)?;
     let revision_branch = branch.clone();
     let revision = match run_branch_ref_read(
         cg.project_root().to_path_buf(),
@@ -288,13 +306,20 @@ pub(crate) async fn handle_branch_search(
             },
         ));
     };
+    let source_reference =
+        tracedecay_domain::RefId::new(format!("refs/heads/{branch}")).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("invalid branch reference: {error}"),
+            }
+        })?;
     match executor(crate::mcp::server::CodeIndexSearchRequestV1 {
         project_root: cg.project_root().to_path_buf(),
         query,
         source_revision: Some(revision.commit.clone()),
         source_tree: Some(revision.tree.clone()),
+        source_reference: Some(source_reference),
         limit,
-        cursor: None,
+        cursor,
         mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
         authority: authority.cloned(),
         deadline,
@@ -303,6 +328,12 @@ pub(crate) async fn handle_branch_search(
     .await
     {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
+            let next_cursor = complete
+                .next_cursor
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
+            let (status, reason) = branch_search_page_status(next_cursor.is_some());
             let results = complete
                 .ordered_candidates
                 .iter()
@@ -314,6 +345,7 @@ pub(crate) async fn handle_branch_search(
                         "qualified_name": display.map(|value| value.qualified_name.as_str()),
                         "kind": display.map(|value| value.kind.as_str()),
                         "branch": branch,
+                        "source_reference": format!("refs/heads/{branch}"),
                         "source_revision": revision.commit.as_str(),
                         "source_tree": revision.tree.as_str(),
                         "code_generation": complete.code_generation,
@@ -324,11 +356,14 @@ pub(crate) async fn handle_branch_search(
                 Some(cg.project_root()),
                 &args,
                 &json!({
-                    "status": "complete",
+                    "status": status,
+                    "reason": reason,
                     "branch": branch,
+                    "source_reference": format!("refs/heads/{branch}"),
                     "source_revision": revision.commit.as_str(),
                     "source_tree": revision.tree.as_str(),
                     "code_generation": complete.code_generation,
+                    "next_cursor": next_cursor,
                     "results": results,
                 }),
                 vec![],
@@ -347,7 +382,7 @@ fn branch_diff_unavailable(
     head: (&str, &tracedecay_domain::GitOidV1),
     unavailable: &crate::mcp::server::CodeIndexBranchDiffUnavailableV1,
 ) -> ToolResult {
-    let reason = unavailable.reason.as_str();
+    let (reason, retryable) = branch_unavailable_wire(unavailable.reason);
     generic_tool_result(
         Some(cg.project_root()),
         args,
@@ -360,11 +395,7 @@ fn branch_diff_unavailable(
             "base_generation": unavailable.base_generation,
             "head_generation": unavailable.head_generation,
             "reason": reason,
-            "retryable": matches!(
-                unavailable.reason,
-                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
-                    | crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
-            ),
+            "retryable": retryable,
         }),
         vec![],
     )
@@ -377,12 +408,64 @@ fn branch_diff_unavailable(
 
 fn branch_symbol_json(symbol: &crate::mcp::server::CodeIndexBranchSymbolV1) -> Value {
     json!({
+        "symbol_identity": symbol.symbol_identity,
+        "symbol_occurrence_id": symbol.symbol_occurrence_id,
+        "file_identity": symbol.file_identity,
+        "file_occurrence_id": symbol.file_occurrence_id,
         "name": symbol.name,
         "qualified_name": symbol.qualified_name,
         "kind": symbol.kind,
         "file": symbol.file,
         "content_digest": symbol.content_digest,
     })
+}
+
+fn branch_change_json(change: &crate::mcp::server::CodeIndexBranchChangeV1) -> Value {
+    match change {
+        crate::mcp::server::CodeIndexBranchChangeV1::Added { symbol } => json!({
+            "change": "added",
+            "symbol": branch_symbol_json(symbol),
+        }),
+        crate::mcp::server::CodeIndexBranchChangeV1::Removed { symbol } => json!({
+            "change": "removed",
+            "symbol": branch_symbol_json(symbol),
+        }),
+        crate::mcp::server::CodeIndexBranchChangeV1::Changed { base, head } => json!({
+            "change": "changed",
+            "base": branch_symbol_json(base),
+            "head": branch_symbol_json(head),
+        }),
+    }
+}
+
+fn branch_change_files(change: &crate::mcp::server::CodeIndexBranchChangeV1) -> [&str; 2] {
+    match change {
+        crate::mcp::server::CodeIndexBranchChangeV1::Added { symbol }
+        | crate::mcp::server::CodeIndexBranchChangeV1::Removed { symbol } => {
+            [symbol.file.as_str(), symbol.file.as_str()]
+        }
+        crate::mcp::server::CodeIndexBranchChangeV1::Changed { base, head } => {
+            [base.file.as_str(), head.file.as_str()]
+        }
+    }
+}
+
+fn branch_change_counts(
+    changes: &[crate::mcp::server::CodeIndexBranchChangeV1],
+) -> (usize, usize, usize) {
+    changes
+        .iter()
+        .fold((0, 0, 0), |counts, change| match change {
+            crate::mcp::server::CodeIndexBranchChangeV1::Added { .. } => {
+                (counts.0 + 1, counts.1, counts.2)
+            }
+            crate::mcp::server::CodeIndexBranchChangeV1::Removed { .. } => {
+                (counts.0, counts.1 + 1, counts.2)
+            }
+            crate::mcp::server::CodeIndexBranchChangeV1::Changed { .. } => {
+                (counts.0, counts.1, counts.2 + 1)
+            }
+        })
 }
 
 /// Compares generations sealed for the two selected local refs' exact commits.
@@ -420,6 +503,15 @@ pub(crate) async fn handle_branch_diff(
     if limit == 0 {
         return Err(TraceDecayError::Config {
             message: "branch-diff limit must be positive".to_owned(),
+        });
+    }
+    let cursor = args
+        .get("cursor")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if cursor.as_ref().is_some_and(|cursor| cursor.len() > 4_096) {
+        return Err(TraceDecayError::Config {
+            message: "branch-diff cursor exceeds its byte bound".to_owned(),
         });
     }
     let resolution_base = base_name.clone();
@@ -467,13 +559,24 @@ pub(crate) async fn handle_branch_diff(
     };
     match executor(crate::mcp::server::CodeIndexBranchDiffRequestV1 {
         project_root: cg.project_root().to_path_buf(),
+        base_reference: tracedecay_domain::RefId::new(format!("refs/heads/{base_name}")).map_err(
+            |error| TraceDecayError::Config {
+                message: format!("invalid base branch reference: {error}"),
+            },
+        )?,
         base_revision: base_revision.commit.clone(),
         base_tree: base_revision.tree.clone(),
+        head_reference: tracedecay_domain::RefId::new(format!("refs/heads/{head_name}")).map_err(
+            |error| TraceDecayError::Config {
+                message: format!("invalid head branch reference: {error}"),
+            },
+        )?,
         head_revision: head_revision.commit.clone(),
         head_tree: head_revision.tree.clone(),
         file_filter: args.get("file").and_then(Value::as_str).map(str::to_owned),
         kind_filter: args.get("kind").and_then(Value::as_str).map(str::to_owned),
         limit,
+        cursor,
         authority: authority.cloned(),
         deadline,
         cancellation,
@@ -481,37 +584,13 @@ pub(crate) async fn handle_branch_diff(
     .await
     {
         crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Complete(completed) => {
-            let added = completed
-                .added
+            let (added, removed, changed) = branch_change_counts(&completed.changes);
+            let changes = completed
+                .changes
                 .iter()
-                .map(branch_symbol_json)
+                .map(branch_change_json)
                 .collect::<Vec<_>>();
-            let removed = completed
-                .removed
-                .iter()
-                .map(branch_symbol_json)
-                .collect::<Vec<_>>();
-            let changed = completed
-                .changed
-                .iter()
-                .map(|value| {
-                    json!({
-                        "base": branch_symbol_json(&value.base),
-                        "head": branch_symbol_json(&value.head),
-                    })
-                })
-                .collect::<Vec<_>>();
-            let touched =
-                unique_file_paths(
-                    completed
-                        .added
-                        .iter()
-                        .map(|symbol| symbol.file.as_str())
-                        .chain(completed.removed.iter().map(|symbol| symbol.file.as_str()))
-                        .chain(completed.changed.iter().flat_map(|value| {
-                            [value.base.file.as_str(), value.head.file.as_str()]
-                        })),
-                );
+            let touched = unique_file_paths(completed.changes.iter().flat_map(branch_change_files));
             Ok(generic_tool_result(
                 Some(cg.project_root()),
                 &args,
@@ -525,39 +604,25 @@ pub(crate) async fn handle_branch_diff(
                     "head_tree": head_revision.tree.as_str(),
                     "base_generation": completed.base_generation,
                     "head_generation": completed.head_generation,
+                    "total_changes": completed.total_changes,
                     "summary": {
-                        "added": added.len(),
-                        "removed": removed.len(),
-                        "changed": changed.len(),
+                        "added": added,
+                        "removed": removed,
+                        "changed": changed,
                     },
-                    "added": added,
-                    "removed": removed,
-                    "changed": changed,
+                    "changes": changes,
                 }),
                 touched,
             ))
         }
         crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Partial(partial) => {
-            let added = partial
-                .added
+            let (added, removed, changed) = branch_change_counts(&partial.changes);
+            let changes = partial
+                .changes
                 .iter()
-                .map(branch_symbol_json)
+                .map(branch_change_json)
                 .collect::<Vec<_>>();
-            let removed = partial
-                .removed
-                .iter()
-                .map(branch_symbol_json)
-                .collect::<Vec<_>>();
-            let changed = partial
-                .changed
-                .iter()
-                .map(|value| {
-                    json!({
-                        "base": branch_symbol_json(&value.base),
-                        "head": branch_symbol_json(&value.head),
-                    })
-                })
-                .collect::<Vec<_>>();
+            let touched = unique_file_paths(partial.changes.iter().flat_map(branch_change_files));
             Ok(generic_tool_result(
                 Some(cg.project_root()),
                 &args,
@@ -572,27 +637,16 @@ pub(crate) async fn handle_branch_diff(
                     "head_tree": head_revision.tree.as_str(),
                     "base_generation": partial.base_generation,
                     "head_generation": partial.head_generation,
-                    "base_counts": {
-                        "files": partial.base_file_count,
-                        "chunks": partial.base_chunk_count,
-                        "symbols": partial.base_symbol_count,
-                    },
-                    "head_counts": {
-                        "files": partial.head_file_count,
-                        "chunks": partial.head_chunk_count,
-                        "symbols": partial.head_symbol_count,
-                    },
                     "total_changes": partial.total_changes,
+                    "next_cursor": partial.next_cursor,
                     "summary": {
-                        "added": added.len(),
-                        "removed": removed.len(),
-                        "changed": changed.len(),
+                        "added": added,
+                        "removed": removed,
+                        "changed": changed,
                     },
-                    "added": added,
-                    "removed": removed,
-                    "changed": changed,
+                    "changes": changes,
                 }),
-                vec![],
+                touched,
             ))
         }
         crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Unavailable(unavailable) => {
@@ -610,6 +664,25 @@ pub(crate) async fn handle_branch_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branch_search_continuation_is_reported_as_partial() {
+        assert_eq!(
+            branch_search_page_status(true),
+            ("partial", Some("result_limit"))
+        );
+        assert_eq!(branch_search_page_status(false), ("complete", None));
+    }
+
+    #[test]
+    fn corruption_reset_required_has_a_stable_non_retryable_wire_code() {
+        assert_eq!(
+            branch_unavailable_wire(
+                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+            ),
+            ("index_corruption_reset_required", false),
+        );
+    }
 
     #[tokio::test]
     async fn branch_ref_route_reports_capacity_without_queueing() {

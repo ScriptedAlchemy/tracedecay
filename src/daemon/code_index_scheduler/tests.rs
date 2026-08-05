@@ -225,6 +225,60 @@ fn retention_generations(
     generations
 }
 
+fn remove_historical_pointer_entries(store_root: &Path) {
+    let pointer_path = store_root.join("active-code-generation-v1.json");
+    let mut pointer: crate::retention::code_index_generations::DurablePublicationPointerV1 =
+        serde_json::from_slice(&std::fs::read(&pointer_path).expect("read publication pointer"))
+            .expect("decode publication pointer");
+    pointer.generation_index.clear();
+    pointer.generation_index_truncated = false;
+    pointer.generation_index_digest = None;
+    std::fs::write(
+        pointer_path,
+        serde_json::to_vec(&pointer).expect("encode legacy publication pointer"),
+    )
+    .expect("write legacy publication pointer");
+}
+
+#[test]
+fn code_generation_retention_preserves_every_pointer_addressable_generation() {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        run_code_generation_retention,
+    };
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let generations = retention_generations(&fixture, store.path(), 5);
+
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(49),
+    )
+    .expect("apply retention");
+
+    assert!(report.plan.collectable_generations.is_empty());
+    assert!(report.deleted_generations.is_empty());
+    let reopened = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    for generation in generations {
+        assert!(
+            reopened
+                .publication
+                .load_generation(&generation)
+                .expect("read pointer-addressable generation")
+                .is_some(),
+            "retention must preserve every generation still named by the pointer"
+        );
+    }
+}
+
 #[test]
 fn code_generation_retention_dry_run_reports_without_deleting() {
     use crate::retention::code_index_generations::{
@@ -235,6 +289,7 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
     let store = TempDir::new().expect("store root");
     let generations = retention_generations(&fixture, store.path(), 5);
+    remove_historical_pointer_entries(store.path());
 
     let report = run_code_generation_retention(
         store.path(),
@@ -280,6 +335,7 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
     let store = TempDir::new().expect("store root");
     let generations = retention_generations(&fixture, store.path(), 6);
+    remove_historical_pointer_entries(store.path());
     let vector_readable = BTreeSet::from([generations[0].clone()]);
 
     let report = run_code_generation_retention(
@@ -325,6 +381,7 @@ fn code_generation_retention_emits_durable_reclaim_receipt() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
     let store = TempDir::new().expect("store root");
     retention_generations(&fixture, store.path(), 5);
+    remove_historical_pointer_entries(store.path());
 
     let report = run_code_generation_retention(
         store.path(),

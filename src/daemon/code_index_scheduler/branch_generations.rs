@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, TryLockError};
 
-use tracedecay_domain::GitOidV1;
+use tracedecay_domain::{GitOidV1, RefId};
 use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
 
 use super::{
@@ -40,10 +40,23 @@ pub(in crate::daemon) struct BranchGenerationPairV1 {
 }
 
 impl DaemonCodeIndexPublicationStoreV1 {
+    fn exact_read_error(
+        error: crate::code_index::production::CodeIndexPublicationStoreErrorV1,
+    ) -> CodeIndexSearchUnavailableReasonV1 {
+        match error {
+            crate::code_index::production::CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(
+                _,
+            ) => CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+            _ => CodeIndexSearchUnavailableReasonV1::Internal,
+        }
+    }
+
     fn revisions(
         &self,
+        base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
+        head_reference: &RefId,
         head_revision: &GitOidV1,
         head_tree: &GitOidV1,
         control: &BranchGenerationReadControlV1,
@@ -59,14 +72,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let pointer = self
             .read_publication_pointer()
-            .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?
+            .map_err(Self::exact_read_error)?
             .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
-        let find = |revision: &GitOidV1, tree: &GitOidV1| {
+        let find = |reference: &RefId, revision: &GitOidV1, tree: &GitOidV1| {
             pointer
                 .generation_index
                 .iter()
                 .find(|entry| {
-                    entry.source_revision.as_deref() == Some(revision.as_str())
+                    entry.source_reference.as_deref() == Some(reference.as_str())
+                        && entry.source_revision.as_deref() == Some(revision.as_str())
                         && entry.source_tree.as_deref() == Some(tree.as_str())
                 })
                 .cloned()
@@ -76,11 +90,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
                 })
         };
-        let base_entry = find(base_revision, base_tree)?;
-        let head_entry = if base_revision == head_revision && base_tree == head_tree {
+        let base_entry = find(base_reference, base_revision, base_tree)?;
+        let head_entry = if base_reference == head_reference
+            && base_revision == head_revision
+            && base_tree == head_tree
+        {
             base_entry.clone()
         } else {
-            find(head_revision, head_tree)?
+            find(head_reference, head_revision, head_tree)?
         };
         if let Some(reason) = control.termination() {
             return Err(reason);
@@ -88,15 +105,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let load =
             |entry: &crate::retention::code_index_generations::DurableGenerationIndexEntryV1,
              revision: &GitOidV1,
-             tree: &GitOidV1| {
+             tree: &GitOidV1,
+             reference: &RefId| {
                 self.validate_exact_git_evidence(revision.as_str(), tree.as_str())
-                    .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?;
+                    .map_err(Self::exact_read_error)?;
                 let generation_id =
                     tracedecay_domain::CodeGenerationId::new(entry.generation_id.clone())
                         .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?;
                 let generation = self
                     .load_generation(&generation_id)
-                    .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?
+                    .map_err(Self::exact_read_error)?
                     .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
                 if generation
                     .snapshot()
@@ -104,6 +122,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     .as_ref()
                     .map(|source| source.as_str())
                     != Some(revision.as_str())
+                    || generation
+                        .snapshot()
+                        .reference
+                        .as_ref()
+                        .map(|source| source.as_str())
+                        != Some(reference.as_str())
                     || generation.snapshot().content_identity.as_str()
                         != entry.snapshot_content_identity
                 {
@@ -111,11 +135,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 }
                 Ok(generation)
             };
-        let base = load(&base_entry, base_revision, base_tree)?;
-        let head = if base_revision == head_revision && base_tree == head_tree {
+        let base = load(&base_entry, base_revision, base_tree, base_reference)?;
+        let head = if base_reference == head_reference
+            && base_revision == head_revision
+            && base_tree == head_tree
+        {
             Arc::clone(&base)
         } else {
-            load(&head_entry, head_revision, head_tree)?
+            load(&head_entry, head_revision, head_tree, head_reference)?
         };
         Ok((base, head))
     }
@@ -125,8 +152,10 @@ impl CodeIndexSchedulerRegistryV1 {
     pub(in crate::daemon) async fn generations_for_revisions(
         &self,
         scope: &tracedecay_application::ResolvedScope,
+        base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
+        head_reference: &RefId,
         head_revision: &GitOidV1,
         head_tree: &GitOidV1,
         control: BranchGenerationReadControlV1,
@@ -146,8 +175,10 @@ impl CodeIndexSchedulerRegistryV1 {
             }
             matched.ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
         };
+        let base_reference = base_reference.clone();
         let base_revision = base_revision.clone();
         let base_tree = base_tree.clone();
+        let head_reference = head_reference.clone();
         let head_revision = head_revision.clone();
         let head_tree = head_tree.clone();
         let scope = scope.clone();
@@ -162,8 +193,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
             };
             let (base, head) = scheduler.publication.revisions(
+                &base_reference,
                 &base_revision,
                 &base_tree,
+                &head_reference,
                 &head_revision,
                 &head_tree,
                 &control,
@@ -190,6 +223,7 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_application::ResolvedScope;
     use tracedecay_domain::{GitOidV1, ProjectId};
+    use tracedecay_query::code_search;
 
     use super::*;
     use crate::daemon::code_index_branch_diff::{bounded_diff, diff_symbols, generation_symbols};
@@ -300,24 +334,67 @@ mod tests {
             .expect("mount sealed store");
         let identity = super::super::identity::IndexingIdentityV1::resolve(&canonical_project)
             .expect("indexing identity");
+        let reference = identity.head_ref().cloned().expect("head reference");
         let scope = ResolvedScope::new(
             project_id,
             identity.repository_id().clone(),
             identity.worktree_id().clone(),
-            identity.head_ref().cloned(),
+            Some(reference.clone()),
         )
         .expect("resolved scope");
         let control = BranchGenerationReadControlV1 {
             deadline: None,
             cancellation: None,
         };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let pointer: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+                    .expect("read durable generation index"),
+            )
+            .expect("decode durable generation index");
+            let generation_file = pointer["generation_index"]
+                .as_array()
+                .expect("generation index")
+                .iter()
+                .find(|entry| entry["source_revision"].as_str() == Some(base_revision.as_str()))
+                .and_then(|entry| entry["generation_file"].as_str())
+                .expect("base generation file");
+            let target = scoped_store
+                .join("code-generations-v1")
+                .join(generation_file);
+            let backup = target.with_extension("json.symlink-target");
+            std::fs::rename(&target, &backup).expect("move exact generation behind symlink");
+            symlink(&backup, &target).expect("replace exact generation with symlink");
+            assert!(matches!(
+                registry
+                    .generations_for_revisions(
+                        &scope,
+                        &reference,
+                        &base_revision,
+                        &base_tree,
+                        &reference,
+                        &head_revision,
+                        &head_tree,
+                        control.clone(),
+                    )
+                    .await,
+                Err(CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired)
+            ));
+            std::fs::remove_file(&target).expect("remove exact-generation symlink");
+            std::fs::rename(&backup, &target).expect("restore exact generation");
+        }
         let pair = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 match registry
                     .generations_for_revisions(
                         &scope,
+                        &reference,
                         &base_revision,
                         &base_tree,
+                        &reference,
                         &head_revision,
                         &head_tree,
                         control.clone(),
@@ -338,9 +415,28 @@ mod tests {
             registry
                 .generations_for_revisions(
                     &scope,
+                    &reference,
                     &base_revision,
                     &head_tree,
+                    &reference,
                     &base_revision,
+                    &head_tree,
+                    control.clone(),
+                )
+                .await,
+            Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
+        ));
+        let wrong_reference =
+            tracedecay_domain::RefId::new("refs/heads/not-main").expect("wrong reference");
+        assert!(matches!(
+            registry
+                .generations_for_revisions(
+                    &scope,
+                    &wrong_reference,
+                    &base_revision,
+                    &base_tree,
+                    &reference,
+                    &head_revision,
                     &head_tree,
                     control.clone(),
                 )
@@ -356,25 +452,23 @@ mod tests {
             base,
             pair.head.generation().manifest().generation_id.as_str(),
             head,
-        );
+        )
+        .expect("diff symbols");
 
-        assert!(completed.added.is_empty());
-        assert!(completed.removed.is_empty());
-        assert_eq!(completed.changed.len(), 1);
-        assert_eq!(
-            completed.changed[0].head.qualified_name,
-            "src/lib.rs::exact_branch_value"
-        );
-        assert_ne!(
-            completed.changed[0].base.content_digest,
-            completed.changed[0].head.content_digest
-        );
+        assert!(matches!(
+            completed.changes.as_slice(),
+            [code_search::CodeIndexBranchChangeV1::Changed { base, head }]
+                if head.qualified_name == "src/lib.rs::exact_branch_value"
+                    && base.content_digest != head.content_digest
+        ));
 
         let large_pair = registry
             .generations_for_revisions(
                 &scope,
+                &reference,
                 &large_revision,
                 &large_tree,
+                &reference,
                 &large_revision,
                 &large_tree,
                 control.clone(),
@@ -389,25 +483,16 @@ mod tests {
             None,
             100,
             &control,
-        )
-        .expect("bounded large diff");
+        );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(1),
             "oversized generation admission must not materialize symbols"
         );
-        assert!(matches!(
+        assert_eq!(
             outcome,
-            tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::Partial(
-                tracedecay_query::code_search::CodeIndexBranchDiffPartialV1 {
-                    reason:
-                        tracedecay_query::code_search::CodeIndexBranchDiffPartialReasonV1::GenerationSymbolLimit,
-                    added,
-                    removed,
-                    changed,
-                    ..
-                }
-            ) if added.is_empty() && removed.is_empty() && changed.is_empty()
-        ));
+            Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable),
+            "a generation beyond the admitted resumable bound is unavailable, not an empty terminal partial"
+        );
 
         let cancellation =
             tracedecay_application::CancellationSignal::active("cancel.large-generation")
@@ -461,14 +546,16 @@ mod tests {
             registry
                 .generations_for_revisions(
                     &scope,
+                    &reference,
                     &base_revision,
                     &base_tree,
+                    &reference,
                     &head_revision,
                     &head_tree,
                     control,
                 )
                 .await,
-            Err(CodeIndexSearchUnavailableReasonV1::Internal)
+            Err(CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired)
         ));
     }
 
@@ -534,11 +621,12 @@ mod tests {
             .expect("mount sealed store");
         let identity = super::super::identity::IndexingIdentityV1::resolve(&canonical_project)
             .expect("indexing identity");
+        let reference = identity.head_ref().cloned().expect("head reference");
         let scope = ResolvedScope::new(
             project_id,
             identity.repository_id().clone(),
             identity.worktree_id().clone(),
-            identity.head_ref().cloned(),
+            Some(reference.clone()),
         )
         .expect("resolved scope");
 
@@ -546,8 +634,10 @@ mod tests {
             registry
                 .generations_for_revisions(
                     &scope,
+                    &reference,
                     &revision,
                     &tree,
+                    &reference,
                     &revision,
                     &tree,
                     BranchGenerationReadControlV1 {

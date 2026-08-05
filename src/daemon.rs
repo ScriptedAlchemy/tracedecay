@@ -144,11 +144,11 @@ mod code_index_branch_diff;
 use code_index_branch_diff::code_index_branch_diff_executor;
 mod code_index_executor;
 use code_index_executor::code_index_search_executor;
+mod code_index_task_support;
 #[cfg(test)]
-use code_index_executor::{
-    code_index_scope_unavailable, code_index_search_display_binding,
-    code_index_search_hydration_budget, mcp_search_request_termination,
-};
+use code_index_executor::{code_index_search_display_binding, mcp_search_request_termination};
+#[cfg(test)]
+use code_index_task_support::{code_index_scope_unavailable, code_index_search_hydration_budget};
 pub(crate) mod code_index_scheduler;
 mod connection_serving;
 pub(crate) mod context_scout_lifecycle;

@@ -80,14 +80,22 @@ pub fn local_branch_revision_controlled(
     control: &LocalBranchReadControlV1,
 ) -> Result<LocalBranchRevisionV1, LocalBranchSnapshotErrorV1> {
     control.termination().map_or(Ok(()), Err)?;
+    let repo =
+        gix::open(project_root).map_err(|_| LocalBranchSnapshotErrorV1::RepositoryUnavailable)?;
+    local_branch_revision_in_repository(&repo, branch, control)
+}
+
+fn local_branch_revision_in_repository(
+    repo: &gix::Repository,
+    branch: &str,
+    control: &LocalBranchReadControlV1,
+) -> Result<LocalBranchRevisionV1, LocalBranchSnapshotErrorV1> {
     let refname = format!("refs/heads/{branch}");
     gix::refs::FullName::try_from(refname.as_str()).map_err(|_| {
         LocalBranchSnapshotErrorV1::InvalidReference {
             branch: branch.to_owned(),
         }
     })?;
-    let repo =
-        gix::open(project_root).map_err(|_| LocalBranchSnapshotErrorV1::RepositoryUnavailable)?;
     let mut reference = repo
         .try_find_reference(&refname)
         .map_err(|_| LocalBranchSnapshotErrorV1::ReferenceUnavailable {
@@ -180,7 +188,7 @@ pub fn local_branch_snapshots_controlled(
     let next_after = truncated.then(|| selected.last().cloned()).flatten();
     let mut snapshots = Vec::with_capacity(selected.len());
     for name in selected {
-        let revision = local_branch_revision_controlled(project_root, &name, control)?;
+        let revision = local_branch_revision_in_repository(&repo, &name, control)?;
         snapshots.push(BranchSnapshot {
             name,
             commit: revision.commit.as_str().to_owned(),

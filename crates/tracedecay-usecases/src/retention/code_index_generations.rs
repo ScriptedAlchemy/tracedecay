@@ -4,8 +4,9 @@
 //! the active code pointer or a readable vector inventory names it. Collection
 //! therefore uses conservative mark-and-sweep rather than refcounts: a missed
 //! mark costs disk space, while a miscount could silently remove readable code
-//! evidence. The mark set is the active generation, every vector-readable source,
-//! and a small newest-superseded rollback floor.
+//! evidence. The mark set is every generation addressable through the durable
+//! publication pointer, every vector-readable source, and a small
+//! newest-superseded rollback floor.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -78,6 +79,8 @@ pub struct DurableGenerationIndexEntryV1 {
     pub sealed_at_micros: i64,
     pub generation_file: String,
     pub state_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_reference: Option<String>,
     pub source_revision: Option<String>,
     pub source_tree: Option<String>,
 }
@@ -344,6 +347,25 @@ pub fn plan_code_generation_retention_with_verification(
             "active generation file is missing or does not match the pointer digest".to_owned(),
         ));
     }
+    let pointer_generations = active_pointer
+        .generation_index
+        .iter()
+        .map(|entry| {
+            CodeGenerationId::new(entry.generation_id.clone())
+                .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let missing_pointer_generations = pointer_generations
+        .iter()
+        .filter(|generation| !generations.contains_key(*generation))
+        .map(CodeGenerationId::as_str)
+        .collect::<Vec<_>>();
+    if !missing_pointer_generations.is_empty() {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "publication-pointer generations are missing: {}",
+            missing_pointer_generations.join(", ")
+        )));
+    }
     let missing_sources = vector_readable_sources
         .iter()
         .filter(|source| !generations.contains_key(*source))
@@ -370,9 +392,11 @@ pub fn plan_code_generation_retention_with_verification(
 
     // Mark before sweeping. An omitted mark retains a derived file and costs
     // space; unlike refcounting, no accounting drift can silently delete a live
-    // generation. Active and vector-readable marks are exact liveness, while
-    // the newest superseded floor is the bounded rollback reserve.
-    let mut marked = vector_readable_sources.clone();
+    // generation. Pointer-addressable and vector-readable marks are exact
+    // liveness, while the newest superseded floor is the bounded rollback
+    // reserve.
+    let mut marked = pointer_generations;
+    marked.extend(vector_readable_sources.iter().cloned());
     marked.insert(active_generation_id.clone());
     marked.extend(
         superseded_generations

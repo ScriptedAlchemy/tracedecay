@@ -3,7 +3,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use tracedecay_domain::{
+    FreshnessVectorDigest, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SingleRootScopeV1,
+    TemporalModeV1, VectorWatermark, canonical_sha256,
+};
 use tracedecay_query::code_search;
+use tracedecay_query::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
 
 use super::{code_index_scheduler, project_open_owners, query_mcp_admission};
 
@@ -12,7 +17,7 @@ const MAX_BRANCH_DIFF_FILES_PER_GENERATION: usize = 1_024;
 const MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION: usize = 4_096;
 const MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION: usize = 1_024;
 
-type SymbolKey = (String, String, String);
+type SymbolKey = tracedecay_domain::SymbolIdentityDigest;
 
 #[derive(Clone, Copy)]
 struct GenerationCountsV1 {
@@ -31,18 +36,10 @@ fn generation_counts(
     }
 }
 
-fn generation_bound_reason(
-    counts: GenerationCountsV1,
-) -> Option<code_search::CodeIndexBranchDiffPartialReasonV1> {
-    if counts.files > MAX_BRANCH_DIFF_FILES_PER_GENERATION {
-        Some(code_search::CodeIndexBranchDiffPartialReasonV1::GenerationFileLimit)
-    } else if counts.chunks > MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION {
-        Some(code_search::CodeIndexBranchDiffPartialReasonV1::GenerationChunkLimit)
-    } else if counts.symbols > MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION {
-        Some(code_search::CodeIndexBranchDiffPartialReasonV1::GenerationSymbolLimit)
-    } else {
-        None
-    }
+fn generation_exceeds_bound(counts: GenerationCountsV1) -> bool {
+    counts.files > MAX_BRANCH_DIFF_FILES_PER_GENERATION
+        || counts.chunks > MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION
+        || counts.symbols > MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION
 }
 
 fn unavailable(
@@ -60,11 +57,7 @@ fn unavailable(
 }
 
 fn symbol_key(symbol: &code_search::CodeIndexBranchSymbolV1) -> SymbolKey {
-    (
-        symbol.qualified_name.clone(),
-        symbol.kind.clone(),
-        symbol.file.clone(),
-    )
+    symbol.symbol_identity.clone()
 }
 
 pub(super) fn diff_symbols(
@@ -72,18 +65,22 @@ pub(super) fn diff_symbols(
     base: Vec<code_search::CodeIndexBranchSymbolV1>,
     head_generation: &str,
     head: Vec<code_search::CodeIndexBranchSymbolV1>,
-) -> code_search::CodeIndexBranchDiffCompletedV1 {
-    let mut base = base
-        .into_iter()
-        .map(|symbol| (symbol_key(&symbol), symbol))
-        .collect::<BTreeMap<_, _>>();
-    let mut head = head
-        .into_iter()
-        .map(|symbol| (symbol_key(&symbol), symbol))
-        .collect::<BTreeMap<_, _>>();
-    let mut added = Vec::new();
-    let mut removed = Vec::new();
-    let mut changed = Vec::new();
+) -> Result<
+    code_search::CodeIndexBranchDiffCompletedV1,
+    code_search::CodeIndexSearchUnavailableReasonV1,
+> {
+    let collect = |symbols: Vec<code_search::CodeIndexBranchSymbolV1>| {
+        let mut collected = BTreeMap::new();
+        for symbol in symbols {
+            if collected.insert(symbol_key(&symbol), symbol).is_some() {
+                return Err(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
+            }
+        }
+        Ok(collected)
+    };
+    let mut base = collect(base)?;
+    let mut head = collect(head)?;
+    let mut changes = Vec::new();
     for key in base
         .keys()
         .chain(head.keys())
@@ -91,21 +88,24 @@ pub(super) fn diff_symbols(
         .collect::<std::collections::BTreeSet<_>>()
     {
         match (base.remove(&key), head.remove(&key)) {
-            (None, Some(symbol)) => added.push(symbol),
-            (Some(symbol), None) => removed.push(symbol),
+            (None, Some(symbol)) => {
+                changes.push(code_search::CodeIndexBranchChangeV1::Added { symbol })
+            }
+            (Some(symbol), None) => {
+                changes.push(code_search::CodeIndexBranchChangeV1::Removed { symbol })
+            }
             (Some(base), Some(head)) if base.content_digest != head.content_digest => {
-                changed.push(code_search::CodeIndexBranchChangedSymbolV1 { base, head });
+                changes.push(code_search::CodeIndexBranchChangeV1::Changed { base, head });
             }
             _ => {}
         }
     }
-    code_search::CodeIndexBranchDiffCompletedV1 {
+    Ok(code_search::CodeIndexBranchDiffCompletedV1 {
         base_generation: base_generation.to_owned(),
         head_generation: head_generation.to_owned(),
-        added,
-        removed,
-        changed,
-    }
+        total_changes: changes.len(),
+        changes,
+    })
 }
 
 pub(super) fn generation_symbols(
@@ -135,8 +135,11 @@ pub(super) fn generation_symbols(
             .get(&chunk.anchor.file_occurrence_id)
             .ok_or(code_search::CodeIndexSearchUnavailableReasonV1::Internal)?;
         if symbol_files
-            .insert(symbol.clone(), *file)
-            .is_some_and(|prior| prior != *file)
+            .insert(
+                symbol.clone(),
+                (chunk.anchor.file_occurrence_id.clone(), *file),
+            )
+            .is_some_and(|prior| prior != (chunk.anchor.file_occurrence_id.clone(), *file))
         {
             return Err(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
         }
@@ -146,7 +149,7 @@ pub(super) fn generation_symbols(
         if let Some(reason) = control.termination() {
             return Err(reason);
         }
-        let file = symbol_files
+        let (file_occurrence_id, file) = symbol_files
             .get(&symbol.occurrence)
             .ok_or(code_search::CodeIndexSearchUnavailableReasonV1::Internal)?;
         if file_filter.is_some_and(|filter| !file.starts_with(filter) && *file != filter)
@@ -155,6 +158,10 @@ pub(super) fn generation_symbols(
             continue;
         }
         symbols.push(code_search::CodeIndexBranchSymbolV1 {
+            symbol_identity: symbol.identity.clone(),
+            symbol_occurrence_id: symbol.occurrence.clone(),
+            file_identity: symbol.file_identity.clone(),
+            file_occurrence_id: file_occurrence_id.clone(),
             qualified_name: symbol.qualified_name.clone(),
             name: symbol
                 .qualified_name
@@ -171,73 +178,33 @@ pub(super) fn generation_symbols(
     Ok(symbols)
 }
 
-fn partial(
+fn page_diff_changes(
     base_generation: &str,
     head_generation: &str,
-    base_counts: GenerationCountsV1,
-    head_counts: GenerationCountsV1,
-    reason: code_search::CodeIndexBranchDiffPartialReasonV1,
+    changes: Vec<code_search::CodeIndexBranchChangeV1>,
+    total_changes: usize,
+    next_cursor: Option<String>,
 ) -> code_search::CodeIndexBranchDiffOutcomeV1 {
-    code_search::CodeIndexBranchDiffOutcomeV1::Partial(code_search::CodeIndexBranchDiffPartialV1 {
-        base_generation: base_generation.to_owned(),
-        head_generation: head_generation.to_owned(),
-        reason,
-        base_file_count: base_counts.files,
-        head_file_count: head_counts.files,
-        base_chunk_count: base_counts.chunks,
-        head_chunk_count: head_counts.chunks,
-        base_symbol_count: base_counts.symbols,
-        head_symbol_count: head_counts.symbols,
-        total_changes: None,
-        added: Vec::new(),
-        removed: Vec::new(),
-        changed: Vec::new(),
-    })
-}
-
-fn bound_results(
-    completed: code_search::CodeIndexBranchDiffCompletedV1,
-    base_counts: GenerationCountsV1,
-    head_counts: GenerationCountsV1,
-    limit: usize,
-) -> code_search::CodeIndexBranchDiffOutcomeV1 {
-    let total_changes = completed.added.len() + completed.removed.len() + completed.changed.len();
-    if total_changes <= limit {
-        return code_search::CodeIndexBranchDiffOutcomeV1::Complete(completed);
+    match next_cursor {
+        Some(next_cursor) => code_search::CodeIndexBranchDiffOutcomeV1::Partial(
+            code_search::CodeIndexBranchDiffPartialV1 {
+                base_generation: base_generation.to_owned(),
+                head_generation: head_generation.to_owned(),
+                reason: code_search::CodeIndexBranchDiffPartialReasonV1::ResultLimit,
+                total_changes,
+                changes,
+                next_cursor,
+            },
+        ),
+        None => code_search::CodeIndexBranchDiffOutcomeV1::Complete(
+            code_search::CodeIndexBranchDiffCompletedV1 {
+                base_generation: base_generation.to_owned(),
+                head_generation: head_generation.to_owned(),
+                total_changes,
+                changes,
+            },
+        ),
     }
-    let mut remaining = limit;
-    let added = completed
-        .added
-        .into_iter()
-        .take(remaining)
-        .collect::<Vec<_>>();
-    remaining -= added.len();
-    let removed = completed
-        .removed
-        .into_iter()
-        .take(remaining)
-        .collect::<Vec<_>>();
-    remaining -= removed.len();
-    let changed = completed
-        .changed
-        .into_iter()
-        .take(remaining)
-        .collect::<Vec<_>>();
-    code_search::CodeIndexBranchDiffOutcomeV1::Partial(code_search::CodeIndexBranchDiffPartialV1 {
-        base_generation: completed.base_generation,
-        head_generation: completed.head_generation,
-        reason: code_search::CodeIndexBranchDiffPartialReasonV1::ResultLimit,
-        base_file_count: base_counts.files,
-        head_file_count: head_counts.files,
-        base_chunk_count: base_counts.chunks,
-        head_chunk_count: head_counts.chunks,
-        base_symbol_count: base_counts.symbols,
-        head_symbol_count: head_counts.symbols,
-        total_changes: Some(total_changes),
-        added,
-        removed,
-        changed,
-    })
 }
 
 pub(super) fn bounded_diff(
@@ -245,10 +212,10 @@ pub(super) fn bounded_diff(
     head: &crate::code_index::production::CodeIndexPublishedGenerationV1,
     file_filter: Option<&str>,
     kind_filter: Option<&str>,
-    limit: usize,
+    _limit: usize,
     control: &code_index_scheduler::branch_generations::BranchGenerationReadControlV1,
 ) -> Result<
-    code_search::CodeIndexBranchDiffOutcomeV1,
+    code_search::CodeIndexBranchDiffCompletedV1,
     code_search::CodeIndexSearchUnavailableReasonV1,
 > {
     if let Some(reason) = control.termination() {
@@ -258,21 +225,62 @@ pub(super) fn bounded_diff(
     let head_id = head.manifest().generation_id.as_str();
     let base_counts = generation_counts(base);
     let head_counts = generation_counts(head);
-    if let Some(reason) =
-        generation_bound_reason(base_counts).or_else(|| generation_bound_reason(head_counts))
-    {
-        return Ok(partial(base_id, head_id, base_counts, head_counts, reason));
+    if generation_exceeds_bound(base_counts) || generation_exceeds_bound(head_counts) {
+        return Err(code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
     }
     let base_symbols = generation_symbols(base, file_filter, kind_filter, control)?;
     let head_symbols = generation_symbols(head, file_filter, kind_filter, control)?;
     if let Some(reason) = control.termination() {
         return Err(reason);
     }
-    Ok(bound_results(
-        diff_symbols(base_id, base_symbols, head_id, head_symbols),
-        base_counts,
-        head_counts,
-        limit.min(code_search::CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1),
+    diff_symbols(base_id, base_symbols, head_id, head_symbols)
+}
+
+fn prepared_error_reason(
+    error: PreparedQueryErrorV1,
+) -> code_search::CodeIndexSearchUnavailableReasonV1 {
+    match error {
+        PreparedQueryErrorV1::Invalid => {
+            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest
+        }
+        PreparedQueryErrorV1::Stale => {
+            code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
+        }
+        PreparedQueryErrorV1::Unavailable => {
+            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable
+        }
+    }
+}
+
+fn branch_diff_scope_digest(
+    scope: &tracedecay_application::ResolvedScope,
+    request: &code_search::CodeIndexBranchDiffRequestV1,
+    base_generation: &tracedecay_domain::CodeGenerationId,
+    head_generation: &tracedecay_domain::CodeGenerationId,
+) -> Result<tracedecay_domain::ManifestDigest, tracedecay_domain::DomainError> {
+    canonical_sha256(&(
+        "tracedecay.code-index-branch-diff.scope.v1",
+        &scope.repository_id,
+        &scope.worktree_id,
+        &request.base_reference,
+        &request.base_revision,
+        &request.base_tree,
+        base_generation,
+        &request.head_reference,
+        &request.head_revision,
+        &request.head_tree,
+        head_generation,
+    ))
+}
+
+fn branch_diff_query_binding_digest(
+    request: &code_search::CodeIndexBranchDiffRequestV1,
+) -> Result<tracedecay_domain::ManifestDigest, tracedecay_domain::DomainError> {
+    canonical_sha256(&(
+        "tracedecay.code-index-branch-diff.query.v1",
+        request.file_filter.as_deref(),
+        request.kind_filter.as_deref(),
+        "symbol_identity_ascending.v1",
     ))
 }
 
@@ -322,8 +330,8 @@ pub(super) fn code_index_branch_diff_executor(
                 }
             };
             let control = code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
-                deadline: request.deadline,
-                cancellation: request.cancellation,
+                deadline: request.deadline.clone(),
+                cancellation: request.cancellation.clone(),
             };
             if let Some(reason) = control.termination() {
                 return unavailable(None, None, reason);
@@ -341,8 +349,10 @@ pub(super) fn code_index_branch_diff_executor(
             let generations = match schedulers
                 .generations_for_revisions(
                     &scope,
+                    &request.base_reference,
                     &request.base_revision,
                     &request.base_tree,
+                    &request.head_reference,
                     &request.head_revision,
                     &request.head_tree,
                     control.clone(),
@@ -366,7 +376,7 @@ pub(super) fn code_index_branch_diff_executor(
                 .generation_id
                 .as_str()
                 .to_owned();
-            let outcome = match bounded_diff(
+            let completed = match bounded_diff(
                 generations.base.generation(),
                 generations.head.generation(),
                 request.file_filter.as_deref(),
@@ -374,9 +384,177 @@ pub(super) fn code_index_branch_diff_executor(
                 request.limit,
                 &control,
             ) {
-                Ok(outcome) => outcome,
+                Ok(completed) => completed,
                 Err(reason) => return unavailable(Some(base_id), Some(head_id), reason),
             };
+            let query_authority = match schedulers.query_authority_for_scope(&scope).await {
+                Some(authority) => authority,
+                None => {
+                    return unavailable(
+                        Some(base_id),
+                        Some(head_id),
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    );
+                }
+            };
+            let freshness_digest = match canonical_sha256(&(
+                "tracedecay.code-index-branch-diff.freshness.v1",
+                generations
+                    .base
+                    .generation()
+                    .manifest()
+                    .snapshot_digest
+                    .as_str(),
+                generations
+                    .head
+                    .generation()
+                    .manifest()
+                    .snapshot_digest
+                    .as_str(),
+            )) {
+                Ok(digest) => digest,
+                Err(_) => {
+                    return unavailable(
+                        Some(base_id),
+                        Some(head_id),
+                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                    );
+                }
+            };
+            let freshness = match FreshnessVectorDigest::new(freshness_digest.as_str()) {
+                Ok(freshness) => freshness,
+                Err(_) => {
+                    return unavailable(
+                        Some(base_id),
+                        Some(head_id),
+                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                    );
+                }
+            };
+            let retrieval_request = RetrievalRequest {
+                principal: authority.principal.clone(),
+                scope: RetrievalScope {
+                    privacy_domain: generations
+                        .head
+                        .generation()
+                        .manifest()
+                        .privacy_domain
+                        .clone(),
+                    root: SingleRootScopeV1 {
+                        repository: scope.repository_id.clone(),
+                        worktree: Some(scope.worktree_id.clone()),
+                        reference: Some(request.head_reference.clone()),
+                    },
+                },
+                temporal_mode: TemporalModeV1::Current,
+                snapshot: RetrievalSnapshot {
+                    watermarks: VectorWatermark::default(),
+                    freshness_digest: freshness,
+                    authorization_revision: authority.authorization_revision.clone(),
+                    captured_at: generations
+                        .base
+                        .generation()
+                        .manifest()
+                        .seal
+                        .sealed_at
+                        .max(generations.head.generation().manifest().seal.sealed_at),
+                },
+                profile_id: query_authority.profile().profile_id.clone(),
+                budget: query_authority.profile().retrieval_budget,
+            };
+            let scope_digest = match branch_diff_scope_digest(
+                &scope,
+                &request,
+                &generations.base.generation().manifest().generation_id,
+                &generations.head.generation().manifest().generation_id,
+            ) {
+                Ok(digest) => digest,
+                Err(_) => {
+                    return unavailable(
+                        Some(base_id),
+                        Some(head_id),
+                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                    );
+                }
+            };
+            let query_binding_digest = match branch_diff_query_binding_digest(&request) {
+                Ok(digest) => digest,
+                Err(_) => {
+                    return unavailable(
+                        Some(base_id),
+                        Some(head_id),
+                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                    );
+                }
+            };
+            let bindings = match PreparedQueryBindingsV1::new(
+                "code_index_branch_diff.v1",
+                scope_digest,
+                generations
+                    .head
+                    .generation()
+                    .manifest()
+                    .generation_id
+                    .clone(),
+                query_binding_digest,
+            ) {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    return unavailable(Some(base_id), Some(head_id), prepared_error_reason(error));
+                }
+            };
+            let prepared = match PreparedQueryV1::prepare(
+                Arc::clone(&query_authority),
+                retrieval_request,
+                request.cursor.as_deref(),
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return unavailable(Some(base_id), Some(head_id), prepared_error_reason(error));
+                }
+            };
+            let page_size = match u32::try_from(
+                request
+                    .limit
+                    .min(code_search::CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1),
+            ) {
+                Ok(page_size) if page_size > 0 => page_size,
+                _ => {
+                    return unavailable(
+                        Some(base_id),
+                        Some(head_id),
+                        code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                    );
+                }
+            };
+            let page = match prepared.paginate(
+                &bindings,
+                completed.changes,
+                page_size,
+                tracedecay_application::clock::now_micros(),
+            ) {
+                Ok(page) => page,
+                Err(error) => {
+                    return unavailable(Some(base_id), Some(head_id), prepared_error_reason(error));
+                }
+            };
+            let total_changes = match usize::try_from(page.total) {
+                Ok(total) => total,
+                Err(_) => {
+                    return unavailable(
+                        Some(base_id),
+                        Some(head_id),
+                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                    );
+                }
+            };
+            let outcome = page_diff_changes(
+                &base_id,
+                &head_id,
+                page.items,
+                total_changes,
+                page.next_cursor,
+            );
             let terminal_scope = match project_open_owners::resolved_scope_for_project(
                 &request.project_root,
                 &project_id,
@@ -423,10 +601,31 @@ pub(super) fn code_index_branch_diff_executor(
 mod tests {
     use tracedecay_query::code_search::{self, CodeIndexBranchSymbolV1};
 
-    use super::{GenerationCountsV1, bound_results, diff_symbols};
+    use super::{
+        branch_diff_query_binding_digest, branch_diff_scope_digest, diff_symbols, page_diff_changes,
+    };
 
-    fn symbol(qualified_name: &str, file: &str, content_digest: &str) -> CodeIndexBranchSymbolV1 {
+    fn symbol(
+        identity: u64,
+        occurrence: &str,
+        qualified_name: &str,
+        file: &str,
+        content_digest: &str,
+    ) -> CodeIndexBranchSymbolV1 {
         CodeIndexBranchSymbolV1 {
+            symbol_identity: tracedecay_domain::SymbolIdentityDigest::new(format!(
+                "sha256:{identity:064x}"
+            ))
+            .expect("symbol identity"),
+            symbol_occurrence_id: tracedecay_domain::SymbolOccurrenceId::new(occurrence)
+                .expect("symbol occurrence"),
+            file_identity: tracedecay_domain::FileIdentityDigest::new(format!(
+                "sha256:{:064x}",
+                10
+            ))
+            .expect("file identity"),
+            file_occurrence_id: tracedecay_domain::FileOccurrenceId::new("file.fixture")
+                .expect("file occurrence"),
             qualified_name: qualified_name.to_owned(),
             name: qualified_name
                 .rsplit("::")
@@ -442,35 +641,53 @@ mod tests {
     #[test]
     fn diff_is_deterministic_and_distinguishes_added_removed_and_changed_symbols() {
         let base = vec![
-            symbol("crate::changed", "src/lib.rs", "sha256:base"),
-            symbol("crate::removed", "src/old.rs", "sha256:removed"),
+            symbol(
+                1,
+                "symbol.base.changed",
+                "crate::changed",
+                "src/lib.rs",
+                "sha256:base",
+            ),
+            symbol(
+                2,
+                "symbol.base.removed",
+                "crate::removed",
+                "src/old.rs",
+                "sha256:removed",
+            ),
         ];
         let head = vec![
-            symbol("crate::added", "src/new.rs", "sha256:added"),
-            symbol("crate::changed", "src/lib.rs", "sha256:head"),
+            symbol(
+                3,
+                "symbol.head.added",
+                "crate::added",
+                "src/new.rs",
+                "sha256:added",
+            ),
+            symbol(
+                1,
+                "symbol.head.changed",
+                "crate::changed",
+                "src/lib.rs",
+                "sha256:head",
+            ),
         ];
 
-        let completed = diff_symbols("generation.base", base, "generation.head", head);
+        let completed =
+            diff_symbols("generation.base", base, "generation.head", head).expect("diff");
 
-        assert_eq!(
-            completed
-                .added
-                .iter()
-                .map(|symbol| symbol.qualified_name.as_str())
-                .collect::<Vec<_>>(),
-            ["crate::added"]
-        );
-        assert_eq!(
-            completed
-                .removed
-                .iter()
-                .map(|symbol| symbol.qualified_name.as_str())
-                .collect::<Vec<_>>(),
-            ["crate::removed"]
-        );
-        assert_eq!(completed.changed.len(), 1);
-        assert_eq!(completed.changed[0].base.content_digest, "sha256:base");
-        assert_eq!(completed.changed[0].head.content_digest, "sha256:head");
+        assert!(matches!(
+            completed.changes.as_slice(),
+            [
+                code_search::CodeIndexBranchChangeV1::Changed { base, head },
+                code_search::CodeIndexBranchChangeV1::Removed { symbol: removed },
+                code_search::CodeIndexBranchChangeV1::Added { symbol: added },
+            ] if base.content_digest == "sha256:base"
+                && head.content_digest == "sha256:head"
+                && removed.qualified_name == "crate::removed"
+                && added.qualified_name == "crate::added"
+        ));
+        assert_eq!(completed.total_changes, 3);
         assert_eq!(completed.base_generation, "generation.base");
         assert_eq!(completed.head_generation, "generation.head");
     }
@@ -480,33 +697,248 @@ mod tests {
         let head = (0..300)
             .map(|index| {
                 symbol(
+                    u64::try_from(index).expect("fixture index"),
+                    &format!("symbol.head.{index:03}"),
                     &format!("crate::added_{index:03}"),
                     "src/lib.rs",
                     &format!("sha256:{index:064x}"),
                 )
             })
             .collect();
-        let completed = diff_symbols("generation.base", Vec::new(), "generation.head", head);
-        let counts = GenerationCountsV1 {
-            files: 1,
-            chunks: 300,
-            symbols: 300,
-        };
-
-        let outcome = bound_results(completed, counts, counts, 10);
+        let completed =
+            diff_symbols("generation.base", Vec::new(), "generation.head", head).expect("diff");
+        let outcome = page_diff_changes(
+            &completed.base_generation,
+            &completed.head_generation,
+            completed.changes.into_iter().take(10).collect(),
+            completed.total_changes,
+            Some("cursor.authenticated".to_owned()),
+        );
 
         assert!(matches!(
             outcome,
             code_search::CodeIndexBranchDiffOutcomeV1::Partial(
                 code_search::CodeIndexBranchDiffPartialV1 {
                     reason: code_search::CodeIndexBranchDiffPartialReasonV1::ResultLimit,
-                    total_changes: Some(300),
-                    added,
-                    removed,
-                    changed,
+                    total_changes: 300,
+                    changes,
+                    next_cursor,
                     ..
                 }
-            ) if added.len() == 10 && removed.is_empty() && changed.is_empty()
+            ) if changes.len() == 10 && next_cursor == "cursor.authenticated"
         ));
+    }
+
+    #[test]
+    fn result_page_retains_authenticated_continuation_and_merged_order() {
+        let changes = vec![
+            code_search::CodeIndexBranchChangeV1::Removed {
+                symbol: symbol(
+                    1,
+                    "symbol.base.removed",
+                    "crate::removed",
+                    "src/a.rs",
+                    "sha256:removed",
+                ),
+            },
+            code_search::CodeIndexBranchChangeV1::Added {
+                symbol: symbol(
+                    2,
+                    "symbol.head.added",
+                    "crate::added",
+                    "src/b.rs",
+                    "sha256:added",
+                ),
+            },
+        ];
+
+        let outcome = page_diff_changes(
+            "generation.base",
+            "generation.head",
+            changes.clone(),
+            3,
+            Some("cursor.authenticated".to_owned()),
+        );
+
+        assert!(matches!(
+            outcome,
+            code_search::CodeIndexBranchDiffOutcomeV1::Partial(
+                code_search::CodeIndexBranchDiffPartialV1 {
+                    total_changes: 3,
+                    changes: page,
+                    next_cursor,
+                    ..
+                }
+            ) if page == changes && next_cursor == "cursor.authenticated"
+        ));
+    }
+
+    #[test]
+    fn same_named_symbol_occurrences_are_not_overwritten() {
+        let base = vec![
+            symbol(
+                1,
+                "symbol.base.duplicate-a",
+                "crate::duplicate",
+                "src/lib.rs",
+                "sha256:base-a",
+            ),
+            symbol(
+                2,
+                "symbol.base.duplicate-b",
+                "crate::duplicate",
+                "src/lib.rs",
+                "sha256:base-b",
+            ),
+        ];
+        let head = vec![
+            symbol(
+                1,
+                "symbol.head.duplicate-a",
+                "crate::duplicate",
+                "src/lib.rs",
+                "sha256:head-a",
+            ),
+            symbol(
+                2,
+                "symbol.head.duplicate-b",
+                "crate::duplicate",
+                "src/lib.rs",
+                "sha256:head-b",
+            ),
+        ];
+
+        let completed =
+            diff_symbols("generation.base", base, "generation.head", head).expect("diff");
+
+        assert_eq!(
+            completed.changes.len(),
+            2,
+            "stable occurrence identity must preserve same-name definitions"
+        );
+    }
+
+    #[test]
+    fn duplicate_stable_symbol_identity_is_typed_corruption() {
+        let duplicated = vec![
+            symbol(
+                1,
+                "symbol.base.duplicate-a",
+                "crate::duplicate",
+                "src/a.rs",
+                "sha256:a",
+            ),
+            symbol(
+                1,
+                "symbol.base.duplicate-b",
+                "crate::duplicate",
+                "src/b.rs",
+                "sha256:b",
+            ),
+        ];
+
+        assert_eq!(
+            diff_symbols("generation.base", duplicated, "generation.head", Vec::new(),),
+            Err(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
+        );
+    }
+
+    #[test]
+    fn continuation_binding_covers_exact_refs_commits_trees_generations_and_filters() {
+        let scope = tracedecay_application::ResolvedScope::new(
+            tracedecay_domain::ProjectId::new("project.diff-binding").expect("project"),
+            tracedecay_domain::RepositoryId::new("repository.diff-binding").expect("repository"),
+            tracedecay_domain::WorktreeId::new("worktree.diff-binding").expect("worktree"),
+            Some(tracedecay_domain::RefId::new("refs/heads/head").expect("scope reference")),
+        )
+        .expect("scope");
+        let request = code_search::CodeIndexBranchDiffRequestV1 {
+            project_root: std::path::PathBuf::from("/project"),
+            base_reference: tracedecay_domain::RefId::new("refs/heads/base")
+                .expect("base reference"),
+            base_revision: tracedecay_domain::GitOidV1::new("1".repeat(40)).expect("base revision"),
+            base_tree: tracedecay_domain::GitOidV1::new("2".repeat(40)).expect("base tree"),
+            head_reference: tracedecay_domain::RefId::new("refs/heads/head")
+                .expect("head reference"),
+            head_revision: tracedecay_domain::GitOidV1::new("3".repeat(40)).expect("head revision"),
+            head_tree: tracedecay_domain::GitOidV1::new("4".repeat(40)).expect("head tree"),
+            file_filter: Some("src".to_owned()),
+            kind_filter: Some("function".to_owned()),
+            limit: 10,
+            cursor: None,
+            authority: None,
+            deadline: None,
+            cancellation: None,
+        };
+        let base_generation =
+            tracedecay_domain::CodeGenerationId::new("generation.diff.base").expect("base gen");
+        let head_generation =
+            tracedecay_domain::CodeGenerationId::new("generation.diff.head").expect("head gen");
+        let expected =
+            branch_diff_scope_digest(&scope, &request, &base_generation, &head_generation)
+                .expect("scope digest");
+
+        let mut mutations = Vec::new();
+        let mut changed = request.clone();
+        changed.base_reference =
+            tracedecay_domain::RefId::new("refs/heads/other-base").expect("other base");
+        mutations.push(changed);
+        let mut changed = request.clone();
+        changed.base_revision =
+            tracedecay_domain::GitOidV1::new("5".repeat(40)).expect("other base commit");
+        mutations.push(changed);
+        let mut changed = request.clone();
+        changed.base_tree =
+            tracedecay_domain::GitOidV1::new("6".repeat(40)).expect("other base tree");
+        mutations.push(changed);
+        let mut changed = request.clone();
+        changed.head_reference =
+            tracedecay_domain::RefId::new("refs/heads/other-head").expect("other head");
+        mutations.push(changed);
+        let mut changed = request.clone();
+        changed.head_revision =
+            tracedecay_domain::GitOidV1::new("7".repeat(40)).expect("other head commit");
+        mutations.push(changed);
+        let mut changed = request.clone();
+        changed.head_tree =
+            tracedecay_domain::GitOidV1::new("8".repeat(40)).expect("other head tree");
+        mutations.push(changed);
+        for changed in mutations {
+            assert_ne!(
+                branch_diff_scope_digest(&scope, &changed, &base_generation, &head_generation,)
+                    .expect("changed scope digest"),
+                expected,
+            );
+        }
+        assert_ne!(
+            branch_diff_scope_digest(
+                &scope,
+                &request,
+                &tracedecay_domain::CodeGenerationId::new("generation.diff.other-base")
+                    .expect("other base gen"),
+                &head_generation,
+            )
+            .expect("changed base generation digest"),
+            expected,
+        );
+        assert_ne!(
+            branch_diff_scope_digest(
+                &scope,
+                &request,
+                &base_generation,
+                &tracedecay_domain::CodeGenerationId::new("generation.diff.other-head")
+                    .expect("other head gen"),
+            )
+            .expect("changed head generation digest"),
+            expected,
+        );
+        let expected_query =
+            branch_diff_query_binding_digest(&request).expect("query binding digest");
+        let mut changed_filter = request;
+        changed_filter.kind_filter = Some("struct".to_owned());
+        assert_ne!(
+            branch_diff_query_binding_digest(&changed_filter).expect("changed query digest"),
+            expected_query,
+        );
     }
 }

@@ -251,6 +251,8 @@ pub(in crate::daemon) enum QuerySearchExecutionErrorV1 {
     GenerationUnavailable,
     #[error("exact generation read is unavailable: {0:?}")]
     ExactGenerationUnavailable(tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1),
+    #[error("exact generation cursor does not match the selected code source")]
+    ExactCursorInvalid,
     #[error("query authority is unavailable for the exact admitted scope")]
     AuthorityUnavailable,
     #[error("query search policy is invalid: {0}")]
