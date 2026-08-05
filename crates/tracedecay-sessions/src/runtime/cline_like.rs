@@ -385,13 +385,16 @@ pub async fn capture_cline_like_snapshot_observations(
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
     capture_snapshot_observations(
         facade,
+        source.provider,
         scope,
         cancellation,
         max_new_bytes,
-        source.discover_transcript_paths(
-            project_root,
-            TranscriptDiscoveryBounds::from_discovered_units(MAX_TASKS_PER_PASS),
-        ),
+        || {
+            source.discover_transcript_paths(
+                project_root,
+                TranscriptDiscoveryBounds::from_discovered_units(MAX_TASKS_PER_PASS),
+            )
+        },
         |path| snapshot_input_bytes(source.provider, path),
         |path| {
             let Some(parsed) =

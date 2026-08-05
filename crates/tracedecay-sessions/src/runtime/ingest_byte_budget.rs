@@ -85,16 +85,6 @@ impl IngestByteBudget {
         self.consumed = self.consumed.saturating_add(bytes);
         true
     }
-
-    /// Returns the current batch's provisional charge when cancellation wins
-    /// before any record from that batch reaches durable admission.
-    pub(super) fn defer_unadmitted(&mut self, bytes: u64) {
-        if let Some(remaining) = &mut self.remaining {
-            *remaining = remaining.saturating_add(bytes);
-        }
-        self.consumed = self.consumed.saturating_sub(bytes);
-        self.deferred = true;
-    }
 }
 
 #[cfg(test)]
