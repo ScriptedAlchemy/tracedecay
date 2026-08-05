@@ -596,6 +596,7 @@ pub async fn ensure_git_correlation_schema_in_transaction(
             GIT_CORRELATION_SCHEMA_VERSION
         )));
     }
+    history_progress::install_final_schema(conn).await?;
     if version == Some(GIT_CORRELATION_SCHEMA_VERSION) {
         return Ok(());
     }
@@ -1890,6 +1891,8 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
 }
 
 mod backfill;
+#[path = "git_correlation/backfill/bounded/progress.rs"]
+pub(super) mod history_progress;
 mod store;
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
