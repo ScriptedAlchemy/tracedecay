@@ -6,7 +6,8 @@ mod producer;
 pub use export::RegisteredAggregateShareExporterV1;
 pub use producer::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
-    ObservabilityProducerIdentityV1, ObservabilityProducerSummaryV1,
+    ObservabilityProducerDeadlinesV1, ObservabilityProducerIdentityV1,
+    ObservabilityProducerSummaryV1,
 };
 
 use tracedecay_application::{
@@ -562,10 +563,28 @@ pub async fn observatory_read_model(
         })
         .collect::<Vec<_>>();
     let observed = events.len() as u64;
+    let explicit_drop_carriers = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ObservabilityPayloadV1::TelemetryDrop(drop) => Some((
+                (
+                    event.process_boot_id.clone(),
+                    drop.last_missing_sequence.saturating_add(1),
+                ),
+                drop.proved_drop_lower_bound,
+            )),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let dropped = events.iter().fold(0u64, |total, event| {
         let payload_drops = match &event.payload {
             ObservabilityPayloadV1::TelemetryDrop(drop) => drop.proved_drop_lower_bound,
-            _ => event.dropped_count,
+            _ => event.dropped_count.saturating_sub(
+                explicit_drop_carriers
+                    .get(&(event.process_boot_id.clone(), event.producer_sequence))
+                    .copied()
+                    .unwrap_or(0),
+            ),
         };
         total.saturating_add(payload_drops)
     });

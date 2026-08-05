@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracedecay_application::{
     AggregateShareExportRequestV1, ObservabilityAggregateExportApplicationV1,
@@ -10,8 +11,8 @@ use tracedecay_domain::{
 };
 use tracedecay_usecases::observability::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
-    ObservabilityProducerIdentityV1, RegisteredAggregateShareExporterV1,
-    RegisteredObservabilityPortV1,
+    ObservabilityProducerDeadlinesV1, ObservabilityProducerIdentityV1,
+    RegisteredAggregateShareExporterV1, RegisteredObservabilityPortV1,
 };
 
 fn envelope(scope: &str, boot: &str, id: u64, event_time_micros: i64) -> ObservabilityEnvelopeV1 {
@@ -146,7 +147,7 @@ async fn full_producer_queue_reports_drops_through_durable_coverage() {
 
     let page = RegisteredObservabilityPortV1::new(&db)
         .query(ObservabilityQueryV1 {
-            authorized_scope_ref: scope,
+            authorized_scope_ref: scope.clone(),
             event_kinds: Vec::new(),
             horizon: ObservabilityHorizonV1 {
                 since_micros: 0,
@@ -163,6 +164,161 @@ async fn full_producer_queue_reports_drops_through_durable_coverage() {
                 || matches!(event.payload, ObservabilityPayloadV1::TelemetryDrop(_))
         }),
         "accepted or control-lane event must expose drops"
+    );
+}
+
+#[tokio::test]
+async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let (_project, runtime) = runtime().await;
+    let db = runtime.project_database_arc().expect("project database");
+    let scope = "project.observability.v2".to_owned();
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: scope.clone(),
+        process_boot_id: "boot:carried-drops".into(),
+        producer_revision: "producer.v1".into(),
+        configuration_revision: "configuration.v1".into(),
+        policy_revision: "policy.v1".into(),
+    };
+    let blocker = db
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    let mut producer =
+        BoundedObservabilityProducerV1::start(Arc::clone(&db), identity, 1).expect("producer");
+    assert_eq!(
+        producer
+            .try_emit(envelope(&scope, "boot:carried-drops", 1, 1))
+            .expect("first emission"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+    tokio::task::yield_now().await;
+    assert_eq!(
+        producer
+            .try_emit(envelope(&scope, "boot:carried-drops", 2, 2))
+            .expect("queued emission"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+    let mut dropped = u64::from(
+        producer
+            .try_emit(envelope(&scope, "boot:carried-drops", 3, 3))
+            .expect("capacity observation")
+            == ObservabilityEmissionOutcomeV1::DroppedAtCapacity,
+    );
+    assert!(dropped > 0, "the held writer must make the data queue full");
+    blocker.commit().await.expect("release registered writer");
+
+    let mut next_id = 4_u64;
+    let mut later_enqueued = false;
+    for _ in 0..1_024 {
+        match producer
+            .try_emit(envelope(
+                &scope,
+                "boot:carried-drops",
+                next_id,
+                i64::try_from(next_id).expect("small event id"),
+            ))
+            .expect("bounded emission")
+        {
+            ObservabilityEmissionOutcomeV1::Enqueued => {
+                later_enqueued = true;
+                break;
+            }
+            ObservabilityEmissionOutcomeV1::DroppedAtCapacity => {
+                dropped = dropped.saturating_add(1);
+                next_id = next_id.saturating_add(1);
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    assert!(
+        later_enqueued,
+        "worker must reopen a bounded data slot after the writer is released"
+    );
+    let summary = producer.shutdown().await.expect("shutdown producer");
+    assert_eq!(summary.dropped, dropped);
+
+    let page = RegisteredObservabilityPortV1::new(&db)
+        .query(ObservabilityQueryV1 {
+            authorized_scope_ref: scope.clone(),
+            event_kinds: vec!["telemetry.drop.observed.v1".to_owned()],
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: i64::MAX,
+            },
+            after_watermark: None,
+            limit: 16,
+        })
+        .await
+        .expect("drop query");
+    let explicit = page
+        .events
+        .iter()
+        .find_map(|event| match &event.payload {
+            ObservabilityPayloadV1::TelemetryDrop(value) => Some(value),
+            _ => None,
+        })
+        .expect("explicit durable drop range");
+    assert_eq!(explicit.proved_drop_lower_bound, dropped);
+    assert_eq!(
+        explicit
+            .last_missing_sequence
+            .saturating_sub(explicit.first_missing_sequence)
+            .saturating_add(1),
+        dropped
+    );
+    let read_model =
+        tracedecay_usecases::observability::observatory_read_model(&db, Some(&scope), 0).await;
+    let drop_metric = read_model
+        .metrics
+        .iter()
+        .find(|metric| metric.metric == "telemetry_drops_lower_bound")
+        .expect("drop metric");
+    assert_eq!(drop_metric.coverage.unknown, dropped);
+}
+
+#[tokio::test]
+async fn cancellation_is_bounded_when_the_registered_writer_is_blocked() {
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let (_project, runtime) = runtime().await;
+    let db = runtime.project_database_arc().expect("project database");
+    let scope = "project.observability.v2".to_owned();
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: scope.clone(),
+        process_boot_id: "boot:deadline".into(),
+        producer_revision: "producer.v1".into(),
+        configuration_revision: "configuration.v1".into(),
+        policy_revision: "policy.v1".into(),
+    };
+    let blocker = db
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    let mut producer = BoundedObservabilityProducerV1::start_with_deadlines(
+        Arc::clone(&db),
+        identity,
+        1,
+        ObservabilityProducerDeadlinesV1 {
+            persistence: Duration::from_millis(50),
+            shutdown: Duration::from_millis(250),
+        },
+    )
+    .expect("producer");
+    producer
+        .try_emit(envelope(&scope, "boot:deadline", 1, 1))
+        .expect("enqueue blocked record");
+    tokio::task::yield_now().await;
+
+    let cancellation = tokio::time::timeout(Duration::from_millis(500), producer.cancel())
+        .await
+        .expect("producer cancellation must honor its own database deadline");
+    blocker.commit().await.expect("release registered writer");
+    let error = cancellation.expect_err("blocked persistence is reported");
+    assert!(
+        error
+            .to_string()
+            .contains("observability_persistence_deadline"),
+        "unexpected cancellation error: {error}"
     );
 }
 
@@ -210,7 +366,7 @@ async fn aggregate_share_export_suppresses_identity_and_small_contributions() {
             cell.metric == tracedecay_application::AggregateShareMetricV1::RetrievalQueries
         })
         .expect("retrieval query cell");
-    assert_eq!(retrieval_queries.value, Some(100.0));
+    assert_eq!(retrieval_queries.value, Some(101.0));
     let encoded = serde_json::to_string(&packet).expect("encode packet");
     for prohibited in [
         "project.observability.v2",

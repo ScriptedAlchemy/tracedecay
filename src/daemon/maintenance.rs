@@ -328,6 +328,11 @@ impl MaintenanceCoordinator {
                 *self.store_cursor.lock().await = next_cursor.clone();
                 // Global (profile-wide) compaction is a single bounded op, not a
                 // per-store loop, so it runs every tick outside the round-robin.
+                succeeded &= super::store_maintenance::run_observability_analytics_retention(
+                    profile_database,
+                    "global.db",
+                )
+                .await;
                 if let Some(compaction) = &retention.compaction {
                     succeeded &= super::store_maintenance::run_global_compaction(
                         profile_database,
