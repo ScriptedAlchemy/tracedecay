@@ -359,10 +359,27 @@ impl ProjectOpenTasks {
             .await
     }
 
-    pub(super) async fn shutdown_project_roots(
+    pub(super) async fn shutdown_project_identity(
         &self,
         profile_root: &Path,
+        project_id: &str,
         project_roots: &std::collections::BTreeSet<PathBuf>,
+    ) -> bool {
+        self.shutdown_project_identity_with_deadline(
+            profile_root,
+            project_id,
+            project_roots,
+            DAEMON_TASK_ABORT_DEADLINE,
+        )
+        .await
+    }
+
+    pub(super) async fn shutdown_project_identity_with_deadline(
+        &self,
+        profile_root: &Path,
+        project_id: &str,
+        project_roots: &std::collections::BTreeSet<PathBuf>,
+        timeout: Duration,
     ) -> bool {
         {
             let mut registry = self.registry.lock().await;
@@ -371,7 +388,16 @@ impl ProjectOpenTasks {
                 .keys()
                 .filter(|route| {
                     route.profile_root == profile_root
-                        && project_roots.contains(&route.project_path)
+                        && (project_roots.contains(&route.project_path)
+                            || crate::storage::resolve_persisted_layout(
+                                &route.project_path,
+                                profile_root,
+                            )
+                            .ok()
+                            .flatten()
+                            .and_then(|layout| layout.identity.project_id)
+                            .as_deref()
+                                == Some(project_id))
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -382,7 +408,7 @@ impl ProjectOpenTasks {
                 }
             }
         }
-        self.drain_retiring(DAEMON_TASK_ABORT_DEADLINE).await
+        self.drain_retiring(timeout).await
     }
 
     pub(super) async fn shutdown_with_deadline(

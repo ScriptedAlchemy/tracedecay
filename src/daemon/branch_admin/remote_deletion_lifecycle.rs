@@ -391,6 +391,44 @@ impl StoreAdministration {
                     self.shutdown_host_admission_replay().await;
                     self.session_temporal_refresh_schedulers.shutdown().await;
                     self.host_admission_brokers.lock().await.clear();
+                    #[cfg(unix)]
+                    if !self
+                        .settle_retirement_reapers(super::super::DAEMON_TASK_ABORT_DEADLINE)
+                        .await
+                    {
+                        let cleanup = crate::global_db::RemoteDeletionCleanupState::Settling {
+                            failure_code: RemoteDeletionFailureCode::RuntimeOwnersSettling,
+                            phase: RemoteDeletionPhase::CancelRuntimeOwners,
+                            retryable: true,
+                        };
+                        database
+                            .transition_remote_deletion_tombstone(
+                                &tombstone,
+                                tombstone.cleanup.clone(),
+                                cleanup,
+                            )
+                            .await
+                            .map_err(|error| {
+                                RemoteDeletionExecutionError::new(
+                                    receipt.clone(),
+                                    RemoteDeletionFailureCode::TombstoneUnavailable,
+                                    RemoteDeletionPhase::PersistTombstone,
+                                    true,
+                                    error,
+                                )
+                            })?;
+                        return Err(RemoteDeletionExecutionError::new(
+                            receipt,
+                            RemoteDeletionFailureCode::RuntimeOwnersSettling,
+                            RemoteDeletionPhase::CancelRuntimeOwners,
+                            true,
+                            TraceDecayError::Config {
+                                message:
+                                    "remote-deleted account runtime owners are still settling"
+                                        .to_owned(),
+                            },
+                        ));
+                    }
                     let projects = match self
                         .remote_deletion_project_ids(&database, &profile_root)
                         .await
@@ -611,7 +649,7 @@ impl StoreAdministration {
             })?;
         let open_tasks = super::super::project_open_tasks(owners.project_open_gates.as_ref()).await;
         if !open_tasks
-            .shutdown_project_roots(profile_root, &project_roots)
+            .shutdown_project_identity(profile_root, project_id, &project_roots)
             .await
         {
             return Err(cleanup_error(
@@ -911,6 +949,21 @@ impl StoreAdministration {
         #[cfg(unix)]
         self.abort_remote_deleted_maintenance_schedulers(profile_root, project_id)
             .await?;
+        #[cfg(unix)]
+        if !self
+            .settle_retirement_reapers_for_project(
+                profile_root,
+                project_id,
+                super::super::DAEMON_TASK_ABORT_DEADLINE,
+            )
+            .await
+        {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "remote-deleted project '{project_id}' maintenance reapers are still settling"
+                ),
+            });
+        }
         project_server_lifecycle::schedule_project_server_retirement(self, servers, None).await;
         if !self
             .settle_project_server_retirements(super::super::DAEMON_TASK_ABORT_DEADLINE)

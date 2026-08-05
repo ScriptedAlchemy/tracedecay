@@ -570,6 +570,7 @@ impl StoreAdministration {
         &self,
     ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
     {
+        self.ensure_account_active().await?;
         self.session_runtime_registry().await
     }
 
@@ -577,13 +578,14 @@ impl StoreAdministration {
         &self,
     ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
     {
+        self.ensure_account_active().await?;
         self.session_runtime_registry().await
     }
 
     pub(super) async fn registered_profile_session_database(
         &self,
     ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
-        self.ensure_profile_not_remote_deleted().await?;
+        self.ensure_account_active().await?;
         self.session_runtime_registry()
             .await?
             .profile_sessions()
@@ -618,7 +620,7 @@ impl StoreAdministration {
             .await
     }
 
-    async fn ensure_profile_not_remote_deleted(&self) -> Result<()> {
+    pub(super) async fn ensure_account_active(&self) -> Result<()> {
         let database = self.raw_registered_profile_database().await?;
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
@@ -633,6 +635,15 @@ impl StoreAdministration {
             ));
         }
         Ok(())
+    }
+
+    pub(super) async fn remote_account_deletion_tombstone(
+        &self,
+    ) -> Result<Option<crate::global_db::RemoteDeletionTombstone>> {
+        let database = self.raw_registered_profile_database().await?;
+        database
+            .remote_account_deletion_tombstone(self.profile_identity()?.profile_id().as_str())
+            .await
     }
 
     pub(super) async fn mounted_registered_session_databases(
@@ -1073,6 +1084,76 @@ impl StoreAdministration {
         }
     }
 
+    #[cfg(unix)]
+    pub(super) async fn settle_retirement_reapers(&self, timeout: std::time::Duration) -> bool {
+        self.settle_retirement_reapers_for_owner(None, timeout, true)
+            .await
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn settle_retirement_reapers_for_project(
+        &self,
+        profile_root: &Path,
+        project_id: &str,
+        timeout: std::time::Duration,
+    ) -> bool {
+        self.settle_retirement_reapers_for_owner(Some((profile_root, project_id)), timeout, false)
+            .await
+    }
+
+    #[cfg(unix)]
+    async fn settle_retirement_reapers_for_owner(
+        &self,
+        owner: Option<(&Path, &str)>,
+        timeout: std::time::Duration,
+        stop_accepting: bool,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let changed = self.retirement_reapers.changed.notified();
+            let (pending, matching) = {
+                let mut state = self.retirement_reapers.state();
+                if stop_accepting {
+                    state.accepting = false;
+                }
+                let matching = state
+                    .reapers
+                    .iter()
+                    .filter(|(key, _)| {
+                        owner.is_none_or(|(profile_root, project_id)| {
+                            key.owner.owner.profile_root == profile_root
+                                && key.owner.owner.project_id.as_deref() == Some(project_id)
+                        })
+                    })
+                    .map(|(_, handle)| {
+                        (handle.retired_task.clone(), Arc::clone(&handle.termination))
+                    })
+                    .collect::<Vec<_>>();
+                (state.pending, matching)
+            };
+            if pending == 0 && matching.is_empty() {
+                return true;
+            }
+            for (task, _) in &matching {
+                task.abort();
+            }
+            if matching.is_empty() {
+                if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                    return false;
+                }
+                continue;
+            }
+            for (_, termination) in matching {
+                if tokio::time::timeout_at(deadline, termination.wait())
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
     #[cfg(all(test, unix))]
     pub(super) async fn retirement_reaper_count(&self) -> usize {
         self.retirement_reapers.state().reapers.len()
@@ -1129,6 +1210,7 @@ impl StoreAdministration {
         &self,
         profile_root: &Path,
     ) -> Result<Vec<crate::dashboard::AutomationSchedulerOwnerReconcileOutcome>> {
+        self.ensure_account_active().await?;
         let profile_root = authority::canonical_identity_path(profile_root)?;
         let servers = {
             let registry = self.project_servers.lock().await;

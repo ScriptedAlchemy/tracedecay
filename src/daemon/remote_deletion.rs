@@ -20,6 +20,39 @@ pub(super) struct RemoteDeletionRuntimeOwners {
     pub(super) project_open_gates: std::sync::Arc<tokio::sync::Mutex<super::ProjectOpenGates>>,
 }
 
+pub(super) enum RemoteDeletionBootMode {
+    Ordinary,
+    DeletionOnly(RemoteDeletionReceipt),
+}
+
+pub(super) async fn resume_remote_account_deletion_for_boot(
+    owners: &RemoteDeletionRuntimeOwners,
+) -> crate::errors::Result<RemoteDeletionBootMode> {
+    let Some(tombstone) = owners
+        .administration
+        .remote_account_deletion_tombstone()
+        .await?
+    else {
+        return Ok(RemoteDeletionBootMode::Ordinary);
+    };
+    match owners
+        .administration
+        .execute_remote_deletion(
+            owners,
+            RemoteDeletionReceiptTarget::Account,
+            None,
+            tombstone.tombstone_id,
+        )
+        .await
+    {
+        Ok(receipt) => Ok(RemoteDeletionBootMode::DeletionOnly(receipt)),
+        Err(error) if error.receipt.tombstone_recorded => {
+            Ok(RemoteDeletionBootMode::DeletionOnly(error.receipt))
+        }
+        Err(error) => Err(error.source),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "target", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum RemoteDeletionHttpTarget {
