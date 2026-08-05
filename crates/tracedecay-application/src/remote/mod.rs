@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod capture;
 pub mod composition;
+pub mod credential_admission;
 pub mod protocol;
 pub mod query;
 pub mod recovery;

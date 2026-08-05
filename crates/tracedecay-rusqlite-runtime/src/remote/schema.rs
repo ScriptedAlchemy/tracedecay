@@ -18,6 +18,7 @@ CREATE TABLE remote_authorities (
 
 CREATE TABLE remote_enrollment_grants (
     grant_id TEXT PRIMARY KEY,
+    credential_fingerprint TEXT NOT NULL UNIQUE,
     grant_json TEXT NOT NULL,
     admission_json TEXT NOT NULL,
     consumed_at INTEGER
@@ -80,6 +81,48 @@ pub(super) const REMOTE_NODE_LOCAL_TABLES: &[&str] = &[
     "remote_replay_policies",
     "remote_spool_frames",
     "remote_store_contract",
+];
+
+pub(super) const REMOTE_NODE_LOCAL_COLUMNS: &[(&str, &str)] = &[
+    ("remote_authorities", "brain_id"),
+    ("remote_authorities", "runtime_binding_json"),
+    ("remote_authorities", "authority_state_json"),
+    ("remote_authorities", "writer_json"),
+    ("remote_authorities", "updated_at"),
+    ("remote_enrollment_grants", "grant_id"),
+    ("remote_enrollment_grants", "credential_fingerprint"),
+    ("remote_enrollment_grants", "grant_json"),
+    ("remote_enrollment_grants", "admission_json"),
+    ("remote_enrollment_grants", "consumed_at"),
+    ("remote_enrollments", "enrollment_id"),
+    ("remote_enrollments", "brain_id"),
+    ("remote_enrollments", "node_id"),
+    ("remote_enrollments", "revision"),
+    ("remote_enrollments", "credential_fingerprint"),
+    ("remote_enrollments", "enrollment_json"),
+    ("remote_enrollments", "commit_receipt_json"),
+    ("remote_query_policies", "scope_digest"),
+    ("remote_query_policies", "policy_revision"),
+    ("remote_query_policies", "record_json"),
+    ("remote_replay_policies", "scope_digest"),
+    ("remote_replay_policies", "policy_revision"),
+    ("remote_replay_policies", "evidence_json"),
+    ("remote_spool_frames", "event_id"),
+    ("remote_spool_frames", "enrollment_id"),
+    ("remote_spool_frames", "sequence"),
+    ("remote_spool_frames", "previous_event_id"),
+    ("remote_spool_frames", "frame_digest"),
+    ("remote_spool_frames", "key_revision"),
+    ("remote_spool_frames", "nonce"),
+    ("remote_spool_frames", "ciphertext"),
+    ("remote_spool_frames", "state"),
+    ("remote_spool_frames", "last_attempt"),
+    ("remote_spool_frames", "attempt_started_at"),
+    ("remote_spool_frames", "receipt_json"),
+    ("remote_spool_frames", "finding"),
+    ("remote_spool_frames", "captured_at"),
+    ("remote_store_contract", "singleton"),
+    ("remote_store_contract", "contract_id"),
 ];
 
 /// Canonical repository-store fragment for replay identity and sequencing.

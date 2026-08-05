@@ -68,7 +68,9 @@ pub(super) fn map_enrollment_error(
     error: RemoteSqliteStorageErrorV1,
 ) -> RemoteEnrollmentAuthorityErrorV1 {
     match error {
-        RemoteSqliteStorageErrorV1::Corruption | RemoteSqliteStorageErrorV1::BindingMismatch => {
+        RemoteSqliteStorageErrorV1::Corruption
+        | RemoteSqliteStorageErrorV1::BindingMismatch
+        | RemoteSqliteStorageErrorV1::Conflict => {
             RemoteEnrollmentAuthorityErrorV1::IdentityConflict
         }
         _ => RemoteEnrollmentAuthorityErrorV1::Unavailable,

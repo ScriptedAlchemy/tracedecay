@@ -162,10 +162,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         node_id: BrainNodeId,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
     ) -> Result<RemoteSqliteStorageV1> {
-        let database = {
+        let (database, newly_mounted) = {
             let mut mounted = self.remote_nodes.lock().await;
             if let Some(database) = mounted.get(&node_id) {
-                Arc::clone(database)
+                (Arc::clone(database), false)
             } else {
                 let shard_id = StoreShardIdV1::remote_node(
                     self.identity.brain_id().clone(),
@@ -187,7 +187,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?,
                 );
                 mounted.insert(node_id, Arc::clone(&database));
-                database
+                (database, true)
             }
         };
         let authority = database.write_authority()?;
@@ -200,10 +200,22 @@ impl DaemonSessionRuntimeRegistryV1 {
                     format!("registered storage handle unavailable: {error:?}"),
                 )
             })?;
-        RemoteSqliteStorageV1::from_registered(handle, runtime.binding().clone(), keyring)
-            .map_err(|error| {
-                session_registry_error("attach Remote Brain node store", error.to_string())
-            })
+        let storage =
+            RemoteSqliteStorageV1::from_registered(handle, runtime.binding().clone(), keyring)
+                .map_err(|error| {
+                    session_registry_error("attach Remote Brain node store", error.to_string())
+                })?;
+        if newly_mounted {
+            storage
+                .recover_interrupted_replay_attempts(tracedecay_application::clock::now_micros())
+                .map_err(|error| {
+                    session_registry_error(
+                        "recover interrupted Remote Brain replay",
+                        error.to_string(),
+                    )
+                })?;
+        }
+        Ok(storage)
     }
 
     pub(crate) async fn mounted_session_databases(&self) -> Vec<Arc<RegisteredGlobalDb>> {

@@ -42,10 +42,14 @@ use tracedecay_application::{
 };
 
 const READ_WAIT: Duration = Duration::from_secs(5);
+mod credential_admission;
 mod crypto;
 mod enrollment;
+mod enrollment_lifecycle;
 mod policy;
 mod replay_authority;
+mod replay_recovery;
+mod rows;
 mod schema;
 mod status;
 
@@ -54,6 +58,8 @@ use enrollment::{
     enrollment_one_row, enrollment_row_text, load_authority_state, load_enrollment,
     map_enrollment_error,
 };
+pub use replay_recovery::RemoteReplayStartupRecoveryV1;
+use rows::*;
 pub use schema::{REMOTE_NODE_LOCAL_SCHEMA, REMOTE_OBSERVATION_EVENTS_SCHEMA};
 pub use status::RemoteStorageStatusSnapshotV1;
 
@@ -65,6 +71,8 @@ pub enum RemoteSqliteStorageErrorV1 {
     InvalidKeyLength,
     #[error("remote Brain store binding does not match the registered runtime")]
     BindingMismatch,
+    #[error("remote Brain store compare-and-swap precondition did not match")]
+    Conflict,
     #[error("remote Brain store does not have the exact final persisted shape and requires reset")]
     ResetRequired,
     #[error("remote Brain storage is corrupt")]
@@ -211,12 +219,13 @@ impl RemoteSqliteStorageV1 {
             serde_json::to_string(admission).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let result = self.handle.execute(ExactSqlStatement::new(
             "INSERT INTO remote_enrollment_grants (
-                grant_id, grant_json, admission_json, consumed_at
-             ) VALUES (?1, ?2, ?3, NULL)
+                grant_id, credential_fingerprint, grant_json, admission_json, consumed_at
+             ) VALUES (?1, ?2, ?3, ?4, NULL)
              ON CONFLICT(grant_id) DO NOTHING"
                 .to_owned(),
             vec![
                 text(grant.grant_id.as_str()),
+                text(grant.fingerprint.digest().as_str()),
                 text(&grant_json),
                 text(&admission_json),
             ],
@@ -614,6 +623,29 @@ fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStor
     if names != schema::REMOTE_NODE_LOCAL_TABLES {
         return Err(RemoteSqliteStorageErrorV1::ResetRequired);
     }
+    let columns = query(
+        handle,
+        "SELECT tables.name, columns.name
+         FROM sqlite_master AS tables
+         JOIN pragma_table_info(tables.name) AS columns
+         WHERE tables.type = 'table' AND tables.name NOT LIKE 'sqlite_%'
+         ORDER BY tables.name, columns.cid",
+        Vec::new(),
+    )
+    .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
+    let columns = columns
+        .rows
+        .iter()
+        .map(|row| match row.values.as_slice() {
+            [ExactSqlValue::Text(table), ExactSqlValue::Text(column)] => {
+                Ok((table.as_str(), column.as_str()))
+            }
+            _ => Err(RemoteSqliteStorageErrorV1::ResetRequired),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns != schema::REMOTE_NODE_LOCAL_COLUMNS {
+        return Err(RemoteSqliteStorageErrorV1::ResetRequired);
+    }
     let marker = query(
         handle,
         "SELECT contract_id FROM remote_store_contract WHERE singleton = 1",
@@ -901,141 +933,6 @@ fn validate_previous_frame(
         return Err(RemoteCapturePersistenceErrorV1::SequenceGap);
     }
     Ok(())
-}
-
-fn query(
-    handle: &ExactSqlHandle,
-    sql: &str,
-    params: Vec<ExactSqlValue>,
-) -> Result<ExactSqlRows, RemoteSqliteStorageErrorV1> {
-    let statement = ExactSqlStatement::new(sql.to_owned(), params)?;
-    Ok(handle.query(statement, READ_WAIT)?)
-}
-
-fn statement(
-    sql: &str,
-    params: Vec<ExactSqlValue>,
-) -> Result<ExactSqlStatement, RemoteCapturePersistenceErrorV1> {
-    ExactSqlStatement::new(sql.to_owned(), params).map_err(map_persistence_error)
-}
-
-fn text(value: &str) -> ExactSqlValue {
-    ExactSqlValue::Text(value.to_owned())
-}
-
-fn optional_text(value: Option<&str>) -> ExactSqlValue {
-    value.map_or(ExactSqlValue::Null, text)
-}
-
-fn one_row(
-    rows: ExactSqlRows,
-) -> Result<crate::exact_sql::ExactSqlRow, RemoteSqliteStorageErrorV1> {
-    let mut rows = rows.rows.into_iter();
-    match (rows.next(), rows.next()) {
-        (Some(row), None) => Ok(row),
-        _ => Err(RemoteSqliteStorageErrorV1::Corruption),
-    }
-}
-
-fn row_text(
-    row: &crate::exact_sql::ExactSqlRow,
-    index: usize,
-) -> Result<&str, RemoteCapturePersistenceErrorV1> {
-    match row.values.get(index) {
-        Some(ExactSqlValue::Text(value)) => Ok(value),
-        _ => Err(RemoteCapturePersistenceErrorV1::Corruption),
-    }
-}
-
-fn row_blob(
-    row: &crate::exact_sql::ExactSqlRow,
-    index: usize,
-) -> Result<&[u8], RemoteCapturePersistenceErrorV1> {
-    match row.values.get(index) {
-        Some(ExactSqlValue::Blob(value)) => Ok(value),
-        _ => Err(RemoteCapturePersistenceErrorV1::Corruption),
-    }
-}
-
-fn row_u64(
-    row: &crate::exact_sql::ExactSqlRow,
-    index: usize,
-) -> Result<u64, RemoteCapturePersistenceErrorV1> {
-    match row.values.get(index) {
-        Some(ExactSqlValue::Integer(value)) => {
-            u64::try_from(*value).map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)
-        }
-        _ => Err(RemoteCapturePersistenceErrorV1::Corruption),
-    }
-}
-
-fn persistence_one_row(
-    rows: ExactSqlRows,
-) -> Result<crate::exact_sql::ExactSqlRow, RemoteCapturePersistenceErrorV1> {
-    let mut rows = rows.rows.into_iter();
-    match (rows.next(), rows.next()) {
-        (Some(row), None) => Ok(row),
-        _ => Err(RemoteCapturePersistenceErrorV1::Corruption),
-    }
-}
-
-fn decode_spool_state(
-    row: crate::exact_sql::ExactSqlRow,
-) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
-    let state = parse_replay_state(row_text(&row, 0)?)?;
-    let receipt = match row.values.get(1) {
-        Some(ExactSqlValue::Null) => None,
-        Some(ExactSqlValue::Text(value)) => Some(
-            serde_json::from_str(value).map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?,
-        ),
-        _ => return Err(RemoteCapturePersistenceErrorV1::Corruption),
-    };
-    Ok(RemoteReplaySpoolStateV1 {
-        state,
-        receipt,
-        last_attempt: row_u64(&row, 2)?,
-    })
-}
-
-const fn replay_state_name(state: RemoteReplayStateV1) -> &'static str {
-    match state {
-        RemoteReplayStateV1::Pending => "pending",
-        RemoteReplayStateV1::Admitted => "admitted",
-        RemoteReplayStateV1::Duplicate => "duplicate",
-        RemoteReplayStateV1::Acknowledged => "acknowledged",
-        RemoteReplayStateV1::Rejected => "rejected",
-        RemoteReplayStateV1::Quarantined => "quarantined",
-        RemoteReplayStateV1::GarbageCollectionEligible => "garbage_collection_eligible",
-    }
-}
-
-fn parse_replay_state(state: &str) -> Result<RemoteReplayStateV1, RemoteCapturePersistenceErrorV1> {
-    match state {
-        "pending" => Ok(RemoteReplayStateV1::Pending),
-        "admitted" => Ok(RemoteReplayStateV1::Admitted),
-        "duplicate" => Ok(RemoteReplayStateV1::Duplicate),
-        "acknowledged" => Ok(RemoteReplayStateV1::Acknowledged),
-        "rejected" => Ok(RemoteReplayStateV1::Rejected),
-        "quarantined" => Ok(RemoteReplayStateV1::Quarantined),
-        "garbage_collection_eligible" => Ok(RemoteReplayStateV1::GarbageCollectionEligible),
-        _ => Err(RemoteCapturePersistenceErrorV1::Corruption),
-    }
-}
-
-fn map_encryption_error(error: RemoteSqliteStorageErrorV1) -> RemoteCapturePersistenceErrorV1 {
-    match error {
-        RemoteSqliteStorageErrorV1::InvalidKeyLength
-        | RemoteSqliteStorageErrorV1::InvalidKeyRevision => {
-            RemoteCapturePersistenceErrorV1::AtRestEncryptionUnavailable
-        }
-        RemoteSqliteStorageErrorV1::Corruption => RemoteCapturePersistenceErrorV1::Corruption,
-        _ => RemoteCapturePersistenceErrorV1::Unavailable,
-    }
-}
-
-fn map_persistence_error(error: impl std::fmt::Display) -> RemoteCapturePersistenceErrorV1 {
-    let _ = error;
-    RemoteCapturePersistenceErrorV1::Unavailable
 }
 
 #[cfg(test)]
