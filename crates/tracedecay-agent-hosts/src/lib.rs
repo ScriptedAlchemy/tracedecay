@@ -32,8 +32,8 @@ pub(crate) use tracedecay_usecases::request_identity;
 // code resolving verbatim, exactly as the root crate's `src/<module>.rs` shims
 // do on the other side of the split.
 pub(crate) use tracedecay_runtime_core::{
-    branch, config, db, errors, lifecycle_lease, memory, privacy, runtime_identity, serde_util,
-    storage, store, worktree,
+    config, db, errors, lifecycle_lease, memory, privacy, runtime_identity, serde_util, storage,
+    store, worktree,
 };
 
 /// Kernel-owned slice of the former root `tracedecay` façade module.
