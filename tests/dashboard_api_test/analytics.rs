@@ -234,7 +234,7 @@ fn observability_event(
 ) -> AnalyticsEventInsert {
     let envelope = ObservabilityEnvelopeV1 {
         event_id: "dashboard-observability-failed".to_string(),
-        event_kind: "retrieval.query.observed.v1".to_string(),
+        event_kind: "retrieval.query.completed.v1".to_string(),
         schema_revision: 1,
         idempotency_key: "dashboard-observability-failed".to_string(),
         trace_id: "dashboard-observability-trace".to_string(),

@@ -727,7 +727,7 @@ async fn observability_append_is_idempotent_and_rejects_changed_input() {
         project_id: "scope:fixture".to_string(),
         session_id: None,
         timestamp: 1,
-        event_kind: "retrieval.query.observed.v1".to_string(),
+        event_kind: "retrieval.query.completed.v1".to_string(),
         hook_name: None,
         tool_name: None,
         tool_category: None,
