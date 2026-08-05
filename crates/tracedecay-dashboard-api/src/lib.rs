@@ -1100,7 +1100,7 @@ fn router_with_active_application(
     spa_routes: Router,
 ) -> Router {
     let runtime = projects::DashboardRuntime::new(state, project_api_router());
-    let router = Router::new()
+    let api_router = Router::new()
         .route("/api/projects", get(projects::list))
         .route("/api/projects/{project_id}", get(projects::context))
         .route(
@@ -1124,17 +1124,9 @@ fn router_with_active_application(
         .route("/api/code-index/{*tail}", any(active_api_gateway))
         .route("/api/feedback/status", any(active_api_gateway))
         .route("/api/events", any(active_api_gateway))
-        .with_state(runtime)
-        // Embedded SPA/static routes are supplied by the owning binary: the
-        // asset bundle is generated into `OUT_DIR` by the root crate's
-        // `build.rs` and included with `env!("OUT_DIR")`, which only resolves
-        // inside the crate that ran that build script. `spa_routes` is merged
-        // after `.with_state(…)`, so it is a stateless `axum::Router` and must
-        // carry the SPA fallback itself (see [`spa_routes`] on the entry
-        // points for the exact contract).
-        .merge(spa_routes);
-    match application {
-        Some(application) => router
+        .with_state(runtime);
+    let api_router = match application {
+        Some(application) => api_router
             .nest("/api/application", application.http_router)
             .nest("/api/work", application.dashboard_work_router)
             .nest("/api/feedback", application.dashboard_feedback_router)
@@ -1142,8 +1134,13 @@ fn router_with_active_application(
                 "/api/dashboard/application",
                 application.dashboard_configuration_router,
             ),
-        None => router,
-    }
+        None => api_router,
+    };
+    // Apply delivery after every public API prefix is mounted, while the
+    // request still carries its original `/api/**` URI. Embedded assets own
+    // their own delivery layer, so merge them only after the API router is
+    // wrapped to avoid compressing or rewriting asset validators twice.
+    tracedecay_api::delivery::http_delivery_router(api_router).merge(spa_routes)
 }
 
 fn project_api_router() -> Router<DashboardState> {
@@ -2100,6 +2097,7 @@ mod authority_tests {
             .await
             .expect("active application response");
         assert_eq!(active.status(), StatusCode::NO_CONTENT);
+        assert_eq!(active.headers()[header::CACHE_CONTROL], "no-store");
 
         let feedback = app
             .clone()
@@ -2163,6 +2161,45 @@ mod authority_tests {
             .await
             .expect("selected-project application response");
         assert_eq!(selected.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn embedded_assets_keep_one_delivery_layer_after_api_composition() {
+        let fixture = DashboardStateFixture::open("project.dashboard-asset-delivery").await;
+        let spa_routes = tracedecay_api::delivery::http_delivery_router(Router::new().route(
+            "/static/probe.js",
+            get(|| async {
+                (
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            axum::http::HeaderValue::from_static("application/javascript"),
+                        ),
+                        (
+                            header::ETAG,
+                            axum::http::HeaderValue::from_static("\"asset-v1\""),
+                        ),
+                    ],
+                    "globalThis.TRACEDECAY_DELIVERY_PROBE = 'one asset delivery layer';",
+                )
+            }),
+        ));
+        let app = router_with_active_application(fixture.state, None, spa_routes);
+
+        let asset = app
+            .oneshot(
+                Request::builder()
+                    .uri("/static/probe.js")
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .expect("asset request"),
+            )
+            .await
+            .expect("asset response");
+
+        assert_eq!(asset.status(), StatusCode::OK);
+        assert_eq!(asset.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(asset.headers()[header::ETAG], "\"asset-v1--gzip\"");
     }
 
     /// Deliverable 4: the V2 read-model routes must be reachable through both
