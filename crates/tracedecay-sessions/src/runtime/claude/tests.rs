@@ -693,7 +693,7 @@ fn redacted_marker_ids_do_not_collide() {
 #[test]
 fn claude_checked_in_assistant_fixture_crosses_the_canonical_boundary() {
     let path = format!(
-        "{}/tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
+        "{}/../../tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
         env!("CARGO_MANIFEST_DIR")
     );
     let bytes = std::fs::read(&path).unwrap();
@@ -823,7 +823,7 @@ fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
 #[test]
 fn claude_workflow_lookalike_emits_no_workflow_lifecycle() {
     let path = format!(
-        "{}/tests/fixtures/provider_normalization/claude/workflow_lookalike.input.json",
+        "{}/../../tests/fixtures/provider_normalization/claude/workflow_lookalike.input.json",
         env!("CARGO_MANIFEST_DIR")
     );
     let bytes = std::fs::read(&path).unwrap();
