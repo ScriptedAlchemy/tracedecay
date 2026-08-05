@@ -57,18 +57,42 @@ async fn registered_diagnostics_message_count(
     project_sessions: Option<&RegisteredGlobalDb>,
     user_sessions: Option<&RegisteredGlobalDb>,
     all_projects: bool,
-) -> crate::errors::Result<i64> {
+) -> Result<SessionMessageCounts, AnalyticsDiagnosticsError> {
+    let mut sources = Vec::new();
     let mut total = match project_sessions {
-        Some(database) => database.session_message_count().await.map_err(cli_error)?,
+        Some(database) => {
+            let count = database.session_message_count().await.map_err(|error| {
+                AnalyticsDiagnosticsError::new(
+                    AccountingSourceV1::ProjectSessions,
+                    error.to_string(),
+                )
+            })?;
+            sources.push(AccountingSourceV1::ProjectSessions);
+            count
+        }
         None => 0,
     };
     if all_projects
         && let Some(database) = user_sessions
         && project_sessions.is_none_or(|project| project.db_path() != database.db_path())
     {
-        total += database.session_message_count().await.map_err(cli_error)?;
+        let count = database.session_message_count().await.map_err(|error| {
+            AnalyticsDiagnosticsError::new(AccountingSourceV1::ProfileSessions, error.to_string())
+        })?;
+        total = total.checked_add(count).ok_or_else(|| {
+            AnalyticsDiagnosticsError::new(
+                AccountingSourceV1::ProfileSessions,
+                "combined session message count exceeds i64",
+            )
+        })?;
+        sources.push(AccountingSourceV1::ProfileSessions);
     }
-    Ok(total)
+    Ok(SessionMessageCounts { total, sources })
+}
+
+struct SessionMessageCounts {
+    total: i64,
+    sources: Vec<AccountingSourceV1>,
 }
 
 /// `tracedecay analytics sync`: import hook JSONL rows into the durable
@@ -228,19 +252,8 @@ pub(crate) async fn analytics_diagnostics_with_db(
     let hook_sources_failed = hook_failures.len();
     let hook_analytics = hook_read.rows;
 
-    let message_count =
-        registered_diagnostics_message_count(project_sessions, user_sessions, all_projects)
-            .await
-            .map_err(|error| {
-                AnalyticsDiagnosticsError::new(
-                    if all_projects {
-                        AccountingSourceV1::ProfileSessions
-                    } else {
-                        AccountingSourceV1::ProjectSessions
-                    },
-                    error.to_string(),
-                )
-            })?;
+    let session_messages =
+        registered_diagnostics_message_count(project_sessions, user_sessions, all_projects).await?;
 
     let durable = if event_rows.is_empty() {
         None
@@ -248,7 +261,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
         Some(event_rows.as_slice())
     };
     let mut summary = crate::dashboard::analytics_api::diagnostics_summary_from_parts(
-        message_count,
+        session_messages.total,
         &hook_analytics,
         durable,
     );
@@ -282,6 +295,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
         payload: summary,
         hook_sources_attempted,
         hook_sources_failed,
+        session_sources: session_messages.sources,
     })
 }
 
@@ -289,6 +303,7 @@ pub(crate) struct AnalyticsDiagnosticsResult {
     pub(crate) payload: Value,
     pub(crate) hook_sources_attempted: usize,
     pub(crate) hook_sources_failed: usize,
+    pub(crate) session_sources: Vec<AccountingSourceV1>,
 }
 
 pub(crate) struct AnalyticsDiagnosticsError {
@@ -309,9 +324,10 @@ impl AnalyticsDiagnosticsError {
 mod tests {
     use std::path::Path;
 
+    use tracedecay_application::AccountingSourceV1;
     use tracedecay_usecases::analytics_bridge::hook_row_to_analytics_event;
 
-    use super::analytics_diagnostics_with_db;
+    use super::{analytics_diagnostics_with_db, registered_diagnostics_message_count};
 
     #[test]
     fn maps_hook_invoked_row_with_attribution() {
@@ -398,6 +414,35 @@ mod tests {
         assert_eq!(
             output["observatory"]["metrics"][0]["coverage"]["state"],
             "known"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_project_diagnostics_retains_each_distinct_session_source() {
+        let project = crate::global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "analytics-project-session-source",
+        )
+        .await;
+        let profile = crate::global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "analytics-profile-session-source",
+        )
+        .await;
+
+        let counts = registered_diagnostics_message_count(
+            Some(&project.registered),
+            Some(&profile.registered),
+            true,
+        )
+        .await
+        .expect("session message counts");
+
+        assert_eq!(counts.total, 0);
+        assert_eq!(
+            counts.sources,
+            vec![
+                AccountingSourceV1::ProjectSessions,
+                AccountingSourceV1::ProfileSessions,
+            ]
         );
     }
 }

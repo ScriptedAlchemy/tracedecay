@@ -334,15 +334,13 @@ impl DaemonAccountingAuthority {
                 hook_reason,
             ),
         ];
-        coverage.push(source_coverage(
-            if all_projects {
-                AccountingSourceV1::ProfileSessions
-            } else {
-                AccountingSourceV1::ProjectSessions
-            },
-            AccountingSourceStateV1::Complete,
-            None,
-        ));
+        coverage.extend(
+            diagnostics
+                .session_sources
+                .iter()
+                .copied()
+                .map(|source| source_coverage(source, AccountingSourceStateV1::Complete, None)),
+        );
         Ok(ServedAccountingPayload {
             payload: diagnostics.payload,
             scope: self.scope(!all_projects && self.project.is_some()),
