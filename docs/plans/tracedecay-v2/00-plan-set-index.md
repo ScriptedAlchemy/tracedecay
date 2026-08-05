@@ -81,7 +81,7 @@ product journeys or the full verification suite.
 - Doctor currently reports
   `authority_audit_unavailable`, and Cursor Core has a component-ownership
   conflict. Plan 09 owns Doctor composition and Plan 27 owns
-  host lifecycle/ownership repair. The host capability/lifecycle reachability
+  host lifecycle/ownership recovery. The host capability/lifecycle reachability
   fixes do not close this Cursor Core ownership conflict, which remains open.
 - Semantic search is disabled by an invalid configuration snapshot. Plan 20
   owns final-snapshot validity and explicit reset/recreation; Plan 31 owns
@@ -101,7 +101,7 @@ product journeys or the full verification suite.
 Completed-slice names are historical implementation evidence, not instructions
 to recreate a type, file layout, fixture filename, milestone, or gate. A deleted
 or renamed mechanism does not mean the feature is missing. Later audits must
-first map every retained product, semantic, migration, and recovery requirement
+first map every retained product, semantic, exact-shape admission, and recovery requirement
 to its current canonical owner and direct behavior/regression evidence; only
 missing callable behavior or a missing direct regression is a product gap.
 Removed planning/evidence machinery is not unfinished product work and must not
@@ -216,13 +216,13 @@ records the rejected mechanism, the reason, and the retained replacement:
    authorization, scope, and composition. A design-approved, measured product
    renderer used because admitted libraries do not satisfy the visual contract
    is not an alternate infrastructure authority.
-10. **A synthetic Doctor remediation dispatcher is rejected.** The attempted
-    lane lacked the operation owner, authorization, preview/confirmation,
-    compare-and-swap, effect boundary, receipt, and rollback/recovery details
-    needed to dispatch safely. Plan 09 composes only owner-supplied legal
-    remediation operations; missing authority returns typed unavailable and
-    remains with the named owning plan rather than being filled by a generic
-    dispatcher.
+10. **Doctor is read-only diagnostic authority.** Doctor reports typed
+    findings, evidence, coverage, freshness, and unavailable state. It owns no
+    mutation registry, repair dispatcher, preview/confirm/apply route, cleanup,
+    GC, retention action, or recovery command. Configuration and other product
+    mutations remain separate explicitly named operations owned by their
+    capability; Doctor may link to their documentation but never invokes or
+    advertises them as Doctor actions.
 
 ### Frontend rejection record
 
@@ -345,9 +345,9 @@ delivery phases:
   GitHub stack/review snapshots; and Plan 11 renders those results without
   backend truth. None creates a second diagnostic store, provider contract,
   suggestion channel, task authority, or executor.
-- Plan 09 implements and composes the one Doctor application use case and its
-  legal-remediation handoffs; Plan 14 owns the historical regression and
-  observable-behavior contract; Plan 11 renders only. Plan 20 alone owns
+- Plan 09 implements and composes the one read-only Doctor application use
+  case; Plan 14 owns the historical regression and observable-behavior
+  contract; Plan 11 renders only. Plan 20 alone owns
   configuration definitions, precedence, snapshots, behavior/provenance
   digests, activation, and audit. Plan 26 alone owns measurement descriptors,
   cohorts, labels, calibration/drift observations, and denominator-safe read
@@ -408,7 +408,8 @@ changing their transport.
 **Implementation and deletion.**
 
 - Ship asynchronous suggestions, host capability detection, install/upgrade/
-  repair, and stock-host conformance as part of this callable path, including
+  uninstall, interrupted-lifecycle rollback, and stock-host conformance as
+  part of this callable path, including
   Kimi Code manifest/global `PostToolUse` and `Stop` hooks plus MCP and
   skills/commands, and OpenCode local JS/TS plugin events, custom LSP
   configuration, MCP, custom agents/skills, and commands (prompt templates).
@@ -446,8 +447,8 @@ proximity tiers; and prove bounded backpressure, restart, OpenCode
 custom-LSP duplicate-analyzer avoidance, and truthful provider-unavailable
 behavior,
 including an explicit Cline-family route or evidence-backed typed unavailable
-result. Exercise the official install/upgrade/repair/uninstall flow for Kimi
-Code and OpenCode; prove competing-extension, interrupted-lifecycle,
+result. Exercise the official install/upgrade/uninstall flow for Kimi Code and
+OpenCode; prove competing-extension, interrupted-lifecycle,
 host-by-host rollback, and the direct feedback rollback switch. Normal
 Linux/macOS/Windows CI covers supported-host default-feature compatibility.
 
@@ -458,12 +459,12 @@ composition are required dependent capabilities described below.
 
 **User outcome.** From one dashboard, a user can inspect the Brain, move from a
 finding to exact evidence, understand Doctor status, change supported settings,
-inspect truthful Observatory/Costs data, and execute a legal remediation.
+and inspect truthful Observatory/Costs data.
 
 **End-to-end production path.** The shared dashboard shell and Brain/Explorer/
 Loom investigation surfaces request canonical application results, progressively
-disclose anchored diagnostics, CI/review/proximity evidence and health, and send
-authorized configuration or remediation commands back through the daemon.
+disclose anchored diagnostics, CI/review/proximity evidence and health, and
+send authorized configuration commands through their named daemon operation.
 
 **Implementation and deletion.**
 
@@ -478,11 +479,11 @@ authorized configuration or remediation commands back through the daemon.
 - Plan 09 remains the sole Doctor use-case implementation/composition
   authority, Plan 14 its historical regression/behavior contract, and Plan 26
   the measurement authority; the Plan 11 UI renders supplied results and never
-  computes a second grade, readiness score, remediation policy, or backend
+  computes a second grade, readiness score, action policy, or backend
   truth.
 - Optional GPU or commercial adapters may draw or accelerate only; they never
   own graph, query, storage, health, readiness, scheduling, ranking, or
-  remediation semantics.
+  mutation semantics.
 - Delete dashboard-local health, configuration, and action logic replaced by
   canonical application operations.
 
@@ -523,12 +524,13 @@ usability study. The Plan 11 performance and payload budgets and the
 sustained-update rates were withdrawn by owner decision 2026-07-31; Plan 11
 records the withdrawal.
 
-**Direct acceptance.** Starting from a real host feedback finding, navigate to retained
-evidence, diagnose an injected operational fault, apply an authorized
-remediation or setting change, observe the resulting state, and verify
-accessibility, cancellation, restart, denied-action, partial-data, and
-unavailable-provider behavior. Run those direct tests and normal repository CI;
-do not create a separate dashboard/Doctor acceptance gate.
+**Direct acceptance.** Starting from a real host feedback finding, navigate to
+retained evidence, diagnose an injected operational fault, make a supported
+setting change through the separate configuration authority, observe the
+resulting state, and verify accessibility, cancellation, restart,
+denied-action, partial-data, and unavailable-provider behavior. Doctor itself
+remains read-only. Run those direct tests and normal repository CI; do not
+create a separate dashboard/Doctor acceptance gate.
 
 Multi-root operation, workflow definition lifecycle, placement,
 fan-out/synthesis/recovery, calibration, automation execution controls, and
@@ -644,7 +646,7 @@ narrative retrieval, Plan 13 anchors, Plan 25 code generations, and the owning
 Git, CI, diagnostic, review, artifact, and runtime stores; summaries never
 replace exact evidence or widen authority. The product presents Kanban, DAG,
 timeline, causal, and workload views plus calibrated task-shape, decomposition,
-sizing, routing, handoff, and repair proposals. Only an explicitly admitted
+sizing, routing, handoff, and recovery proposals. Only an explicitly admitted
 step enters the daemon-owned workflow runtime, which negotiates a provider,
 schedules and leases an attempt, records effects, artifacts, cancellation/
 retry, review, outcome, and calibration, and returns a non-auto-applied replan.
@@ -652,7 +654,7 @@ retry, review, outcome, and calibration, and returns a non-auto-applied replan.
 **Implementation and deletion.**
 
 - Preserve evidence/history relations, governed experience recall, selective
-  escalation, isolated independent review, minimal repair, graph-native typed
+  escalation, isolated independent review, bounded recovery, graph-native typed
   auxiliary-attempt requests, model-capability profiles, and explanations with
   raw values, provenance, coverage, uncertainty, and calibration validity.
 - Canonical task retrieval rejects demonstrated expertise. Authorized expertise
@@ -930,23 +932,18 @@ fresh-profile, embedded, in-process, and single-authority: no sidecar,
 
 Storage retention, size, and efficiency
 ([Plan 38](38-storage-retention-size-and-efficiency.md)) threads through the
-remaining capabilities rather than owning a separate delivery stage: the Doctor storage finding
-family uses Plan 09 over Plan 26 read models; automatic
-branch-DB lifecycle and registry orphan detection/collection land with the
-storage-runtime authority; session retention with raw/projected dedup
-extends the staged LCM GC cards. Measured driver: one isolated validation profile
-reached 256 GB and was reduced to ~75 GB purely by removing data the
-product should never have retained. All plan 38 sections (§1–§7) have now
-landed on this branch (2026-07-23) — branch lifecycle, registry orphan
-detection/collection, session retention with raw/projected dedup and
-disposition-scoped evidence release, one-content-copy, the debris contract,
-compaction policy types, and telemetry read models with typed Doctor storage
-findings. Daemon-owned GC/retention/compaction cadence, per-transaction
-retention reauthorization, exact registry relink/retirement, durable incident
-debris quarantine/collection, real stale-branch and retention-backlog Doctor
-sources, and the rusqlite reserved-health size/table-growth primitive plus
-scoped daemon application adapter landed on 2026-07-23. Store soft budgets are
-owner-configured and inert by default.
+remaining capabilities rather than owning a separate delivery stage. Durable
+facts and memory are project-wide; branch and worktree identity may remain
+provenance but never selects, shards, clones, or owns a fact database. The
+storage runtime owns bounded retention, compaction, exact registry retirement,
+debris quarantine, and one-content-copy enforcement. Session retention keeps
+raw and projected evidence deduplicated while LCM summary nodes retain
+losslessly expandable source references. Plan 09 exposes the corresponding
+storage findings through read-only Doctor composition over Plan 26 telemetry;
+Doctor never invokes cleanup, GC, retention, relink, or recovery. Store soft
+budgets are owner-configured and inert by default. Direct validation uses an
+isolated profile and proves size reduction without reading or mutating the
+operator profile.
 
 The remaining delivery proceeds by complete product journeys under this index.
 Branch, pull-request, merge, worktree, and SHA choreography is not roadmap
