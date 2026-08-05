@@ -78,7 +78,7 @@ impl ComposerIngestContext<'_, '_> {
 }
 
 async fn drain_composer_projection_queue(context: &ComposerIngestContext<'_, '_>) {
-    if let Err(error) = crate::runtime::claude_observation::drain_projection_queue(
+    if let Err(error) = crate::runtime::cursor::drain_cursor_observation_projections(
         context.facade,
         &context.scope,
         context.cancellation,

@@ -36,6 +36,7 @@ use crate::runtime::shared::{
     append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
     content_storage_text_and_tools, paths_equal, title_from_messages,
 };
+use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame, RawJsonlFrameReader, SessionDraft,
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
@@ -50,6 +51,7 @@ const CURSOR_EVENT_LOCATION_KEYS: TranscriptLocationMetadataKeys =
         "cursor_event_worktree",
         "cursor_event_location_provenance",
     );
+const MAX_CURSOR_PROJECTIONS_PER_PASS: usize = 256;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CursorTranscriptIngestStats {
@@ -824,23 +826,23 @@ async fn admit_cursor_sweep_observations_with_admission(
     Ok(stats)
 }
 
-async fn drain_cursor_observation_projections(
+pub(super) async fn drain_cursor_observation_projections(
     admission: &dyn HostAdmission,
     scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    let stats =
-        crate::runtime::claude_observation::drain_projection_queue(admission, scope, cancellation)
-            .await
-            .map_err(|error| match error {
-                crate::runtime::claude_observation::ClaudeObservationIngestError::Transcript(
-                    error,
-                ) => error,
-                _ => TranscriptIngestError::InvalidFrameState { provider: "cursor" },
-            })?;
+    let outcome = admission
+        .drain_projection_queue(
+            "cursor",
+            scope,
+            cancellation,
+            MAX_CURSOR_PROJECTIONS_PER_PASS,
+        )
+        .await
+        .map_err(|outcome| host_admission_error("cursor", outcome))?;
     Ok(CursorTranscriptIngestStats {
-        sessions_upserted: stats.transcript.sessions_upserted,
-        messages_upserted: stats.projection_outputs,
+        sessions_upserted: u64::try_from(outcome.session_ids.len()).unwrap_or(u64::MAX),
+        messages_upserted: outcome.projected_outputs,
         bytes_consumed: 0,
         source_deferred: false,
     })
@@ -1817,7 +1819,10 @@ mod tests {
         std::fs::create_dir_all(&transcript_dir).unwrap();
         std::fs::write(
             transcript_dir.join("session-cancelled.jsonl"),
-            r#"{"role":"user","message":{"content":[{"type":"text","text":"must not ingest"}]}}"#,
+            concat!(
+                r#"{"role":"user","message":{"content":[{"type":"text","text":"must not ingest"}]}}"#,
+                "\n"
+            ),
         )
         .unwrap();
         let source = CursorSweepSource::with_home(home.path());
@@ -1827,6 +1832,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
         let (project, _home, source, project_id) = cursor_sweep_test_fixture();
+        assert_eq!(source.transcript_paths(project.path()).len(), 1);
         let admission = MemoryHostAdmission::default();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
@@ -1862,6 +1868,7 @@ mod tests {
         )
         .await
         .expect("uncancelled Cursor retry must admit the untouched source");
+        assert_eq!(admission.observations().len(), 1);
         assert_eq!(replay.messages_upserted, 1);
 
         let deduplicated = admit_cursor_sweep_observations_with_admission(
