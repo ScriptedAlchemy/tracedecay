@@ -19,14 +19,15 @@ use crate::RegisteredGlobalDb;
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ChangePlanId,
-    ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
-    ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
-    ConfigurationSnapshotV1, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
-    CredentialReferenceMetadataV1, ProtectedChange, ProtectedChangePlan,
-    ProtectedChangeSnapshotError, RedactedConfigurationChangeV1, RollbackModeV1, RuleEffect,
-    ScopeControlOperationV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationAuditEventKindV1,
+    ConfigurationCandidateV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+    ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
+    CredentialKindV1, CredentialReferenceId, CredentialReferenceMetadataV1, ProtectedChange,
+    ProtectedChangePlan, ProtectedChangeSnapshotError, RedactedConfigurationChangeV1,
+    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1, SettingKey,
+    SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
-use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros};
+use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
@@ -52,12 +53,13 @@ use activation::{
 };
 #[cfg(test)]
 use audit::decode_audit_row;
-use codec::{invalid_store_data, unavailable_store};
+use codec::{StoredConfigurationProtectedOperationV1, invalid_store_data, unavailable_store};
+#[cfg(test)]
+use mutation::commit_configuration_transaction;
 #[cfg(test)]
 use mutation::validate_commit_bindings;
 use mutation::{
-    commit_configuration_transaction, current_state_from_transaction,
-    map_protected_change_snapshot_error, map_store_error, result_revision_id,
+    ConfigurationCommitDraft, current_state_from_transaction, derived_identifier, map_store_error,
 };
 use read::read_revision_from_executor;
 use read::validate_snapshot_registry_completeness;
