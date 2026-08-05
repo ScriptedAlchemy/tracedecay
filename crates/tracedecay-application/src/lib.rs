@@ -40,6 +40,7 @@ pub mod sdk_catalog;
 pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
+pub mod wire;
 pub mod work;
 pub mod work_catalog;
 pub mod work_dispatch;
@@ -67,9 +68,14 @@ pub use authorization::{
 };
 pub use clock::now_micros;
 pub use configuration::{
-    ConfigurationGetRequestV1, ConfigurationSetRequestV1,
-    configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
-    configuration_surface_operation,
+    ConfigurationAuditRequestV1, ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1,
+    ConfigurationGetRequestV1, ConfigurationListRequestV1, ConfigurationObservedStateRequestV1,
+    ConfigurationProtectedApplyRequestV1, ConfigurationProtectedPreviewRequestV1,
+    ConfigurationRollbackApplyRequestV1, ConfigurationRollbackPreviewRequestV1,
+    ConfigurationSetRequestV1, ConfigurationUnsetRequestV1, ConfigurationWireRequestV1,
+    ConfigurationWriteCredentialRequestV1, configuration_surface_catalog_contribution,
+    configuration_surface_handler_descriptors, configuration_surface_operation,
+    configuration_surface_request_schema, configuration_surface_result_schema,
 };
 pub use context::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId,
@@ -241,6 +247,7 @@ pub use tracedecay_domain::framed_log::{
     read_bounded, replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
     truncate_file, validate_regular_or_missing, with_owned_temp_publish,
 };
+pub use wire::{ApplicationOwnerKind, ApplicationWireOperation};
 pub use work::*;
 pub use work_catalog::*;
 pub use work_dispatch::*;
