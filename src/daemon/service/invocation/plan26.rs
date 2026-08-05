@@ -81,6 +81,7 @@ pub(super) fn plan26_feedback_operation(
         | DaemonInvocationOperation::MultiRootExecute
         | DaemonInvocationOperation::WorkApplication
         | DaemonInvocationOperation::WorkflowApplication
+        | DaemonInvocationOperation::HandoffApplication
         | DaemonInvocationOperation::WorkAttempt
         | DaemonInvocationOperation::SemanticEvaluateAndPublish
         | DaemonInvocationOperation::GitStatus
@@ -116,6 +117,7 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
         | DaemonInvocationOutcome::MultiRootQueryPage { .. }
         | DaemonInvocationOutcome::WorkApplication { .. }
         | DaemonInvocationOutcome::WorkflowApplication { .. }
+        | DaemonInvocationOutcome::HandoffApplication { .. }
         | DaemonInvocationOutcome::WorkAttempt { .. }
         | DaemonInvocationOutcome::SemanticEvaluatedProfilePublished { .. }
         | DaemonInvocationOutcome::ObservationAccepted

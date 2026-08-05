@@ -2841,6 +2841,11 @@ fn project_open_work_grant(
     let capabilities = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
         .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1.iter())
+        .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS_V1.iter())
+        .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1.iter())
+        .chain(std::iter::once(
+            &tracedecay_application::HANDOFF_ISSUE_OPERATION_ID_V1,
+        ))
         .map(|(_, capability, _)| CapabilityId::new(*capability))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map_err(|_| ApplicationContractError::Inconsistent {
@@ -2858,6 +2863,11 @@ fn project_open_work_grant(
     let use_cases = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
         .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1.iter())
+        .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS_V1.iter())
+        .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1.iter())
+        .chain(std::iter::once(
+            &tracedecay_application::HANDOFF_ISSUE_OPERATION_ID_V1,
+        ))
         .map(|(_, _, use_case)| tracedecay_tool_catalog::UseCaseId::new(*use_case))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map_err(|_| ApplicationContractError::Inconsistent {
@@ -3007,6 +3017,11 @@ fn production_owner_capabilities()
     for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
         .into_iter()
         .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1)
+        .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS_V1)
+        .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1)
+        .chain(std::iter::once(
+            tracedecay_application::HANDOFF_ISSUE_OPERATION_ID_V1,
+        ))
     {
         capabilities.insert(CapabilityId::new(capability).map_err(|_| {
             ApplicationContractError::Inconsistent {
@@ -3075,6 +3090,11 @@ mod tests {
         for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
             .into_iter()
             .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1)
+            .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS_V1)
+            .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1)
+            .chain(std::iter::once(
+                tracedecay_application::HANDOFF_ISSUE_OPERATION_ID_V1,
+            ))
         {
             let capability = CapabilityId::new(capability).expect("Work attempt capability");
             assert!(
