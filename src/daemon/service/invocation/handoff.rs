@@ -16,7 +16,6 @@ use super::*;
 
 #[derive(Clone)]
 struct DaemonHandoffOpenTargets {
-    database: Arc<crate::global_db::RegisteredGlobalDb>,
     feedback: Option<Arc<Pr12FeedbackRuntime>>,
     observed_at: UtcMicros,
     recheck_sequence: Arc<AtomicU64>,
@@ -194,7 +193,6 @@ pub(super) async fn execute_handoff_application(
         }
     };
     let targets = DaemonHandoffOpenTargets {
-        database: Arc::clone(&registered.database),
         feedback,
         observed_at,
         recheck_sequence: Arc::new(AtomicU64::new(0)),
