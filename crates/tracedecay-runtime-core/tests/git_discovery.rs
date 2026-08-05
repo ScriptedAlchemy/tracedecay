@@ -39,10 +39,70 @@ async fn bounded_discovery_distinguishes_repository_and_non_repository() {
         identity.worktree_root,
         repository.canonicalize().expect("canonical repository")
     );
+    assert_eq!(
+        identity.git_dir,
+        repository
+            .join(".git")
+            .canonicalize()
+            .expect("canonical git dir")
+    );
     assert!(matches!(
         non_repository,
         GitRepositoryIdentityOutcome::NotRepository
     ));
+}
+
+#[tokio::test]
+async fn linked_worktree_identity_preserves_worktree_git_dir_and_common_dir() {
+    let fixture = TempDir::new().expect("fixture");
+    let repository = fixture.path().join("repository");
+    let linked = fixture.path().join("linked");
+    std::fs::create_dir_all(&repository).expect("repository directory");
+    run_git(&repository, &["init", "--quiet"]);
+    run_git(
+        &repository,
+        &[
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=test@tracedecay.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+    );
+    run_git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            linked.to_str().expect("UTF-8 fixture"),
+        ],
+    );
+
+    let outcome = discover_repository_identity(
+        &linked,
+        MonotonicDeadline::at(Instant::now() + Duration::from_secs(2)),
+        &CancellationToken::new(),
+    )
+    .await;
+    let GitRepositoryIdentityOutcome::Resolved(identity) = outcome else {
+        panic!("linked worktree should resolve, got {outcome:?}");
+    };
+    assert_eq!(
+        identity.worktree_root,
+        linked.canonicalize().expect("canonical linked worktree")
+    );
+    assert_eq!(
+        identity.common_dir,
+        repository.join(".git").canonicalize().expect("common dir")
+    );
+    assert_ne!(identity.git_dir, identity.common_dir);
+    assert!(identity.git_dir.ends_with("worktrees/linked"));
 }
 
 #[tokio::test]
