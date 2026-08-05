@@ -33,8 +33,11 @@ use tracedecay_application::{
     WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
     WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
     WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-    WorkflowActivation, WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowFanOutRequest,
+    WorkflowActivation, WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff,
+    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
+    WorkflowDefinitionValidation, WorkflowFanOutRequest, WorkflowRetirement,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
@@ -296,7 +299,13 @@ impl WorkApplicationInvocationV1 {
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
 pub(crate) enum WorkflowApplicationInvocation {
     RegisterDefinition(WorkflowDefinitionRegisterRequest),
+    ValidateDefinition(WorkflowDefinitionValidateRequest),
+    GetDefinition(WorkflowDefinitionGetRequest),
+    ListDefinitions(WorkflowDefinitionListRequest),
+    DefinitionHistory(WorkflowDefinitionHistoryRequest),
+    DiffDefinition(WorkflowDefinitionDiffRequest),
     ActivateDefinition(WorkflowDefinitionActivateRequest),
+    RetireDefinition(WorkflowDefinitionRetireRequest),
     ExecuteFanOut(Box<WorkflowFanOutRequest>),
     HandoffIssue(TaskHandoffIssueRequest),
     HandoffRedeem(TaskHandoffRedeemRequest),
@@ -306,7 +315,13 @@ impl WorkflowApplicationInvocation {
     pub(crate) const fn operation_key(&self) -> &'static str {
         match self {
             Self::RegisterDefinition(_) => "register_definition",
+            Self::ValidateDefinition(_) => "validate_definition",
+            Self::GetDefinition(_) => "get_definition",
+            Self::ListDefinitions(_) => "list_definitions",
+            Self::DefinitionHistory(_) => "definition_history",
+            Self::DiffDefinition(_) => "diff_definition",
             Self::ActivateDefinition(_) => "activate_definition",
+            Self::RetireDefinition(_) => "retire_definition",
             Self::ExecuteFanOut(_) => "execute_fan_out",
             Self::HandoffIssue(_) => "handoff_issue",
             Self::HandoffRedeem(_) => "handoff_redeem",
@@ -2258,7 +2273,13 @@ pub(crate) enum WorkApplicationOutcomeV1 {
 #[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
 pub(crate) enum WorkflowApplicationOutcome {
     RegisterDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinition>),
+    ValidateDefinition(ApplicationOutcome<WorkflowDefinitionValidation>),
+    GetDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinition>),
+    ListDefinitions(ApplicationOutcome<Vec<tracedecay_domain::WorkflowDefinition>>),
+    DefinitionHistory(ApplicationOutcome<Vec<tracedecay_domain::WorkflowDefinition>>),
+    DiffDefinition(ApplicationOutcome<WorkflowDefinitionDiff>),
     ActivateDefinition(ApplicationOutcome<WorkflowActivation>),
+    RetireDefinition(ApplicationOutcome<WorkflowRetirement>),
     ExecuteFanOut(ApplicationOutcome<tracedecay_domain::WorkflowRunProjection>),
     HandoffIssue(ApplicationOutcome<TaskHandoffGrant>),
     HandoffRedeem(ApplicationOutcome<TaskHandoffRedeemed>),

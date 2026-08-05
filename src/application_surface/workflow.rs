@@ -6,7 +6,9 @@ use axum::response::Response;
 use tracedecay_api::WorkflowOperation;
 use tracedecay_application::{
     TaskHandoffIssueRequest, TaskHandoffRedeemRequest, WorkflowDefinitionActivateRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowFanOutRequest,
+    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest, WorkflowFanOutRequest,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -86,6 +88,78 @@ async fn invoke_operation(
             )
             .await
         }
+        WorkflowOperation::ValidateDefinition => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionValidateRequest>(body)
+            else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<tracedecay_application::WorkflowDefinitionValidation>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::ValidateDefinition(decoded),
+                validate_definition_outcome,
+            )
+            .await
+        }
+        WorkflowOperation::GetDefinition => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionGetRequest>(body) else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<tracedecay_domain::WorkflowDefinition>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::GetDefinition(decoded),
+                get_definition_outcome,
+            )
+            .await
+        }
+        WorkflowOperation::ListDefinitions => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionListRequest>(body) else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<Vec<tracedecay_domain::WorkflowDefinition>>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::ListDefinitions(decoded),
+                list_definitions_outcome,
+            )
+            .await
+        }
+        WorkflowOperation::DefinitionHistory => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionHistoryRequest>(body)
+            else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<Vec<tracedecay_domain::WorkflowDefinition>>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::DefinitionHistory(decoded),
+                definition_history_outcome,
+            )
+            .await
+        }
+        WorkflowOperation::DiffDefinition => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionDiffRequest>(body) else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<tracedecay_application::WorkflowDefinitionDiff>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::DiffDefinition(decoded),
+                diff_definition_outcome,
+            )
+            .await
+        }
         WorkflowOperation::ActivateDefinition => {
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionActivateRequest>(body)
             else {
@@ -98,6 +172,21 @@ async fn invoke_operation(
                 controls,
                 WorkflowApplicationInvocation::ActivateDefinition(decoded),
                 activate_definition_outcome,
+            )
+            .await
+        }
+        WorkflowOperation::RetireDefinition => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionRetireRequest>(body)
+            else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<tracedecay_application::WorkflowRetirement>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::RetireDefinition(decoded),
+                retire_definition_outcome,
             )
             .await
         }
@@ -186,14 +275,8 @@ macro_rules! workflow_selector {
             match outcome {
                 crate::daemon_contract::DaemonInvocationOutcome::WorkflowApplication {
                     scope,
-                    outcome:
-                        WorkflowApplicationOutcome::$variant(
-                            tracedecay_application::ApplicationOutcome::Effect(outcome),
-                        ),
-                } => Some((
-                    scope,
-                    tracedecay_application::ApplicationOutcome::Effect(outcome),
-                )),
+                    outcome: WorkflowApplicationOutcome::$variant(outcome),
+                } => Some((scope, outcome)),
                 _ => None,
             }
         }
@@ -206,9 +289,39 @@ workflow_selector!(
     tracedecay_domain::WorkflowDefinition
 );
 workflow_selector!(
+    validate_definition_outcome,
+    ValidateDefinition,
+    tracedecay_application::WorkflowDefinitionValidation
+);
+workflow_selector!(
+    get_definition_outcome,
+    GetDefinition,
+    tracedecay_domain::WorkflowDefinition
+);
+workflow_selector!(
+    list_definitions_outcome,
+    ListDefinitions,
+    Vec<tracedecay_domain::WorkflowDefinition>
+);
+workflow_selector!(
+    definition_history_outcome,
+    DefinitionHistory,
+    Vec<tracedecay_domain::WorkflowDefinition>
+);
+workflow_selector!(
+    diff_definition_outcome,
+    DiffDefinition,
+    tracedecay_application::WorkflowDefinitionDiff
+);
+workflow_selector!(
     activate_definition_outcome,
     ActivateDefinition,
     tracedecay_application::WorkflowActivation
+);
+workflow_selector!(
+    retire_definition_outcome,
+    RetireDefinition,
+    tracedecay_application::WorkflowRetirement
 );
 workflow_selector!(
     execute_fan_out_outcome,

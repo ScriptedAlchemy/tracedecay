@@ -12,8 +12,10 @@ use tracedecay_application::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationResult, CancellationSignal, Deadline, LegalAction, ResultContractRef,
     RetryDirective, SafeDiagnostic, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
-    WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest, WorkflowFanOutRequest,
-    workflow_executable_binding_registry,
+    WorkflowDefinitionActivateRequest, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRetireRequest,
+    WorkflowDefinitionValidateRequest, WorkflowFanOutRequest, workflow_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
@@ -34,7 +36,13 @@ const WORKFLOW_CLI_DEADLINE_MICROS: i64 = 120_000_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkflowCliOperation {
     RegisterDefinition,
+    ValidateDefinition,
+    GetDefinition,
+    ListDefinitions,
+    DefinitionHistory,
+    DiffDefinition,
     ActivateDefinition,
+    RetireDefinition,
     ExecuteFanOut,
     HandoffIssue,
     HandoffRedeem,
@@ -44,7 +52,13 @@ impl WorkflowCliOperation {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "register_definition",
+            Self::ValidateDefinition => "validate_definition",
+            Self::GetDefinition => "get_definition",
+            Self::ListDefinitions => "list_definitions",
+            Self::DefinitionHistory => "definition_history",
+            Self::DiffDefinition => "diff_definition",
             Self::ActivateDefinition => "activate_definition",
+            Self::RetireDefinition => "retire_definition",
             Self::ExecuteFanOut => "execute_fan_out",
             Self::HandoffIssue => "handoff_issue",
             Self::HandoffRedeem => "handoff_redeem",
@@ -54,7 +68,13 @@ impl WorkflowCliOperation {
     const fn canonical(self) -> WorkflowOperation {
         match self {
             Self::RegisterDefinition => WorkflowOperation::RegisterDefinition,
+            Self::ValidateDefinition => WorkflowOperation::ValidateDefinition,
+            Self::GetDefinition => WorkflowOperation::GetDefinition,
+            Self::ListDefinitions => WorkflowOperation::ListDefinitions,
+            Self::DefinitionHistory => WorkflowOperation::DefinitionHistory,
+            Self::DiffDefinition => WorkflowOperation::DiffDefinition,
             Self::ActivateDefinition => WorkflowOperation::ActivateDefinition,
+            Self::RetireDefinition => WorkflowOperation::RetireDefinition,
             Self::ExecuteFanOut => WorkflowOperation::ExecuteFanOut,
             Self::HandoffIssue => WorkflowOperation::HandoffIssue,
             Self::HandoffRedeem => WorkflowOperation::HandoffRedeem,
@@ -85,8 +105,20 @@ impl WorkflowCliOperation {
         match self {
             Self::RegisterDefinition => decode::<WorkflowDefinitionRegisterRequest>(body)
                 .map(WorkflowApplicationInvocation::RegisterDefinition),
+            Self::ValidateDefinition => decode::<WorkflowDefinitionValidateRequest>(body)
+                .map(WorkflowApplicationInvocation::ValidateDefinition),
+            Self::GetDefinition => decode::<WorkflowDefinitionGetRequest>(body)
+                .map(WorkflowApplicationInvocation::GetDefinition),
+            Self::ListDefinitions => decode::<WorkflowDefinitionListRequest>(body)
+                .map(WorkflowApplicationInvocation::ListDefinitions),
+            Self::DefinitionHistory => decode::<WorkflowDefinitionHistoryRequest>(body)
+                .map(WorkflowApplicationInvocation::DefinitionHistory),
+            Self::DiffDefinition => decode::<WorkflowDefinitionDiffRequest>(body)
+                .map(WorkflowApplicationInvocation::DiffDefinition),
             Self::ActivateDefinition => decode::<WorkflowDefinitionActivateRequest>(body)
                 .map(WorkflowApplicationInvocation::ActivateDefinition),
+            Self::RetireDefinition => decode::<WorkflowDefinitionRetireRequest>(body)
+                .map(WorkflowApplicationInvocation::RetireDefinition),
             Self::ExecuteFanOut => decode::<WorkflowFanOutRequest>(body)
                 .map(Box::new)
                 .map(WorkflowApplicationInvocation::ExecuteFanOut),
@@ -104,8 +136,26 @@ impl WorkflowCliOperation {
                 Self::RegisterDefinition,
                 WorkflowApplicationOutcome::RegisterDefinition(_)
             ) | (
+                Self::ValidateDefinition,
+                WorkflowApplicationOutcome::ValidateDefinition(_)
+            ) | (
+                Self::GetDefinition,
+                WorkflowApplicationOutcome::GetDefinition(_)
+            ) | (
+                Self::ListDefinitions,
+                WorkflowApplicationOutcome::ListDefinitions(_)
+            ) | (
+                Self::DefinitionHistory,
+                WorkflowApplicationOutcome::DefinitionHistory(_)
+            ) | (
+                Self::DiffDefinition,
+                WorkflowApplicationOutcome::DiffDefinition(_)
+            ) | (
                 Self::ActivateDefinition,
                 WorkflowApplicationOutcome::ActivateDefinition(_)
+            ) | (
+                Self::RetireDefinition,
+                WorkflowApplicationOutcome::RetireDefinition(_)
             ) | (
                 Self::ExecuteFanOut,
                 WorkflowApplicationOutcome::ExecuteFanOut(_)
@@ -209,7 +259,13 @@ fn erase_workflow_outcome(
 ) -> Result<ApplicationOutcome<Value>> {
     let outcome = match outcome {
         WorkflowApplicationOutcome::RegisterDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::ValidateDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::GetDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::ListDefinitions(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::DefinitionHistory(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::DiffDefinition(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::ActivateDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::RetireDefinition(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::ExecuteFanOut(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::HandoffIssue(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::HandoffRedeem(outcome) => serde_json::to_value(outcome),
