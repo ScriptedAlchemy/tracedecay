@@ -100,10 +100,10 @@ pub(super) fn validate_registration(
 ) -> Result<(), GraphDbError> {
     if !matches!(
         registration.binding.shard_id.scope,
-        StoreShardScopeV1::Project { .. }
+        StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProfileSessions
     ) {
         return Err(GraphDbError::invalid(
-            "graph registry requires the canonical project store runtime binding",
+            "graph registry requires a canonical project or profile-sessions runtime binding",
         ));
     }
     if registration.verified_locator.shard_id != registration.binding.shard_id

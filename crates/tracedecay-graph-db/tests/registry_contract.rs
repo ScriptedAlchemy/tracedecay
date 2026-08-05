@@ -49,6 +49,28 @@ fn identity(profile: &str, project: &str) -> StoreRuntimeBindingV1 {
     )
 }
 
+fn profile_sessions_identity(profile: &str) -> StoreRuntimeBindingV1 {
+    StoreRuntimeBindingV1::new(
+        StoreShardIdV1::profile_sessions(
+            BrainId::try_from("brain-a".to_owned()).unwrap(),
+            UserProfileId::try_from(profile.to_owned()).unwrap(),
+        ),
+        StoreIncarnationV1::new(1).unwrap(),
+        StoreAuthorityEpochV1::new(1).unwrap(),
+    )
+}
+
+fn broad_profile_identity(profile: &str) -> StoreRuntimeBindingV1 {
+    StoreRuntimeBindingV1::new(
+        StoreShardIdV1::profile(
+            BrainId::try_from("brain-a".to_owned()).unwrap(),
+            UserProfileId::try_from(profile.to_owned()).unwrap(),
+        ),
+        StoreIncarnationV1::new(1).unwrap(),
+        StoreAuthorityEpochV1::new(1).unwrap(),
+    )
+}
+
 fn registration(
     binding: StoreRuntimeBindingV1,
     store_root: &std::path::Path,
@@ -108,6 +130,50 @@ fn exact_project_profile_identity_reuses_one_persistent_handle() {
         Some(GraphDbRegistryStatus::Ready)
     );
     assert!(temp.path().join("graph").join("graph.grafeo").is_file());
+}
+
+#[test]
+fn profile_sessions_scope_uses_exact_profile_authority() {
+    let first_root = TempDir::new().unwrap();
+    let second_root = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
+    let first = registry
+        .resolve(registration(
+            profile_sessions_identity("profile-a"),
+            first_root.path(),
+        ))
+        .unwrap();
+    let second = registry
+        .resolve(registration(
+            profile_sessions_identity("profile-b"),
+            second_root.path(),
+        ))
+        .unwrap();
+
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_eq!(
+        registry.status(&profile_sessions_identity("profile-a")),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+    assert_eq!(
+        registry.status(&profile_sessions_identity("profile-b")),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+}
+
+#[test]
+fn broad_profile_scope_is_rejected() {
+    let root = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+
+    assert!(matches!(
+        registry.resolve(registration(
+            broad_profile_identity("profile-a"),
+            root.path(),
+        )),
+        Err(GraphDbError::InvalidRequest { .. })
+    ));
+    assert!(!root.path().join("graph").exists());
 }
 
 #[test]
