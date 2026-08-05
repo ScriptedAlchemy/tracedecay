@@ -581,17 +581,30 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
 
 #[test]
 fn redeploy_retires_owned_discovery_files_and_preserves_foreign_bytes() {
+    const RETIRED_FIND_IMPACT_SKILL: &str = r#"---
+name: tracedecay-find-impact
+description: 'Use to find the blast radius of a change, including impacted symbols, files, and the tests to run.'
+---
+
+# Find impact
+
+Use to find a change's blast radius: impacted symbols, files, and tests to run.
+
+Use `tracedecay:assessing-impact`.
+
+- **Target:** the symbol, file, or change to analyze. If none is given, use the current working-tree diff.
+- Read-only: shallow `max_depth` first. Identify impact; do not run tests.
+
+Output: impacted symbols + files, the test set to run, and any hub/coupling risk.
+"#;
+
     let home = tempfile::tempdir().unwrap();
     write_exact_native_activation(home.path(), TEST_BIN);
     let ctx = install_ctx(home.path());
     let source = codex_plugin_install_dir(home.path());
-    let retired = source.join("skills/tracedecay-retired/SKILL.md");
+    let retired = source.join("skills/tracedecay-find-impact/SKILL.md");
     std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
-    std::fs::write(
-        &retired,
-        "---\nname: tracedecay:retired\ndescription: TraceDecay retired skill\n---\n",
-    )
-    .unwrap();
+    std::fs::write(&retired, RETIRED_FIND_IMPACT_SKILL).unwrap();
     let operator_support = retired.parent().unwrap().join("operator-notes.txt");
     let operator_support_bytes = b"preserve operator TraceDecay MCP support bytes";
     std::fs::write(&operator_support, operator_support_bytes).unwrap();
@@ -625,7 +638,7 @@ fn redeploy_retires_owned_discovery_files_and_preserves_foreign_bytes() {
 
     let foreign = source.join("skills/operator-owned/SKILL.md");
     std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
-    let foreign_bytes = b"---\nname: operator-owned\ndescription: Keep this workflow\n---\n";
+    let foreign_bytes = b"---\nname: operator-owned\ndescription: Use the TraceDecay MCP safely\n---\n\nCall `tracedecay_context` for indexed code.\n";
     std::fs::write(&foreign, foreign_bytes).unwrap();
     install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
     assert_eq!(std::fs::read(foreign).unwrap(), foreign_bytes);
