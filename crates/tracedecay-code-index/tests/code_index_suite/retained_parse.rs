@@ -4,15 +4,29 @@ use std::{
     time::Duration,
 };
 
-use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseLimits, ParseReuse};
+use tracedecay_code_extraction::{
+    AstroExtractor, LanguageExtractor, RustExtractor,
+    incremental::{ParseDocumentIdentity, ParseLimits, ParseReuse},
+    parsed_extraction::ParsedExtractionDisposition,
+};
 use tracedecay_code_index::retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool};
 use tracedecay_domain::{
-    CommitId, ProjectId, RefId, RepositoryDirtyStateV1, RepositoryId, TreeId, WorktreeId,
+    CommitId, ExtractionResult, ProjectId, RefId, RepositoryDirtyStateV1, RepositoryId, TreeId,
+    WorktreeId,
 };
 
 use crate::support::id;
 
 fn identity(worktree: &str, commit: &str, tree: &str) -> ParseDocumentIdentity {
+    identity_at(worktree, commit, tree, "src/lib.rs")
+}
+
+fn identity_at(
+    worktree: &str,
+    commit: &str,
+    tree: &str,
+    logical_path: &str,
+) -> ParseDocumentIdentity {
     ParseDocumentIdentity::Repository {
         project_id: id::<ProjectId>("project.retained"),
         repository_id: id::<RepositoryId>("repository.retained"),
@@ -21,8 +35,17 @@ fn identity(worktree: &str, commit: &str, tree: &str) -> ParseDocumentIdentity {
         commit: Some(id::<CommitId>(commit)),
         tree: Some(id::<TreeId>(tree)),
         dirty: RepositoryDirtyStateV1::Dirty,
-        logical_path: "src/lib.rs".to_owned(),
+        logical_path: logical_path.to_owned(),
     }
+}
+
+fn normalize_extraction(mut result: ExtractionResult) -> ExtractionResult {
+    for node in &mut result.nodes {
+        node.updated_at = 0;
+    }
+    result.duration_ms = 0;
+    result.sanitize();
+    result
 }
 
 #[test]
@@ -58,6 +81,85 @@ fn saved_indexing_reuses_one_tree_only_within_the_exact_checkout() {
     assert_eq!(stats.initial_parses, 2);
     assert_eq!(stats.incremental_parses, 1);
     assert_eq!(stats.retained_documents, 2);
+}
+
+#[test]
+fn incremental_extraction_matches_cold_canonical_rows_and_visits_only_changed_rust_root() {
+    let pool = SharedRetainedParsePool::default();
+    let extractor = RustExtractor;
+    let before = "fn one() -> u32 { 1 }\nfn two() -> u32 { 2 }\n";
+    let after = "fn one() -> u32 { 1 }\nfn two() -> u32 { 20 }\n";
+
+    let (_, initial) = pool
+        .parse_and_extract(
+            identity("worktree.rows", "commit-a", "tree-a"),
+            "rust",
+            before,
+            &extractor,
+        )
+        .expect("initial canonical extraction");
+    let (report, incremental) = pool
+        .parse_and_extract(
+            identity("worktree.rows", "commit-b", "tree-b"),
+            "rust",
+            after,
+            &extractor,
+        )
+        .expect("incremental canonical extraction");
+
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    assert_eq!(
+        incremental.disposition,
+        ParsedExtractionDisposition::ChangedRegions
+    );
+    assert_eq!(incremental.metrics.visited_top_level_nodes, 1);
+    assert!(incremental.metrics.visited_bytes < after.len());
+    assert_eq!(
+        normalize_extraction(incremental.result),
+        normalize_extraction(extractor.extract("src/lib.rs", after))
+    );
+    assert_eq!(
+        initial.disposition,
+        ParsedExtractionDisposition::FullDocument
+    );
+    let stats = pool.stats();
+    assert_eq!(stats.full_extractions, 1);
+    assert_eq!(stats.incremental_extractions, 1);
+    assert_eq!(stats.reset_extractions, 0);
+}
+
+#[test]
+fn composite_source_masking_preserves_incremental_astro_canonical_rows() {
+    let pool = SharedRetainedParsePool::default();
+    let extractor = AstroExtractor::new();
+    let before = "---\nconst title = 'old';\n---\n<h1>{title}</h1>\n";
+    let after = "---\nconst title = 'new';\n---\n<h1>{title}</h1>\n";
+
+    pool.parse_and_extract(
+        identity_at("worktree.astro", "commit-a", "tree-a", "src/page.astro"),
+        "astro",
+        before,
+        &extractor,
+    )
+    .expect("initial Astro extraction");
+    let (report, incremental) = pool
+        .parse_and_extract(
+            identity_at("worktree.astro", "commit-b", "tree-b", "src/page.astro"),
+            "astro",
+            after,
+            &extractor,
+        )
+        .expect("incremental Astro extraction");
+
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    assert_eq!(
+        incremental.disposition,
+        ParsedExtractionDisposition::ChangedRegions
+    );
+    assert_eq!(
+        normalize_extraction(incremental.result),
+        normalize_extraction(extractor.extract("src/page.astro", after))
+    );
 }
 
 #[test]

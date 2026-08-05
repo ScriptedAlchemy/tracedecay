@@ -11,11 +11,15 @@ use std::{
 };
 
 use thiserror::Error;
+use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::incremental::{
     ParseDocumentIdentity, ParseError, ParseLimits, ParseReport, ParseResetReason, ParseReuse,
     RetainedParseDocument,
 };
-use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, WorktreeId};
+use tracedecay_code_extraction::parsed_extraction::{
+    ParsedExtraction, ParsedExtractionDisposition,
+};
+use tracedecay_domain::{ExtractionResult, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 
 const DEFAULT_MAX_RETAINED_DOCUMENTS: usize = 256;
 const DEFAULT_MAX_RETAINED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
@@ -56,6 +60,11 @@ pub struct RetainedParsePoolStats {
     pub evicted_documents: u64,
     pub changed_bytes: u64,
     pub parse_micros: u64,
+    pub full_extractions: u64,
+    pub incremental_extractions: u64,
+    pub reset_extractions: u64,
+    pub visited_top_level_nodes: u64,
+    pub extracted_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -104,6 +113,7 @@ impl ParseDocumentKey {
 
 struct RetainedEntry {
     document: RetainedParseDocument,
+    extraction: Option<ExtractionResult>,
 }
 
 #[derive(Default)]
@@ -151,6 +161,42 @@ impl SharedRetainedParsePool {
         language_id: &str,
         source: &str,
     ) -> Result<ParseReport, ParseError> {
+        self.parse_internal(identity, language_id, source, source, None, None)
+            .map(|(report, _)| report)
+    }
+
+    pub fn parse_and_extract(
+        &self,
+        identity: ParseDocumentIdentity,
+        language_id: &str,
+        source: &str,
+        extractor: &dyn LanguageExtractor,
+    ) -> Result<(ParseReport, ParsedExtraction), ParseError> {
+        let grammar_key = extractor.retained_grammar_key(identity.logical_path());
+        let prepared_source = extractor.prepare_parse_source(source);
+        let (report, extraction) = self.parse_internal(
+            identity,
+            language_id,
+            source,
+            prepared_source.as_ref(),
+            Some(&grammar_key),
+            Some(extractor),
+        )?;
+        match extraction {
+            Some(extraction) => Ok((report, extraction)),
+            None => Err(ParseError::ParseFailed),
+        }
+    }
+
+    fn parse_internal(
+        &self,
+        identity: ParseDocumentIdentity,
+        language_id: &str,
+        source: &str,
+        prepared_source: &str,
+        grammar_key: Option<&str>,
+        extractor: Option<&dyn LanguageExtractor>,
+    ) -> Result<(ParseReport, Option<ParsedExtraction>), ParseError> {
         if source.len() > self.limits.max_total_source_bytes {
             self.record_failure();
             return Err(ParseError::SourceTooLarge {
@@ -169,7 +215,16 @@ impl SharedRetainedParsePool {
         };
 
         match existing {
-            Some(entry) => self.parse_existing(key, entry, identity, language_id, source),
+            Some(entry) => self.parse_existing(
+                key,
+                entry,
+                identity,
+                language_id,
+                source,
+                prepared_source,
+                grammar_key,
+                extractor,
+            ),
             None => {
                 // Serialize only first admission. The second lookup closes the
                 // race between the optimistic lookup above and this bounded
@@ -181,30 +236,64 @@ impl SharedRetainedParsePool {
                 if let Some(entry) = state.documents.get(&key).cloned() {
                     touch(&mut state.lru, &key);
                     drop(state);
-                    return self.parse_existing(key, entry, identity, language_id, source);
+                    return self.parse_existing(
+                        key,
+                        entry,
+                        identity,
+                        language_id,
+                        source,
+                        prepared_source,
+                        grammar_key,
+                        extractor,
+                    );
                 }
-                let (document, report) = match RetainedParseDocument::open(
-                    identity,
-                    language_id,
-                    source,
-                    self.limits.document,
-                ) {
+                let opened = match grammar_key {
+                    Some(grammar_key) => RetainedParseDocument::open_prepared(
+                        identity,
+                        language_id,
+                        grammar_key,
+                        source,
+                        prepared_source,
+                        self.limits.document,
+                    ),
+                    None => RetainedParseDocument::open(
+                        identity,
+                        language_id,
+                        source,
+                        self.limits.document,
+                    ),
+                };
+                let (document, report) = match opened {
                     Ok(parsed) => parsed,
                     Err(error) => {
                         self.record_failure();
                         return Err(error);
                     }
                 };
+                let extraction = match extractor {
+                    Some(extractor) => match document.extract_canonical(extractor, &report, None) {
+                        Ok(extraction) => Some(extraction),
+                        Err(error) => {
+                            state.stats.failed_parses = state.stats.failed_parses.saturating_add(1);
+                            return Err(error);
+                        }
+                    },
+                    None => None,
+                };
+                let retained_extraction = extraction.as_ref().map(|parsed| parsed.result.clone());
                 let current_size = document.retained_source_bytes();
-                let entry = Arc::new(Mutex::new(RetainedEntry { document }));
+                let entry = Arc::new(Mutex::new(RetainedEntry {
+                    document,
+                    extraction: retained_extraction,
+                }));
                 state.documents.insert(key.clone(), Arc::clone(&entry));
                 state.source_bytes.insert(key.clone(), current_size);
                 touch(&mut state.lru, &key);
                 evict_to_limits(&mut state, &key, self.limits);
-                record_success(&mut state.stats, &report);
+                record_success(&mut state.stats, &report, extraction.as_ref());
                 state.stats.retained_documents = state.documents.len();
                 state.stats.retained_source_bytes = state.source_bytes.values().copied().sum();
-                Ok(report)
+                Ok((report, extraction))
             }
         }
     }
@@ -216,22 +305,42 @@ impl SharedRetainedParsePool {
         identity: ParseDocumentIdentity,
         language_id: &str,
         source: &str,
-    ) -> Result<ParseReport, ParseError> {
+        prepared_source: &str,
+        grammar_key: Option<&str>,
+        extractor: Option<&dyn LanguageExtractor>,
+    ) -> Result<(ParseReport, Option<ParsedExtraction>), ParseError> {
         let mut retained = entry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let report = if retained.document.language_id() == language_id {
-            retained.document.reparse(identity, source)
+        let language_changed = retained.document.language_id() != language_id;
+        let report = if !language_changed {
+            match grammar_key {
+                Some(_) => retained
+                    .document
+                    .reparse_prepared(identity, source, prepared_source),
+                None => retained.document.reparse(identity, source),
+            }
         } else {
-            RetainedParseDocument::open(identity, language_id, source, self.limits.document).map(
-                |(document, mut report)| {
-                    retained.document = document;
-                    report.reuse = ParseReuse::Reset {
-                        reason: ParseResetReason::LanguageChanged,
-                    };
-                    report
-                },
-            )
+            let opened = match grammar_key {
+                Some(grammar_key) => RetainedParseDocument::open_prepared(
+                    identity,
+                    language_id,
+                    grammar_key,
+                    source,
+                    prepared_source,
+                    self.limits.document,
+                ),
+                None => {
+                    RetainedParseDocument::open(identity, language_id, source, self.limits.document)
+                }
+            };
+            opened.map(|(document, mut report)| {
+                retained.document = document;
+                report.reuse = ParseReuse::Reset {
+                    reason: ParseResetReason::LanguageChanged,
+                };
+                report
+            })
         };
         let report = match report {
             Ok(report) => report,
@@ -239,6 +348,34 @@ impl SharedRetainedParsePool {
                 drop(retained);
                 self.record_failure();
                 return Err(error);
+            }
+        };
+        let extraction = match extractor {
+            Some(extractor) => {
+                let previous = if language_changed {
+                    None
+                } else {
+                    retained.extraction.as_ref()
+                };
+                match retained
+                    .document
+                    .extract_canonical(extractor, &report, previous)
+                {
+                    Ok(extraction) => {
+                        retained.extraction = Some(extraction.result.clone());
+                        Some(extraction)
+                    }
+                    Err(error) => {
+                        retained.extraction = None;
+                        drop(retained);
+                        self.record_failure();
+                        return Err(error);
+                    }
+                }
+            }
+            None => {
+                retained.extraction = None;
+                None
             }
         };
         let current_size = retained.document.retained_source_bytes();
@@ -255,10 +392,10 @@ impl SharedRetainedParsePool {
             touch(&mut state.lru, &key);
             evict_to_limits(&mut state, &key, self.limits);
         }
-        record_success(&mut state.stats, &report);
+        record_success(&mut state.stats, &report, extraction.as_ref());
         state.stats.retained_documents = state.documents.len();
         state.stats.retained_source_bytes = state.source_bytes.values().copied().sum();
-        Ok(report)
+        Ok((report, extraction))
     }
 
     pub fn stats(&self) -> RetainedParsePoolStats {
@@ -324,7 +461,11 @@ fn evict_to_limits(
     }
 }
 
-fn record_success(stats: &mut RetainedParsePoolStats, report: &ParseReport) {
+fn record_success(
+    stats: &mut RetainedParsePoolStats,
+    report: &ParseReport,
+    extraction: Option<&ParsedExtraction>,
+) {
     match report.reuse {
         ParseReuse::Initial => stats.initial_parses = stats.initial_parses.saturating_add(1),
         ParseReuse::Incremental => {
@@ -345,4 +486,23 @@ fn record_success(stats: &mut RetainedParsePoolStats, report: &ParseReport) {
     stats.parse_micros = stats
         .parse_micros
         .saturating_add(report.metrics.parse_elapsed.as_micros() as u64);
+    if let Some(extraction) = extraction {
+        match extraction.disposition {
+            ParsedExtractionDisposition::FullDocument => {
+                stats.full_extractions = stats.full_extractions.saturating_add(1);
+            }
+            ParsedExtractionDisposition::ChangedRegions => {
+                stats.incremental_extractions = stats.incremental_extractions.saturating_add(1);
+            }
+            ParsedExtractionDisposition::Reset { .. } => {
+                stats.reset_extractions = stats.reset_extractions.saturating_add(1);
+            }
+        }
+        stats.visited_top_level_nodes = stats
+            .visited_top_level_nodes
+            .saturating_add(extraction.metrics.visited_top_level_nodes as u64);
+        stats.extracted_bytes = stats
+            .extracted_bytes
+            .saturating_add(extraction.metrics.visited_bytes as u64);
+    }
 }

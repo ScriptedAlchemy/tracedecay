@@ -181,7 +181,7 @@ impl TreeSitterExtractor {
     /// Resolve the parser for one file, falling back to the descriptor's
     /// declared extensions when the logical path carries no (recognized)
     /// extension.
-    fn resolve_parser<'a>(
+    pub(crate) fn resolve_parser<'a>(
         &'a self,
         file: &ValidatedCodeFileV1,
         descriptor: &LanguageDescriptorV1,
@@ -193,6 +193,40 @@ impl TreeSitterExtractor {
             self.parsers
                 .extractor_for_file(&format!("probe.{extension}"))
         })
+    }
+
+    pub(crate) fn extract_preparsed(
+        &self,
+        file: &ReceiptBoundCodeFileV1,
+        descriptor: &LanguageDescriptorV1,
+        result: ExtractionResult,
+        parsed_len: usize,
+        cancellation: &dyn ExtractionCancellation,
+    ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
+        if cancellation.is_cancelled() {
+            return Err(ExtractionFailureV1::Cancelled);
+        }
+        let authority = file.authority().clone();
+        let file = file.validated_file();
+        validate_descriptor(file, descriptor)?;
+        let admitted_prefix = file
+            .sanitized_bytes
+            .get(..parsed_len)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        if admitted_prefix.is_none() {
+            return Err(ExtractionFailureV1::ParseFailed {
+                detail: "retained parse prefix is not an admitted UTF-8 boundary".to_owned(),
+            });
+        }
+        finish_extraction(
+            authority,
+            file,
+            descriptor,
+            result,
+            parsed_len,
+            parsed_len < file.sanitized_bytes.len(),
+            cancellation,
+        )
     }
 }
 
@@ -378,16 +412,7 @@ impl LanguageExtractor for TreeSitterExtractor {
         }
         let authority = file.authority().clone();
         let file = file.validated_file();
-        if let Some(declared) = &file.file.language
-            && declared != &descriptor.language
-        {
-            return Err(ExtractionFailureV1::IncompatibleDescriptor {
-                detail: format!(
-                    "file declares language {} but descriptor is {}",
-                    declared, descriptor.language
-                ),
-            });
-        }
+        validate_descriptor(file, descriptor)?;
 
         let parser = self.resolve_parser(file, descriptor).ok_or({
             ExtractionFailureV1::GrammarUnavailable {
@@ -417,84 +442,120 @@ impl LanguageExtractor for TreeSitterExtractor {
         let source_was_capped = parsed_len < source.len();
 
         let mut result = parser.extract(&file.file.logical_path, extraction_source);
-        result.sanitize();
-
-        if cancellation.is_cancelled() {
-            return Err(ExtractionFailureV1::Cancelled);
-        }
-
-        let parse_outcome = match (source_was_capped, result.errors.first()) {
-            (false, None) => ParseOutcomeV1::Complete,
-            (true, None) => ParseOutcomeV1::Partial {
-                reason: format!(
-                    "source byte cap {MAX_EXTRACTION_SOURCE_BYTES} reached; remaining bytes unsupported"
-                ),
-            },
-            (was_capped, Some(first)) => {
-                let first: String = first.chars().take(200).collect();
-                let cap_reason = if was_capped {
-                    format!(
-                        "; source byte cap {MAX_EXTRACTION_SOURCE_BYTES} reached; remaining bytes unsupported"
-                    )
-                } else {
-                    String::new()
-                };
-                ParseOutcomeV1::Partial {
-                    reason: format!(
-                        "{} extraction error(s); first: {first}{cap_reason}",
-                        result.errors.len()
-                    ),
-                }
-            }
-        };
-
-        let file_len = file.sanitized_bytes.len() as u64;
-        let parsed_ranges = if parsed_len > 0 {
-            vec![SourceSpan {
-                start_byte: 0,
-                end_byte: parsed_len as u64,
-            }]
-        } else {
-            Vec::new()
-        };
-        let unsupported_ranges = if source_was_capped {
-            vec![SourceSpan {
-                start_byte: parsed_len as u64,
-                end_byte: file_len,
-            }]
-        } else {
-            Vec::new()
-        };
-        let coverage = ExtractionCoverageV1 {
-            parsed_bytes: parsed_len as u64,
-            error_bytes: 0,
-            unsupported_bytes: file_len - parsed_len as u64,
-            symbols_extracted: result.nodes.len() as u64,
-            relations_extracted: result.edges.len() as u64,
-            ambiguity_count: result.unresolved_refs.len() as u64,
-        };
-        let rows_digest = rows_digest(file, descriptor, &result)?;
-
-        Ok(ExtractedCodeFileV1 {
+        finish_extraction(
             authority,
-            batch: ExtractionBatchV1 {
-                generation_id: file.generation_id.clone(),
-                file_occurrence_id: file.file.file_occurrence_id.clone(),
-                language: descriptor.language.clone(),
-                descriptor_revision: descriptor.descriptor_revision.clone(),
-                grammar_revision: descriptor.grammar_revision.clone(),
-                extractor_revision: descriptor.extractor_revision.clone(),
-                content_digest: file.file.content_digest.clone(),
-                parse_outcome,
-                parsed_ranges,
-                error_ranges: Vec::new(),
-                unsupported_ranges,
-                coverage,
-                rows_digest,
-            },
-            parse_artifacts: result,
-        })
+            file,
+            descriptor,
+            result,
+            parsed_len,
+            source_was_capped,
+            cancellation,
+        )
     }
+}
+
+fn validate_descriptor(
+    file: &ValidatedCodeFileV1,
+    descriptor: &LanguageDescriptorV1,
+) -> Result<(), ExtractionFailureV1> {
+    if let Some(declared) = &file.file.language
+        && declared != &descriptor.language
+    {
+        return Err(ExtractionFailureV1::IncompatibleDescriptor {
+            detail: format!(
+                "file declares language {} but descriptor is {}",
+                declared, descriptor.language
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn finish_extraction(
+    authority: ReceiptBoundCodeFileAuthorityV1,
+    file: &ValidatedCodeFileV1,
+    descriptor: &LanguageDescriptorV1,
+    mut result: ExtractionResult,
+    parsed_len: usize,
+    source_was_capped: bool,
+    cancellation: &dyn ExtractionCancellation,
+) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
+    result.sanitize();
+    if cancellation.is_cancelled() {
+        return Err(ExtractionFailureV1::Cancelled);
+    }
+
+    let parse_outcome = match (source_was_capped, result.errors.first()) {
+        (false, None) => ParseOutcomeV1::Complete,
+        (true, None) => ParseOutcomeV1::Partial {
+            reason: format!(
+                "source byte cap {MAX_EXTRACTION_SOURCE_BYTES} reached; remaining bytes unsupported"
+            ),
+        },
+        (was_capped, Some(first)) => {
+            let first: String = first.chars().take(200).collect();
+            let cap_reason = if was_capped {
+                format!(
+                    "; source byte cap {MAX_EXTRACTION_SOURCE_BYTES} reached; remaining bytes unsupported"
+                )
+            } else {
+                String::new()
+            };
+            ParseOutcomeV1::Partial {
+                reason: format!(
+                    "{} extraction error(s); first: {first}{cap_reason}",
+                    result.errors.len()
+                ),
+            }
+        }
+    };
+
+    let file_len = file.sanitized_bytes.len() as u64;
+    let parsed_ranges = if parsed_len > 0 {
+        vec![SourceSpan {
+            start_byte: 0,
+            end_byte: parsed_len as u64,
+        }]
+    } else {
+        Vec::new()
+    };
+    let unsupported_ranges = if source_was_capped {
+        vec![SourceSpan {
+            start_byte: parsed_len as u64,
+            end_byte: file_len,
+        }]
+    } else {
+        Vec::new()
+    };
+    let coverage = ExtractionCoverageV1 {
+        parsed_bytes: parsed_len as u64,
+        error_bytes: 0,
+        unsupported_bytes: file_len - parsed_len as u64,
+        symbols_extracted: result.nodes.len() as u64,
+        relations_extracted: result.edges.len() as u64,
+        ambiguity_count: result.unresolved_refs.len() as u64,
+    };
+    let rows_digest = rows_digest(file, descriptor, &result)?;
+
+    Ok(ExtractedCodeFileV1 {
+        authority,
+        batch: ExtractionBatchV1 {
+            generation_id: file.generation_id.clone(),
+            file_occurrence_id: file.file.file_occurrence_id.clone(),
+            language: descriptor.language.clone(),
+            descriptor_revision: descriptor.descriptor_revision.clone(),
+            grammar_revision: descriptor.grammar_revision.clone(),
+            extractor_revision: descriptor.extractor_revision.clone(),
+            content_digest: file.file.content_digest.clone(),
+            parse_outcome,
+            parsed_ranges,
+            error_ranges: Vec::new(),
+            unsupported_ranges,
+            coverage,
+            rows_digest,
+        },
+        parse_artifacts: result,
+    })
 }
 
 #[cfg(test)]

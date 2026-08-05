@@ -332,8 +332,13 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     let stats = owner.retained_parse_stats();
     assert_eq!(stats.initial_parses, 1);
     assert_eq!(stats.incremental_parses, 1);
+    assert_eq!(stats.full_extractions, 1);
+    assert_eq!(stats.incremental_extractions, 1);
+    assert_eq!(stats.reset_extractions, 0);
     assert_eq!(stats.retained_documents, 1);
     assert!(stats.changed_bytes < 60);
+    assert!(stats.visited_top_level_nodes <= 3);
+    assert!(stats.extracted_bytes < 120);
 }
 
 #[test]
