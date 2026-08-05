@@ -96,7 +96,15 @@ fn test_all_error_codes() {
 #[test]
 fn test_tool_definition_scope_properties_match_handlers() {
     let tools = get_tool_definitions();
+    assert!(!tools.is_empty());
+    let mut names = std::collections::BTreeSet::new();
     for tool in &tools {
+        assert!(
+            names.insert(&tool.name),
+            "duplicate MCP tool definition: {}",
+            tool.name
+        );
+        assert!(tool.name.starts_with("tracedecay_"));
         assert!(
             tool.input_schema["properties"].get("hermes_home").is_none(),
             "{} must not expose Hermes host-home routing",
@@ -132,44 +140,35 @@ fn test_ast_grep_tools_follow_capability_gates() {
 }
 
 #[test]
-fn test_write_and_exec_tools_are_not_read_only() {
-    // Tools that mutate files or run subprocesses must advertise
-    // `readOnlyHint: false`, otherwise harnesses that auto-approve read-only
-    // tools will edit files / run `cargo test` without prompting. See #94.
-    let write_or_exec = [
-        "tracedecay_str_replace",
-        "tracedecay_multi_str_replace",
-        "tracedecay_insert_at",
-        "tracedecay_replace_symbol",
-        "tracedecay_insert_at_symbol",
-        "tracedecay_move_symbol",
-        "tracedecay_run_affected_tests",
-        "tracedecay_ast_grep_rewrite",
-        "tracedecay_lcm_doctor",
-    ];
-    // The only entry allowed to be missing: it is registered just when
-    // ast-grep is on PATH. Skipping any other name would let a renamed or
-    // dropped mutating tool pass this gate without ever being checked.
-    const PATH_CONDITIONAL: &str = "tracedecay_ast_grep_rewrite";
+fn test_dispatch_effect_metadata_controls_read_only_hint() {
     let tools = get_tool_definitions();
-    for name in write_or_exec {
-        let Some(tool) = tools.iter().find(|t| t.name == name) else {
-            assert_eq!(
-                name, PATH_CONDITIONAL,
-                "write/exec tool '{name}' is no longer in the catalog; the \
-                 readOnlyHint gate would silently skip it. Re-point this list \
-                 at the tool's current name instead of dropping the coverage."
-            );
-            continue;
-        };
+    for tool in tools {
+        let dispatch = tool
+            .meta
+            .as_ref()
+            .and_then(|metadata| metadata.get("tracedecay/dispatch"))
+            .unwrap_or_else(|| panic!("tool '{}' has no canonical dispatch metadata", tool.name));
+        let effect = dispatch["effect"]
+            .as_str()
+            .unwrap_or_else(|| panic!("tool '{}' has no canonical dispatch effect", tool.name));
+        let read_only = dispatch["read_only"]
+            .as_bool()
+            .unwrap_or_else(|| panic!("tool '{}' has no canonical dispatch read_only", tool.name));
+        assert_eq!(
+            read_only,
+            matches!(effect, "read" | "preview"),
+            "tool '{}' has inconsistent dispatch effect/read_only metadata",
+            tool.name
+        );
         let annotations = tool
             .annotations
             .as_ref()
-            .unwrap_or_else(|| panic!("tool '{name}' has no annotations"));
+            .unwrap_or_else(|| panic!("tool '{}' has no annotations", tool.name));
         assert_eq!(
             annotations["readOnlyHint"],
-            serde_json::Value::Bool(false),
-            "write/exec tool '{name}' must have readOnlyHint: false"
+            serde_json::Value::Bool(read_only),
+            "tool '{}' readOnlyHint must follow canonical dispatch metadata",
+            tool.name
         );
     }
 }

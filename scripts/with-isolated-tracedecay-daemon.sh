@@ -91,10 +91,14 @@ command -v setsid >/dev/null 2>&1 || {
   exit 2
 }
 
-run_dir="$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-daemon.XXXXXX")"
+# AF_UNIX socket paths are bounded (typically 108 bytes). Sweep artifacts may
+# live beneath a much deeper workspace path, so daemon runtime state uses this
+# short, harness-owned directory while reports remain at the caller's path.
+run_dir="$(mktemp -d /tmp/tracedecay-daemon.XXXXXX)"
 export TRACEDECAY_DATA_DIR="$run_dir/profile"
 export TRACEDECAY_DAEMON_SOCKET="$run_dir/daemon.sock"
 export TRACEDECAY_DAEMON_HARNESS_ACTIVE=1
+export TRACEDECAY_DAEMON_HARNESS_ROOT="$run_dir"
 # Keep explicit caller overrides inside the elected daemon's isolated profile.
 # A database outside this profile correctly fails the sole-writer authority check.
 export TRACEDECAY_GLOBAL_DB="$TRACEDECAY_DATA_DIR/global.db"

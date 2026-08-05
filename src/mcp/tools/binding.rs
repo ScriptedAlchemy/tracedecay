@@ -342,6 +342,7 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_replace_symbol"
             | "tracedecay_insert_at_symbol"
             | "tracedecay_move_symbol"
+            | "tracedecay_rename_symbol"
     )
 }
 
@@ -582,6 +583,31 @@ mod tests {
                 contract.inverse(),
                 McpInverseContract::Unavailable { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn only_source_edits_with_real_sweep_journeys_are_available() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        assert!(
+            catalog
+                .contract("tracedecay_rename_symbol")
+                .unwrap()
+                .availability()
+                .is_available()
+        );
+        for tool_name in [
+            "tracedecay_api_migration_apply",
+            "tracedecay_source_edit_reconcile",
+        ] {
+            assert!(
+                !catalog
+                    .contract(tool_name)
+                    .unwrap()
+                    .availability()
+                    .is_available(),
+                "{tool_name} has no authentic producer/consumer/inverse journey"
+            );
         }
     }
 

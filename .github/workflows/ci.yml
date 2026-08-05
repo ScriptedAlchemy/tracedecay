@@ -787,6 +787,53 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  mcp-tool-sweep:
+    name: Catalog-complete MCP tool sweep
+    needs: dashboard-assets
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    # This is intentionally a production-journey gate: release build, dynamic
+    # RMCP tools/list, one isolated read daemon, and a fresh isolated profile
+    # for each verified reversible effect. Any advertised mutation without a
+    # journey remains an explicit failure row. No hand-maintained inventory.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Validate MCP sweep harness contracts
+        run: python3 -m unittest discover -s tests/tool_sweep_suite -p 'test_*.py'
+
+      - name: Cache release build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-mcp-tool-sweep-release-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Build release daemon and MCP proxy
+        run: cargo build --release --locked --bin tracedecay
+
+      - name: Audit every negotiated MCP tool
+        run: scripts/tool-sweep.sh --bin target/release/tracedecay --out "target/tool-sweep/${{ github.run_id }}-${{ github.run_attempt }}" --shards 4
+
+      - name: Upload MCP tool sweep artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mcp-tool-sweep
+          path: target/tool-sweep
+          if-no-files-found: warn
+          retention-days: 14
+
   release-compatibility:
     name: Release compatibility
     needs: dashboard-assets
