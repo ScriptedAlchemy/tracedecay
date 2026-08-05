@@ -33,7 +33,7 @@ fn dashboard_read_model_preserves_per_root_partial_truth() {
             value: vec!["result".to_owned()],
             reason: ScopePartialReasonV1::RootUnavailable,
         },
-        continuation,
+        continuation: Some(continuation),
     };
 
     let wire = serde_json::to_value(MultiRootQueryReadModelV1::from(page)).unwrap();
