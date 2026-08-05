@@ -251,45 +251,6 @@ pub(super) fn lcm_temporal_mode(args: &Value, default: TemporalModeV1) -> Result
     }
 }
 
-pub(super) fn messages_arg(args: &Value) -> Result<Vec<Value>> {
-    let Some(messages) = args.get("messages") else {
-        return Ok(Vec::new());
-    };
-    let Some(messages) = messages.as_array() else {
-        return Err(argument_error("messages must be an array"));
-    };
-    Ok(messages.clone())
-}
-
-pub(super) fn string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
-    let Some(value) = args.get(name) else {
-        return Ok(Vec::new());
-    };
-    let Some(values) = value.as_array() else {
-        return Err(argument_error(format!("{name} must be an array")));
-    };
-    values
-        .iter()
-        .map(|value| {
-            if let Some(text) = value
-                .as_str()
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-            {
-                return Ok(text.to_string());
-            }
-            if let Some(integer) = value.as_i64()
-                && integer >= 0
-            {
-                return Ok(integer.to_string());
-            }
-            Err(argument_error(format!(
-                "{name} must contain only non-empty strings or non-negative integers"
-            )))
-        })
-        .collect()
-}
-
 pub(super) fn string_only_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
     let Some(value) = args.get(name) else {
         return Ok(Vec::new());
@@ -310,56 +271,6 @@ pub(super) fn string_only_array_arg(args: &Value, name: &str) -> Result<Vec<Stri
                 })
         })
         .collect()
-}
-
-/// The summarizer the caller asked for, taken at face value.
-///
-/// An explicit `summarizer: "noop"` used to be silently rewritten to the
-/// auxiliary summarizer under hard compression pressure, which made the tool
-/// do something the caller never requested. The request is now honored and the
-/// pressure is reported through [`summarizer_pressure_advisory`] instead.
-pub(super) fn summarizer_arg(args: &Value) -> Result<LcmSummarizerMode> {
-    match args.get("summarizer") {
-        Some(summarizer) => {
-            serde_json::from_value(summarizer.clone()).map_err(|err| TraceDecayError::Config {
-                message: format!("invalid summarizer: {err}"),
-            })
-        }
-        None => Ok(LcmSummarizerMode::HermesAuxiliary),
-    }
-}
-
-/// Typed advisory for an explicit no-op summarizer requested while the session
-/// is already under hard compression pressure. `None` means there is nothing
-/// to advise.
-pub(super) fn summarizer_pressure_advisory(args: &Value) -> Result<Option<Value>> {
-    let mode = summarizer_arg(args)?;
-    if !matches!(mode, LcmSummarizerMode::Noop) || !hard_compression_pressure(args)? {
-        return Ok(None);
-    }
-    Ok(Some(serde_json::json!({
-        "code": "noop_summarizer_under_hard_pressure",
-        "message": "summarizer 'noop' was honored while the session is over its compression threshold; no summaries will be produced",
-        "requested_summarizer": "noop",
-        "recommended_summarizer": "hermes_auxiliary",
-    })))
-}
-
-pub(super) fn hard_compression_pressure(args: &Value) -> Result<bool> {
-    let Some(current_tokens) = non_negative_i64_arg(args, "current_tokens")? else {
-        return Ok(false);
-    };
-    if non_negative_i64_arg(args, "threshold_tokens")?
-        .is_some_and(|threshold| threshold > 0 && current_tokens >= threshold)
-    {
-        return Ok(true);
-    }
-    let assembly_cap = compression_decision::effective_assembly_token_cap(AssemblyCapInput {
-        max_assembly_tokens: non_negative_i64_arg(args, "max_assembly_tokens")?,
-        context_length: non_negative_i64_arg(args, "context_length")?,
-        reserve_tokens_floor: non_negative_i64_arg(args, "reserve_tokens_floor")?,
-    });
-    Ok(assembly_cap.is_some_and(|cap| current_tokens >= cap))
 }
 
 pub(super) fn lcm_content_slice(args: &Value) -> Result<LcmContentSlice> {
@@ -391,51 +302,6 @@ pub(super) fn lcm_load_content_slice(args: &Value) -> Result<(LcmContentSlice, O
     let limit = requested_limit.min(MAX_LCM_LOAD_CONTENT_LIMIT);
     let clamped_from = (requested_limit > limit).then_some(requested_limit);
     Ok((LcmContentSlice { offset, limit }, clamped_from))
-}
-
-pub(super) fn lcm_doctor_mode(args: &Value) -> Result<&str> {
-    let mode = optional_non_empty_string_arg(args, "mode")?.unwrap_or("diagnose");
-    match mode {
-        "diagnose" | "repair" | "retention" | "clean" | "gc" => Ok(mode),
-        _ => Err(argument_error(
-            "mode must be one of diagnose, repair, retention, clean, gc",
-        )),
-    }
-}
-
-pub(super) fn lcm_doctor_clean_apply_enabled(_args: &Value) -> Result<bool> {
-    Ok(crate::global_db::env_flag("LCM_DOCTOR_CLEAN_APPLY_ENABLED"))
-}
-
-pub(super) fn lcm_gc_apply_enabled(_args: &Value) -> Result<bool> {
-    Ok(crate::global_db::env_flag("LCM_GC_APPLY_ENABLED"))
-}
-
-pub(super) fn lcm_clean_config(args: &Value) -> Result<LcmCleanConfig> {
-    Ok(LcmCleanConfig {
-        ignore_session_patterns: string_array_arg(args, "ignore_session_patterns")?,
-        stateless_session_patterns: string_array_arg(args, "stateless_session_patterns")?,
-        ignore_message_patterns: string_array_arg(args, "ignore_message_patterns")?,
-    })
-}
-
-pub(super) fn lcm_gc_config(args: &Value) -> Result<LcmGcConfig> {
-    match args.get("gc_config") {
-        Some(value) => serde_json::from_value::<LcmGcConfig>(value.clone()).map_err(|err| {
-            argument_error(format!(
-                "gc_config must be a valid LcmGcConfig object: {err}"
-            ))
-        }),
-        None => Ok(LcmGcConfig::default()),
-    }
-}
-
-// By-value so it can be used point-free as a `map_err` adapter.
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn lcm_error(err: crate::sessions::lcm::LcmError) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: err.to_string(),
-    }
 }
 
 pub(super) fn parse_lcm_scope(args: &Value) -> Result<LcmScope> {
@@ -623,22 +489,4 @@ pub(super) fn parse_git_scope_filter(args: &Value) -> Result<GitScopeFilter> {
         optional_non_empty_string_arg(args, "commit")?,
     )
     .map_err(|err| argument_error(err.to_string()))
-}
-
-#[cfg(test)]
-mod authority_tests {
-    use super::*;
-
-    #[test]
-    fn doctor_apply_gates_ignore_caller_overrides() {
-        let clean_env = crate::global_db::env_flag("LCM_DOCTOR_CLEAN_APPLY_ENABLED");
-        let gc_env = crate::global_db::env_flag("LCM_GC_APPLY_ENABLED");
-        let args = json!({
-            "doctor_clean_apply_enabled": !clean_env,
-            "lcm_gc_apply_enabled": !gc_env,
-        });
-
-        assert_eq!(lcm_doctor_clean_apply_enabled(&args).unwrap(), clean_env);
-        assert_eq!(lcm_gc_apply_enabled(&args).unwrap(), gc_env);
-    }
 }

@@ -1,10 +1,9 @@
 //! Cursor `preCompact` machinery.
 //!
 //! Cursor's compaction event exposes pressure metadata but not Cursor's own
-//! generated summary text. The hook delegates compaction to the daemon, which
-//! ingests the current transcript tail, asks LCM for the compactable raw-message
-//! backlog, generates a summary through `cursor-agent -p`, and stores that
-//! summary as a normal LCM summary node.
+//! generated summary text. The hook delegates pressure admission to the daemon,
+//! which ingests the current transcript tail and reports native summary content
+//! as unavailable. It never substitutes `cursor-agent` output.
 
 use std::time::Duration;
 

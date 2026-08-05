@@ -1,47 +1,15 @@
-use std::path::Path;
-use std::sync::Arc;
-
 use serde_json::Value;
 use tracedecay_application::RetainedSurfaceOperation;
 
 use super::session;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
 
-pub async fn handle_user_lcm_tool(
+/// Projectless daemon path over the daemon-mounted LCM command/query and
+/// canonical temporal retrieval authorities.
+pub(crate) async fn handle_user_lcm_tool_with_authorities(
     tool_name: &str,
     args: Value,
-    profile_root: &Path,
-) -> Result<crate::mcp::tools::ToolResult> {
-    handle_user_lcm_tool_with_db(tool_name, args, profile_root, None, None, None).await
-}
-
-/// Projectless daemon path: retain the profile session DB and optional
-/// temporal retrieval service already attached by store administration.
-pub(crate) async fn handle_user_lcm_tool_with_retained_authority(
-    tool_name: &str,
-    args: Value,
-    profile_root: &Path,
-    retained_session_db: &Arc<RegisteredGlobalDb>,
-    retrieval_service: Option<&dyn session::message_search::SessionRetrievalServicePort>,
-) -> Result<crate::mcp::tools::ToolResult> {
-    handle_user_lcm_tool_with_db(
-        tool_name,
-        args,
-        profile_root,
-        Some(retained_session_db),
-        None,
-        retrieval_service,
-    )
-    .await
-}
-
-pub(crate) async fn handle_user_lcm_tool_with_db(
-    tool_name: &str,
-    args: Value,
-    profile_root: &Path,
-    retained_session_db: Option<&Arc<RegisteredGlobalDb>>,
-    _registry_db: Option<&RegisteredGlobalDb>,
+    lcm_authority: Option<&dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
     retrieval_service: Option<&dyn session::message_search::SessionRetrievalServicePort>,
 ) -> Result<crate::mcp::tools::ToolResult> {
     if args.get("storage_scope").and_then(Value::as_str) != Some("user") {
@@ -76,9 +44,8 @@ pub(crate) async fn handle_user_lcm_tool_with_db(
         )
         .await;
     }
-    let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
     let context =
-        session::LcmHandlerContext::user(&sessions_db_path, retained_session_db, retrieval_service);
+        session::LcmHandlerContext::user(retrieval_service).with_lcm_authority(lcm_authority);
     let operation =
         RetainedSurfaceOperation::from_name(tool_name).ok_or_else(|| TraceDecayError::Config {
             message: format!("unknown user-scoped LCM tool: {tool_name}"),
@@ -102,13 +69,6 @@ pub(super) async fn dispatch_lcm_tool(
         RetainedSurfaceOperation::LcmExpand => session::handle_lcm_expand(context, args).await,
         RetainedSurfaceOperation::LcmExpandQuery => {
             session::handle_lcm_expand_query(context, args).await
-        }
-        RetainedSurfaceOperation::LcmPreflight => {
-            session::handle_lcm_preflight(context, args).await
-        }
-        RetainedSurfaceOperation::LcmCompress => session::handle_lcm_compress(context, args).await,
-        RetainedSurfaceOperation::LcmSessionBoundary => {
-            session::handle_lcm_session_boundary(context, args).await
         }
         RetainedSurfaceOperation::FactStore
         | RetainedSurfaceOperation::FactFeedback

@@ -208,15 +208,12 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_git_status", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_health_delta", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_health_read", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_compress", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_describe", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_doctor", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_expand", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_expand_query", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_grep", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_load_session", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_preflight", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_session_boundary", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_status", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_module_api", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_qualified_name", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -281,9 +278,6 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_memory_status"
         | "tracedecay_session_refresh"
         | "tracedecay_run_affected_tests"
-        | "tracedecay_lcm_doctor"
-        | "tracedecay_lcm_compress"
-        | "tracedecay_lcm_session_boundary"
         | "tracedecay_session_start"
         | "tracedecay_session_end" => EffectClass::Administrative,
         _ => EffectClass::Read,
@@ -566,11 +560,7 @@ mod tests {
     #[test]
     fn mixed_repair_tools_are_effects_without_fabricated_lifecycle_claims() {
         let catalog = mcp_dispatch_catalog().unwrap();
-        for tool_name in [
-            "tracedecay_lcm_doctor",
-            "tracedecay_memory_status",
-            "tracedecay_session_refresh",
-        ] {
+        for tool_name in ["tracedecay_memory_status", "tracedecay_session_refresh"] {
             let contract = catalog.contract(tool_name).unwrap();
             assert_eq!(contract.effect(), EffectClass::Administrative);
             assert!(!contract.read_only());

@@ -18,7 +18,7 @@ Codex.
   `hooks` field): `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
   `PostToolUse`, and `PostCompact` handlers that inject index status and
   tool-routing steering, keep the graph/session store warm, and replace
-  encrypted Codex compaction placeholders with auxiliary app-server summaries
+  Codex compaction pressure as a typed unavailable native-summary state
   backed by the visible source messages in TraceDecay's LCM DAG.
 
 The source `hooks/hooks-codex.json` is an empty seed for repo-local bundles.

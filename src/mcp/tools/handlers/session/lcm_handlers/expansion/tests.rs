@@ -35,7 +35,7 @@ async fn describe_maps_summary_target_to_typed_service_and_adds_temporal_metadat
         lineage: Vec::new(),
         retrieval: LcmRetrievalOutcome::complete(LcmDataFreshness::Fresh),
     });
-    let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
+    let context = LcmHandlerContext::user(Some(&service));
 
     let response = payload(
         handle_lcm_describe(
@@ -101,7 +101,7 @@ async fn expand_maps_raw_alias_and_preserves_bounded_legacy_expansion() {
         state: HydrationStateV1::Available,
         retrieval: LcmRetrievalOutcome::complete(LcmDataFreshness::Fresh),
     });
-    let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
+    let context = LcmHandlerContext::user(Some(&service));
 
     let response = payload(
         handle_lcm_expand(
@@ -155,7 +155,7 @@ async fn stale_describe_and_expand_render_typed_freshness_in_json_and_markdown()
 
     let describe = payload(
         handle_lcm_describe(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({"provider": "claude", "session_id": "session-exact", "format": "json"}),
         )
         .await
@@ -163,7 +163,7 @@ async fn stale_describe_and_expand_render_typed_freshness_in_json_and_markdown()
     );
     let expand = payload(
         handle_lcm_expand(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({
                 "provider": "claude",
                 "session_id": "session-exact",
@@ -184,7 +184,7 @@ async fn stale_describe_and_expand_render_typed_freshness_in_json_and_markdown()
 
     let markdown = response_text(
         handle_lcm_describe(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({"provider": "claude", "session_id": "session-exact", "format": "markdown"}),
         )
         .await
@@ -221,7 +221,7 @@ async fn zero_item_partial_describe_and_expand_render_omissions_without_deletion
 
     let describe = payload(
         handle_lcm_describe(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({"provider": "claude", "session_id": "session-exact", "format": "json"}),
         )
         .await
@@ -229,7 +229,7 @@ async fn zero_item_partial_describe_and_expand_render_omissions_without_deletion
     );
     let expand = payload(
         handle_lcm_expand(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({
                 "provider": "claude",
                 "session_id": "session-exact",
@@ -253,7 +253,7 @@ async fn zero_item_partial_describe_and_expand_render_omissions_without_deletion
 
     let markdown = response_text(
         handle_lcm_expand(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({
                 "provider": "claude",
                 "session_id": "session-exact",
@@ -279,7 +279,7 @@ async fn describe_and_expand_without_service_never_probe_legacy_storage() {
 
     let describe = payload(
         handle_lcm_describe(
-            LcmHandlerContext::user(missing_path, None, None),
+            LcmHandlerContext::user(None),
             json!({
                 "provider": "claude",
                 "session_id": "session-exact",
@@ -298,7 +298,7 @@ async fn describe_and_expand_without_service_never_probe_legacy_storage() {
 
     let expand = payload(
         handle_lcm_expand(
-            LcmHandlerContext::user(missing_path, None, None),
+            LcmHandlerContext::user(None),
             json!({
                 "provider": "claude",
                 "session_id": "session-exact",

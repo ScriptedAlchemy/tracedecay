@@ -257,10 +257,9 @@ pub async fn hook_cursor_stop() -> i32 {
 ///
 /// Cursor's compaction event exposes pressure metadata but not Cursor's own
 /// generated summary text. The hook delegates to the daemon, which ingests the
-/// current transcript tail, asks LCM for the compactable raw-message backlog,
-/// generates a summary through `cursor-agent -p`, and stores that summary as a
-/// normal LCM summary node. The hook is fail-open and emits Cursor's empty
-/// object shape.
+/// current transcript tail and records the host's pressure event. Native
+/// summary content remains typed unavailable because Cursor does not expose it.
+/// The hook is fail-open and emits Cursor's empty object shape.
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;

@@ -5,7 +5,6 @@ use crate::automation::config_error;
 use crate::automation::run_ledger::AutomationRunStatus;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::Result;
-use crate::global_db::RegisteredGlobalDb;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
@@ -257,19 +256,11 @@ pub(crate) async fn replay_projectless_hermes_host_admission(
 async fn continue_projectless_hermes_review(
     profile_root: &Path,
     session_runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
-    session_db: &RegisteredGlobalDb,
 ) -> Result<Value> {
     let dashboard_root = crate::automation::runner::user_automation_root(profile_root);
     let Some(ready) = crate::automation::host_receipts::oldest_ready(&dashboard_root).await? else {
         return Ok(json!({ "action": "hermes_receipt", "status": "ingested" }));
     };
-    if session_db
-        .lcm_load_raw_message("hermes", &ready.transcript_watermark)
-        .await
-        .is_none()
-    {
-        return Ok(json!({ "action": "hermes_receipt", "status": "awaiting_transcript" }));
-    }
     if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
         .await?
         .paused
@@ -308,7 +299,6 @@ pub(super) async fn hermes_receipt(
     args: &Value,
     profile_root: &Path,
     session_runtime_registry: Option<&Arc<DaemonSessionRuntimeRegistryV1>>,
-    session_db: &RegisteredGlobalDb,
     broker: &SharedHostAdmissionBroker,
 ) -> Result<Value> {
     let event_value = args
@@ -368,12 +358,7 @@ pub(super) async fn hermes_receipt(
         let session_runtime_registry = session_runtime_registry.ok_or_else(|| {
             config_error("Hermes review requires retained profile runtime registry authority")
         })?;
-        return continue_projectless_hermes_review(
-            profile_root,
-            session_runtime_registry,
-            session_db,
-        )
-        .await;
+        return continue_projectless_hermes_review(profile_root, session_runtime_registry).await;
     }
     Ok(json!({ "action": "hermes_receipt", "status": "recorded" }))
 }

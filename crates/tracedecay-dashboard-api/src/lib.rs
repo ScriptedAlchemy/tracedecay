@@ -7,10 +7,8 @@
 //!
 //! - `/api/plugins/holographic/*`  → project memory store
 //!   (`memory_facts` / `memory_entities` / `memory_banks` in the project DB)
-//! - `/api/plugins/hermes-lcm/*`   → LCM session store
-//!   (`lcm_raw_messages` / `lcm_summary_nodes` in the resolved active project
-//!   store where transcript ingest writes; see [`resolve_lcm_store`] for the
-//!   fail-closed authority selection)
+//! - `/api/plugins/hermes-lcm/*`   → typed unavailable until the daemon mounts
+//!   canonical temporal retrieval for the dashboard
 //!
 //! The endpoint paths and JSON payload shapes intentionally mirror the
 //! original Hermes plugin APIs (`plugins/memory/holographic_plus/dashboard/
@@ -91,17 +89,6 @@ mod graph_service;
 mod graph_structure_api;
 pub mod hooks;
 mod lcm_api;
-// SEAM(sessions): the sessions mover physically relocated this dashboard test
-// module to `crates/tracedecay-sessions/src/runtime/lcm/`, where nothing
-// declares it — it is a dashboard test (`super::*` resolves to this crate's
-// root, and it drives an `axum::Router` over `DashboardState`). The `#[path]`
-// follows the file so the coverage is not silently dropped; the lead should
-// physically move it back under this crate (`src/` or `tests/`) at
-// integration, at which point this attribute goes away.
-#[cfg(test)]
-#[path = "../../tracedecay-sessions/src/runtime/lcm/dashboard_fixes_tests.rs"]
-mod lcm_dashboard_fixes_tests;
-mod lcm_queries;
 mod loom_api;
 mod memory_analysis;
 mod memory_api;

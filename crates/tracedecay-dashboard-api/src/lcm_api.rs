@@ -1,18 +1,8 @@
 //! LCM dashboard API.
 //!
-//! Transcript browse and content routes stay unavailable until the canonical
-//! temporal retrieval service can hydrate them through the owning store's
-//! redaction authority. The maintenance routes below continue to operate on
-//! the LCM payload store explicitly.
-//!
-//! Schema mapping (hermes-lcm → tracedecay):
-//! - `messages`               → `lcm_raw_messages` (`source` ← `provider`,
-//!   `token_estimate` ← ~chars/4, `pinned`/`tool_name` not tracked)
-//! - `summary_nodes`          → `lcm_summary_nodes` (`summary` ←
-//!   `summary_text`, `token_count` ← `summary_token_count`, `latest_at` ←
-//!   `source_time_end`; node ids are strings, not ints)
-//! - `summary_nodes.source_ids` JSON → `lcm_summary_sources` rows
-//! - FTS mirrors → `lcm_raw_messages_fts` / `lcm_summary_nodes_fts`
+//! All transcript browse routes fail closed until the dashboard composition
+//! root mounts the canonical temporal retrieval service. This adapter never
+//! queries LCM tables or hydrates payloads directly.
 
 use axum::{Json, extract::State};
 use schemars::JsonSchema;

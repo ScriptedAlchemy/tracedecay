@@ -1857,17 +1857,17 @@ fn spawn_handshake_capturing_daemon(socket_path: PathBuf) -> mpsc::Receiver<Valu
 }
 
 #[test]
-fn user_scoped_lcm_tool_cli_handshakes_projectless_from_filesystem_root_cwd() {
+fn user_scoped_transcript_ingest_handshakes_projectless_from_filesystem_root_cwd() {
     let home = TempDir::new().unwrap();
     let socket_dir = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let socket_path = socket_dir.path().join("tracedecay.sock");
     let observed_handshake = spawn_handshake_capturing_daemon(socket_path.clone());
     let args = json!({
+        "action": "ingest_transcript",
         "provider": "hermes",
         "session_id": "stock-check-session",
         "storage_scope": "user",
-        "transcript_projection": true,
         "messages": [
             {"role": "user", "content": "hello", "id": "m1"},
             {"role": "assistant", "content": "hi there", "id": "m2"}
@@ -1880,7 +1880,7 @@ fn user_scoped_lcm_tool_cli_handshakes_projectless_from_filesystem_root_cwd() {
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args([
             "tool",
-            "tracedecay_lcm_preflight",
+            "tracedecay_hook_runtime",
             "--json",
             "--args",
             args.as_str(),
@@ -1918,10 +1918,10 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
     let socket = common::daemon_socket_path(&home_path);
 
     let user_args = json!({
+        "action": "ingest_transcript",
         "provider": "hermes",
         "session_id": "stock-check-session",
         "storage_scope": "user",
-        "transcript_projection": true,
         "messages": [
             {
                 "role": "user",
@@ -1945,24 +1945,24 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
         .env("TRACEDECAY_DAEMON_SOCKET", &socket)
         .args([
             "tool",
-            "tracedecay_lcm_preflight",
+            "tracedecay_hook_runtime",
             "--json",
             "--args",
             user_args.as_str(),
         ])
         .output()
-        .expect("user-scoped sync_turn preflight should run");
+        .expect("user-scoped transcript ingest should run");
     assert!(
         user_output.status.success(),
-        "user-scoped Hermes preflight must succeed projectless\nstdout:\n{}\nstderr:\n{}",
+        "user-scoped Hermes transcript ingest must succeed projectless\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&user_output.stdout),
         String::from_utf8_lossy(&user_output.stderr)
     );
 
     let project_args = json!({
+        "action": "ingest_transcript",
         "provider": "hermes",
         "session_id": "stock-check-session",
-        "transcript_projection": true,
         "messages": [
             {
                 "role": "user",
@@ -1988,16 +1988,16 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
             "tool",
             "--project",
             &project_arg,
-            "tracedecay_lcm_preflight",
+            "tracedecay_hook_runtime",
             "--json",
             "--args",
             project_args.as_str(),
         ])
         .output()
-        .expect("project-scoped sync_turn preflight should run");
+        .expect("project-scoped transcript ingest should run");
     assert!(
         project_output.status.success(),
-        "project-scoped Hermes preflight must succeed\nstdout:\n{}\nstderr:\n{}",
+        "project-scoped Hermes transcript ingest must succeed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&project_output.stdout),
         String::from_utf8_lossy(&project_output.stderr)
     );

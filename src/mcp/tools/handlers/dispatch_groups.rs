@@ -619,10 +619,7 @@ pub(super) async fn execute_project_retained_application_tool(
         | RetainedSurfaceOperation::LcmGrep
         | RetainedSurfaceOperation::LcmDescribe
         | RetainedSurfaceOperation::LcmExpand
-        | RetainedSurfaceOperation::LcmExpandQuery
-        | RetainedSurfaceOperation::LcmPreflight
-        | RetainedSurfaceOperation::LcmCompress
-        | RetainedSurfaceOperation::LcmSessionBoundary => {
+        | RetainedSurfaceOperation::LcmExpandQuery => {
             dispatch_lcm_tool(request.operation, request.arguments, active_lcm_context).await
         }
         RetainedSurfaceOperation::SessionStart => {

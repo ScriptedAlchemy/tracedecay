@@ -3,75 +3,23 @@ use std::sync::Mutex;
 
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestId, ResolvedScope,
+    RequestId,
 };
 use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_usecases::context::{
+    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
+    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    session_application_grant_digest,
+};
 
 use super::*;
-
-struct ExactCanonicalSummaryAdmission {
-    anchors: Vec<RetrievalAnchorId>,
-    source_messages: Vec<tracedecay_sessions::runtime::lcm::LcmSummarySourceMessage>,
-}
-
-impl LcmCanonicalSummaryAdmissionPort for ExactCanonicalSummaryAdmission {
-    fn admit<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _cancellation: &'a CancellationToken,
-        command: &'a LcmCompactionCommand,
-        summary_request: &'a LcmSummaryRequest,
-    ) -> CanonicalSummaryFuture<'a> {
-        Box::pin(async move {
-            let LcmCompressionEvidence::ClaudeNativeSummary {
-                summary_text,
-                source_anchors,
-                source_content_digest,
-                ..
-            } = &command.evidence
-            else {
-                return CanonicalSummaryAdmission::Unavailable(
-                    LcmAuthorityUnavailableReason::HostProtocolUnavailable,
-                );
-            };
-            let Ok(canonical_digest) = canonical_sha256(&self.source_messages) else {
-                return CanonicalSummaryAdmission::Unavailable(
-                    LcmAuthorityUnavailableReason::CanonicalSourceUnavailable,
-                );
-            };
-            if source_anchors != &self.anchors
-                || source_content_digest != &canonical_digest
-                || summary_request.source_messages != self.source_messages
-            {
-                return CanonicalSummaryAdmission::Unavailable(
-                    LcmAuthorityUnavailableReason::CanonicalSourceUnavailable,
-                );
-            }
-            let Ok(source_state) = canonical_sha256(&(
-                command.evidence.protocol().event_digest(),
-                source_anchors,
-                source_content_digest,
-                &summary_request.source_range,
-            )) else {
-                return CanonicalSummaryAdmission::Unavailable(
-                    LcmAuthorityUnavailableReason::CanonicalSourceUnavailable,
-                );
-            };
-            CanonicalSummaryAdmission::Admitted {
-                summary_text: summary_text.clone(),
-                source_state,
-            }
-        })
-    }
-}
 
 #[derive(Default)]
 struct FakeStore {
     calls: Mutex<Vec<LcmAuthorityOperation>>,
-    provided_summaries: Mutex<Vec<String>>,
     status: Mutex<Option<LcmStatus>>,
 }
 
@@ -82,19 +30,12 @@ impl FakeStore {
             .map(|calls| calls.clone())
             .unwrap_or_default()
     }
-
-    fn provided_summaries(&self) -> Vec<String> {
-        self.provided_summaries
-            .lock()
-            .map(|summaries| summaries.clone())
-            .unwrap_or_default()
-    }
 }
 
 impl LcmDaemonStore for FakeStore {
-    fn preflight(&self, _request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse> {
+    fn ingest(&self, _request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse> {
         if let Ok(mut calls) = self.calls.lock() {
-            calls.push(LcmAuthorityOperation::Preflight);
+            calls.push(LcmAuthorityOperation::Ingest);
         }
         Box::pin(async {
             Ok(LcmPreflightResponse {
@@ -106,83 +47,16 @@ impl LcmDaemonStore for FakeStore {
         })
     }
 
-    fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
+    fn preflight(&self, _request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse> {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(LcmAuthorityOperation::Compact);
         }
-        if let LcmSummarizerMode::Provided { summary_text, .. } = &request.summarizer
-            && let Ok(mut summaries) = self.provided_summaries.lock()
-        {
-            summaries.push(summary_text.clone());
-        }
-        Box::pin(async move {
-            let summary_request = matches!(&request.summarizer, LcmSummarizerMode::HermesAuxiliary)
-                .then(|| LcmSummaryRequest {
-                    provider: request.provider.clone(),
-                    session_id: request.session_id.clone(),
-                    focus_topic: request.focus_topic.clone(),
-                    prompt: "Summarize the exact canonical source range".to_owned(),
-                    source_range: tracedecay_sessions::runtime::lcm::LcmSummarySourceRange {
-                        from_store_id: 11,
-                        to_store_id: 12,
-                    },
-                    source_messages: vec![
-                        tracedecay_sessions::runtime::lcm::LcmSummarySourceMessage {
-                            store_id: 11,
-                            role: "user".to_owned(),
-                            content: "canonical visible source".to_owned(),
-                        },
-                        tracedecay_sessions::runtime::lcm::LcmSummarySourceMessage {
-                            store_id: 12,
-                            role: "assistant".to_owned(),
-                            content: "[REDACTED]".to_owned(),
-                        },
-                    ],
-                    extraction_request: None,
-                });
-            Ok(LcmCompressionResponse {
-                status: "ok".to_owned(),
-                reason: match request.summarizer {
-                    LcmSummarizerMode::Provided { .. } => "native_summary",
-                    LcmSummarizerMode::HermesAuxiliary => "needs_summary",
-                    LcmSummarizerMode::Noop | LcmSummarizerMode::Fake { .. } => "no_summary",
-                }
-                .to_owned(),
-                summary_nodes_created: 0,
-                summary_nodes: Vec::new(),
-                replay_messages: Vec::new(),
-                replay_token_estimate: 0,
-                replay_over_budget: false,
-                compression_attempts: 0,
-                fallback_used: false,
-                context_recovery_hint: None,
-                retry_status: None,
-                frontier: tracedecay_sessions::runtime::lcm::LcmLifecycleState {
-                    provider: request.provider,
-                    conversation_id: request.session_id.clone(),
-                    current_session_id: request.session_id,
-                    current_frontier_store_id: Some(3),
-                    last_finalized_session_id: None,
-                    last_finalized_frontier_store_id: None,
-                    maintenance_debt: Vec::new(),
-                },
-                summary_request,
-            })
-        })
-    }
-
-    fn session_boundary(
-        &self,
-        _request: LcmSessionBoundaryRequest,
-    ) -> StoreFuture<'_, LcmSessionBoundaryResponse> {
-        if let Ok(mut calls) = self.calls.lock() {
-            calls.push(LcmAuthorityOperation::SessionBoundary);
-        }
         Box::pin(async {
-            Ok(LcmSessionBoundaryResponse {
+            Ok(LcmPreflightResponse {
                 status: "ok".to_owned(),
-                recorded: true,
-                reason: "recorded".to_owned(),
+                should_compress: false,
+                reason: "below_threshold".to_owned(),
+                replay_messages: Vec::new(),
             })
         })
     }
@@ -194,33 +68,71 @@ impl LcmDaemonStore for FakeStore {
         let status = self.status.lock().ok().and_then(|status| status.clone());
         Box::pin(async move { status.ok_or_else(|| LcmError::Db("unavailable".to_owned())) })
     }
+
+    fn doctor(&self, _query: LcmDoctorQuery) -> StoreFuture<'_, serde_json::Value> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(LcmAuthorityOperation::Doctor);
+        }
+        Box::pin(async { Ok(serde_json::json!({"status": "healthy", "findings": []})) })
+    }
 }
 
 fn request_context(
     operation: LcmAuthorityOperation,
     allowed: bool,
-) -> (RequestContext, CancellationToken) {
-    request_context_until(operation, allowed, UtcMicros(i64::MAX - 1))
+) -> (RequestContext, SessionRequestBinding, CancellationToken) {
+    request_context_for_target(
+        operation,
+        allowed,
+        UtcMicros(i64::MAX - 1),
+        default_target(operation),
+    )
 }
 
 fn request_context_until(
     operation: LcmAuthorityOperation,
     allowed: bool,
     expires_at: UtcMicros,
-) -> (RequestContext, CancellationToken) {
+) -> (RequestContext, SessionRequestBinding, CancellationToken) {
+    request_context_for_target(operation, allowed, expires_at, default_target(operation))
+}
+
+fn request_context_for_target(
+    operation: LcmAuthorityOperation,
+    allowed: bool,
+    expires_at: UtcMicros,
+    target: LcmAuthorityTarget,
+) -> (RequestContext, SessionRequestBinding, CancellationToken) {
     let actor = ActorId::new("actor.lcm-test").unwrap();
-    let scope = ResolvedScope::new(
+    let identity = ResolvedSessionIdentity::for_project(
+        ProfileId::new("profile.lcm-test").unwrap(),
         ProjectId::new("project.lcm-test").unwrap(),
-        RepositoryId::new("repository.lcm-test").unwrap(),
-        WorktreeId::new("worktree.lcm-test").unwrap(),
-        None,
-    )
-    .unwrap();
+        SessionStoreId::new("store.lcm-test").unwrap(),
+        SessionRootId::new("root.lcm-test").unwrap(),
+        ResolvedGitRoute::new(
+            RepositoryId::new("repository.lcm-test").unwrap(),
+            WorktreeId::new("worktree.lcm-test").unwrap(),
+            BranchId::new("branch.lcm-test").unwrap(),
+        ),
+    );
+    let scope = identity.session_request_scope().unwrap();
     let (capability, use_case) = lcm_authority_operation_identity(operation).unwrap();
+    let (capability_digest, policy_digest, configuration_digest) =
+        mount::lcm_binding_digests(&identity, &capability, &target).unwrap();
+    let request_id = RequestId::new("request.lcm-test").unwrap();
+    let cancellation = CancellationToken::for_application_request(request_id.as_str());
+    let budgets = RequestBudgets::new(100, 1_000_000, 10_000).unwrap();
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.lcm-test").unwrap(),
         1,
-        canonical_sha256(&"lcm-test-grant").unwrap(),
+        session_application_grant_digest(
+            capability_digest,
+            policy_digest,
+            configuration_digest,
+            &cancellation,
+            budgets,
+        )
+        .unwrap(),
         actor.clone(),
         UtcMicros(1),
         expires_at,
@@ -238,8 +150,6 @@ fn request_context_until(
         DisclosureClass::Sensitive,
     )
     .unwrap();
-    let request_id = RequestId::new("request.lcm-test").unwrap();
-    let cancellation = CancellationToken::for_application_request(request_id.as_str());
     let token_id = cancellation.application_token_id().unwrap();
     let context = RequestContext::new(
         actor,
@@ -250,7 +160,40 @@ fn request_context_until(
         CancellationContext::active(token_id).unwrap(),
     )
     .unwrap();
-    (context, cancellation)
+    let binding = SessionRequestBinding::new(
+        identity,
+        capability_digest,
+        policy_digest,
+        configuration_digest,
+        cancellation.clone(),
+        budgets,
+    );
+    (context, binding, cancellation)
+}
+
+fn default_target(operation: LcmAuthorityOperation) -> LcmAuthorityTarget {
+    match operation {
+        LcmAuthorityOperation::Ingest => target("hermes", Some("session.lcm-test")),
+        LcmAuthorityOperation::Compact => target("cursor", Some("session.lcm-test")),
+        LcmAuthorityOperation::Status => target("claude", None),
+        LcmAuthorityOperation::Doctor => LcmAuthorityTarget::Store,
+    }
+}
+
+fn hermes_ingest(messages: Vec<serde_json::Value>) -> LcmTranscriptIngestCommand {
+    let mut preflight = preflight("hermes");
+    preflight.messages = messages;
+    let event_digest = canonical_sha256(&(
+        &preflight.provider,
+        &preflight.session_id,
+        &preflight.messages,
+    ))
+    .unwrap();
+    LcmTranscriptIngestCommand {
+        preflight,
+        protocol_revision: "hermes.turn-completed.v1".to_owned(),
+        event_digest,
+    }
 }
 
 fn preflight(provider: &str) -> LcmPreflightRequest {
@@ -276,52 +219,34 @@ fn preflight(provider: &str) -> LcmPreflightRequest {
     }
 }
 
-fn canonical_source_messages() -> Vec<tracedecay_sessions::runtime::lcm::LcmSummarySourceMessage> {
-    vec![
-        tracedecay_sessions::runtime::lcm::LcmSummarySourceMessage {
-            store_id: 11,
-            role: "user".to_owned(),
-            content: "canonical visible source".to_owned(),
-        },
-        tracedecay_sessions::runtime::lcm::LcmSummarySourceMessage {
-            store_id: 12,
-            role: "assistant".to_owned(),
-            content: "[REDACTED]".to_owned(),
-        },
-    ]
+fn target(provider: &str, session_id: Option<&str>) -> LcmAuthorityTarget {
+    LcmAuthorityTarget::Provider {
+        provider: provider.to_owned(),
+        session_id: session_id.map(str::to_owned),
+    }
 }
 
-fn claude_native_command(source_content_digest: ManifestDigest) -> LcmCompactionCommand {
-    LcmCompactionCommand {
-        preflight: preflight("claude"),
-        focus_topic: None,
-        expected_current_frontier_store_id: None,
-        evidence: LcmCompressionEvidence::ClaudeNativeSummary {
-            protocol: LcmHostProtocol::ClaudeCodePreCompact {
-                protocol_revision: "claude.precompact.v1".to_owned(),
-                event_digest: canonical_sha256(&"claude-event").unwrap(),
-            },
-            summary_text: "exact native Claude summary".to_owned(),
-            source_anchors: vec![
-                RetrievalAnchorId::new("anchor.source.11").unwrap(),
-                RetrievalAnchorId::new("anchor.source.12").unwrap(),
-            ],
-            source_content_digest,
-        },
-    }
+fn status_request(provider: &str, session_id: Option<&str>) -> LcmAuthorityRequest {
+    LcmAuthorityRequest::Status(LcmStatusQuery {
+        provider: provider.to_owned(),
+        session_id: session_id.map(str::to_owned),
+        deep: false,
+    })
 }
 
 #[tokio::test]
 async fn denied_command_never_reaches_daemon_store() {
     let store = Arc::new(FakeStore::default());
     let authority = DaemonLcmAuthority::with_store(store.clone());
-    let (context, cancellation) = request_context(LcmAuthorityOperation::Preflight, false);
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Status, false);
 
     let response = authority
         .execute(LcmAuthorityInvocation {
             context,
+            binding,
+            target: target("claude", None),
             cancellation,
-            request: LcmAuthorityRequest::Preflight(preflight("claude")),
+            request: status_request("claude", None),
         })
         .await;
 
@@ -330,17 +255,100 @@ async fn denied_command_never_reaches_daemon_store() {
 }
 
 #[tokio::test]
+async fn authentic_hermes_turn_is_committed_through_daemon_store() {
+    let store = Arc::new(FakeStore::default());
+    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let command = hermes_ingest(vec![serde_json::json!({
+        "id": "message.hermes.1",
+        "role": "user",
+        "content": "authentic callback content"
+    })]);
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Ingest, true);
+
+    let response = authority
+        .execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: target("hermes", Some("session.lcm-test")),
+            cancellation,
+            request: LcmAuthorityRequest::Ingest(command),
+        })
+        .await;
+
+    assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
+    assert!(response.receipt.committed_state.is_some());
+    assert!(matches!(
+        response.payload,
+        Some(LcmAuthorityPayload::Ingest(_))
+    ));
+    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Ingest]);
+}
+
+#[tokio::test]
+async fn altered_hermes_turn_is_rejected_before_store_effect() {
+    let store = Arc::new(FakeStore::default());
+    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let mut command = hermes_ingest(vec![serde_json::json!({
+        "id": "message.hermes.1",
+        "role": "user",
+        "content": "original callback content"
+    })]);
+    command.preflight.messages[0]["content"] = serde_json::json!("altered");
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Ingest, true);
+
+    let response = authority
+        .execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: target("hermes", Some("session.lcm-test")),
+            cancellation,
+            request: LcmAuthorityRequest::Ingest(command),
+        })
+        .await;
+
+    assert_eq!(
+        response.outcome,
+        LcmAuthorityOutcome::Unavailable {
+            reason: LcmAuthorityUnavailableReason::HostProtocolUnavailable
+        }
+    );
+    assert!(store.calls().is_empty());
+}
+
+#[tokio::test]
 async fn mismatched_live_cancellation_identity_is_denied_before_store_effect() {
     let store = Arc::new(FakeStore::default());
     let authority = DaemonLcmAuthority::with_store(store.clone());
-    let (context, _) = request_context(LcmAuthorityOperation::Preflight, true);
+    let (context, binding, _) = request_context(LcmAuthorityOperation::Status, true);
     let cancellation = CancellationToken::for_application_request("request.other");
 
     let response = authority
         .execute(LcmAuthorityInvocation {
             context,
+            binding,
+            target: target("claude", None),
             cancellation,
-            request: LcmAuthorityRequest::Preflight(preflight("claude")),
+            request: status_request("claude", None),
+        })
+        .await;
+
+    assert_eq!(response.outcome, LcmAuthorityOutcome::Denied);
+    assert!(store.calls().is_empty());
+}
+
+#[tokio::test]
+async fn request_target_not_bound_into_grant_is_denied_before_store_effect() {
+    let store = Arc::new(FakeStore::default());
+    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Status, true);
+
+    let response = authority
+        .execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: target("cursor", None),
+            cancellation,
+            request: status_request("cursor", None),
         })
         .await;
 
@@ -351,11 +359,13 @@ async fn mismatched_live_cancellation_identity_is_denied_before_store_effect() {
 #[tokio::test]
 async fn unavailable_store_is_typed_and_never_fabricates_empty_success() {
     let authority = DaemonLcmAuthority::unavailable();
-    let (context, cancellation) = request_context(LcmAuthorityOperation::Status, true);
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Status, true);
 
     let response = authority
         .execute(LcmAuthorityInvocation {
             context,
+            binding,
+            target: target("claude", None),
             cancellation,
             request: LcmAuthorityRequest::Status(LcmStatusQuery {
                 provider: "claude".to_owned(),
@@ -378,14 +388,16 @@ async fn unavailable_store_is_typed_and_never_fabricates_empty_success() {
 async fn live_cancellation_stops_before_store_effect() {
     let store = Arc::new(FakeStore::default());
     let authority = DaemonLcmAuthority::with_store(store.clone());
-    let (context, cancellation) = request_context(LcmAuthorityOperation::Preflight, true);
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Status, true);
     cancellation.cancel();
 
     let response = authority
         .execute(LcmAuthorityInvocation {
             context,
+            binding,
+            target: target("claude", None),
             cancellation,
-            request: LcmAuthorityRequest::Preflight(preflight("claude")),
+            request: status_request("claude", None),
         })
         .await;
 
@@ -401,14 +413,16 @@ async fn live_cancellation_stops_before_store_effect() {
 async fn expired_deadline_stops_before_store_effect() {
     let store = Arc::new(FakeStore::default());
     let authority = DaemonLcmAuthority::with_store(store.clone());
-    let (context, cancellation) =
-        request_context_until(LcmAuthorityOperation::Preflight, true, UtcMicros(2));
+    let (context, binding, cancellation) =
+        request_context_until(LcmAuthorityOperation::Status, true, UtcMicros(2));
 
     let response = authority
         .execute(LcmAuthorityInvocation {
             context,
+            binding,
+            target: target("claude", None),
             cancellation,
-            request: LcmAuthorityRequest::Preflight(preflight("claude")),
+            request: status_request("claude", None),
         })
         .await;
 
@@ -421,31 +435,61 @@ async fn expired_deadline_stops_before_store_effect() {
 }
 
 #[tokio::test]
-async fn non_claude_summary_content_is_unrepresentable_as_native_admission() {
+async fn pressure_only_event_ingests_then_reports_missing_native_payload() {
     let store = Arc::new(FakeStore::default());
     let authority = DaemonLcmAuthority::with_store(store.clone());
-    let (context, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
-    let protocol = LcmHostProtocol::CursorPreCompact {
-        protocol_revision: "cursor.precompact.v1".to_owned(),
-        event_digest: canonical_sha256(&"cursor-event").unwrap(),
-    };
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
     let command = LcmCompactionCommand {
         preflight: preflight("cursor"),
-        focus_topic: None,
-        expected_current_frontier_store_id: None,
-        evidence: LcmCompressionEvidence::ClaudeNativeSummary {
-            protocol,
-            summary_text: "untrusted cursor summary".to_owned(),
-            source_anchors: vec![
-                tracedecay_domain::RetrievalAnchorId::new("anchor.cursor").unwrap(),
-            ],
-            source_content_digest: canonical_sha256(&"source").unwrap(),
+        evidence: LcmCompressionEvidence::PressureOnly {
+            protocol: LcmHostProtocol::CursorPreCompact {
+                protocol_revision: "cursor.precompact.v1".to_owned(),
+                event_digest: canonical_sha256(&"cursor-pressure-event").unwrap(),
+            },
         },
     };
 
     let response = authority
         .execute(LcmAuthorityInvocation {
             context,
+            binding,
+            target: target("cursor", Some("session.lcm-test")),
+            cancellation,
+            request: LcmAuthorityRequest::Compact(command),
+        })
+        .await;
+
+    assert_eq!(
+        response.outcome,
+        LcmAuthorityOutcome::Unavailable {
+            reason: LcmAuthorityUnavailableReason::HostPayloadUnavailable
+        }
+    );
+    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Compact]);
+    assert!(response.payload.is_none());
+    assert!(response.receipt.committed_state.is_some());
+}
+
+#[tokio::test]
+async fn pressure_protocol_provider_mismatch_is_typed_before_ingest() {
+    let store = Arc::new(FakeStore::default());
+    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
+    let command = LcmCompactionCommand {
+        preflight: preflight("cursor"),
+        evidence: LcmCompressionEvidence::PressureOnly {
+            protocol: LcmHostProtocol::CodexContextCompacted {
+                protocol_revision: "codex.context-compacted.v1".to_owned(),
+                event_digest: canonical_sha256(&"mismatched-pressure-event").unwrap(),
+            },
+        },
+    };
+
+    let response = authority
+        .execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: target("cursor", Some("session.lcm-test")),
             cancellation,
             request: LcmAuthorityRequest::Compact(command),
         })
@@ -458,151 +502,11 @@ async fn non_claude_summary_content_is_unrepresentable_as_native_admission() {
         }
     );
     assert!(store.calls().is_empty());
+    assert!(response.receipt.committed_state.is_none());
 }
 
 #[tokio::test]
-async fn pressure_only_event_ingests_then_reports_missing_native_payload() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
-    let (context, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
-    let command = LcmCompactionCommand {
-        preflight: preflight("cursor"),
-        focus_topic: None,
-        expected_current_frontier_store_id: None,
-        evidence: LcmCompressionEvidence::PressureOnly {
-            protocol: LcmHostProtocol::CursorPreCompact {
-                protocol_revision: "cursor.precompact.v1".to_owned(),
-                event_digest: canonical_sha256(&"cursor-pressure-event").unwrap(),
-            },
-        },
-    };
-
-    let response = authority
-        .execute(LcmAuthorityInvocation {
-            context,
-            cancellation,
-            request: LcmAuthorityRequest::Compact(command),
-        })
-        .await;
-
-    assert_eq!(
-        response.outcome,
-        LcmAuthorityOutcome::Unavailable {
-            reason: LcmAuthorityUnavailableReason::HostPayloadUnavailable
-        }
-    );
-    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Preflight]);
-    assert!(response.payload.is_none());
-    assert!(response.receipt.committed_state.is_some());
-}
-
-#[tokio::test]
-async fn native_summary_commit_requires_exact_canonical_hydration_and_redaction_state() {
-    let source_messages = canonical_source_messages();
-    let anchors = vec![
-        RetrievalAnchorId::new("anchor.source.11").unwrap(),
-        RetrievalAnchorId::new("anchor.source.12").unwrap(),
-    ];
-    let canonical_digest = canonical_sha256(&source_messages).unwrap();
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone()).with_canonical_summary_admission(
-        Arc::new(ExactCanonicalSummaryAdmission {
-            anchors,
-            source_messages,
-        }),
-    );
-    let (context, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
-
-    let response = authority
-        .execute(LcmAuthorityInvocation {
-            context,
-            cancellation,
-            request: LcmAuthorityRequest::Compact(claude_native_command(canonical_digest)),
-        })
-        .await;
-
-    assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
-    assert!(response.receipt.committed_state.is_some());
-    assert_eq!(
-        store.calls(),
-        vec![
-            LcmAuthorityOperation::Compact,
-            LcmAuthorityOperation::Compact
-        ]
-    );
-    assert_eq!(
-        store.provided_summaries(),
-        vec!["exact native Claude summary".to_owned()]
-    );
-}
-
-#[tokio::test]
-async fn missing_summary_relation_authority_never_commits_native_summary() {
-    let source_messages = canonical_source_messages();
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
-    let (context, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
-
-    let response = authority
-        .execute(LcmAuthorityInvocation {
-            context,
-            cancellation,
-            request: LcmAuthorityRequest::Compact(claude_native_command(
-                canonical_sha256(&source_messages).unwrap(),
-            )),
-        })
-        .await;
-
-    assert_eq!(
-        response.outcome,
-        LcmAuthorityOutcome::Unavailable {
-            reason: LcmAuthorityUnavailableReason::SummaryRelationAuthorityUnavailable
-        }
-    );
-    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Compact]);
-    assert!(store.provided_summaries().is_empty());
-    assert!(response.receipt.committed_state.is_some());
-}
-
-#[tokio::test]
-async fn canonical_source_digest_mismatch_never_commits_native_summary() {
-    let source_messages = canonical_source_messages();
-    let anchors = vec![
-        RetrievalAnchorId::new("anchor.source.11").unwrap(),
-        RetrievalAnchorId::new("anchor.source.12").unwrap(),
-    ];
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone()).with_canonical_summary_admission(
-        Arc::new(ExactCanonicalSummaryAdmission {
-            anchors,
-            source_messages,
-        }),
-    );
-    let (context, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
-
-    let response = authority
-        .execute(LcmAuthorityInvocation {
-            context,
-            cancellation,
-            request: LcmAuthorityRequest::Compact(claude_native_command(
-                canonical_sha256(&"wrong source").unwrap(),
-            )),
-        })
-        .await;
-
-    assert_eq!(
-        response.outcome,
-        LcmAuthorityOutcome::Unavailable {
-            reason: LcmAuthorityUnavailableReason::CanonicalSourceUnavailable
-        }
-    );
-    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Compact]);
-    assert!(store.provided_summaries().is_empty());
-    assert!(response.receipt.committed_state.is_some());
-}
-
-#[tokio::test]
-async fn registered_authority_restart_reads_committed_preflight_state() {
+async fn registered_authority_restart_reads_committed_hermes_turn() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
         directory.path(),
@@ -610,19 +514,20 @@ async fn registered_authority_restart_reads_committed_preflight_state() {
     .await
     .unwrap();
     let first = DaemonLcmAuthority::registered(runtime.profile_database_arc());
-    let mut request = preflight("claude");
-    request.messages = vec![serde_json::json!({
+    let command = hermes_ingest(vec![serde_json::json!({
         "id": "message.restart.1",
         "role": "user",
         "content": "durable session content"
-    })];
-    let (context, cancellation) = request_context(LcmAuthorityOperation::Preflight, true);
+    })]);
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Ingest, true);
 
     let written = first
         .execute(LcmAuthorityInvocation {
             context,
+            binding,
+            target: target("hermes", Some("session.lcm-test")),
             cancellation,
-            request: LcmAuthorityRequest::Preflight(request),
+            request: LcmAuthorityRequest::Ingest(command),
         })
         .await;
 
@@ -632,13 +537,20 @@ async fn registered_authority_restart_reads_committed_preflight_state() {
 
     let remounted = runtime.remount_profile_database_for_test().await.unwrap();
     let restarted = DaemonLcmAuthority::registered(remounted);
-    let (context, cancellation) = request_context(LcmAuthorityOperation::Status, true);
+    let (context, binding, cancellation) = request_context_for_target(
+        LcmAuthorityOperation::Status,
+        true,
+        UtcMicros(i64::MAX - 1),
+        target("hermes", Some("session.lcm-test")),
+    );
     let read = restarted
         .execute(LcmAuthorityInvocation {
             context,
+            binding,
+            target: target("hermes", Some("session.lcm-test")),
             cancellation,
             request: LcmAuthorityRequest::Status(LcmStatusQuery {
-                provider: "claude".to_owned(),
+                provider: "hermes".to_owned(),
                 session_id: Some("session.lcm-test".to_owned()),
                 deep: false,
             }),
@@ -650,4 +562,54 @@ async fn registered_authority_restart_reads_committed_preflight_state() {
         panic!("restarted authority must return typed LCM status");
     };
     assert_eq!(status.raw_message_count, 1);
+}
+
+#[tokio::test]
+async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+        directory.path(),
+    )
+    .await
+    .unwrap();
+    let database = runtime.profile_database_arc();
+    let shard = database.binding().shard_id.clone();
+    let profile_id = ProfileId::new(shard.profile_id.as_str()).unwrap();
+    let profile_identity = ResolvedSessionIdentity::for_profile(
+        profile_id.clone(),
+        SessionStoreId::new("store.profile.lcm-test").unwrap(),
+        SessionRootId::new("root.profile.lcm-test").unwrap(),
+    );
+    let mounted =
+        mount_registered_lcm_authority(database.clone(), profile_identity, &shard).unwrap();
+    let first = mounted
+        .execute(LcmAuthorityRequest::Status(LcmStatusQuery {
+            provider: "claude".to_owned(),
+            session_id: Some("session.mounted.first".to_owned()),
+            deep: false,
+        }))
+        .await
+        .unwrap();
+    let second = mounted
+        .execute(LcmAuthorityRequest::Status(LcmStatusQuery {
+            provider: "claude".to_owned(),
+            session_id: Some("session.mounted.second".to_owned()),
+            deep: false,
+        }))
+        .await
+        .unwrap();
+    assert_ne!(first.receipt.grant_digest, second.receipt.grant_digest);
+
+    let project_identity = ResolvedSessionIdentity::for_project(
+        profile_id,
+        ProjectId::new("project.wrong-owner").unwrap(),
+        SessionStoreId::new("store.project.wrong-owner").unwrap(),
+        SessionRootId::new("root.project.wrong-owner").unwrap(),
+        ResolvedGitRoute::new(
+            RepositoryId::new("repository.wrong-owner").unwrap(),
+            WorktreeId::new("worktree.wrong-owner").unwrap(),
+            BranchId::new("branch.wrong-owner").unwrap(),
+        ),
+    );
+    assert!(mount_registered_lcm_authority(database, project_identity, &shard).is_none());
 }

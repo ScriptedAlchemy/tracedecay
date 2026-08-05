@@ -78,15 +78,14 @@ import subprocess
 import tempfile
 
 TRACEDECAY_BIN = {bin}
-# Default per-call ceiling. Long-running verbs (LCM ingest/compression over
-# long transcripts, doctor/diagnose repair passes) keep a higher ceiling.
+# Default per-call ceiling. Long-running transcript ingest and diagnostics
+# keep a higher ceiling.
 TRACEDECAY_TIMEOUT_SECONDS = 120
 TRACEDECAY_LONG_TIMEOUT_SECONDS = 600
 LONG_RUNNING_TOOLS = frozenset((
-    "tracedecay_lcm_compress",
-    "tracedecay_lcm_preflight",
     "tracedecay_lcm_doctor",
     "tracedecay_diagnose",
+    "tracedecay_hook_runtime",
     # First hermes search runs the state.db catch-up sweep, which can
     # exceed the default ceiling on large profile histories.
     "tracedecay_message_search",
@@ -94,7 +93,7 @@ LONG_RUNNING_TOOLS = frozenset((
 MAX_CAPTURE_CHARS = 4000
 # Linux caps a single argv string at MAX_ARG_STRLEN (128 KiB). Payloads at or
 # above this threshold spill to a tempfile passed as `--args @<path>` so
-# compression of exactly the long sessions it exists for cannot fail with
+# transcript ingestion and other large daemon requests cannot fail with
 # E2BIG/EFAULT at exec time.
 ARGS_FILE_THRESHOLD_BYTES = 100000
 
