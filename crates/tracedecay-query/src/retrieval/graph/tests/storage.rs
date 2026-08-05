@@ -6,8 +6,8 @@ use tracedecay_graph_db::{
     GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, NeverCancelled,
 };
 use tracedecay_store::{
-    BrainId, LocatorDigest, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
+    StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
 use super::*;
@@ -51,14 +51,15 @@ fn graph_projection_reopens_with_identical_ordered_output() {
         StoreIncarnationV1::new(1).expect("valid incarnation"),
         StoreAuthorityEpochV1::new(1).expect("valid epoch"),
     );
+    let canonical_path = temp.path().join("graph.grafeo");
     let registration = GraphDbRegistration {
         verified_locator: VerifiedStoreLocatorV1::new(
             binding.shard_id.clone(),
             binding.incarnation,
-            LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).expect("valid locator digest"),
+            canonical_store_locator_digest(&canonical_path).expect("valid locator digest"),
         ),
         binding: binding.clone(),
-        store_root: temp.path().to_path_buf(),
+        canonical_path,
         cancellation: Arc::new(NeverCancelled),
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: Instant::now() + Duration::from_secs(30),

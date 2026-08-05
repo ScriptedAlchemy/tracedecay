@@ -7,8 +7,8 @@ use tracedecay_graph_db::{
     NeverCancelled,
 };
 use tracedecay_store::{
-    BrainId, LocatorDigest, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
+    StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
 pub struct RegisteredGraph {
@@ -44,19 +44,20 @@ impl RegisteredGraph {
 }
 
 pub fn graph_path(root: &Path) -> PathBuf {
-    root.join("graph").join("graph.grafeo")
+    root.join("graph.grafeo")
 }
 
 pub fn registration(binding: StoreRuntimeBindingV1, root: &Path) -> GraphDbRegistration {
+    let canonical_path = graph_path(root);
     let verified_locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
         binding.incarnation,
-        LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+        canonical_store_locator_digest(&canonical_path).unwrap(),
     );
     GraphDbRegistration {
         binding,
         verified_locator,
-        store_root: root.to_path_buf(),
+        canonical_path,
         cancellation: Arc::new(NeverCancelled),
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: Instant::now() + Duration::from_secs(30),

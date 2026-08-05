@@ -10,13 +10,14 @@ use tracedecay_graph_db::{
     NeverCancelled, SourceGeneration,
 };
 use tracedecay_store::{
-    BrainId, LocatorDigest, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
+    StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
 const ENTITY_COUNT: usize = 100_000;
 
 fn registration(root: &std::path::Path) -> GraphDbRegistration {
+    let canonical_path = root.join("graph.grafeo");
     let binding = StoreRuntimeBindingV1::new(
         StoreShardIdV1::project(
             BrainId::try_from("brain.benchmark".to_owned()).expect("valid brain"),
@@ -30,10 +31,10 @@ fn registration(root: &std::path::Path) -> GraphDbRegistration {
         verified_locator: VerifiedStoreLocatorV1::new(
             binding.shard_id.clone(),
             binding.incarnation,
-            LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).expect("valid locator digest"),
+            canonical_store_locator_digest(&canonical_path).expect("valid locator digest"),
         ),
         binding,
-        store_root: root.to_path_buf(),
+        canonical_path,
         cancellation: Arc::new(NeverCancelled),
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: Instant::now() + Duration::from_secs(3_600),

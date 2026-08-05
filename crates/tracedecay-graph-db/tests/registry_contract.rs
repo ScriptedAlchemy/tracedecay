@@ -12,8 +12,9 @@ use tracedecay_graph_db::{
     GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
 };
 use tracedecay_store::{
-    BrainId, LocatorDigest, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, StoreAuthorityEpochV1,
+    StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId,
+    VerifiedStoreLocatorV1, WorktreeId, canonical_store_locator_digest,
 };
 
 #[derive(Debug)]
@@ -60,6 +61,34 @@ fn profile_sessions_identity(profile: &str) -> StoreRuntimeBindingV1 {
     )
 }
 
+fn project_sessions_identity(profile: &str, project: &str) -> StoreRuntimeBindingV1 {
+    StoreRuntimeBindingV1::new(
+        StoreShardIdV1::project_sessions(
+            BrainId::try_from("brain-a".to_owned()).unwrap(),
+            UserProfileId::try_from(profile.to_owned()).unwrap(),
+            ProjectId::try_from(project.to_owned()).unwrap(),
+        ),
+        StoreIncarnationV1::new(1).unwrap(),
+        StoreAuthorityEpochV1::new(1).unwrap(),
+    )
+}
+
+fn code_identity(profile: &str, project: &str) -> StoreRuntimeBindingV1 {
+    StoreRuntimeBindingV1::new(
+        StoreShardIdV1::code(
+            BrainId::try_from("brain-a".to_owned()).unwrap(),
+            UserProfileId::try_from(profile.to_owned()).unwrap(),
+            ProjectId::try_from(project.to_owned()).unwrap(),
+            RepositoryId::try_from("repository-a".to_owned()).unwrap(),
+            CodeShardScopeV1::Worktree {
+                worktree_id: WorktreeId::try_from("worktree-a".to_owned()).unwrap(),
+            },
+        ),
+        StoreIncarnationV1::new(1).unwrap(),
+        StoreAuthorityEpochV1::new(1).unwrap(),
+    )
+}
+
 fn broad_profile_identity(profile: &str) -> StoreRuntimeBindingV1 {
     StoreRuntimeBindingV1::new(
         StoreShardIdV1::profile(
@@ -75,15 +104,16 @@ fn registration(
     binding: StoreRuntimeBindingV1,
     store_root: &std::path::Path,
 ) -> GraphDbRegistration {
+    let canonical_path = store_root.join("graph.grafeo");
     let verified_locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
         binding.incarnation,
-        LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+        canonical_store_locator_digest(&canonical_path).unwrap(),
     );
     GraphDbRegistration {
         binding,
         verified_locator,
-        store_root: store_root.to_path_buf(),
+        canonical_path,
         cancellation: Arc::new(NeverCancelled),
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: std::time::Instant::now() + Duration::from_secs(30),
@@ -126,10 +156,15 @@ fn exact_project_profile_identity_reuses_one_persistent_handle() {
 
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(
-        registry.status(&identity("profile-a", "project-a")),
+        registry
+            .status(&registration(
+                identity("profile-a", "project-a"),
+                temp.path(),
+            ))
+            .unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
-    assert!(temp.path().join("graph").join("graph.grafeo").is_file());
+    assert!(temp.path().join("graph.grafeo").is_file());
 }
 
 #[test]
@@ -152,11 +187,21 @@ fn profile_sessions_scope_uses_exact_profile_authority() {
 
     assert!(!Arc::ptr_eq(&first, &second));
     assert_eq!(
-        registry.status(&profile_sessions_identity("profile-a")),
+        registry
+            .status(&registration(
+                profile_sessions_identity("profile-a"),
+                first_root.path(),
+            ))
+            .unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
     assert_eq!(
-        registry.status(&profile_sessions_identity("profile-b")),
+        registry
+            .status(&registration(
+                profile_sessions_identity("profile-b"),
+                second_root.path(),
+            ))
+            .unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
 }
@@ -173,7 +218,50 @@ fn broad_profile_scope_is_rejected() {
         )),
         Err(GraphDbError::InvalidRequest { .. })
     ));
-    assert!(!root.path().join("graph").exists());
+    assert!(!root.path().join("graph.grafeo").exists());
+}
+
+#[test]
+fn project_session_and_code_scopes_keep_distinct_locator_authority() {
+    let project_root = TempDir::new().unwrap();
+    let sessions_root = TempDir::new().unwrap();
+    let code_root = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 3 }).unwrap();
+    let project_binding = identity("profile-a", "project-a");
+    let sessions_binding = project_sessions_identity("profile-a", "project-a");
+    let code_binding = code_identity("profile-a", "project-a");
+
+    let project = registry
+        .resolve(registration(project_binding.clone(), project_root.path()))
+        .unwrap();
+    let sessions = registry
+        .resolve(registration(sessions_binding.clone(), sessions_root.path()))
+        .unwrap();
+    let code = registry
+        .resolve(registration(code_binding.clone(), code_root.path()))
+        .unwrap();
+
+    assert!(!Arc::ptr_eq(&project, &sessions));
+    assert!(!Arc::ptr_eq(&project, &code));
+    assert!(!Arc::ptr_eq(&sessions, &code));
+    assert_eq!(
+        registry
+            .status(&registration(project_binding, project_root.path()))
+            .unwrap(),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+    assert_eq!(
+        registry
+            .status(&registration(sessions_binding, sessions_root.path()))
+            .unwrap(),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+    assert_eq!(
+        registry
+            .status(&registration(code_binding, code_root.path()))
+            .unwrap(),
+        Some(GraphDbRegistryStatus::Ready)
+    );
 }
 
 #[test]
@@ -233,7 +321,10 @@ fn identity_and_canonical_path_cannot_be_rebound() {
         LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap();
     assert_eq!(
         registry.resolve(changed_locator).unwrap_err(),
-        GraphDbError::Conflict
+        GraphDbError::InvalidRequest {
+            message: "verified graph locator digest does not bind the canonical graph path"
+                .to_owned()
+        }
     );
 }
 
@@ -251,12 +342,20 @@ fn stale_binding_cannot_close_or_rebind_the_registered_store() {
 
     assert_eq!(
         registry
+            .status(&registration(stale.clone(), temp.path()))
+            .unwrap_err(),
+        GraphDbError::Conflict
+    );
+    assert_eq!(
+        registry
             .reopen(registration(stale, temp.path()))
             .unwrap_err(),
         GraphDbError::Conflict
     );
     assert_eq!(
-        registry.status(&registered),
+        registry
+            .status(&registration(registered.clone(), temp.path()))
+            .unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
     assert!(
@@ -273,14 +372,12 @@ fn symlinked_graph_directory_is_rejected_before_open() {
 
     let store = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
-    symlink(target.path(), store.path().join("graph")).unwrap();
+    let alias = store.path().join("graph-alias");
+    symlink(target.path(), &alias).unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
-        registry.resolve(registration(
-            identity("profile-a", "project-a"),
-            store.path(),
-        )),
+        registry.resolve(registration(identity("profile-a", "project-a"), &alias,)),
         Err(GraphDbError::InvalidRequest { .. })
     ));
     assert!(!target.path().join("graph.grafeo").exists());
@@ -293,14 +390,9 @@ fn symlinked_graph_file_is_rejected_before_open() {
 
     let store = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
-    std::fs::create_dir(store.path().join("graph")).unwrap();
     let target_file = target.path().join("target.grafeo");
     std::fs::write(&target_file, []).unwrap();
-    symlink(
-        &target_file,
-        store.path().join("graph").join("graph.grafeo"),
-    )
-    .unwrap();
+    symlink(&target_file, store.path().join("graph.grafeo")).unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
@@ -444,7 +536,12 @@ fn idle_retention_closes_and_evicts_unleased_handles() {
         )
         .unwrap();
     assert_eq!(evicted, vec![first_identity.clone()]);
-    assert_eq!(registry.status(&first_identity), None);
+    assert_eq!(
+        registry
+            .status(&registration(first_identity, first_root.path()))
+            .unwrap(),
+        None
+    );
 
     registry
         .resolve(registration(
@@ -466,8 +563,13 @@ fn cancelled_open_does_not_create_or_register_a_store() {
         registry.resolve(request).unwrap_err(),
         GraphDbError::Cancelled
     );
-    assert_eq!(registry.status(&store_identity), None);
-    assert!(!temp.path().join("graph").exists());
+    assert_eq!(
+        registry
+            .status(&registration(store_identity.clone(), temp.path()))
+            .unwrap(),
+        None
+    );
+    assert!(!temp.path().join("graph.grafeo").exists());
 }
 
 #[test]
@@ -481,7 +583,7 @@ fn expired_deadline_does_not_open_or_close_a_registered_store() {
         registry.resolve(expired).unwrap_err(),
         GraphDbError::DeadlineExceeded
     );
-    assert!(!temp.path().join("graph").exists());
+    assert!(!temp.path().join("graph.grafeo").exists());
 
     let request = registration(store_identity.clone(), temp.path());
     let handle = registry.resolve(request.clone()).unwrap();
@@ -493,7 +595,9 @@ fn expired_deadline_does_not_open_or_close_a_registered_store() {
         GraphDbError::DeadlineExceeded
     );
     assert_eq!(
-        registry.status(&store_identity),
+        registry
+            .status(&registration(store_identity.clone(), temp.path()))
+            .unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
 }
@@ -514,10 +618,12 @@ fn waiter_cancellation_after_open_retains_the_shared_registered_store() {
         GraphDbError::Cancelled
     );
     assert_eq!(
-        registry.status(&store_identity),
+        registry
+            .status(&registration(store_identity.clone(), temp.path()))
+            .unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
-    assert!(temp.path().join("graph").join("graph.grafeo").is_file());
+    assert!(temp.path().join("graph.grafeo").is_file());
     assert!(
         registry
             .resolve(registration(store_identity, temp.path()))
@@ -531,9 +637,7 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
     use grafeo_engine::config::StorageFormat;
 
     let temp = TempDir::new().unwrap();
-    let graph_root = temp.path().join("graph");
-    std::fs::create_dir_all(&graph_root).unwrap();
-    let graph_path = graph_root.join("graph.grafeo");
+    let graph_path = temp.path().join("graph.grafeo");
     let raw = grafeo_engine::GrafeoDB::with_config(
         Config::persistent(&graph_path).with_storage_format(StorageFormat::SingleFile),
     )
@@ -549,7 +653,9 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
         Err(GraphDbError::ResetRequired { .. })
     ));
     assert_eq!(
-        registry.status(&store_identity),
+        registry
+            .status(&registration(store_identity.clone(), temp.path()))
+            .unwrap(),
         Some(GraphDbRegistryStatus::ResetRequired)
     );
 
