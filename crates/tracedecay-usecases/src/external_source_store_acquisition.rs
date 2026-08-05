@@ -6,7 +6,7 @@ use tracedecay_domain::{ManifestDigest, SourceBindingIdentityV1, UtcMicros, cano
 use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, RepositoryReadResultV1,
     RepositoryWritePayloadV1, RuntimeReadCoverageV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
-    SourceAcquisitionQueueCasV1, SourceAcquisitionQueueStateV1,
+    SourceAcquisitionQueueCasV1, SourceAcquisitionQueueStateV1, StorageRuntimeReadPort,
 };
 
 use super::{

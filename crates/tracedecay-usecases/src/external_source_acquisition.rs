@@ -148,7 +148,8 @@ impl SourceCanonicalRefetchPageV1 {
         task: &SourceScheduledRefetchV1,
         grant: &SourceAcquisitionGrantV1,
     ) -> Result<(), ExternalSourceAcquisitionErrorV1> {
-        task.validate()?;
+        task.validate()
+            .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
         grant.validate()?;
         self.envelope
             .validate()
