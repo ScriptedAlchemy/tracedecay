@@ -15,7 +15,9 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_code_extraction::LanguageExtractor as ParserLanguageExtractor;
-use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseError};
+use tracedecay_code_extraction::incremental::{
+    ParseCompleteness, ParseDocumentIdentity, ParseError,
+};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, ComponentVersion, CoverageSummaryV1,
@@ -322,7 +324,7 @@ fn parse_for_indexing(
     while !source.is_char_boundary(parsed_len) {
         parsed_len = parsed_len.saturating_sub(1);
     }
-    let (_, extraction) = retained_parses.parse_and_extract(
+    let (report, mut extraction) = retained_parses.parse_and_extract(
         ParseDocumentIdentity::Repository {
             project_id: config.project_id.clone(),
             repository_id: snapshot.repository.clone(),
@@ -337,6 +339,12 @@ fn parse_for_indexing(
         &source[..parsed_len],
         parser,
     )?;
+    if let ParseCompleteness::Partial { reasons } = report.completeness {
+        extraction
+            .result
+            .errors
+            .push(format!("retained parse incomplete: {reasons:?}"));
+    }
     Ok((extraction.result, parsed_len))
 }
 
