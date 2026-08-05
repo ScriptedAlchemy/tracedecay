@@ -4,13 +4,14 @@
 //! the reviewed operation identities, schemas, and surface bindings beside the
 //! application feature without importing a transport or persistence adapter.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::ManifestDigest;
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
     ConfigurationRevisionId, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
     ProtectedChange, RollbackModeV1, SettingKey,
 };
+use tracedecay_domain::{BrainId, LocatorDigest, ManifestDigest, ProjectId, UserProfileId};
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
     CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
@@ -32,11 +33,11 @@ use crate::retrieval::catalog::{
 
 /// Typed input for the first configuration read migrated through the daemon
 /// invocation boundary.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationListRequestV1 {}
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationGetRequestV1 {
     pub key: SettingKey,
@@ -44,7 +45,7 @@ pub struct ConfigurationGetRequestV1 {
 
 /// Typed revision-CAS input for the first configuration write migrated through
 /// the daemon invocation boundary.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationSetRequestV1 {
     pub layer: ConfigurationLayerIdV1,
@@ -53,7 +54,7 @@ pub struct ConfigurationSetRequestV1 {
     pub expected_revision: ConfigurationRevisionId,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "operation")]
 pub enum ConfigurationDirectMutationRequestV1 {
     Set {
@@ -67,7 +68,7 @@ pub enum ConfigurationDirectMutationRequestV1 {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationUnsetRequestV1 {
     pub layer: ConfigurationLayerIdV1,
@@ -75,14 +76,14 @@ pub struct ConfigurationUnsetRequestV1 {
     pub expected_revision: ConfigurationRevisionId,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationBatchRequestV1 {
     pub mutations: Vec<ConfigurationDirectMutationRequestV1>,
     pub expected_revision: ConfigurationRevisionId,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationWriteCredentialRequestV1 {
     pub expected_reference_id: Option<CredentialReferenceId>,
@@ -91,18 +92,18 @@ pub struct ConfigurationWriteCredentialRequestV1 {
     pub expected_revision: ConfigurationRevisionId,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationObservedStateRequestV1 {}
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationProtectedPreviewRequestV1 {
     pub change: ProtectedChange,
     pub expected_revision: ConfigurationRevisionId,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationProtectedApplyRequestV1 {
     pub plan_id: ChangePlanId,
@@ -111,7 +112,7 @@ pub struct ConfigurationProtectedApplyRequestV1 {
     pub idempotency_key: ConfigurationIdempotencyKey,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationRollbackPreviewRequestV1 {
     pub target_revision_id: ConfigurationRevisionId,
@@ -120,7 +121,7 @@ pub struct ConfigurationRollbackPreviewRequestV1 {
 
 pub type ConfigurationRollbackApplyRequestV1 = ConfigurationProtectedApplyRequestV1;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationAuditRequestV1 {
     #[serde(default)]
@@ -128,7 +129,60 @@ pub struct ConfigurationAuditRequestV1 {
     pub limit: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Exact reset refusal that an operator must echo before configuration data is
+/// destroyed. The runtime and locator digests cover the daemon-pinned store
+/// publication without exposing its filesystem path.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationResetConfirmationV1 {
+    pub brain_id: BrainId,
+    pub profile_id: UserProfileId,
+    pub project_id: ProjectId,
+    pub runtime_binding_digest: ManifestDigest,
+    pub locator_digest: LocatorDigest,
+    pub refusal_reason: String,
+}
+
+impl ConfigurationResetConfirmationV1 {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        if self.refusal_reason.is_empty()
+            || self.refusal_reason.trim() != self.refusal_reason
+            || self.refusal_reason.len() > 512
+            || self.refusal_reason.chars().any(char::is_control)
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "configuration reset refusal reason",
+            });
+        }
+        self.runtime_binding_digest.validate()?;
+        self.locator_digest.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationResetRequestV1 {
+    #[serde(default)]
+    pub confirmation: Option<ConfigurationResetConfirmationV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "outcome", content = "value")]
+pub enum ConfigurationResetOutcomeV1 {
+    ConfirmationRequired {
+        confirmation: ConfigurationResetConfirmationV1,
+    },
+    Completed {
+        brain_id: BrainId,
+        profile_id: UserProfileId,
+        project_id: ProjectId,
+        runtime_binding_digest: ManifestDigest,
+        locator_digest: LocatorDigest,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "operation", content = "request")]
 pub enum ConfigurationWireRequestV1 {
     List(ConfigurationListRequestV1),
@@ -144,6 +198,7 @@ pub enum ConfigurationWireRequestV1 {
     RollbackPreview(ConfigurationRollbackPreviewRequestV1),
     RollbackApply(ConfigurationRollbackApplyRequestV1),
     Audit(ConfigurationAuditRequestV1),
+    Reset(ConfigurationResetRequestV1),
 }
 
 struct ConfigurationSurfaceSpec {
@@ -153,9 +208,18 @@ struct ConfigurationSurfaceSpec {
     example: &'static str,
     effect: EffectClass,
     paginated: bool,
+    surfaces: &'static [BindingSurface],
 }
 
-const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
+const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+    BindingSurface::Dashboard,
+];
+const CONFIGURATION_RESET_SURFACES: [BindingSurface; 1] = [BindingSurface::Cli];
+
+const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 14] = [
     ConfigurationSurfaceSpec {
         name: "configuration_list",
         summary: "List configuration settings",
@@ -163,6 +227,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "List project configuration settings",
         effect: EffectClass::Read,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_explain",
@@ -171,6 +236,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Explain this configuration setting",
         effect: EffectClass::Read,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_get",
@@ -179,6 +245,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Get this configuration setting",
         effect: EffectClass::Read,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_set",
@@ -187,6 +254,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Set this project configuration value",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_unset",
@@ -195,6 +263,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Unset this project configuration value",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_batch",
@@ -203,6 +272,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Apply these project configuration changes together",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_write_credential",
@@ -211,6 +281,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Rotate this configuration credential reference",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_observed_state",
@@ -219,6 +290,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Show configuration activation drift",
         effect: EffectClass::Read,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_protected_preview",
@@ -227,6 +299,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Preview this protected configuration change",
         effect: EffectClass::Preview,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_protected_apply",
@@ -235,6 +308,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Apply this approved protected configuration change",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_rollback_preview",
@@ -243,6 +317,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Preview rollback to this configuration revision",
         effect: EffectClass::Preview,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_rollback_apply",
@@ -251,6 +326,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Apply this approved configuration rollback",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
         name: "configuration_audit",
@@ -259,10 +335,20 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Show configuration audit history",
         effect: EffectClass::Read,
         paginated: true,
+        surfaces: &CONFIGURATION_SURFACES,
+    },
+    ConfigurationSurfaceSpec {
+        name: "configuration_reset",
+        summary: "Reset incompatible configuration",
+        description: "Reset only the exact incompatible project configuration store after echoing its daemon-issued confirmation.",
+        example: "Reset the refused project configuration store",
+        effect: EffectClass::ConfigurationWrite,
+        paginated: false,
+        surfaces: &CONFIGURATION_RESET_SURFACES,
     },
 ];
 
-pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
+pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 14] = [
     "configuration_list",
     "configuration_explain",
     "configuration_get",
@@ -276,13 +362,7 @@ pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
     "configuration_rollback_preview",
     "configuration_rollback_apply",
     "configuration_audit",
-];
-
-const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
-    BindingSurface::Cli,
-    BindingSurface::Mcp,
-    BindingSurface::Http,
-    BindingSurface::Dashboard,
+    "configuration_reset",
 ];
 
 pub fn configuration_surface_catalog_contribution()
@@ -293,7 +373,7 @@ pub fn configuration_surface_catalog_contribution()
     for spec in &CONFIGURATION_SPECS {
         let capability_id = CapabilityId::new(capability_id(spec.name))?;
         let (spec_bindings, binding_ids) =
-            current_bindings(&capability_id, spec.name, CONFIGURATION_SURFACES)?;
+            current_bindings(&capability_id, spec.name, spec.surfaces)?;
         bindings.extend(spec_bindings);
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
@@ -341,10 +421,11 @@ fn capability(
         request_schema: configuration_surface_request_schema(spec.name)?,
         result_schema: configuration_surface_result_schema(spec.name)?,
         effect,
-        scope: ScopeRequirement::new(vec![
-            ScopeDimension::ConfigurationLayer,
-            ScopeDimension::Project,
-        ])?,
+        scope: ScopeRequirement::new(if spec.name == "configuration_reset" {
+            vec![ScopeDimension::Project]
+        } else {
+            vec![ScopeDimension::ConfigurationLayer, ScopeDimension::Project]
+        })?,
         authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
@@ -529,7 +610,8 @@ mod tests {
         assert_eq!(contribution.capabilities().len(), CONFIGURATION_SPECS.len());
         assert_eq!(
             contribution.bindings().len(),
-            CONFIGURATION_SPECS.len() * CONFIGURATION_SURFACES.len()
+            (CONFIGURATION_SPECS.len() - 1) * CONFIGURATION_SURFACES.len()
+                + CONFIGURATION_RESET_SURFACES.len()
         );
         assert!(
             contribution
@@ -565,18 +647,32 @@ mod tests {
 
         for capability in contribution.capabilities() {
             assert!(
-                capability
-                    .scope()
-                    .requires(ScopeDimension::ConfigurationLayer),
-                "{} must route through an exact configuration-layer authority",
-                capability.capability_id()
-            );
-            assert!(
                 capability.scope().requires(ScopeDimension::Project),
                 "{} must not advertise a nonexistent projectless profile route",
                 capability.capability_id()
             );
+            if capability.capability_id().as_str() != "capability.application.configuration.reset" {
+                assert!(
+                    capability
+                        .scope()
+                        .requires(ScopeDimension::ConfigurationLayer),
+                    "{} must route through an exact configuration-layer authority",
+                    capability.capability_id()
+                );
+            }
         }
+    }
+
+    #[test]
+    fn configuration_reset_is_cli_only() {
+        let contribution = configuration_surface_catalog_contribution().expect("contribution");
+        let reset = contribution
+            .bindings()
+            .iter()
+            .filter(|binding| binding.operation().as_str() == "configuration_reset")
+            .collect::<Vec<_>>();
+        assert_eq!(reset.len(), 1);
+        assert_eq!(reset[0].surface(), BindingSurface::Cli);
     }
 
     #[test]

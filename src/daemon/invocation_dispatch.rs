@@ -51,21 +51,23 @@ pub(super) async fn execute_portable_daemon_invocation(
     }
     let request_id = request.request_id.clone();
     let git_operation = invocation_is_git_operation(request.operation());
+    let configuration_reset = request.is_configuration_reset();
     let mut project_path = None;
     if request.requires_project() {
-        if Box::pin(portable_project_server_for_request(
-            lifecycle,
-            store_administration.clone(),
-            project_open_gates,
-            invocation.clone(),
-            http_application_registry,
-            handshake,
-            ProjectServerRequirement::Core,
-            #[cfg(test)]
-            project_open_attempts,
-        ))
-        .await
-        .is_err()
+        if !configuration_reset
+            && Box::pin(portable_project_server_for_request(
+                lifecycle,
+                store_administration.clone(),
+                project_open_gates,
+                invocation.clone(),
+                http_application_registry,
+                handshake,
+                ProjectServerRequirement::Core,
+                #[cfg(test)]
+                project_open_attempts,
+            ))
+            .await
+            .is_err()
         {
             return DaemonInvocationResponse::problem(
                 request_id,
@@ -82,7 +84,9 @@ pub(super) async fn execute_portable_daemon_invocation(
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        if admitted_lsp_root_for_project_path(&resolved_project_path).is_none() {
+        if !configuration_reset
+            && admitted_lsp_root_for_project_path(&resolved_project_path).is_none()
+        {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
@@ -179,12 +183,14 @@ pub(super) async fn execute_daemon_invocation(
     }
     let request_id = request.request_id.clone();
     let git_operation = invocation_is_git_operation(request.operation());
+    let configuration_reset = request.is_configuration_reset();
     let mut project_path = None;
     if request.requires_project() {
-        if engine
-            .project_server_for_request(handshake, ProjectServerRequirement::Core)
-            .await
-            .is_err()
+        if !configuration_reset
+            && engine
+                .project_server_for_request(handshake, ProjectServerRequirement::Core)
+                .await
+                .is_err()
         {
             return DaemonInvocationResponse::problem(
                 request_id,
@@ -201,7 +207,9 @@ pub(super) async fn execute_daemon_invocation(
                 service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        if admitted_lsp_root_for_project_path(&resolved_project_path).is_none() {
+        if !configuration_reset
+            && admitted_lsp_root_for_project_path(&resolved_project_path).is_none()
+        {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::Unavailable,
