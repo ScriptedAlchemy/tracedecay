@@ -6,7 +6,6 @@
 #![forbid(unsafe_code)]
 
 pub mod advisory;
-pub mod api_migration;
 pub mod authorization;
 pub mod clock;
 pub mod configuration;
@@ -62,7 +61,6 @@ mod surface_binding;
 pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
 
 pub use advisory::*;
-pub use api_migration::*;
 pub use authorization::{
     AuthorizationAdmission, AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome,
     AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,

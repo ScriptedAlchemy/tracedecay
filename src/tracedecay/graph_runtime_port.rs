@@ -20,7 +20,6 @@ use tracedecay_application::retrieval::grep_analysis::{RedundancyRequestV1, Redu
 use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult,
 };
-use tracedecay_application::{ApiMigrationApplyResultV1, ApiMigrationPlanV1};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::DependencyImportUse;
 use tracedecay_usecases::tracedecay::{
@@ -375,27 +374,6 @@ impl GraphRuntimePort for TraceDecay {
             dry_run,
             update_references,
         ))
-    }
-
-    fn apply_api_migration_plan<'a>(
-        &'a self,
-        plan: &'a ApiMigrationPlanV1,
-        dry_run: bool,
-        is_cancelled: &'a mut (dyn FnMut() -> bool + Send),
-    ) -> GraphFuture<'a, ApiMigrationApplyResultV1> {
-        Box::pin(TraceDecay::apply_api_migration_plan(
-            self,
-            plan,
-            dry_run,
-            is_cancelled,
-        ))
-    }
-
-    fn rollback_api_migration_plan<'a>(
-        &'a self,
-        plan: &'a ApiMigrationPlanV1,
-    ) -> GraphFuture<'a, ()> {
-        Box::pin(TraceDecay::rollback_api_migration_plan(self, plan))
     }
 
     fn recover_source_edit_preimages<'a>(

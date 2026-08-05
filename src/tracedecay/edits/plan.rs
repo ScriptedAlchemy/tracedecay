@@ -16,7 +16,46 @@ pub(in crate::tracedecay) use tracedecay_usecases::tracedecay::{
 
 use crate::errors::{Result, TraceDecayError};
 
+use super::super::TraceDecay;
 use super::file_authority::{SourceEditFileAuthority, read_source_edit_candidate};
+
+impl TraceDecay {
+    pub(crate) async fn recover_source_edit_preimages(
+        &self,
+        files: &[PlannedSourceEditFile],
+    ) -> Result<()> {
+        rollback_planned_source_edit_files(&self.project_root, files)?;
+        for file in files {
+            let Some(expected) = &file.expected else {
+                continue;
+            };
+            let authority =
+                SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
+            self.reindex_file(&file.relative_path, expected, &authority)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Reconcile the graph after a completed source edit whose durable journal
+    /// did not advance before restart. Source bytes are already final; this
+    /// operation only republishes their indexed representation.
+    pub(crate) async fn commit_source_edit_postimages(
+        &self,
+        files: &[PlannedSourceEditFile],
+    ) -> Result<()> {
+        for file in files {
+            let Some(intended) = &file.intended else {
+                continue;
+            };
+            let authority =
+                SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
+            self.reindex_file(&file.relative_path, intended, &authority)
+                .await?;
+        }
+        Ok(())
+    }
+}
 
 pub(super) fn rollback_planned_source_edit_files(
     project_root: &Path,

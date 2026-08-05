@@ -1,5 +1,3 @@
-use std::fs;
-
 use tracedecay_application::{
     CancellationSignal, CancellationStage, Deadline, EffectTermination, IdempotencyKey,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1,
@@ -16,11 +14,7 @@ use crate::application::edit::{
 #[tokio::test]
 async fn prepared_restart_with_preimages_restores_partial_bytes_before_another_edit() {
     let fixture = effect_unknown_fixture().await;
-    fs::write(
-        fixture.project.path().join("src/a.rs"),
-        b"pub fn new_a() {}\n",
-    )
-    .unwrap();
+    fixture.write_partial_postimage();
 
     let operation = source_edit_operation(fixture.request.edit.kind()).unwrap();
     let result = execute_source_edit(
@@ -37,19 +31,12 @@ async fn prepared_restart_with_preimages_restores_partial_bytes_before_another_e
         result.effect.unwrap().receipt.outcome,
         EffectTermination::Failed
     );
-    assert_eq!(
-        fs::read(fixture.project.path().join("src/a.rs")).unwrap(),
-        b"pub fn old_a() {}\n"
-    );
-    assert_eq!(
-        fs::read(fixture.project.path().join("src/locked/b.rs")).unwrap(),
-        b"pub fn old_b() {}\n"
-    );
+    fixture.assert_preimages();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
-            fs::metadata(fixture.project.path().join("src/a.rs"))
+            std::fs::metadata(fixture.permission_preserving_path())
                 .unwrap()
                 .permissions()
                 .mode()
@@ -69,16 +56,7 @@ async fn prepared_restart_with_completed_edit_rolls_forward_and_preserves_bytes(
     // The worktree already holds the exact previewed result for every candidate:
     // both files carry their intended post-edit content, as they would after a
     // crash that interrupted only the durable bookkeeping.
-    fs::write(
-        fixture.project.path().join("src/a.rs"),
-        b"pub fn new_a() {}\n",
-    )
-    .unwrap();
-    fs::write(
-        fixture.project.path().join("src/locked/b.rs"),
-        b"pub fn new_b() {}\n",
-    )
-    .unwrap();
+    fixture.write_all_postimages();
 
     let operation = source_edit_operation(fixture.request.edit.kind()).unwrap();
     let result = execute_source_edit(
@@ -97,14 +75,7 @@ async fn prepared_restart_with_completed_edit_rolls_forward_and_preserves_bytes(
         EffectTermination::Completed
     );
     // Every written byte is preserved on disk.
-    assert_eq!(
-        fs::read(fixture.project.path().join("src/a.rs")).unwrap(),
-        b"pub fn new_a() {}\n"
-    );
-    assert_eq!(
-        fs::read(fixture.project.path().join("src/locked/b.rs")).unwrap(),
-        b"pub fn new_b() {}\n"
-    );
+    fixture.assert_postimages();
 }
 
 /// The write never landed: after the fixture the worktree still holds every
@@ -129,14 +100,7 @@ async fn prepared_restart_with_untouched_preimages_rolls_back_cleanly() {
         result.effect.unwrap().receipt.outcome,
         EffectTermination::Failed
     );
-    assert_eq!(
-        fs::read(fixture.project.path().join("src/a.rs")).unwrap(),
-        b"pub fn old_a() {}\n"
-    );
-    assert_eq!(
-        fs::read(fixture.project.path().join("src/locked/b.rs")).unwrap(),
-        b"pub fn old_b() {}\n"
-    );
+    fixture.assert_preimages();
 }
 
 #[tokio::test]
@@ -185,14 +149,7 @@ async fn reconciliation_before_admission_cancellation_is_durable_and_replayable(
             .stage,
         CancellationStage::BeforeAdmission
     );
-    assert_eq!(
-        fs::read(fixture.project.path().join("src/a.rs")).unwrap(),
-        b"pub fn old_a() {}\n"
-    );
-    assert_eq!(
-        fs::read(fixture.project.path().join("src/locked/b.rs")).unwrap(),
-        b"pub fn old_b() {}\n"
-    );
+    fixture.assert_preimages();
 
     let replay = reconcile_source_edit_effect_unknown_with_control(
         &fixture.graph,

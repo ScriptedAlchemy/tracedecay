@@ -54,8 +54,8 @@ seams must therefore be resolved by port inversion, never by a dependency.
 
 The composition root must implement `tracedecay_usecases::tracedecay::GraphRuntimePort`
 for its graph runtime. The port covers graph reads, search/statistics,
-diagnostics, redundancy and health reads, source edits, API migrations, and
-source-edit recovery.
+diagnostics, redundancy and health reads, source edits, and source-edit
+recovery.
 
 Source-edit preview/apply wiring must use the use-case-owned functions and
 value type:
