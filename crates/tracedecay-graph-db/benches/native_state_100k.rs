@@ -10,14 +10,18 @@ use tracedecay_graph_db::{
     NeverCancelled, SourceGeneration,
 };
 use tracedecay_store::{
-    BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
-    StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
+    BrainId, GRAPH_STORE_PRIVATE_DIRECTORY, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
 };
 
 const ENTITY_COUNT: usize = 100_000;
 
 fn registration(root: &std::path::Path) -> GraphDbRegistration {
-    let canonical_path = root.join("graph.grafeo");
+    create_private_graph_directory(root);
+    let canonical_path = root
+        .join(GRAPH_STORE_PRIVATE_DIRECTORY)
+        .join("graph.grafeo");
     let binding = StoreRuntimeBindingV1::new(
         StoreShardIdV1::project(
             BrainId::try_from("brain.benchmark".to_owned()).expect("valid brain"),
@@ -39,6 +43,34 @@ fn registration(root: &std::path::Path) -> GraphDbRegistration {
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: Instant::now() + Duration::from_secs(3_600),
     }
+}
+
+#[cfg(unix)]
+fn create_private_graph_directory(root: &std::path::Path) {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(root.join(GRAPH_STORE_PRIVATE_DIRECTORY)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("create private graph directory: {error}"),
+    }
+}
+
+#[cfg(windows)]
+fn create_private_graph_directory(root: &std::path::Path) {
+    let path = root.join(GRAPH_STORE_PRIVATE_DIRECTORY);
+    match tracedecay_runtime_core::windows_security::create_private_directory(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("create private graph directory: {error}"),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_private_graph_directory(_root: &std::path::Path) {
+    panic!("private graph storage is unsupported on this platform");
 }
 
 fn registry() -> GraphDbRegistry {

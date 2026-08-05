@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,6 +12,7 @@ pub use tracedecay_domain::{
 use super::StorageRuntimeContractErrorV1;
 
 const LOCATOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.store-runtime.local-locator.v1\0";
+pub const GRAPH_STORE_PRIVATE_DIRECTORY: &str = ".tracedecay-grafeo";
 
 macro_rules! canonical_id {
     ($name:ident, $field:literal) => {
@@ -423,6 +424,35 @@ pub fn canonical_store_locator_digest(
     })
 }
 
+/// Derives the sole persistent Graph locator paired with one relational shard.
+///
+/// Both inputs have already been selected and canonicalized by daemon store
+/// authority. This pure contract only places the graph file in the daemon's
+/// private graph directory; it never creates or opens filesystem artifacts.
+pub fn graph_store_locator_path(
+    canonical_store_root: &Path,
+    relational_store_path: &Path,
+) -> Result<PathBuf, StorageRuntimeContractErrorV1> {
+    if !canonical_store_root.is_absolute()
+        || !relational_store_path.is_absolute()
+        || !relational_store_path.starts_with(canonical_store_root)
+    {
+        return Err(StorageRuntimeContractErrorV1::NonCanonical {
+            field: "graph store locator path",
+        });
+    }
+    let filename = relational_store_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .ok_or(StorageRuntimeContractErrorV1::NonCanonical {
+            field: "graph store locator path",
+        })?;
+    Ok(canonical_store_root
+        .join(GRAPH_STORE_PRIVATE_DIRECTORY)
+        .join(format!("{filename}.grafeo")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +499,18 @@ mod tests {
 
         assert_ne!(first, second);
         assert!(canonical_store_locator_digest(Path::new("relative/graph.grafeo")).is_err());
+    }
+
+    #[test]
+    fn graph_locator_is_private_and_shard_specific() {
+        let root = Path::new("/stores/project-a");
+        assert_eq!(
+            graph_store_locator_path(root, &root.join("sessions.db"))
+                .expect("canonical graph locator"),
+            root.join(GRAPH_STORE_PRIVATE_DIRECTORY)
+                .join("sessions.grafeo")
+        );
+        assert!(graph_store_locator_path(root, Path::new("/stores/project-b/project.db")).is_err());
     }
 
     #[test]

@@ -829,7 +829,7 @@ fn open_registered_graph(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
     )?;
-    let path_anchor = GraphPathAnchor::acquire(path)?;
+    let mut path_anchor = GraphPathAnchor::acquire(path)?;
     check_request(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
@@ -851,6 +851,7 @@ fn open_registered_graph(
         owner.close()?;
         return Err(error);
     }
+    path_anchor.commit();
     Ok(owner)
 }
 
