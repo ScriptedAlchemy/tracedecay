@@ -423,12 +423,68 @@ fn completion_termination(
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionSyncOperationState, completion_termination, existing_operation_outcome};
+    use super::{
+        DaemonSessionSyncConfig, DaemonSessionSyncService, SessionSyncOperationState,
+        completion_termination, existing_operation_outcome,
+    };
     use tracedecay_application::session_sync::{
         SessionSyncAdmissionReceiptV1, SessionSyncOutcomeV1, SessionSyncStatsV1,
     };
     use tracedecay_application::{IdempotencyKey, OperationTermination, RequestId};
-    use tracedecay_domain::UtcMicros;
+    use tracedecay_domain::{ProjectId, UtcMicros};
+
+    #[tokio::test]
+    async fn constructing_authority_does_not_schedule_transcript_work() {
+        let profile = tempfile::TempDir::new().unwrap();
+        crate::storage::set_private_dir_permissions(profile.path()).unwrap();
+        let identity = crate::daemon::profile_identity::load_or_create(profile.path()).unwrap();
+        let brain_id = identity.brain_id().clone();
+        let profile_id = identity.profile_id().clone();
+        let _scope = crate::db::enter_daemon_database_scope(
+            identity.profile_root(),
+            1,
+            "session-sync-quiet-admission",
+        )
+        .unwrap();
+        let registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .unwrap();
+        let database = registry.profile_database().await.unwrap();
+        let project_root = profile.path().join("empty-project");
+        std::fs::create_dir(&project_root).unwrap();
+        let service = DaemonSessionSyncService::new(DaemonSessionSyncConfig {
+            brain_id,
+            profile_id,
+            project_id: ProjectId::new("project.empty-transcripts").unwrap(),
+            profile_root: profile.path().to_path_buf(),
+            project_root,
+            transcript_source_home: None,
+            project_sessions: std::sync::Arc::clone(&database),
+            user_sessions: std::sync::Arc::clone(&database),
+            registry: std::sync::Arc::clone(&database),
+            analytics: None,
+        });
+
+        assert!(
+            service
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "daemon admission must not start transcript discovery"
+        );
+        assert!(
+            service
+                .operations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "an empty native source set is not a failed or fabricated operation"
+        );
+    }
 
     fn admission() -> SessionSyncAdmissionReceiptV1 {
         SessionSyncAdmissionReceiptV1 {
