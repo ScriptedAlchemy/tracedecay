@@ -10,8 +10,9 @@ use thiserror::Error;
 use crate::{
     AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId, ProviderId,
     RefId, RepositoryId, RunId, RuntimeEvidenceRef, TaskId, UtcMicros, WorkArtifactId,
-    WorkCancellationRequestId, WorkLeaseId, WorkProjection, WorkProjectionSequenceV1,
-    WorkProjectionSnapshotV1, WorkProviderRouteId, WorkVersion, WorkflowOperationRef, WorktreeId,
+    WorkCancellationRequestId, WorkExecutionLimits, WorkExecutionSnapshot, WorkLeaseId,
+    WorkProjection, WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderRouteId,
+    WorkVersion, WorkflowOperationRef, WorktreeId,
 };
 
 pub const MAX_WORK_ATTEMPT_ARTIFACTS: usize = 256;
@@ -261,6 +262,14 @@ impl WorkExecutionBudgetV1 {
     pub const fn max_protocol_bytes(self) -> u64 {
         self.max_protocol_bytes
     }
+
+    pub const fn from_limits(limits: WorkExecutionLimits) -> Self {
+        Self {
+            max_stdout_bytes: limits.max_stdout_bytes(),
+            max_stderr_bytes: limits.max_stderr_bytes(),
+            max_protocol_bytes: limits.max_protocol_bytes(),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for WorkExecutionBudgetV1 {
@@ -297,19 +306,14 @@ pub struct WorkExecutionEnvelopeV1 {
     attempt_identity: WorkAttemptIdentityV1,
     projection_binding: WorkAttemptProjectionBindingV1,
     operation: WorkflowOperationRef,
-    route: WorkProviderRouteV1,
-    backend: WorkProviderBackendV1,
-    model: String,
-    configuration_digest: ManifestDigest,
+    execution_snapshot: WorkExecutionSnapshot,
     project_id: ProjectId,
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
     worktree_root: String,
     reference: Option<RefId>,
     commit: CommitId,
-    deadline: UtcMicros,
     cancellation_generation: u64,
-    budget: WorkExecutionBudgetV1,
     effect_state: WorkEffectStateV1,
 }
 
@@ -319,28 +323,20 @@ impl WorkExecutionEnvelopeV1 {
         attempt_identity: WorkAttemptIdentityV1,
         projection_binding: WorkAttemptProjectionBindingV1,
         operation: WorkflowOperationRef,
-        route: WorkProviderRouteV1,
-        backend: WorkProviderBackendV1,
-        model: String,
-        configuration_digest: ManifestDigest,
+        execution_snapshot: WorkExecutionSnapshot,
         project_id: ProjectId,
         repository_id: RepositoryId,
         worktree_id: WorktreeId,
         worktree_root: String,
         reference: Option<RefId>,
         commit: CommitId,
-        deadline: UtcMicros,
         cancellation_generation: u64,
-        budget: WorkExecutionBudgetV1,
         effect_state: WorkEffectStateV1,
     ) -> Result<Self, WorkRuntimeContractError> {
-        if !crate::canonical_text::is_canonical_text_within(&model, 256)
-            || worktree_root.len() > 4_096
+        if worktree_root.len() > 4_096
             || !Path::new(&worktree_root).is_absolute()
             || worktree_root.contains('\0')
-            || deadline.0 <= 0
             || cancellation_generation == 0
-            || route.provider_id() != backend.provider_id()
         {
             return Err(WorkRuntimeContractError::InvalidExecutionEnvelope);
         }
@@ -348,19 +344,14 @@ impl WorkExecutionEnvelopeV1 {
             attempt_identity,
             projection_binding,
             operation,
-            route,
-            backend,
-            model,
-            configuration_digest,
+            execution_snapshot,
             project_id,
             repository_id,
             worktree_id,
             worktree_root,
             reference,
             commit,
-            deadline,
             cancellation_generation,
-            budget,
             effect_state,
         })
     }
@@ -378,19 +369,23 @@ impl WorkExecutionEnvelopeV1 {
     }
 
     pub fn route(&self) -> &WorkProviderRouteV1 {
-        &self.route
+        self.execution_snapshot.route()
     }
 
     pub const fn backend(&self) -> WorkProviderBackendV1 {
-        self.backend
+        self.execution_snapshot.backend()
     }
 
     pub fn model(&self) -> &str {
-        &self.model
+        self.execution_snapshot.model()
     }
 
     pub fn configuration_digest(&self) -> &ManifestDigest {
-        &self.configuration_digest
+        self.execution_snapshot.effective_behavior_digest()
+    }
+
+    pub fn execution_snapshot(&self) -> &WorkExecutionSnapshot {
+        &self.execution_snapshot
     }
 
     pub fn project_id(&self) -> &ProjectId {
@@ -418,7 +413,7 @@ impl WorkExecutionEnvelopeV1 {
     }
 
     pub const fn deadline(&self) -> UtcMicros {
-        self.deadline
+        self.execution_snapshot.deadline()
     }
 
     pub const fn cancellation_generation(&self) -> u64 {
@@ -426,7 +421,7 @@ impl WorkExecutionEnvelopeV1 {
     }
 
     pub const fn budget(&self) -> WorkExecutionBudgetV1 {
-        self.budget
+        WorkExecutionBudgetV1::from_limits(self.execution_snapshot.limits())
     }
 
     pub const fn effect_state(&self) -> WorkEffectStateV1 {
@@ -441,7 +436,7 @@ impl WorkExecutionEnvelopeV1 {
     ) -> Result<(), WorkRuntimeContractError> {
         if &self.attempt_identity != identity
             || &self.projection_binding != projection_binding
-            || &self.route != requested_route
+            || self.execution_snapshot.route() != requested_route
         {
             return Err(WorkRuntimeContractError::InvalidExecutionEnvelope);
         }
@@ -490,19 +485,14 @@ impl<'de> Deserialize<'de> for WorkExecutionEnvelopeV1 {
             attempt_identity: WorkAttemptIdentityV1,
             projection_binding: WorkAttemptProjectionBindingV1,
             operation: WorkflowOperationRef,
-            route: WorkProviderRouteV1,
-            backend: WorkProviderBackendV1,
-            model: String,
-            configuration_digest: ManifestDigest,
+            execution_snapshot: WorkExecutionSnapshot,
             project_id: ProjectId,
             repository_id: RepositoryId,
             worktree_id: WorktreeId,
             worktree_root: String,
             reference: Option<RefId>,
             commit: CommitId,
-            deadline: UtcMicros,
             cancellation_generation: u64,
-            budget: WorkExecutionBudgetV1,
             effect_state: WorkEffectStateV1,
         }
 
@@ -511,19 +501,14 @@ impl<'de> Deserialize<'de> for WorkExecutionEnvelopeV1 {
             wire.attempt_identity,
             wire.projection_binding,
             wire.operation,
-            wire.route,
-            wire.backend,
-            wire.model,
-            wire.configuration_digest,
+            wire.execution_snapshot,
             wire.project_id,
             wire.repository_id,
             wire.worktree_id,
             wire.worktree_root,
             wire.reference,
             wire.commit,
-            wire.deadline,
             wire.cancellation_generation,
-            wire.budget,
             wire.effect_state,
         )
         .map_err(serde::de::Error::custom)

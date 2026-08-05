@@ -3,6 +3,54 @@
 
 use super::*;
 
+fn workflow_execution_snapshot(
+    configuration_digest: ManifestDigest,
+    deadline: UtcMicros,
+    model: &str,
+) -> tracedecay_domain::WorkExecutionSnapshot {
+    tracedecay_domain::WorkExecutionSnapshot::new(tracedecay_domain::WorkExecutionSnapshotInput {
+        configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId::new(
+            "configuration-revision.workflow.invocation",
+        )
+        .expect("configuration revision"),
+        configuration_snapshot_id: tracedecay_domain::configuration::ConfigurationSnapshotId::new(
+            "configuration-snapshot.workflow.invocation",
+        )
+        .expect("configuration snapshot"),
+        effective_behavior_digest: configuration_digest,
+        resolution_provenance_digest: digest('7'),
+        route: tracedecay_domain::WorkProviderRouteV1::new(
+            tracedecay_domain::ProviderId::new(crate::daemon::work_runtime::CODEX_PROVIDER_ID)
+                .expect("provider id"),
+            tracedecay_domain::WorkProviderRouteId::new("route.work.codex-app-server.v1")
+                .expect("route id"),
+        )
+        .expect("provider route"),
+        backend: tracedecay_domain::WorkProviderBackendV1::CodexAppServer,
+        protocol: tracedecay_domain::WorkProviderProtocol::CodexAppServerJsonRpc,
+        model: model.to_owned(),
+        executable: tracedecay_domain::WorkExecutableReference::new(
+            "executable.codex.app-server".to_owned(),
+            digest('6'),
+        )
+        .expect("executable"),
+        sandbox: tracedecay_domain::WorkSandboxPolicy::Required,
+        approval: tracedecay_domain::WorkApprovalPolicy::Never,
+        filesystem: tracedecay_domain::WorkFilesystemPolicy::WorkspaceWrite,
+        egress: tracedecay_domain::WorkEgressPolicy::Deny,
+        environment_allowlist: std::collections::BTreeSet::new(),
+        credential_references: std::collections::BTreeSet::new(),
+        limits: tracedecay_domain::WorkExecutionLimits::new(
+            128_000, 8_192, 16_384, 16_384, 65_536, 1,
+        )
+        .expect("execution limits"),
+        deadline,
+        fallback: tracedecay_domain::WorkFallbackTopology::Disabled,
+        topology_policy_digest: digest('5'),
+    })
+    .expect("execution snapshot")
+}
+
 #[cfg(unix)]
 fn workflow_provider_fixture_path(project: &std::path::Path) -> std::path::PathBuf {
     project.join("codex-workflow-fixture")
@@ -562,18 +610,11 @@ for line in sys.stdin:
         max_parallel: 1,
         failure_policy: tracedecay_application::WorkflowFailurePolicy::Collect,
         provider: tracedecay_application::WorkflowProviderAdmission {
-            route: tracedecay_domain::WorkProviderRouteV1::new(
-                tracedecay_domain::ProviderId::new(crate::daemon::work_runtime::CODEX_PROVIDER_ID)
-                    .expect("provider id"),
-                tracedecay_domain::WorkProviderRouteId::new("route.work.codex-app-server.v1")
-                    .expect("route id"),
-            )
-            .expect("provider route"),
-            backend: tracedecay_domain::WorkProviderBackendV1::CodexAppServer,
-            model: "gpt-workflow-fixture".to_owned(),
-            // The Work runtime rejects any child envelope whose configuration
-            // digest differs from the one the runtime was registered with.
-            configuration_digest: configuration_digest.clone(),
+            execution_snapshot: workflow_execution_snapshot(
+                configuration_digest.clone(),
+                UtcMicros(now.0 + 20_000_000),
+                "gpt-workflow-fixture",
+            ),
             topology_digest: digest('8'),
             provider_registry_digest: digest('9'),
             worktree_placement: tracedecay_domain::configuration::safe_work_topology_policy_v1()
@@ -581,10 +622,7 @@ for line in sys.stdin:
             reference: None,
             commit: tracedecay_domain::CommitId::new("0123456789abcdef0123456789abcdef01234567")
                 .expect("commit"),
-            deadline: UtcMicros(now.0 + 20_000_000),
             cancellation_generation: 1,
-            budget: tracedecay_domain::WorkExecutionBudgetV1::new(16_384, 16_384, 65_536)
-                .expect("execution budget"),
             effect_state: tracedecay_domain::WorkEffectStateV1::Observational,
         },
         inputs: vec![tracedecay_application::WorkflowFanOutInput {

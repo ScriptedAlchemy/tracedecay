@@ -7,16 +7,18 @@ use tracedecay_application::{
     WorkExecutionPersistenceError, WorkExecutionService, WorkService,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
-    ProviderId, RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
-    WorkAttemptIdentityV1, WorkAttemptProgressV1, WorkAttemptProjectionBindingV1,
-    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationAcknowledgementV1,
-    WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1,
-    WorkEffectStateV1, WorkExecutionBudgetV1, WorkExecutionEnvelopeV1, WorkFenceEpochV1,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
+    ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RepositoryId, RunId, TaskId,
+    UtcMicros, WorkApprovalPolicy, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
+    WorkAttemptProgressV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
+    WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationRequestId,
+    WorkCancellationRequestV1, WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy,
+    WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
     WorkLeaseFenceV1, WorkLeaseId, WorkProjectionCoverageV1, WorkProjectionSequenceV1,
-    WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1, WorkVersion,
-    WorkflowOperationRef, WorktreeId,
+    WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
+    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkSandboxPolicy,
+    WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -91,6 +93,39 @@ fn requested_route() -> WorkProviderRouteV1 {
     )
 }
 
+fn execution_snapshot() -> WorkExecutionSnapshot {
+    WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
+        configuration_revision_id: id::<ConfigurationRevisionId>(
+            "configuration-revision.work.runtime-store",
+        ),
+        configuration_snapshot_id: id::<ConfigurationSnapshotId>(
+            "configuration-snapshot.work.runtime-store",
+        ),
+        effective_behavior_digest: digest('c'),
+        resolution_provenance_digest: digest('d'),
+        route: requested_route(),
+        backend: WorkProviderBackendV1::CodexAppServer,
+        protocol: WorkProviderProtocol::CodexAppServerJsonRpc,
+        model: "gpt-test".to_owned(),
+        executable: WorkExecutableReference::new(
+            "executable.codex.app-server".to_owned(),
+            digest('e'),
+        )
+        .unwrap(),
+        sandbox: WorkSandboxPolicy::Required,
+        approval: WorkApprovalPolicy::Never,
+        filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+        egress: WorkEgressPolicy::Deny,
+        environment_allowlist: BTreeSet::new(),
+        credential_references: BTreeSet::new(),
+        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
+        deadline: UtcMicros(9_000),
+        fallback: WorkFallbackTopology::Disabled,
+        topology_policy_digest: digest('f'),
+    })
+    .unwrap()
+}
+
 fn execution_envelope(
     authority: &WorkAuthority,
     identity: WorkAttemptIdentityV1,
@@ -100,19 +135,14 @@ fn execution_envelope(
         identity,
         binding,
         id::<WorkflowOperationRef>("operation.work.execute-provider"),
-        requested_route(),
-        WorkProviderBackendV1::CodexAppServer,
-        "gpt-test".to_owned(),
-        digest('c'),
+        execution_snapshot(),
         authority.project_id().clone(),
         authority.repository_id().clone(),
         authority.worktree_id().clone(),
         "/tmp/work-runtime-store".to_owned(),
         None,
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
-        UtcMicros(9_000),
         1,
-        WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
         WorkEffectStateV1::Observational,
     )
     .unwrap()

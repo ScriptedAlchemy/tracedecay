@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::configuration::WorktreePlacementModeV1;
 use tracedecay_domain::{
     AttemptId, CommitId, ManifestDigest, RefId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1,
-    WorkCommandId, WorkEffectStateV1, WorkExecutionBudgetV1, WorkLeaseFenceV1,
-    WorkProviderBackendV1, WorkProviderRouteV1, WorkflowDefinition, WorkflowDefinitionId,
-    WorkflowOperationRef, WorkflowPlacementReceipt, WorkflowStepId, canonical_sha256,
+    WorkCommandId, WorkEffectStateV1, WorkExecutionSnapshot, WorkLeaseFenceV1, WorkflowDefinition,
+    WorkflowDefinitionId, WorkflowOperationRef, WorkflowPlacementReceipt, WorkflowStepId,
+    canonical_sha256,
 };
 
 use crate::context::CancellationContext;
@@ -45,19 +45,14 @@ pub struct WorkflowFanOutInput {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowProviderAdmission {
-    pub route: WorkProviderRouteV1,
-    pub backend: WorkProviderBackendV1,
-    pub model: String,
-    pub configuration_digest: ManifestDigest,
+    pub execution_snapshot: WorkExecutionSnapshot,
     pub topology_digest: ManifestDigest,
     pub provider_registry_digest: ManifestDigest,
     pub worktree_placement: WorktreePlacementModeV1,
     pub reference: Option<RefId>,
     pub commit: CommitId,
-    pub deadline: UtcMicros,
     #[schemars(range(min = 1))]
     pub cancellation_generation: u64,
-    pub budget: WorkExecutionBudgetV1,
     pub effect_state: WorkEffectStateV1,
 }
 
@@ -70,10 +65,10 @@ impl WorkflowProviderAdmission {
         WorkflowPlacementReceipt::new(
             run_id,
             step_id,
-            self.route.clone(),
-            self.backend,
-            self.model.clone(),
-            self.configuration_digest.clone(),
+            self.execution_snapshot.route().clone(),
+            self.execution_snapshot.backend(),
+            self.execution_snapshot.model().to_owned(),
+            self.execution_snapshot.effective_behavior_digest().clone(),
             self.topology_digest.clone(),
             self.provider_registry_digest.clone(),
             self.worktree_placement.clone(),
@@ -203,11 +198,12 @@ pub fn prepare_workflow_fan_out(
         .definition
         .validate()
         .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?;
-    if request.provider.configuration_digest != *request.definition.pinned_configuration_digest()
-        || request.provider.model.is_empty()
-        || request.provider.model.trim() != request.provider.model
+    if request
+        .provider
+        .execution_snapshot
+        .effective_behavior_digest()
+        != request.definition.pinned_configuration_digest()
         || request.admitted_at.0 <= 0
-        || request.provider.deadline.0 <= 0
         || request.provider.cancellation_generation == 0
     {
         return Err(WorkflowFanOutRuntimeError::InvalidPlan);
