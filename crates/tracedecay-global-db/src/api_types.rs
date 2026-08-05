@@ -229,8 +229,27 @@ pub struct ProjectRegistryContext {
 
 /// Transcript-ingest backlog snapshot for a session store. See
 /// the registered session-store health route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionProviderCoverageState {
+    Complete,
+    Partial,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SessionProviderCoverage {
+    pub provider: String,
+    pub state: SessionProviderCoverageState,
+    pub deferred_units: u64,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionIngestHealth {
+    /// Providers with durable session rows or daemon-owned source frontiers.
+    pub observed_providers: Vec<String>,
+    /// Latest daemon-owned completion state for each bounded provider sweep.
+    pub provider_coverage: Vec<SessionProviderCoverage>,
     /// Transcripts referenced by sessions that still exist on disk.
     pub tracked_transcripts: u64,
     /// Transcripts with un-ingested appended bytes.

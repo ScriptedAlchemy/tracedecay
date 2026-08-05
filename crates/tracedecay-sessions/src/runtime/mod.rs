@@ -15,18 +15,21 @@ pub mod cursor_agent;
 pub mod cursor_composer;
 pub mod git_correlation;
 pub mod hermes;
+mod host_scan;
 pub mod ingest;
 mod ingest_byte_budget;
 mod jsonl_observation_admission;
+pub mod kimi;
 pub mod kiro;
 pub mod lcm;
+pub mod opencode;
+mod opencode_frontier;
+mod opencode_part_scan;
+mod opencode_snapshot;
 pub mod shared;
 pub mod snapshot_observation;
 pub mod source;
 pub mod store_port;
-// Exposes three `#[doc(hidden)]` process-safety test helpers that the root
-// integration tests reach through the `crate::sessions` shim.
-pub mod transcript_backfill;
 pub mod vibe;
 pub mod workflow_index;
 pub mod workflow_ingest;

@@ -6,15 +6,9 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
-
-use crate::errors::{Result, TraceDecayError};
-
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
-    McpUninstallPolicy, install_mcp_server_entry, load_json_file, load_json_file_strict,
+    AgentIntegration, DoctorCounters, HealthcheckContext, McpDoctorLabels, load_json_file,
     mcp_registration_entry, mcp_servers_registration_state, report_mcp_registration,
-    uninstall_mcp_server_entry,
 };
 
 /// Cline agent.
@@ -60,47 +54,8 @@ impl AgentIntegration for ClineIntegration {
         "cline"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let settings_path = cline_mcp_settings_path(&ctx.home);
-        install_mcp_server(&settings_path, &ctx.tracedecay_bin)?;
-        let legacy_path = legacy_cline_mcp_settings_path(&ctx.home);
-        if legacy_path != settings_path && settings_have_tracedecay(&legacy_path) {
-            uninstall_mcp_server(&legacy_path);
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Removed legacy duplicate registration from {}",
-                legacy_path.display()
-            );
-        }
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Restart Cline — tracedecay tools are now available");
-        Ok(())
-    }
-
     fn supports_local_install(&self) -> bool {
         false
-    }
-
-    fn install_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
-        Err(TraceDecayError::Config {
-            message: "Cline does not currently document or ship a project-local MCP config path. \
-                      `tracedecay install --local --agent cline` is unsupported. \
-                      Run `tracedecay install --agent cline` for a global install."
-                .to_string(),
-        })
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        for settings_path in cline_settings_paths(&ctx.home) {
-            uninstall_mcp_server(&settings_path);
-        }
-
-        eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from Cline.");
-        eprintln!("Restart VS Code for changes to take effect.");
-        Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -132,34 +87,6 @@ impl AgentIntegration for ClineIntegration {
             .iter()
             .any(|path| settings_have_tracedecay(path))
     }
-}
-
-// ---------------------------------------------------------------------------
-// Uninstall helpers
-// ---------------------------------------------------------------------------
-
-fn install_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    install_mcp_server_entry(
-        settings_path,
-        "mcpServers",
-        json!({
-            "command": tracedecay_bin,
-            "args": ["serve"],
-            "disabled": false
-        }),
-        "Cline",
-        load_json_file_strict,
-    )
-}
-
-/// Remove MCP server entry from Cline's `cline_mcp_settings.json`.
-fn uninstall_mcp_server(settings_path: &Path) {
-    uninstall_mcp_server_entry(
-        settings_path,
-        "mcpServers",
-        load_json_file,
-        McpUninstallPolicy::default(),
-    );
 }
 
 // ---------------------------------------------------------------------------

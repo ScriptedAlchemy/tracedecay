@@ -93,6 +93,17 @@ fn recorded_rows(data_root: &Path, profile_root: &Path) -> Vec<Value> {
     rows
 }
 
+fn recorded_file_rows(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path).map_or_else(
+        |_| Vec::new(),
+        |text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect()
+        },
+    )
+}
+
 fn event_kind(row: &Value) -> &str {
     row.get("event").and_then(Value::as_str).unwrap_or_default()
 }
@@ -195,11 +206,6 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
     let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
     let data_root = enroll_project(&project_root, "proj_terminal_invariant");
 
-    let project_key =
-        crate::application::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
-            &project_root,
-        );
-
     // Branch: root known, session known → on-disk dedupe emits once.
     let emit_id = mint_hint_id();
     assert!(
@@ -253,6 +259,8 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
     );
 
     let rows = recorded_rows(&data_root, &profile_root);
+    let project_rows = recorded_file_rows(&data_root.join(super::HOOK_ANALYTICS_FILENAME));
+    let profile_rows = recorded_file_rows(&profile_root.join(super::HOOK_ANALYTICS_FILENAME));
 
     let cases = [
         (&emit_id, "hint_emitted", true),
@@ -274,21 +282,25 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
         );
         for row in &matched {
             assert_eq!(hint_id(row), id.as_str(), "hint_id must be carried");
-            let attributed = row
-                    .get("project_root")
-                    .and_then(Value::as_str)
-                    .map(|root| {
-                        crate::application::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
-                            Path::new(root),
-                        )
-                    });
-            if expect_attribution {
-                assert_eq!(
-                    attributed.as_deref(),
-                    Some(project_key.as_str()),
-                    "row for {id} must carry the canonical project key"
-                );
-            }
+            assert!(
+                row.get("project_root").is_none(),
+                "content-free analytics must not persist a workspace path"
+            );
+        }
+        let routed_rows = if expect_attribution {
+            &project_rows
+        } else {
+            &profile_rows
+        };
+        assert!(
+            !events_for(routed_rows, id).is_empty(),
+            "row for {id} must be routed to its authoritative analytics file"
+        );
+        if expect_attribution {
+            assert!(
+                events_for(&profile_rows, id).is_empty(),
+                "project rows must not leak into the profile fallback file"
+            );
         }
     }
 }

@@ -36,7 +36,7 @@ use types::{AcknowledgedSequenceV1, HookSpoolMetaV1, SpoolIntegrityV1};
 pub use types::{
     HookReplayBatchV1, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
     HookSpoolError, HookSpoolLimitsV1, HookSpoolOpenReportV1, HookSpoolRecordV1,
-    HookSpoolWriterLeaseV1,
+    HookSpoolResetReasonV1, HookSpoolWriterLeaseV1,
 };
 
 use frame::{append_frame, decode_complete_frame, encode_frame, scan_records, truncate_records};
@@ -86,6 +86,31 @@ pub struct HookSpoolV1 {
 }
 
 impl HookSpoolV1 {
+    /// Explicitly recreate one exact host spool without decoding incompatible
+    /// metadata, records, or cursors. The normal writer lease still fences a
+    /// live adapter, and only the three incompatible transport-owned files are
+    /// removed.
+    pub fn reset(
+        root: impl Into<PathBuf>,
+        config: HookSpoolConfigV1,
+        now: UtcMicros,
+    ) -> Result<(), HookSpoolError> {
+        config.validate()?;
+        let root = root.into();
+        ensure_root(&root)?;
+        let (_lease, lease_file) = acquire_lease(&root, config.writer_lease_micros, now)?;
+        for path in [
+            records_path(&root),
+            meta_path(&root),
+            replay_cursor_path(&root),
+        ] {
+            remove_spool_member(&path)?;
+        }
+        shared_sync_directory(&root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)?;
+        drop(lease_file);
+        Ok(())
+    }
+
     /// Open/recover a bounded spool and acquire the sole writer lease. The OS
     /// releases the prior process lock when its file descriptor closes. Expiry
     /// independently prevents a live-but-stale owner from mutating the spool.
@@ -195,6 +220,16 @@ impl HookSpoolV1 {
 
     pub fn lease(&self) -> HookSpoolWriterLeaseV1 {
         self.lease
+    }
+
+    /// Return the durable pending envelope for an exact provider event ID.
+    /// Callers use this only to preserve a prior transport attempt's envelope
+    /// on retry; it does not grant replay or acknowledgement authority.
+    pub fn pending_envelope(&self, event_id: [u8; 16]) -> Option<HookEventEnvelopeV2> {
+        self.pending
+            .iter()
+            .find(|record| record.envelope.event_id == event_id)
+            .map(|record| record.envelope.clone())
     }
 
     /// Append one validated envelope. An exact pending `event_id` duplicate
@@ -574,6 +609,17 @@ fn ensure_root(root: &Path) -> Result<(), HookSpoolError> {
 
 fn validate_regular_or_missing(path: &Path) -> Result<bool, HookSpoolError> {
     shared_validate_regular(path).map_err(|_| HookSpoolError::UnsafePath)
+}
+
+fn remove_spool_member(path: &Path) -> Result<(), HookSpoolError> {
+    if !validate_regular_or_missing(path)? {
+        return Ok(());
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(HookSpoolError::Io),
+    }
 }
 
 fn read_bounded(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, HookSpoolError> {

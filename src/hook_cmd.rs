@@ -82,8 +82,7 @@ pub(crate) fn hook_input(command: &Commands) -> Option<HookInput> {
         | Commands::HookHermesTerminalReceipt
         | Commands::HookKimiEvent
         | Commands::HookOpenCodeEvent
-        | Commands::HookOpenCodeToolAfter
-        | Commands::HookUserSessionReview => Some(HookInput::Stdin),
+        | Commands::HookOpenCodeToolAfter => Some(HookInput::Stdin),
         _ => None,
     }
 }
@@ -180,9 +179,6 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         Commands::HookOpenCodeToolAfter => {
             exit_if_nonzero(tracedecay::hooks::hook_opencode_tool_after().await);
         }
-        Commands::HookUserSessionReview => {
-            exit_if_nonzero(tracedecay::hooks::hook_user_session_review().await);
-        }
         _ => unreachable!("non-hook command passed to hook dispatcher"),
     }
     Ok(())
@@ -237,7 +233,6 @@ mod tests {
             (Commands::HookKimiEvent, HookInput::Stdin),
             (Commands::HookOpenCodeEvent, HookInput::Stdin),
             (Commands::HookOpenCodeToolAfter, HookInput::Stdin),
-            (Commands::HookUserSessionReview, HookInput::Stdin),
         ]
     }
 

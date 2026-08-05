@@ -10,13 +10,12 @@ use std::time::Duration;
 use serde_json::Value;
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
-use super::memory_inject;
 use super::post_tool_use::{
     EmptyPathPolicy, captured_tool_output, notify_edited_paths, trusted_tool_failure,
 };
 use super::steering::{
-    append_context_block, append_context_recovery_hint, build_cursor_session_context,
-    cursor_index_signals_for_root, session_start_from_compaction,
+    append_context_recovery_hint, build_cursor_session_context, cursor_index_signals_for_root,
+    session_start_from_compaction,
 };
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint};
 use super::{
@@ -141,16 +140,12 @@ pub fn cursor_before_submit_prompt_json(additional_context: Option<&str>) -> Str
 }
 
 /// Assembles the prompt-shaped steering for a Cursor `beforeSubmitPrompt` event:
-/// a deduped prompt hint (`decide_hint`) followed by prompt-relevance-gated
-/// memory recall, mirroring [`super::codex::codex_user_prompt_submit_context_for_event`].
-/// Returns `None` when neither surfaces anything (fail-open: no context key).
+/// a deduped prompt hint (`decide_hint`). Returns `None` when the daemon-owned
+/// hint surface has nothing ready (fail-open: no context key).
 pub(super) async fn cursor_before_submit_prompt_context(event_json: &str) -> Option<String> {
     let mut context = String::new();
     if let Some(hint) = cursor_prompt_hint(event_json) {
         append_tool_hint(&mut context, &hint);
-    }
-    if let Some(recall) = Box::pin(cursor_prompt_memory_recall(event_json)).await {
-        append_context_block(&mut context, &recall);
     }
     (!context.trim().is_empty()).then_some(context)
 }
@@ -187,14 +182,6 @@ fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
     deduped_cursor_hint(event_json, &hint_id, hint)
 }
 
-async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    memory_inject::prompt_memory_recall(&parsed, || {
-        cursor_project_root_from_parsed_event_with_identity(&parsed)
-    })
-    .await
-}
-
 /// Cursor `sessionEnd` hook handler (fire-and-forget).
 ///
 /// Final transcript-ingest flush when a conversation ends (including
@@ -221,6 +208,17 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         .await
         .into_recorded_guidance(&hook_telemetry)
     {
+        let outcome = ingest_cursor_transcript_for_event_inner(
+            &event,
+            Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
+            CURSOR_STOP_INGEST_BUDGET,
+            Some(&hook_telemetry),
+        )
+        .await;
+        if outcome.user_scope && outcome.messages_upserted > 0 {
+            let session_id = event_session_id_from_json(&event);
+            super::schedule_user_session_review("cursor", session_id.as_deref());
+        }
         if let Some(guidance) = guidance {
             println!("{}", serde_json::json!({ "additional_context": guidance }));
         } else {
@@ -354,21 +352,6 @@ pub async fn hook_cursor_session_start() -> i32 {
     )
     .await;
     let mut context = cursor_session_context_for_root(root.as_deref()).await;
-    let session_id = event_session_id(&parsed);
-    let digest = match root.as_deref() {
-        Some(root) => {
-            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
-        }
-        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
-    };
-    if let Some(digest) = digest {
-        append_context_block(&mut context, &digest);
-    }
-    if let Some(root) = root.as_deref() {
-        memory_inject::regenerate_cursor_memory_rule(root).await;
-    } else {
-        memory_inject::regenerate_cursor_user_memory_rule().await;
-    }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
     }
@@ -421,9 +404,6 @@ pub async fn hook_cursor_workspace_open() -> i32 {
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
     notify_cursor_workspace_open(&event, &hook_telemetry).await;
-    if let Some(root) = root.as_deref() {
-        memory_inject::regenerate_cursor_memory_rule(root).await;
-    }
     println!("{}", serde_json::json!({}));
     0
 }

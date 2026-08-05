@@ -19,6 +19,7 @@ fn native_material(
     super::native_material(
         &serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default(),
         family,
+        event_json.as_bytes(),
         observed_at,
     )
 }
@@ -493,9 +494,9 @@ fn opencode_event_uses_nested_properties_identity() {
     )
     .unwrap();
 
-    assert_eq!(material.event_id, hash16(b"event-17"));
+    assert_ne!(material.event_id, hash16(b"event-17"));
     assert_eq!(material.protected_session_id, hash32(b"session-23"));
-    assert_eq!(material.file_id, Some(hash16(b"event-17")));
+    assert_eq!(material.file_id, Some(hash16(b"/project/src/lib.rs")));
 }
 
 fn opencode_lsp_fixture_event() -> (serde_json::Value, String) {
@@ -643,10 +644,10 @@ fn opencode_tool_event_uses_nested_input_and_output_identity() {
     )
     .unwrap();
 
-    assert_eq!(material.event_id, hash16(b"call-31"));
+    assert_ne!(material.event_id, hash16(b"call-31"));
     assert_eq!(material.protected_session_id, hash32(b"session-29"));
     assert_eq!(material.effect_receipt_id, Some(hash16(b"call-31")));
-    assert_eq!(material.file_id, Some(hash16(b"call-31")));
+    assert_eq!(material.file_id, Some(hash16(b"/project/src/main.rs")));
 }
 
 #[test]
@@ -707,17 +708,137 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
 }
 
 #[test]
+fn retry_identity_and_timestamp_reuse_are_stable() {
+    let event = r#"{
+        "session_id": "session.retry",
+        "turn_id": "turn.retry",
+        "hook_event_name": "Stop"
+    }"#;
+    let family = tracedecay_hooks::HookEventFamily::SessionBoundary;
+    let first = native_material(event, family, UtcMicros(10)).unwrap();
+    let retry = native_material(event, family, UtcMicros(99)).unwrap();
+    assert_eq!(retry.event_id, first.event_id);
+
+    let temporary = tempfile::tempdir().unwrap();
+    let host = HookHostV1::ClaudeCode;
+    let binding = spool_binding(host, [family]);
+    let decoded = tracedecay_hooks::decode_native_hook_event(
+        host,
+        include_bytes!("../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"),
+    )
+    .unwrap();
+    let first_envelope = decoded.into_envelope(&binding, first).unwrap();
+    assert_eq!(
+        append_for_replay(
+            temporary.path(),
+            host,
+            &first_envelope,
+            &binding,
+            UtcMicros(10),
+        ),
+        SpoolAppendOutcomeV1::Accepted,
+    );
+    let retry_envelope = decoded.into_envelope(&binding, retry).unwrap();
+    assert_eq!(
+        replay_envelope_if_pending(
+            temporary.path(),
+            host,
+            &binding,
+            &retry_envelope,
+            UtcMicros(99),
+        ),
+        PendingEnvelopeV1::Exact(first_envelope),
+    );
+}
+
+fn spool_binding(
+    host: HookHostV1,
+    families: impl IntoIterator<Item = tracedecay_hooks::HookEventFamily>,
+) -> HookScopeBindingV1 {
+    HookScopeBindingV1 {
+        host,
+        project_id: [1; 16],
+        repository_id: [2; 16],
+        worktree_id: [3; 16],
+        worktree_epoch: 4,
+        binding_token: [5; 32],
+        capabilities: families
+            .into_iter()
+            .map(|family| tracedecay_hooks::HookCapabilityV1 {
+                family,
+                support: tracedecay_hooks::stock_event_support(host, family),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn native_identity_is_qualified_by_event_family() {
+    let event = r#"{"session_id":"session.shared","id":"native.shared"}"#;
+    let session = native_material(
+        event,
+        tracedecay_hooks::HookEventFamily::SessionBoundary,
+        UtcMicros(10),
+    )
+    .unwrap();
+    let tool = native_material(
+        event,
+        tracedecay_hooks::HookEventFamily::ToolLifecycle,
+        UtcMicros(10),
+    )
+    .unwrap();
+    assert_ne!(session.event_id, tool.event_id);
+}
+
+#[test]
+fn cursor_saved_edits_preserve_exact_file_identity() {
+    let first = native_material(
+        r#"{
+            "session_id":"session.edit",
+            "generation_id":"generation.edit",
+            "file_path":"/project/src/first.rs",
+            "edits":[{}]
+        }"#,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(10),
+    )
+    .unwrap();
+    let second = native_material(
+        r#"{
+            "session_id":"session.edit",
+            "generation_id":"generation.edit",
+            "file_path":"/project/src/second.rs",
+            "edits":[{}]
+        }"#,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(10),
+    )
+    .unwrap();
+    assert_ne!(first.event_id, second.event_id);
+    assert_eq!(first.file_id, Some(hash16(b"/project/src/first.rs")));
+    assert_eq!(second.file_id, Some(hash16(b"/project/src/second.rs")));
+}
+
+#[test]
 fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
     let fixture =
         include_str!("../../../tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json")
             .replace("<SESSION_ID>", "session.kimi.native")
             .replace("<TOOL_CALL_ID>", "call.kimi.native");
     let fields = serde_json::from_str::<NativeIdentityFields>(&fixture).unwrap();
+    let material = native_material(
+        &fixture,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(10),
+    )
+    .unwrap();
 
-    let lifecycle = native_context_scout_lifecycle(HookHostV1::KimiCode, &fields).unwrap();
+    let lifecycle =
+        native_context_scout_lifecycle(HookHostV1::KimiCode, &fields, material.event_id).unwrap();
 
     assert_eq!(lifecycle.session_id.as_str(), "session.kimi.native");
     assert_eq!(lifecycle.call_id.as_str(), "call.kimi.native");
+    assert_eq!(material.file_id, Some(hash16(b"<SAVED_PATH>")));
 }
 
 #[test]
@@ -731,9 +852,9 @@ fn hermes_real_tool_fixture_uses_terminal_receipt_identity() {
     )
     .unwrap();
 
-    assert_eq!(material.event_id, hash16(b"<TOOL_CALL_ID>"));
+    assert_ne!(material.event_id, hash16(b"<TOOL_CALL_ID>"));
     assert_eq!(material.protected_session_id, hash32(b"<SESSION_ID>"));
-    assert_eq!(material.tool_id, Some(hash16(b"<TOOL_CALL_ID>")));
+    assert_eq!(material.tool_id, Some(material.event_id));
     assert_eq!(material.effect_receipt_id, Some(hash16(b"<TOOL_CALL_ID>")));
     assert_eq!(material.file_id, None);
 }
@@ -749,9 +870,9 @@ fn hermes_adapter_fixture_preserves_native_terminal_identity() {
     )
     .unwrap();
 
-    assert_eq!(material.event_id, hash16(b"<TOOL_CALL_ID>"));
+    assert_ne!(material.event_id, hash16(b"<TOOL_CALL_ID>"));
     assert_eq!(material.protected_session_id, hash32(b"<SESSION_ID>"));
-    assert_eq!(material.tool_id, Some(hash16(b"<TOOL_CALL_ID>")));
+    assert_eq!(material.tool_id, Some(material.event_id));
     assert_eq!(material.effect_receipt_id, Some(hash16(b"<TOOL_CALL_ID>")));
     assert_eq!(material.file_id, None);
 }
@@ -772,7 +893,14 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
         .replace("<SESSION_ID>", "session.opencode.native")
         .replace("<CALL_ID>", "call.opencode.native");
     let fields = serde_json::from_str::<NativeIdentityFields>(&tool_after).unwrap();
-    let lifecycle = native_context_scout_lifecycle(HookHostV1::OpenCode, &fields).unwrap();
+    let material = native_material(
+        &tool_after,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(10),
+    )
+    .unwrap();
+    let lifecycle =
+        native_context_scout_lifecycle(HookHostV1::OpenCode, &fields, material.event_id).unwrap();
     assert_eq!(lifecycle.session_id.as_str(), "session.opencode.native");
     assert_eq!(lifecycle.call_id.as_str(), "call.opencode.native");
 
@@ -784,5 +912,5 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
         .unwrap()["request"]
         .to_string();
     let fields = serde_json::from_str::<NativeIdentityFields>(&file_edit).unwrap();
-    assert!(native_context_scout_lifecycle(HookHostV1::OpenCode, &fields).is_none());
+    assert!(native_context_scout_lifecycle(HookHostV1::OpenCode, &fields, [1; 16]).is_none());
 }

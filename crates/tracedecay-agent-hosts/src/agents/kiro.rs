@@ -44,11 +44,8 @@ const OWNED_AGENT_DESCRIPTION: &str =
 const KIRO_AGENT_ALL_TOOLS: &str = "*";
 const KIRO_ALLOWED_BUILTIN_TOOLS: &str = "@builtin";
 const KIRO_ALLOWED_TRACEDECAY_TOOLS: &str = "@tracedecay";
-const KIRO_PRE_TOOL_HOOK: &str = "hook-kiro-pre-tool-use";
 const KIRO_PROMPT_HOOK: &str = "hook-kiro-prompt-submit";
-const KIRO_POST_TOOL_HOOK: &str = "hook-kiro-post-tool-use";
 const KIRO_SHORT_HOOK_TIMEOUT_MS: u64 = 5_000;
-const KIRO_SYNC_HOOK_TIMEOUT_MS: u64 = 30_000;
 
 /// A hook the managed Kiro agent registers.
 struct KiroManagedHook {
@@ -73,32 +70,12 @@ struct KiroManagedHook {
 /// `Unavailable`, and no CLI subcommand or managed hook is wired. The catalog
 /// entry documents the unverified event rather than enabling it; see
 /// `docs/KIRO-INTEGRATION.md` ("Deliberate non-defaults").
-const KIRO_MANAGED_HOOKS: &[KiroManagedHook] = &[
-    KiroManagedHook {
-        event: "userPromptSubmit",
-        matcher: None,
-        subcommand: KIRO_PROMPT_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
-    },
-    KiroManagedHook {
-        event: "preToolUse",
-        matcher: Some("delegate"),
-        subcommand: KIRO_PRE_TOOL_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
-    },
-    KiroManagedHook {
-        event: "preToolUse",
-        matcher: Some("subagent"),
-        subcommand: KIRO_PRE_TOOL_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
-    },
-    KiroManagedHook {
-        event: "postToolUse",
-        matcher: Some("fs_write"),
-        subcommand: KIRO_POST_TOOL_HOOK,
-        timeout_ms: KIRO_SYNC_HOOK_TIMEOUT_MS,
-    },
-];
+const KIRO_MANAGED_HOOKS: &[KiroManagedHook] = &[KiroManagedHook {
+    event: "userPromptSubmit",
+    matcher: None,
+    subcommand: KIRO_PROMPT_HOOK,
+    timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
+}];
 
 /// Builds the managed agent's `hooks` object from [`KIRO_MANAGED_HOOKS`],
 /// grouping entries per event in table order.
@@ -168,44 +145,16 @@ impl AgentIntegration for KiroIntegration {
         "kiro"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        std::fs::create_dir_all(kiro_home(&ctx.home)).ok();
-
-        let mcp_path = mcp_config_path(&ctx.home);
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
-
-        let steering = steering_path(&ctx.home);
-        install_steering_rules(&steering)?;
-
-        let agent_path = managed_agent_path(&ctx.home);
-        let skill_index_path = managed_skill_index_path(&ctx.home);
-        let owns_agent = install_managed_agent(
-            &agent_path,
-            &ctx.tracedecay_bin,
-            &steering,
-            &ctx.home,
-            Some(&skill_index_path),
-        )?;
-
-        let cli_path = cli_config_path(&ctx.home);
-        install_default_agent(&cli_path, owns_agent)?;
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Start a new Kiro session");
-        eprintln!("     tracedecay tools are now available through Kiro MCP");
-        eprintln!(
-            "     the tracedecay Kiro agent includes hooks for delegation guardrails and sync"
-        );
-        Ok(())
-    }
-
     fn supports_local_install(&self) -> bool {
         true
     }
 
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+    fn activate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
         let mcp_path = workspace_mcp_config_path(project_path);
         let steering = project_path.join(".kiro/steering/tracedecay.md");
         let agent_path = project_path.join(".kiro/agents/tracedecay.json");
@@ -219,7 +168,6 @@ impl AgentIntegration for KiroIntegration {
                 skill_index_path.as_path(),
             ],
         )?;
-
         install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
         install_steering_rules(&steering)?;
         install_managed_agent(
@@ -229,7 +177,47 @@ impl AgentIntegration for KiroIntegration {
             &ctx.home,
             Some(&skill_index_path),
         )?;
+        Ok(())
+    }
 
+    fn project_host_component_registration_paths(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+        project_path: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(vec![
+            workspace_mcp_config_path(project_path),
+            project_path.join(".kiro/steering/tracedecay.md"),
+            project_path.join(".kiro/agents/tracedecay.json"),
+            project_path.join(".kiro/steering/tracedecay-managed-skills.md"),
+            super::managed_memory_digest_targets_path(home),
+        ])
+    }
+
+    fn deactivate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        let mcp_path = workspace_mcp_config_path(project_path);
+        let steering = project_path.join(".kiro/steering/tracedecay.md");
+        let agent_path = project_path.join(".kiro/agents/tracedecay.json");
+        let skill_index_path = project_path.join(".kiro/steering/tracedecay-managed-skills.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [
+                mcp_path.as_path(),
+                steering.as_path(),
+                agent_path.as_path(),
+                skill_index_path.as_path(),
+            ],
+        )?;
+        uninstall_mcp_server(&mcp_path)?;
+        remove_steering_rules(&steering);
+        remove_kiro_managed_skill_index(&ctx.home, &skill_index_path);
+        uninstall_managed_agent(&agent_path);
         Ok(())
     }
 
@@ -251,21 +239,6 @@ impl AgentIntegration for KiroIntegration {
             Some(&skill_index_path),
         )?;
         Ok(UpdatePluginOutcome::Refreshed(vec![agent_path]))
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        uninstall_mcp_server(&mcp_config_path(&ctx.home))?;
-        remove_steering_rules(&steering_path(&ctx.home));
-        remove_kiro_managed_skill_index(&ctx.home, &managed_skill_index_path(&ctx.home));
-        let agent_path = managed_agent_path(&ctx.home);
-        let owned_agent = is_owned_agent_file(&agent_path);
-        uninstall_managed_agent(&agent_path);
-        uninstall_default_agent(&cli_config_path(&ctx.home), &agent_path, owned_agent);
-
-        eprintln!();
-        eprintln!("Uninstall complete. TraceDecay has been removed from Kiro.");
-        eprintln!("Start a new Kiro session for changes to take effect.");
-        Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {

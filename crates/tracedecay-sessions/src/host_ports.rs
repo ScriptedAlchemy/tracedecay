@@ -16,7 +16,9 @@
 //! [`hermes_profile_pin::register`], [`session_review::register`], and
 //! [`lcm_redaction::register`] before any transcript ingest runs.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::OnceLock;
 
 /// Reads the pinned TraceDecay project root out of a Hermes profile config.
@@ -45,13 +47,14 @@ pub mod hermes_profile_pin {
 
 /// Schedules the post-ingest user session review.
 ///
-/// The review runs as a reaped hook child process, which is a root concern:
-/// this crate must not know the binary path or the hook argv.
+/// The review hint is delivered through the root-owned daemon client. This
+/// crate must not know the daemon transport or scheduling policy.
 pub mod session_review {
-    use super::OnceLock;
+    use super::{Future, OnceLock, Pin};
 
     /// Scheduler installed by the composition root.
-    pub type Scheduler = fn(&str, Option<&str>);
+    pub type Scheduler =
+        for<'a> fn(&'a str, Option<&'a str>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
     static SCHEDULER: OnceLock<Scheduler> = OnceLock::new();
 
@@ -61,9 +64,9 @@ pub mod session_review {
     }
 
     /// Requests a review pass; a no-op when unwired.
-    pub fn schedule(provider: &str, session_id: Option<&str>) {
+    pub async fn schedule(provider: &str, session_id: Option<&str>) {
         if let Some(scheduler) = SCHEDULER.get() {
-            scheduler(provider, session_id);
+            scheduler(provider, session_id).await;
         }
     }
 }

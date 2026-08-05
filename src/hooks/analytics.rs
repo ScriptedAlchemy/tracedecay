@@ -616,14 +616,6 @@ pub(super) fn record_hook_analytics(
     let Some(fields) = fields.as_object_mut() else {
         return;
     };
-    if !matches!(event, "hook_invoked" | "hook_completed")
-        && let Some(root) = root
-    {
-        fields.insert(
-            "project_root".to_string(),
-            serde_json::Value::String(root.display().to_string()),
-        );
-    }
     fields.insert(
         "event".to_string(),
         serde_json::Value::String(event.to_string()),

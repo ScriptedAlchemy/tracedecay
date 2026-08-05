@@ -1,33 +1,6 @@
 {
-  "description": "TraceDecay lifecycle hooks: inject index status and tool-routing steering, keep the graph/session store warm, and redirect explore-agent calls toward tracedecay tools.",
+  "description": "TraceDecay native lifecycle hooks: submit bounded edit, session, and stop events to the daemon.",
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "__TRACEDECAY_BIN__",
-            "args": [
-              "hook-pre-tool-use"
-            ]
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "__TRACEDECAY_BIN__",
-            "args": [
-              "hook-prompt-submit"
-            ]
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [
@@ -56,40 +29,13 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|MultiEdit|Write|NotebookEdit|Grep|Glob|Read|Bash",
+        "matcher": "Edit|MultiEdit|Write|NotebookEdit",
         "hooks": [
           {
             "type": "command",
             "command": "__TRACEDECAY_BIN__",
             "args": [
               "hook-claude-post-tool-use"
-            ]
-          }
-        ]
-      }
-    ],
-    "PostToolUseFailure": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "__TRACEDECAY_BIN__",
-            "args": [
-              "hook-claude-post-tool-use"
-            ]
-          }
-        ]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "__TRACEDECAY_BIN__",
-            "args": [
-              "hook-claude-subagent-start"
             ]
           }
         ]

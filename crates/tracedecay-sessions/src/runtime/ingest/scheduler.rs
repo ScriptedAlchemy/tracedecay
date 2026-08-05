@@ -72,6 +72,8 @@ pub(super) const USER_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Hermes,
     SessionProvider::Claude,
     SessionProvider::Kiro,
+    SessionProvider::Kimi,
+    SessionProvider::OpenCode,
     SessionProvider::Cline,
     SessionProvider::RooCode,
     SessionProvider::Kilo,
@@ -148,4 +150,24 @@ pub(super) async fn write_ingest_frontier<S: TranscriptIngestStore>(
         )
         .await
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::runtime::SessionProvider;
+
+    use super::USER_CATCH_UP_PROVIDERS;
+
+    #[test]
+    fn user_catch_up_schedules_every_final_host() {
+        for provider in [
+            SessionProvider::Claude,
+            SessionProvider::Codex,
+            SessionProvider::Cursor,
+            SessionProvider::Kimi,
+            SessionProvider::OpenCode,
+        ] {
+            assert!(USER_CATCH_UP_PROVIDERS.contains(&provider));
+        }
+    }
 }

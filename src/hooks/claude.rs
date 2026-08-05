@@ -6,7 +6,6 @@ use serde_json::Value;
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::codex::codex_additional_context_json;
-use super::memory_inject;
 use super::post_tool_use::{
     CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, captured_tool_output,
     is_claude_edit_tool, is_claude_hint_tool, is_post_tool_use_failure_event,
@@ -14,7 +13,7 @@ use super::post_tool_use::{
     tool_input_file_path_str, trusted_tool_failure,
 };
 use super::steering::{
-    append_context_block, append_context_recovery_hint, append_tracedecay_bootstrap_context,
+    append_context_recovery_hint, append_tracedecay_bootstrap_context,
     cursor_index_signals_for_root, index_status_line, session_start_from_compaction,
 };
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint, is_harness_memory_path};
@@ -160,15 +159,6 @@ pub async fn hook_claude_session_start() -> i32 {
     let session_id = event_session_id(&parsed);
     if root.is_none() && ingest_user_claude_session(session_id.clone()).await {
         super::schedule_user_session_review("claude", session_id.as_deref());
-    }
-    let digest = match root.as_deref() {
-        Some(root) => {
-            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
-        }
-        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
-    };
-    if let Some(digest) = digest {
-        append_context_block(&mut context, &digest);
     }
     // Fire-and-forget: nudge the daemon to refresh the index (and, when this
     // session runs in a harness-created linked worktree, auto-track its branch
@@ -431,29 +421,7 @@ pub async fn hook_prompt_submit() {
     {
         eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
     }
-    let recall = prompt_like_text(&parsed);
-    let recall = match (root.as_deref(), recall.as_deref()) {
-        (Some(root), Some(prompt)) => {
-            Box::pin(memory_inject::combined_prompt_memory_recall(
-                root,
-                session_id.as_deref(),
-                prompt,
-            ))
-            .await
-        }
-        (None, Some(prompt)) => {
-            memory_inject::user_prompt_memory_recall(session_id.as_deref(), prompt).await
-        }
-        (_, None) => None,
-    };
-    if let Some(recall) = recall {
-        println!(
-            "{}",
-            codex_additional_context_json("UserPromptSubmit", &recall)
-        );
-    } else {
-        println!("{}", serde_json::json!({}));
-    }
+    println!("{}", serde_json::json!({}));
 }
 
 /// `Stop` hook handler: ingests new session data and prints a cost receipt.
@@ -473,6 +441,7 @@ pub async fn hook_stop() {
     let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry =
         record_hook_invoked_parsed(root.as_deref(), HintAgent::Claude, "Stop", &event, &parsed);
+    let session_id = event_session_id(&parsed);
     if let Some(root) = root.as_deref()
         && let Some(guidance) = super::v2::dispatch(
             tracedecay_hooks::HookHostV1::ClaudeCode,
@@ -483,12 +452,16 @@ pub async fn hook_stop() {
         .await
         .into_recorded_guidance(&hook_telemetry)
     {
+        if ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
+            .await
+        {
+            super::schedule_user_session_review("claude", session_id.as_deref());
+        }
         if let Some(guidance) = guidance {
             println!("{}", codex_additional_context_json("Stop", &guidance));
         }
         return;
     }
-    let session_id = event_session_id(&parsed);
     if root.is_none()
         && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
             .await
@@ -514,6 +487,25 @@ async fn ingest_user_claude_session_with_telemetry(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn terminal_claude_capture_uses_the_profile_daemon_route() {
+        let _lock = crate::hooks::lock_test_env();
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([
+            serde_json::json!({ "messages_upserted": 1 }),
+        ]);
+
+        assert!(ingest_user_claude_session(Some("claude-stop".to_owned())).await);
+
+        let calls = daemon.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+        assert_eq!(calls[0].1["action"], "ingest_transcript");
+        assert_eq!(calls[0].1["provider"], "claude");
+        assert_eq!(calls[0].1["user_scope"], true);
+        assert_eq!(calls[0].1["session_id"], "claude-stop");
+    }
 
     #[test]
     fn claude_session_start_event_signals_daemon_with_real_cwd() {

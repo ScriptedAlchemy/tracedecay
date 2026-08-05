@@ -5,12 +5,15 @@ use tracedecay_domain::ObservationScopeV1;
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
+use crate::runtime::source::{HostProviderCoverage, persist_host_provider_coverage};
 use crate::runtime::store_port::TranscriptIngestStore;
-use crate::runtime::{SessionProvider, claude_observation, cline_like, hermes, kiro, vibe};
+use crate::runtime::{
+    SessionProvider, claude_observation, cline_like, hermes, kimi, kiro, opencode, vibe,
+};
 
 use super::failure::{
-    ProviderRunOutcome, classify_transcript_ingest_failure, claude_catch_up_failure,
-    warn_transcript_catch_up_failure,
+    ProviderRunOutcome, TranscriptCatchUpFailure, classify_transcript_ingest_failure,
+    claude_catch_up_failure, warn_transcript_catch_up_failure,
 };
 use super::user::{
     try_ingest_user_codex_sessions_with_db_bounded, try_ingest_user_cursor_sessions_with_db_bounded,
@@ -56,6 +59,8 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
             SessionProvider::Hermes => self.run_hermes().await,
             SessionProvider::Claude => self.run_claude().await,
             SessionProvider::Kiro => self.run_kiro().await,
+            SessionProvider::Kimi => self.run_kimi().await,
+            SessionProvider::OpenCode => self.run_opencode().await,
             SessionProvider::Cline | SessionProvider::RooCode | SessionProvider::Kilo => {
                 self.run_cline_like().await
             }
@@ -190,6 +195,123 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 ),
                 self.max_new_bytes,
             ),
+        }
+    }
+
+    async fn run_kimi(self) -> ProviderRunOutcome {
+        let Some(source) = kimi::KimiSource::new() else {
+            return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
+        };
+        let source = source.for_user_scope(self.roots.to_vec());
+        match kimi::capture_kimi_observations(
+            self.facade,
+            &source,
+            self.profile_root,
+            ObservationScopeV1::Profile,
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                let mut run = ProviderRunOutcome::bounded(
+                    TranscriptIngestStats::default(),
+                    outcome.bytes_consumed,
+                    outcome.deferred,
+                );
+                if outcome.discovery_failures > 0 {
+                    run.add_failure(TranscriptCatchUpFailure::source_discovery_partial("kimi"));
+                }
+                run
+            }
+            Err(error) => {
+                let mut run = ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "kimi",
+                        "observation",
+                        &error,
+                        "user Kimi observation catch-up failed",
+                    ),
+                    self.max_new_bytes,
+                );
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    &ObservationScopeV1::Profile,
+                    "kimi",
+                    HostProviderCoverage::Unavailable,
+                    1,
+                )
+                .await
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "kimi",
+                        "coverage",
+                        &coverage_error,
+                        "user Kimi coverage persistence failed",
+                    ));
+                }
+                run
+            }
+        }
+    }
+
+    async fn run_opencode(self) -> ProviderRunOutcome {
+        let Some(source) = opencode::OpenCodeSource::new_for_user(self.roots.to_vec()) else {
+            return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
+        };
+        match opencode::capture_opencode_observations(
+            self.facade,
+            &source,
+            ObservationScopeV1::Profile,
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                let mut run = ProviderRunOutcome::bounded(
+                    outcome.stats,
+                    outcome.bytes_consumed,
+                    outcome.deferred_by_byte_cap
+                        || outcome.scan_cancelled
+                        || outcome.scan_input_bound_reached,
+                );
+                if outcome.scan_non_durable_units > 0 || outcome.scan_unavailable_units > 0 {
+                    run.add_failure(TranscriptCatchUpFailure::source_scan_partial(
+                        "opencode",
+                        outcome.scan_unavailable_units > 0,
+                    ));
+                }
+                run
+            }
+            Err(error) => {
+                let mut run = ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "opencode",
+                        "observation",
+                        &error,
+                        "user OpenCode observation catch-up failed",
+                    ),
+                    self.max_new_bytes,
+                );
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    &ObservationScopeV1::Profile,
+                    "opencode",
+                    HostProviderCoverage::Unavailable,
+                    1,
+                )
+                .await
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "opencode",
+                        "coverage",
+                        &coverage_error,
+                        "user OpenCode coverage persistence failed",
+                    ));
+                }
+                run
+            }
         }
     }
 

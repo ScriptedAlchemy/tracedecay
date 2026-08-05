@@ -109,6 +109,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::graph_semantic_capabilities;
 use crate::mcp::McpServer;
+use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 use tracedecay_lsp::analyzer::broker::{AdmittedLspProvider, MountedLspProvider};
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 
@@ -2269,9 +2270,15 @@ fn hook_feedback_document_uri(
     let logical_path = match &request.hook.envelope().event {
         tracedecay_hooks::HookEventV2::SavedEdit { file_id, .. } => {
             indexed_files.iter().find(|logical_path| {
-                hash16(logical_path.as_bytes()) == *file_id
-                    || hash16(project_root.join(logical_path).to_string_lossy().as_bytes())
-                        == *file_id
+                let logical_file_id = daemon_mint_hook_v2_file_id(
+                    request.hook.envelope(),
+                    hash16(logical_path.as_bytes()),
+                );
+                let absolute_file_id = daemon_mint_hook_v2_file_id(
+                    request.hook.envelope(),
+                    hash16(project_root.join(logical_path).to_string_lossy().as_bytes()),
+                );
+                logical_file_id == *file_id || absolute_file_id == *file_id
             })?
         }
         _ => indexed_files.first()?,
@@ -3061,23 +3068,25 @@ mod tests {
             capabilities,
         };
         Pr13HookOrchestrationRequestV1::from_envelope(
-            tracedecay_hooks::HookEventEnvelopeV2 {
-                schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
-                event_id: [1; 16],
-                producer: tracedecay_hooks::HookHostV1::Codex,
-                protected_session_id: [2; 32],
-                project_id: binding.project_id,
-                repository_id: binding.repository_id,
-                worktree_id: binding.worktree_id,
-                worktree_epoch: binding.worktree_epoch,
-                binding_token: binding.binding_token,
-                ordering: tracedecay_hooks::HookOrderingV1::Unknown,
-                observed_at: UtcMicros(10),
-                event: tracedecay_hooks::HookEventV2::SavedEdit {
-                    file_id,
-                    changed_range_count: 1,
+            crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_envelope(
+                &tracedecay_hooks::HookEventEnvelopeV2 {
+                    schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+                    event_id: [1; 16],
+                    producer: tracedecay_hooks::HookHostV1::Codex,
+                    protected_session_id: [2; 32],
+                    project_id: binding.project_id,
+                    repository_id: binding.repository_id,
+                    worktree_id: binding.worktree_id,
+                    worktree_epoch: binding.worktree_epoch,
+                    binding_token: binding.binding_token,
+                    ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+                    observed_at: UtcMicros(10),
+                    event: tracedecay_hooks::HookEventV2::SavedEdit {
+                        file_id,
+                        changed_range_count: 1,
+                    },
                 },
-            },
+            ),
             &binding,
             None,
             7,
@@ -3260,6 +3269,22 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn canonical_saved_edit_identity_resolves_its_exact_indexed_file() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let absolute_path = temporary.path().join("src/lib.rs");
+        let request = saved_edit_hook_request(hash16(absolute_path.to_string_lossy().as_bytes()));
+
+        assert_eq!(
+            hook_feedback_document_uri(
+                temporary.path(),
+                &["src/lib.rs".to_owned(), "src/other.rs".to_owned()],
+                &request,
+            ),
+            url::Url::from_file_path(absolute_path).ok().map(Into::into),
+        );
     }
 
     #[test]
