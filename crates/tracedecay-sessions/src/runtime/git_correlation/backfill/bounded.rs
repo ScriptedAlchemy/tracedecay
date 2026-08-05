@@ -580,8 +580,8 @@ async fn dry_run_native_history(
         for segment in chunk.segments {
             emitted = dry_run_segment(
                 project_path,
-                window_start,
-                window_end,
+                segment.start,
+                segment.end,
                 &sealed_source,
                 segment.tip_oid,
                 max_commits,
