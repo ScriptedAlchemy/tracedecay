@@ -396,6 +396,9 @@ pub(crate) enum SessionRetrievalUnavailableReason {
     RefreshWorkerRecovering,
     RefreshWorkerStalled,
     RefreshWorkerStopped,
+    HistoricalConvergence,
+    HistoricalRetry,
+    HistoricalBlocked,
     TemporalStoreUnavailable,
     HydrationUnavailable,
 }
@@ -408,6 +411,9 @@ impl SessionRetrievalUnavailableReason {
             Self::RefreshWorkerRecovering => "refresh_worker_recovering",
             Self::RefreshWorkerStalled => "refresh_worker_stalled",
             Self::RefreshWorkerStopped => "refresh_worker_stopped",
+            Self::HistoricalConvergence => "historical_convergence",
+            Self::HistoricalRetry => "historical_retry",
+            Self::HistoricalBlocked => "historical_blocked",
             Self::TemporalStoreUnavailable => "temporal_store_unavailable",
             Self::HydrationUnavailable => "hydration_unavailable",
         }
@@ -420,6 +426,8 @@ impl SessionRetrievalUnavailableReason {
                 | Self::RefreshWorkerRecovering
                 | Self::RefreshWorkerStalled
                 | Self::RefreshWorkerStopped
+                | Self::HistoricalConvergence
+                | Self::HistoricalRetry
                 | Self::TemporalStoreUnavailable
                 | Self::HydrationUnavailable
         )

@@ -1,4 +1,4 @@
-//! Project-server teardown: ingest cancellation, detach, request draining,
+//! Project-server teardown: detach, request draining,
 //! retirement, and per-profile host admission replay.
 //!
 //! Retirement waits for in-flight requests before aborting, so a rekey or a
@@ -10,21 +10,11 @@
 
 use super::*;
 
-pub(super) async fn cancel_project_server_startup_ingests(
-    store_administration: &StoreAdministration,
-) {
-    let servers = {
-        let registry = store_administration.project_servers().lock().await;
-        let mut seen = HashSet::new();
-        registry
-            .values()
-            .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    for server in servers {
-        server.cancel_startup_transcript_ingest();
-    }
+pub(super) async fn cancel_retained_session_history(store_administration: &StoreAdministration) {
+    store_administration
+        .session_temporal_refresh_schedulers()
+        .cancel_historical_ingest()
+        .await;
 }
 
 pub(super) async fn shutdown_project_servers(store_administration: &StoreAdministration) {

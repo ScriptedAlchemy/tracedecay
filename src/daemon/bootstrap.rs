@@ -126,14 +126,14 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     }
     lifecycle.begin_draining();
     maintenance.shutdown().await;
-    cancel_project_server_startup_ingests(&store_administration).await;
+    cancel_retained_session_history(&store_administration).await;
     let _ = timeout(
         DAEMON_TASK_ABORT_DEADLINE,
         http_application_service.shutdown(),
     )
     .await;
     shutdown_portable_project_open_tasks(project_open_gates.as_ref()).await;
-    cancel_project_server_startup_ingests(&store_administration).await;
+    cancel_retained_session_history(&store_administration).await;
     let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
         .await
         .is_ok();
@@ -313,14 +313,14 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     drop(listener);
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
     let shutdown_completed = timeout(DAEMON_SHUTDOWN_DEADLINE, async {
-        cancel_project_server_startup_ingests(&engine.store_administration).await;
+        cancel_retained_session_history(&engine.store_administration).await;
         let _ = timeout(
             DAEMON_TASK_ABORT_DEADLINE,
             http_application_service.shutdown(),
         )
         .await;
         engine.shutdown_project_open_tasks().await;
-        cancel_project_server_startup_ingests(&engine.store_administration).await;
+        cancel_retained_session_history(&engine.store_administration).await;
         // Keep auxiliary process creation blocked until every scheduler and client
         // task is drained or abandoned. A killed app-server call may retry before
         // unwinding, so a shorter guard leaves a shutdown-time respawn race.

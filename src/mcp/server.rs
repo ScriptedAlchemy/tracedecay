@@ -250,7 +250,6 @@ pub struct McpServer {
     global_db: Option<Arc<RegisteredGlobalDb>>,
     profile_root: Option<PathBuf>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    transcript_source_home: Option<PathBuf>,
     accounting_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
@@ -349,12 +348,9 @@ pub struct McpServer {
     /// spawn at most one pair of `git rev-parse` per session no matter how
     /// many tool calls fire. See [`crate::worktree`] and #312.
     worktree_mismatch: Option<crate::worktree::WorktreeIndexMismatch>,
-    /// The whole startup catch-up lifecycle (D1): dispatch claim, index-sync
-    /// and transcript-ingest phases, both retained task handles, and the
-    /// ingest cancellation — one typed state behind one lock. See
-    /// [`StartupCatchUpStateV1`] for the phases and the ordering hazard the
-    /// previous flag soup carried. `Arc` so the detached ingest task can
-    /// settle the same machine that waiters and shutdown read.
+    /// Startup code-index catch-up lifecycle (D1): dispatch claim, retained
+    /// task handle, and readiness state behind one lock. Historical session
+    /// convergence is owned by the daemon scheduler, not this server.
     startup_catch_up: Arc<StartupCatchUpMachineV1>,
     /// `true` while a detached sync-on-read refresh (D4) is in flight.
     /// Single-flights the background refresh: `compare_exchange`d to `true`
@@ -662,7 +658,6 @@ impl McpServer {
             scope_prefix,
             profile_root,
             profile_identity,
-            transcript_source_home,
             global_db,
             accounting_db,
             registry_db,
@@ -696,14 +691,6 @@ impl McpServer {
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
         } = context;
-        #[cfg(test)]
-        assert!(
-            !startup_catch_up_enabled
-                || registered_session_db.is_none()
-                || profile_identity.is_none()
-                || transcript_source_home.is_some(),
-            "test MCP servers with startup transcript authority require an isolated transcript-source home"
-        );
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
@@ -854,7 +841,6 @@ impl McpServer {
             accounting_db,
             profile_root,
             profile_identity,
-            transcript_source_home,
             session_db,
             registry_db,
             project_registry_reads,
@@ -953,19 +939,17 @@ impl McpServer {
         // D1: startup catch-up sync. Reconciles changes made while the server
         // was down (terminal `git pull`, IDE edits before launch, another
         // tool's writes) so read-only sessions start fresh instead of serving
-        // a stale index forever. `run_startup_catch_up_sync` is non-blocking-
-        // safe (detached transcript ingest, flags flipped on every exit path),
-        // so we spawn it detached and return immediately.
+        // a stale index forever. We spawn it detached and return immediately.
         //
         // Gated on `SyncConfig.session_start_sync` (default true) and single-
         // flighted by the machine's dispatch claim so it runs at most once
         // per server even if two `new_with_dbs` paths overlap.
         //
         // Claiming dispatch *is* the transition into `Syncing`, which is what
-        // used to require pre-clearing two default-`true` completion flags
-        // before the spawn. Without that pre-clear there was a window between
-        // the spawn and the task's first instruction where both flags still
-        // read `true`, so a caller that reached `wait_for_startup_catch_up`
+        // used to require pre-clearing a default-`true` completion flag before
+        // the spawn. Without that pre-clear there was a window between the
+        // spawn and the task's first instruction where the flag still read
+        // `true`, so a caller that reached `wait_for_startup_catch_up`
         // in that window observed "done" and returned immediately — then the
         // detached catch-up sync ran concurrently with the caller's own work
         // (e.g. racing it to index a just-written file). The window cannot

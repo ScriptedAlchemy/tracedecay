@@ -736,11 +736,7 @@ impl McpServer {
         if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
             worker.shutdown().await;
         }
-        // Same ordering as before the state machine landed: the index-sync
-        // task is aborted and joined first, then the ingest is cancelled,
-        // joined, and the machine marked cancelled.
         self.shutdown_startup_catch_up_sync().await;
-        self.shutdown_startup_transcript_ingest().await;
     }
 
     pub(crate) async fn replay_host_admission(

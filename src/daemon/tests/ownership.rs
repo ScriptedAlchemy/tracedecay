@@ -209,7 +209,7 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     let mut config = crate::config::load_config(&project).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&project, &config)
-        .expect("disable unrelated startup transcript ingestion");
+        .expect("disable unrelated startup code-index catch-up");
     eprintln!("[cache-test] phase=init done");
 
     let direct = DaemonHandshake {
