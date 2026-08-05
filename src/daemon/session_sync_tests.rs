@@ -10,6 +10,9 @@ use tracedecay_application::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId,
 };
 
+use super::work::{
+    coalesced_alias_local_interruption, git_history_frontier_from_meta, git_history_source_frontier,
+};
 use super::{
     DaemonSessionSyncService, completed_profile_sweep_covers, completion_termination,
     decode_matching_journal,
@@ -86,6 +89,7 @@ fn completed_alias_replay_survives_its_original_deadline() {
     );
     let primary = IdempotencyKey::new("session-sync.primary").unwrap();
     let mut journal = SessionSyncJournalV1::coalesced(&request, UtcMicros(10), primary.clone());
+    let pending_alias = journal.clone();
     journal.status = SessionSyncJournalStatusV1::Complete;
     journal.completion = Some(SessionSyncCompletionReceiptV1 {
         admission: journal.admission.clone(),
@@ -111,6 +115,29 @@ fn completed_alias_replay_survives_its_original_deadline() {
             if receipt.admission.idempotency_key == *request.idempotency_key()
                 && receipt.coalesced_primary.is_some()
     ));
+    assert_eq!(
+        coalesced_alias_local_interruption(&journal, &pending_alias, true, UtcMicros(30)),
+        None,
+        "the primary terminal receipt wins over alias-local timeout and cancellation"
+    );
+}
+
+#[test]
+fn git_recovery_frontier_preserves_the_exact_committed_tuple() {
+    let frontier = git_history_frontier_from_meta(Some(1_723_456_789), Some(417)).unwrap();
+
+    assert_eq!(frontier.activity_timestamp, 1_723_456_789);
+    assert_eq!(frontier.source_rowid, 417);
+    let receipt_frontier =
+        git_history_source_frontier(&ProjectId::new("project.fixture").unwrap(), frontier);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&receipt_frontier.committed_cursor_json).unwrap(),
+        serde_json::json!({
+            "activity_timestamp": 1_723_456_789,
+            "source_rowid": 417,
+        })
+    );
+    assert!(git_history_frontier_from_meta(None, Some(999)).is_none());
 }
 
 #[tokio::test]
