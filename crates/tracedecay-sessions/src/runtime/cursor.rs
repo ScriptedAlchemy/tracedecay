@@ -1817,7 +1817,7 @@ mod tests {
         std::fs::create_dir_all(&transcript_dir).unwrap();
         std::fs::write(
             transcript_dir.join("session-cancelled.jsonl"),
-            r#"{"role":"user","message":{"content":"must not ingest"}}"#,
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"must not ingest"}]}}"#,
         )
         .unwrap();
         let source = CursorSweepSource::with_home(home.path());
