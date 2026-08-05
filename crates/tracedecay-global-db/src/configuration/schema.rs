@@ -47,6 +47,18 @@ impl TryFrom<&tracedecay_runtime_core::errors::TraceDecayError> for Configuratio
     }
 }
 
+impl ConfigurationResetConfirmation {
+    pub fn from_refusal_reason(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn refusal_reason(&self) -> &str {
+        &self.reason
+    }
+}
+
 const FINAL_CONFIGURATION_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_configuration_audit_occurred_at"),
     ("index", "idx_configuration_component_activation_latest"),
@@ -575,6 +587,20 @@ pub async fn ensure_configuration_schema(
     }
 }
 
+/// Inspects the configuration namespace without creating or changing schema
+/// objects. Confirmation exists only for a typed incompatible-shape refusal.
+pub async fn configuration_reset_confirmation(
+    connection: &impl QueryExecutor,
+) -> Result<Option<ConfigurationResetConfirmation>, ConfigurationSchemaError> {
+    match validate_configuration_schema(connection).await {
+        Err(ConfigurationSchemaError::ResetRequired { reason }) => Ok(Some(
+            ConfigurationResetConfirmation::from_refusal_reason(reason),
+        )),
+        Err(error) => Err(error),
+        Ok(_) => Ok(None),
+    }
+}
+
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -897,6 +923,43 @@ mod tests {
         assert_eq!(
             legacy.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_confirmation_inspection_does_not_change_the_refused_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &directory.path().join("configuration.db"),
+        );
+        connection
+            .execute_batch(
+                "CREATE TABLE configuration_legacy_flags (value TEXT NOT NULL);
+                 INSERT INTO configuration_legacy_flags VALUES ('preserve-until-confirmed');",
+            )
+            .await
+            .unwrap();
+
+        let confirmation = configuration_reset_confirmation(&*connection)
+            .await
+            .unwrap()
+            .expect("legacy configuration requires confirmation");
+        assert_eq!(
+            confirmation.refusal_reason(),
+            "persisted schema is not the exact final configuration shape"
+        );
+        let mut rows = connection
+            .query("SELECT value FROM configuration_legacy_flags", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "preserve-until-confirmed"
         );
     }
 

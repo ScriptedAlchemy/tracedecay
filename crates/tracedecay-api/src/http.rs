@@ -104,7 +104,9 @@ pub use tracedecay_application::{
 const fn is_http_exposed(operation: HttpApplicationOperation) -> bool {
     !matches!(
         operation,
-        HttpApplicationOperation::GitPreview | HttpApplicationOperation::GitApply
+        HttpApplicationOperation::GitPreview
+            | HttpApplicationOperation::GitApply
+            | HttpApplicationOperation::ConfigurationReset
     )
 }
 
@@ -135,7 +137,9 @@ fn route_path(operation: HttpApplicationOperation) -> Option<String> {
         operation if operation.owner_kind() == HttpApplicationOwnerKind::ContextScout => {
             format!("/context-scout/{}", operation.as_str())
         }
-        HttpApplicationOperation::GitPreview | HttpApplicationOperation::GitApply => return None,
+        HttpApplicationOperation::GitPreview
+        | HttpApplicationOperation::GitApply
+        | HttpApplicationOperation::ConfigurationReset => return None,
         _ => return None,
     };
     Some(path)
