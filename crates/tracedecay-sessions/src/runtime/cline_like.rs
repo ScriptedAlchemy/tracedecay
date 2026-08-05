@@ -30,15 +30,13 @@ use crate::runtime::shared::{
     path_belongs_to_project, title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
-    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
-    SnapshotCaptureOutcome, StableMessageIdDomains, bounded_snapshot_input_len,
-    capture_snapshot_observations, non_durable_snapshot_record, read_snapshot_text_bounded,
-    snapshot_message_fields, stable_snapshot_message_id,
+    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotCaptureOutcome,
+    StableMessageIdDomains, bounded_snapshot_input_len, capture_snapshot_observations,
+    non_durable_snapshot_record, read_snapshot_text_bounded, snapshot_message_fields,
+    stable_snapshot_message_id,
 };
 #[cfg(test)]
-use crate::runtime::snapshot_observation::{
-    canonical_snapshot_envelope, host_admission_error, snapshot_cursor_after,
-};
+use crate::runtime::snapshot_observation::{canonical_snapshot_envelope, host_admission_error};
 use crate::runtime::source::{
     ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
     TranscriptIngestResult, TranscriptSource, read_changed_with_companion,
@@ -46,12 +44,14 @@ use crate::runtime::source::{
 use serde_json::{Map, Value};
 #[cfg(test)]
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
-    ObservationSourceRangeV1,
+    CanonicalObservationEnvelopeV1, ObservationOrderingDomainV1, ObservationSourceRangeV1,
 };
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 #[cfg(test)]
 use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+
+mod observation;
+pub use observation::ClineLikeSnapshotObservationRecord;
 
 /// Cap task-directory scans so a long VS Code globalStorage history cannot
 /// block dashboard startup.
@@ -76,54 +76,6 @@ pub struct ClineLikeSource {
     provider: &'static str,
     storage_roots: Vec<PathBuf>,
     user_registered_roots: Option<Vec<PathBuf>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClineLikeSnapshotObservationRecord {
-    provider: &'static str,
-    session_id: String,
-    native_record_id: String,
-    order: u64,
-    payload: Vec<u8>,
-}
-
-impl SnapshotAdmissionRecord for ClineLikeSnapshotObservationRecord {
-    fn provider(&self) -> &'static str {
-        self.provider
-    }
-
-    fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    fn native_record_id(&self) -> &str {
-        &self.native_record_id
-    }
-
-    fn order(&self) -> u64 {
-        self.order
-    }
-
-    fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-}
-
-#[cfg(test)]
-impl ClineLikeSnapshotObservationRecord {
-    fn cursor_after(
-        &self,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-    ) -> TranscriptIngestResult<ObservationSourceCursorV1> {
-        snapshot_cursor_after(
-            self.provider,
-            &self.session_id,
-            self.order,
-            scope,
-            generation,
-        )
-    }
 }
 
 impl ClineLikeSource {
