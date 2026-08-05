@@ -1603,6 +1603,74 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
     }
 
+    fn current_ready_decoded_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let (scheduler, serving_generation) = {
+            let mounted = self.mounted.try_lock().ok()?;
+            let worktree = mounted.get(&project_root)?;
+            if worktree.repository_id != scope.repository_id
+                || worktree.worktree_id != scope.worktree_id
+            {
+                return None;
+            }
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.serving_generation),
+            )
+        };
+        let mut scheduler = match scheduler.try_lock() {
+            Ok(scheduler) => scheduler,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        let latest = scheduler
+            .latest_complete_ready_for_exact_source_with(
+                GenerationDecodeAdmissionV1::AlreadyDecoded,
+            )
+            .ok()
+            .flatten()?;
+        if !Self::latest_matches_scope(&latest, scope) {
+            return None;
+        }
+        *serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
+        Some(latest)
+    }
+
+    /// Report an already-decoded current generation for one exact mounted root
+    /// and scope without mounting, decoding, or reconciling.
+    pub(in crate::daemon) fn has_current_ready_decoded_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        self.current_ready_decoded_for_root_scope(project_root, scope)
+            .is_some()
+    }
+
+    /// Return the exact ready generation without blocking the async executor
+    /// on the bounded synchronous freshness probe.
+    pub(in crate::daemon) async fn latest_complete_ready_decoded_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let registry = self.clone();
+        let project_root = project_root.to_path_buf();
+        let scope = scope.clone();
+        tokio::task::spawn_blocking(move || {
+            registry.current_ready_decoded_for_root_scope(&project_root, &scope)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     async fn latest_complete_ready_for_scope_with(
         &self,
         scope: &tracedecay_application::ResolvedScope,

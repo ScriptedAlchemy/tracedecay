@@ -904,7 +904,7 @@ mod doctor_runtime_route_tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn fast_runtime_snapshot_uses_retained_liveness_before_deep_audit() {
+    async fn fast_runtime_snapshot_uses_retained_liveness_without_storage_audit() {
         let root = tempfile::TempDir::new().unwrap();
         let project = root.path().join("project");
         let profile = root.path().join("profile");
@@ -943,8 +943,7 @@ mod doctor_runtime_route_tests {
             .lock()
             .await
             .insert(key, server);
-        let value =
-            super::doctor_runtime_value(&handshake, &store_administration, false, false).await;
+        let value = super::doctor_runtime_value(&handshake, &store_administration, false).await;
 
         assert_eq!(
             value.pointer("/doctor_runtime/status"),
@@ -954,14 +953,11 @@ mod doctor_runtime_route_tests {
         assert_eq!(
             value.pointer("/database/quick_check_ok"),
             Some(&serde_json::Value::Null),
-            "only an explicit deep audit may run quick_check"
+            "the core runtime snapshot must not run quick_check"
         );
-
-        let deep =
-            super::doctor_runtime_value(&handshake, &store_administration, false, true).await;
         assert!(
-            deep.pointer("/database/wal_size_bytes").is_none()
-                && deep.pointer("/database/shm_size_bytes").is_none(),
+            value.pointer("/database/wal_size_bytes").is_none()
+                && value.pointer("/database/shm_size_bytes").is_none(),
             "runtime health must not expose SQLite sidecar implementation details"
         );
     }

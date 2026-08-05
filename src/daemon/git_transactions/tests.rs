@@ -88,6 +88,26 @@ fn repository_mutation_capacity_fails_closed_before_waiting() {
 }
 
 #[test]
+fn completed_repository_mutation_gates_are_reclaimed() {
+    let queue = RepositoryMutationQueue::default();
+    for index in 0..256 {
+        let repository =
+            RepositoryId::new(format!("repository.reclaimed.{index}")).expect("repository id");
+        queue
+            .with_repository(&repository, || ())
+            .expect("repository mutation");
+    }
+
+    assert_eq!(
+        queue
+            .retained_gate_count_for_test()
+            .expect("repository gate count"),
+        0,
+        "completed repository identities must not grow daemon memory without bound"
+    );
+}
+
+#[test]
 fn queued_repository_mutation_observes_live_cancellation() {
     let queue = Arc::new(RepositoryMutationQueue::default());
     let repository = RepositoryId::new("repository.cancellation").expect("repository id");
@@ -110,8 +130,9 @@ fn queued_repository_mutation_observes_live_cancellation() {
     let waiter_queue = Arc::clone(&queue);
     let waiter_cancellation = Arc::clone(&cancellation);
     let waiter_checks = Arc::clone(&checks);
+    let (waiter_result_tx, waiter_result_rx) = std::sync::mpsc::channel();
     let waiter = thread::spawn(move || {
-        waiter_queue
+        let result = waiter_queue
             .with_repository_cancellable(
                 &repository,
                 || {
@@ -122,7 +143,8 @@ fn queued_repository_mutation_observes_live_cancellation() {
                 },
                 |observed| observed.is_some(),
             )
-            .expect("waiter queue")
+            .expect("waiter queue");
+        waiter_result_tx.send(result).expect("waiter result");
     });
 
     while checks.load(Ordering::SeqCst) < 2 {
@@ -133,10 +155,15 @@ fn queued_repository_mutation_observes_live_cancellation() {
     while checks.load(Ordering::SeqCst) == checks_before_cancellation {
         thread::yield_now();
     }
+    assert!(
+        waiter_result_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("cancelled waiter exits before repository holder")
+    );
     release_tx.send(()).expect("release holder");
 
     holder.join().expect("holder joins");
-    assert!(waiter.join().expect("waiter joins"));
+    waiter.join().expect("waiter joins");
 }
 
 #[test]
@@ -301,6 +328,7 @@ fn test_port(
             native,
             GitEffectClassifierV1::default(),
             policy,
+            Arc::new(RepositoryMutationQueue::default()),
         ),
         preview,
         request,
@@ -536,8 +564,13 @@ fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
     let policy = TestPolicy::allowing();
     policy.allow.store(false, Ordering::SeqCst);
     let policy_calls = Arc::clone(&policy.calls);
-    let port =
-        DaemonGitIndexTransactionPort::new(store, native, GitEffectClassifierV1::default(), policy);
+    let port = DaemonGitIndexTransactionPort::new(
+        store,
+        native,
+        GitEffectClassifierV1::default(),
+        policy,
+        Arc::new(RepositoryMutationQueue::default()),
+    );
 
     let replay = port.apply(&request).expect("expired terminal replay");
     assert_eq!(
@@ -634,8 +667,13 @@ fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
     let apply_calls = Arc::clone(&native.apply_calls);
     let recovery_calls = Arc::clone(&native.recovery_calls);
     let policy = TestPolicy::allowing();
-    let port =
-        DaemonGitIndexTransactionPort::new(store, native, GitEffectClassifierV1::default(), policy);
+    let port = DaemonGitIndexTransactionPort::new(
+        store,
+        native,
+        GitEffectClassifierV1::default(),
+        policy,
+        Arc::new(RepositoryMutationQueue::default()),
+    );
 
     assert_eq!(
         port.apply(&request),
@@ -674,6 +712,7 @@ fn startup_service_recovers_before_exposing_the_mutation_port() {
         native,
         GitEffectClassifierV1::default(),
         TestPolicy::allowing(),
+        Arc::new(RepositoryMutationQueue::default()),
         UtcMicros(20),
     )
     .expect("startup recovery completes before service publication");
@@ -701,6 +740,7 @@ fn startup_recovery_failure_returns_no_mutation_service() {
         native,
         GitEffectClassifierV1::default(),
         TestPolicy::allowing(),
+        Arc::new(RepositoryMutationQueue::default()),
         UtcMicros(20),
     );
 
@@ -810,6 +850,13 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
     assert!(
         !Arc::ptr_eq(&primary, &linked),
         "worktrees sharing one store need independent native executors"
+    );
+    assert!(
+        Arc::ptr_eq(
+            primary.mutation_queue_for_test(),
+            linked.mutation_queue_for_test()
+        ),
+        "all Git mutation services must serialize through the daemon registry queue"
     );
     let primary_owner = registry
         .for_repository_root(directory.path())

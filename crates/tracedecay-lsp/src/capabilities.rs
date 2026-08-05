@@ -116,6 +116,7 @@ pub struct ClientCapabilities {
     pub publish_diagnostics_code_description: bool,
     pub publish_diagnostics_data: bool,
     pub supports_document_diagnostics: bool,
+    pub diagnostic_dynamic_registration: bool,
     pub workspace_diagnostic_refresh_support: bool,
     pub supports_workspace_folders: bool,
     pub semantic: BTreeSet<SemanticCapability>,
@@ -178,6 +179,7 @@ impl ClientCapabilities {
             .and_then(|text_document| text_document.get("diagnostic"))
             .and_then(Value::as_object);
         capabilities.supports_document_diagnostics = diagnostic.is_some();
+        capabilities.diagnostic_dynamic_registration = bool_at(diagnostic, "dynamicRegistration");
         // LSP 3.17's `textDocument.diagnostic` capability advertises pull
         // support only. Optional fields on the shared `Diagnostic` shape are
         // negotiated by `textDocument.publishDiagnostics`; accepting invented
@@ -272,6 +274,9 @@ pub enum CapabilityParseError {
 pub struct GatewayCapabilities {
     pub supports_publish_diagnostics: bool,
     pub supports_document_diagnostics: bool,
+    /// True only when the daemon mounted exact indexed-root enumeration and
+    /// canonical root diagnostic snapshot authorities.
+    pub supports_workspace_diagnostics: bool,
     /// Whether the daemon can answer from canonical `TraceDecay` diagnostics
     /// when an upstream analyzer does not provide diagnostics.
     pub supports_managed_diagnostics: bool,
@@ -287,6 +292,7 @@ impl Default for GatewayCapabilities {
         Self {
             supports_publish_diagnostics: true,
             supports_document_diagnostics: true,
+            supports_workspace_diagnostics: false,
             supports_managed_diagnostics: true,
             supports_workspace_folders: false,
             semantic: SemanticCapability::ALL.into_iter().collect(),
@@ -373,7 +379,7 @@ impl EffectiveCapabilities {
                 "diagnosticProvider".into(),
                 json!({
                     "interFileDependencies": true,
-                    "workspaceDiagnostics": false,
+                    "workspaceDiagnostics": self.workspace_diagnostics_supported,
                 }),
             );
         }
@@ -520,6 +526,14 @@ pub fn negotiate_capabilities(
 
     let diagnostics_supported = client_supports_utf16
         && (gateway.supports_managed_diagnostics || upstream.supports_diagnostics);
+    // `textDocument/diagnostic` is the LSP registration method for both
+    // document and workspace pull diagnostics. A dynamically capable client
+    // therefore receives neither half statically when workspace readiness can
+    // change after initialization; the session actor registers the complete
+    // provider only while the canonical workspace authority is live.
+    let dynamic_workspace_diagnostics = client.diagnostic_dynamic_registration
+        && client.supports_document_diagnostics
+        && gateway.supports_workspace_diagnostics;
     let context_projections: BTreeMap<ContextProjectionKind, u32> = client
         .context_projections
         .iter()
@@ -548,20 +562,25 @@ pub fn negotiate_capabilities(
         publish_diagnostics_data: client.publish_diagnostics_data,
         supports_document_diagnostics: diagnostics_supported
             && client.supports_document_diagnostics
-            && gateway.supports_document_diagnostics,
+            && gateway.supports_document_diagnostics
+            && !dynamic_workspace_diagnostics,
         document_diagnostics_related_information: client.publish_diagnostics_related_information,
         document_diagnostics_code_description: client.publish_diagnostics_code_description,
         document_diagnostics_data: client.publish_diagnostics_data,
         supports_workspace_diagnostic_refresh: diagnostics_supported
             && client.supports_document_diagnostics
             && gateway.supports_document_diagnostics
-            && client.workspace_diagnostic_refresh_support,
+            && client.workspace_diagnostic_refresh_support
+            && !dynamic_workspace_diagnostics,
         semantic,
         context_projections,
         supports_context_expansion,
         workspace_folders_supported: client.supports_workspace_folders
             && gateway.supports_workspace_folders,
-        workspace_diagnostics_supported: false,
+        workspace_diagnostics_supported: diagnostics_supported
+            && client.supports_document_diagnostics
+            && gateway.supports_workspace_diagnostics
+            && !dynamic_workspace_diagnostics,
         rename_supported: false,
         general_code_actions_supported: false,
         execute_command_supported: false,

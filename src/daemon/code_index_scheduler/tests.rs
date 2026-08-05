@@ -44,7 +44,8 @@ use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
 
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
+    CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1,
+    SharedCodeIndexBytePoolV1,
 };
 use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
 use tracedecay_query::retrieval::QueryAuthorityV1;
@@ -2515,6 +2516,38 @@ fn restored_generation_abstains_and_schedules_background_truth() {
             .expect("ready check")
             .is_some(),
         "the unchanged restored generation becomes request-admissible after reconciliation"
+    );
+}
+
+#[test]
+fn exact_source_readiness_abstains_when_a_file_is_added_inside_freshness_window() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("initial publish"));
+    assert!(
+        scheduler
+            .latest_complete_ready_for_exact_source_with(
+                GenerationDecodeAdmissionV1::AlreadyDecoded,
+            )
+            .expect("exact source readiness")
+            .is_some()
+    );
+
+    fixture.edit("src/added.rs", "pub fn added() {}\n");
+
+    assert!(
+        scheduler
+            .latest_complete_ready_for_exact_source_with(
+                GenerationDecodeAdmissionV1::AlreadyDecoded,
+            )
+            .expect("exact source readiness after file add")
+            .is_none(),
+        "workspace completeness must abstain before the added file is published"
     );
 }
 

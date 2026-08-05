@@ -17,12 +17,11 @@ use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
-use tracedecay_application::clock::now_micros;
 use tracedecay_application::feedback::{
     FeedbackReadPort, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
 };
@@ -67,11 +66,12 @@ use tracedecay_domain::{
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_lsp::{
-    AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace, DaemonLspRuntimeSession,
-    DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
-    GatewayCapabilities, LSP_SESSION_TTL_MS, LspEndpointError, LspRuntimeFailure, LspRuntimeFuture,
-    LspSessionAccess, LspSessionAdmissionPort, LspSessionCredential, LspSessionId,
-    LspSessionOpenRequest, LspSessionRegistry, SessionLifecycle, UpstreamCapabilities,
+    AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace, ClientFrameAdmission,
+    DaemonLspRuntimeSession, DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest,
+    FeedbackCycleRuntimePort, GatewayCapabilities, LSP_SESSION_TTL_MS, LspEndpointError,
+    LspRuntimeFailure, LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort,
+    LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
+    SessionLifecycle, UpstreamCapabilities,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
@@ -189,13 +189,14 @@ use tracedecay_hooks::{
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).
+mod clock;
 mod configuration;
 mod dispatch;
 mod feedback;
 mod git;
 mod handoff;
+mod invocation_observability;
 mod lsp;
-mod plan26;
 mod primitive;
 mod registrars;
 #[cfg(test)]
@@ -203,13 +204,20 @@ mod tests;
 mod types;
 mod work;
 
+use clock::{current_micros, now_micros, now_millis};
 use configuration::*;
 use feedback::*;
 use git::*;
 use handoff::*;
 #[cfg(test)]
+use invocation_observability::invocation_rejected_argument;
+use invocation_observability::{
+    emit_invocation_observation, feedback_observation_operation, invocation_observation_subject,
+    invocation_problem_rejected_argument, is_observable_operation, observe_invocation_response,
+};
+use lsp::PublishedCodeIndexWorkspaceDocuments;
+#[cfg(test)]
 use lsp::*;
-use plan26::*;
 use primitive::*;
 use registrars::*;
 use types::*;
