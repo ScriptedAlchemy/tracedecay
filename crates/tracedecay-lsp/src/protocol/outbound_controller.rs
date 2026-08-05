@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 
 use super::{
-    DaemonLspProtocolSession, DaemonLspSessionTransport, DiagnosticSnapshotPort, FeedbackCyclePort,
-    FramePoll, FrameSend, Infallible, LspFrame, LspRequestFailure, LspRequestId,
-    MAX_LSP_FRAME_BYTES, MAX_PUBLICATION_BYTES, MAX_QUEUED_OUTBOUND_BYTES,
-    MAX_QUEUED_OUTBOUND_MESSAGES, PublicationAdmission, RpcFailure, SemanticProviderPort,
-    SessionLifecycle, Value, error_response, request_id,
+    ClientFrameAdmission, DaemonLspProtocolSession, DaemonLspSessionTransport,
+    DiagnosticSnapshotPort, FeedbackCyclePort, FramePoll, FrameSend, Infallible, LspFrame,
+    LspRequestFailure, LspRequestId, MAX_LSP_FRAME_BYTES, MAX_PUBLICATION_BYTES,
+    MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES, PublicationAdmission, RpcFailure,
+    SemanticProviderPort, SessionLifecycle, Value, error_response, request_id,
 };
 
 const MIN_CLIENT_FRAME_OUTBOUND_RESERVE: usize = MAX_PUBLICATION_BYTES;
