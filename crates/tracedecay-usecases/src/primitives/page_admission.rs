@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_application::retrieval::PrimitiveFailureKind;
+use tracedecay_application::retrieval::{PrimitiveFailure, PrimitiveFailureKind};
 use tracedecay_application::{
     ApplicationWireOperation, OpaqueCursor, PageAdmissionError, PageAdmissionFuture,
     PageAdmissionPort, PageAdmissionRequest, PageAdmissionSeal, RequestAdmission, RequestContext,
@@ -19,6 +19,7 @@ use tracedecay_temporal_query::ports::{
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 use tracedecay_tool_catalog::{CatalogContributionV1, SurfaceBindingV1};
 
+use super::concrete::SymbolGraphCursorSnapshotAuthority;
 use super::symbol_graph::SymbolGraphCursorPort;
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery};
@@ -92,6 +93,114 @@ pub struct SymbolGraphPageAdmissionAdapterV1<C> {
     cursors: C,
 }
 
+pub struct ProjectSymbolGraphCursorSnapshotAuthority {
+    key: SignedCursorKeyRefV1,
+    configuration_digest: ManifestDigest,
+    watermark: u64,
+}
+
+impl ProjectSymbolGraphCursorSnapshotAuthority {
+    pub(super) fn new(
+        key: SignedCursorKeyRefV1,
+        configuration_digest: ManifestDigest,
+        watermark: u64,
+    ) -> Self {
+        Self {
+            key,
+            configuration_digest,
+            watermark,
+        }
+    }
+}
+
+fn symbol_graph_snapshot_failure(code: &'static str, message: &'static str) -> PrimitiveFailure {
+    PrimitiveFailure {
+        kind: PrimitiveFailureKind::Unavailable,
+        code: code.to_owned(),
+        message: message.to_owned(),
+    }
+}
+
+impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuthority {
+    fn snapshot(
+        &self,
+        context: &RequestContext,
+        lane: &str,
+        body_digest: &ManifestDigest,
+        _observed_at: UtcMicros,
+    ) -> Result<TemporalExecutionSnapshot, PrimitiveFailure> {
+        let request_digest = canonical_sha256(&(
+            "tracedecay.symbol-graph.cursor.v1",
+            context.actor(),
+            context.grant().revision,
+            &context.grant().digest,
+            &context.grant().issuer,
+            &context.grant().allowed_capabilities,
+            &context.grant().allowed_use_cases,
+            context.grant().disclosure,
+            lane,
+            body_digest.as_str(),
+        ))
+        .map_err(|_| {
+            symbol_graph_snapshot_failure(
+                "application.symbol-graph.request",
+                "could not derive the symbol-graph cursor request digest",
+            )
+        })?;
+        let request = TemporalSnapshotRequest::new(
+            SessionId::new("session.daemon.primitive").map_err(|_| {
+                symbol_graph_snapshot_failure(
+                    "application.symbol-graph.session",
+                    "could not mint primitive session id",
+                )
+            })?,
+            context.scope().scope_digest.as_str(),
+            request_digest.as_str(),
+            context.grant().digest.as_str(),
+            TemporalModeV1::Current,
+            RetrievalGrainV1::Occurrence,
+        )
+        .map_err(|_| {
+            symbol_graph_snapshot_failure(
+                "application.symbol-graph.snapshot",
+                "could not build temporal snapshot request",
+            )
+        })?;
+        TemporalExecutionSnapshot::new_authorized(
+            request,
+            TemporalWatermarks {
+                generation: 1,
+                source: self.watermark,
+                projection: self.watermark,
+                index: self.watermark,
+                summary: self.watermark,
+            },
+            KernelVersions {
+                schema: 1,
+                ranking: 1,
+                configuration_digest: BindingDigest::new(
+                    "configuration_digest",
+                    self.configuration_digest.as_str(),
+                )
+                .map_err(|_| {
+                    symbol_graph_snapshot_failure(
+                        "application.symbol-graph.configuration",
+                        "invalid configuration digest",
+                    )
+                })?,
+            },
+            Some(self.key.clone()),
+            ValidatedAuthorization::Authorized,
+        )
+        .map_err(|_| {
+            symbol_graph_snapshot_failure(
+                "application.symbol-graph.snapshot",
+                "could not authorize temporal snapshot",
+            )
+        })
+    }
+}
+
 impl<C> SymbolGraphPageAdmissionAdapterV1<C> {
     pub fn new(catalog: Arc<[CatalogContributionV1]>, cursors: C) -> Self {
         Self { catalog, cursors }
@@ -118,7 +227,13 @@ where
             validate_catalog_page_request(&self.catalog, &request, observed_at)?;
             if let Some(cursor) = &request.page().cursor {
                 self.cursors
-                    .resume_offset(request.context(), lane, cursor, observed_at)
+                    .resume_offset(
+                        request.context(),
+                        lane,
+                        request.body_digest(),
+                        cursor,
+                        observed_at,
+                    )
                     .map_err(|failure| match failure.kind {
                         PrimitiveFailureKind::InvalidRequest => PageAdmissionError::InvalidRequest,
                         PrimitiveFailureKind::NotFoundOrNotAuthorized => PageAdmissionError::Denied,
@@ -213,6 +328,7 @@ impl AuthenticatedDiagnosticCursorAuthorityV1 {
         context: &RequestContext,
         generation: &CodeGenerationId,
         lane: &str,
+        body_digest: &ManifestDigest,
         observed_at: UtcMicros,
     ) -> Result<TemporalExecutionSnapshot, ()> {
         if context.validate().is_err()
@@ -231,6 +347,7 @@ impl AuthenticatedDiagnosticCursorAuthorityV1 {
             context.grant().disclosure,
             generation.as_str(),
             lane,
+            body_digest.as_str(),
         ))
         .map_err(|_| ())?;
         let request = TemporalSnapshotRequest::new(
@@ -272,9 +389,10 @@ impl AuthenticatedDiagnosticCursorAuthorityV1 {
         context: &RequestContext,
         generation: &CodeGenerationId,
         lane: &str,
+        body_digest: &ManifestDigest,
         observed_at: UtcMicros,
     ) -> Result<DiagnosticQueryCursor, ()> {
-        let snapshot = self.snapshot(context, generation, lane, observed_at)?;
+        let snapshot = self.snapshot(context, generation, lane, body_digest, observed_at)?;
         let sort_key =
             verify_cursor(encoded, &snapshot, self.authenticator.as_ref()).map_err(|_| ())?;
         if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
@@ -289,9 +407,10 @@ impl AuthenticatedDiagnosticCursorAuthorityV1 {
         context: &RequestContext,
         generation: &CodeGenerationId,
         lane: &str,
+        body_digest: &ManifestDigest,
         observed_at: UtcMicros,
     ) -> Result<OpaqueCursor, ()> {
-        let snapshot = self.snapshot(context, generation, lane, observed_at)?;
+        let snapshot = self.snapshot(context, generation, lane, body_digest, observed_at)?;
         let encoded = encode_cursor(
             &snapshot,
             &StableSortKey {
@@ -422,6 +541,7 @@ impl PageAdmissionPort for DiagnosticPageAdmissionAdapterV1 {
                         request.context(),
                         &self.generation,
                         self.lane.as_str(),
+                        request.body_digest(),
                         request.observed_at(),
                     )
                     .map_err(|_| PageAdmissionError::Stale)?;

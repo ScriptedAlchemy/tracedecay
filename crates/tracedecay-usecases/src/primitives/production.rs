@@ -29,17 +29,19 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, ProviderEvaluationStateV1, RetrievalAnchorId,
-    RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
+    SignedCursorKeyRefV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
-use super::concrete::{AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshotAuthority};
+use super::concrete::AuthenticatedSymbolGraphCursorAdapter;
 use super::page_admission::{
     AuthenticatedDiagnosticCursorAuthorityV1, DiagnosticPageAdmissionAdapterV1,
     ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
-    ManagedTestRunCurrentScopePort, resolve_diagnostic_page_owner,
+    ManagedTestRunCurrentScopePort, ProjectSymbolGraphCursorSnapshotAuthority,
+    resolve_diagnostic_page_owner,
 };
+use super::page_body_digest::diagnostics_page_body_digest;
 use super::runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest,
@@ -74,11 +76,6 @@ use tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::types::{Node, Visibility};
 use tracedecay_temporal_query::cursor::CURSOR_LIFETIME_MICROS;
-use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,
-    TemporalWatermarks,
-};
-use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 const PRIMITIVE_SORT: &str = "sort.application.primitive.v1";
 
@@ -1312,12 +1309,19 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
                 tracedecay_domain::FileOccurrenceId::as_str,
             );
+            let body_digest = match diagnostics_page_body_digest(request) {
+                Ok(digest) => digest,
+                Err(_) => {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                }
+            };
             let cursor = match request.cursor.as_deref() {
                 Some(cursor) => match self.diagnostic_cursors.decode(
                     cursor,
                     context.request,
                     &current_generation,
                     cursor_lane,
+                    &body_digest,
                     finished_at,
                 ) {
                     Ok(cursor) => Some(cursor),
@@ -1359,6 +1363,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         context.request,
                         &current_generation,
                         cursor_lane,
+                        &body_digest,
                         finished_at,
                     )
                 })
@@ -1500,122 +1505,6 @@ impl Pr12OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
                     payload: Some(payload),
                 },
             ))
-        })
-    }
-}
-
-pub struct ProjectSymbolGraphCursorSnapshotAuthority {
-    key: SignedCursorKeyRefV1,
-    configuration_digest: ManifestDigest,
-    watermark: u64,
-}
-
-impl ProjectSymbolGraphCursorSnapshotAuthority {
-    pub(super) fn new(
-        key: SignedCursorKeyRefV1,
-        configuration_digest: ManifestDigest,
-        watermark: u64,
-    ) -> Self {
-        Self {
-            key,
-            configuration_digest,
-            watermark,
-        }
-    }
-}
-
-fn symbol_graph_snapshot_failure(
-    code: &str,
-    message: &str,
-) -> tracedecay_application::retrieval::PrimitiveFailure {
-    tracedecay_application::retrieval::PrimitiveFailure::new(
-        tracedecay_application::retrieval::PrimitiveFailureKind::Unavailable,
-        code,
-        message,
-    )
-    .unwrap_or_else(|_| panic!("static"))
-}
-
-impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuthority {
-    fn snapshot(
-        &self,
-        context: &RequestContext,
-        lane: &str,
-        _observed_at: UtcMicros,
-    ) -> Result<TemporalExecutionSnapshot, tracedecay_application::retrieval::PrimitiveFailure>
-    {
-        // The snapshot identity is what a cursor is verified against on the
-        // next request, so it is derived from the authorization and lane that
-        // must still hold at resume time. A per-request correlation id would
-        // both fail the digest binding and make every resume a different
-        // request.
-        let request_digest = canonical_sha256(&(
-            "tracedecay.symbol-graph.cursor.v1",
-            context.actor(),
-            context.grant().revision,
-            &context.grant().digest,
-            &context.grant().issuer,
-            &context.grant().allowed_capabilities,
-            &context.grant().allowed_use_cases,
-            context.grant().disclosure,
-            lane,
-        ))
-        .map_err(|_| {
-            symbol_graph_snapshot_failure(
-                "application.symbol-graph.request",
-                "could not derive the symbol-graph cursor request digest",
-            )
-        })?;
-        let request = TemporalSnapshotRequest::new(
-            SessionId::new("session.daemon.primitive").map_err(|_| {
-                symbol_graph_snapshot_failure(
-                    "application.symbol-graph.session",
-                    "could not mint primitive session id",
-                )
-            })?,
-            context.scope().scope_digest.as_str(),
-            request_digest.as_str(),
-            context.grant().digest.as_str(),
-            TemporalModeV1::Current,
-            RetrievalGrainV1::Occurrence,
-        )
-        .map_err(|_| {
-            symbol_graph_snapshot_failure(
-                "application.symbol-graph.snapshot",
-                "could not build temporal snapshot request",
-            )
-        })?;
-        TemporalExecutionSnapshot::new_authorized(
-            request,
-            TemporalWatermarks {
-                generation: 1,
-                source: self.watermark,
-                projection: self.watermark,
-                index: self.watermark,
-                summary: self.watermark,
-            },
-            KernelVersions {
-                schema: 1,
-                ranking: 1,
-                configuration_digest: BindingDigest::new(
-                    "configuration_digest",
-                    self.configuration_digest.as_str(),
-                )
-                .map_err(|_| {
-                    symbol_graph_snapshot_failure(
-                        "application.symbol-graph.configuration",
-                        "invalid configuration digest",
-                    )
-                })?,
-            },
-            Some(self.key.clone()),
-            ValidatedAuthorization::Authorized,
-        )
-        .map_err(|_| {
-            symbol_graph_snapshot_failure(
-                "application.symbol-graph.snapshot",
-                "could not authorize temporal snapshot",
-            )
         })
     }
 }
@@ -2559,7 +2448,7 @@ mod affected_tests_tests {
         (request, operation, scope)
     }
 
-    fn cursor_context(project: &str) -> RequestContext {
+    fn cursor_context(project: &str, request: &str) -> RequestContext {
         let scope = ResolvedScope::new(
             ProjectId::new(project).expect("project"),
             RepositoryId::new("repository.diagnostics").expect("repository"),
@@ -2587,7 +2476,7 @@ mod affected_tests_tests {
             ActorId::new("actor.diagnostics.requester").expect("actor"),
             scope,
             grant,
-            RequestId::new("request.diagnostics").expect("request"),
+            RequestId::new(request).expect("request"),
             Deadline::new(expires_at).expect("deadline"),
             CancellationContext::active("cancel.diagnostics").expect("cancellation"),
         )
@@ -2607,8 +2496,10 @@ mod affected_tests_tests {
             digest('c'),
             Arc::new(authenticator),
         );
-        let context = cursor_context("project.diagnostics");
+        let context = cursor_context("project.diagnostics", "request.diagnostics.first");
+        let retry_context = cursor_context("project.diagnostics", "request.diagnostics.retry");
         let current_generation = generation("generation.diagnostics.1");
+        let body_digest = digest('d');
         let query_cursor =
             DiagnosticQueryCursor::decode("dq1:anchor.diagnostic.1").expect("query cursor");
         let encoded = authority
@@ -2617,6 +2508,7 @@ mod affected_tests_tests {
                 &context,
                 &current_generation,
                 DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                &body_digest,
                 UtcMicros(2),
             )
             .expect("encode");
@@ -2625,9 +2517,10 @@ mod affected_tests_tests {
             authority
                 .decode(
                     encoded.as_str(),
-                    &context,
+                    &retry_context,
                     &current_generation,
                     DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                    &body_digest,
                     UtcMicros(2),
                 )
                 .expect("decode"),
@@ -2637,9 +2530,10 @@ mod affected_tests_tests {
             authority
                 .decode(
                     encoded.as_str(),
-                    &cursor_context("project.diagnostics.other"),
+                    &cursor_context("project.diagnostics.other", "request.diagnostics.other"),
                     &current_generation,
                     DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                    &body_digest,
                     UtcMicros(2),
                 )
                 .is_err()
@@ -2651,6 +2545,7 @@ mod affected_tests_tests {
                     &context,
                     &generation("generation.diagnostics.2"),
                     DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                    &body_digest,
                     UtcMicros(2),
                 )
                 .is_err()
@@ -2662,9 +2557,23 @@ mod affected_tests_tests {
                     &context,
                     &current_generation,
                     "file.diagnostics",
+                    &body_digest,
                     UtcMicros(2),
                 )
                 .is_err()
+        );
+        assert!(
+            authority
+                .decode(
+                    encoded.as_str(),
+                    &retry_context,
+                    &current_generation,
+                    DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                    &digest('e'),
+                    UtcMicros(2),
+                )
+                .is_err(),
+            "a diagnostic cursor must not resume for another query body"
         );
     }
 
@@ -2745,20 +2654,27 @@ mod affected_tests_tests {
         );
 
         let observed_at = now_observed();
+        let body_digest = digest('d');
         let cursor = adapter
-            .issue_cursor(&issuing, "search", 3, 8, observed_at)
+            .issue_cursor(&issuing, "search", &body_digest, 3, 8, observed_at)
             .expect("a production request must be able to issue a page cursor");
         assert_eq!(
             adapter
-                .resume_offset(&resuming, "search", &cursor, observed_at)
+                .resume_offset(&resuming, "search", &body_digest, &cursor, observed_at)
                 .expect("the next production request must resume the page"),
             3
         );
         assert!(
             adapter
-                .resume_offset(&resuming, "callers", &cursor, observed_at)
+                .resume_offset(&resuming, "callers", &body_digest, &cursor, observed_at)
                 .is_err(),
             "a cursor must not resume into another lane"
+        );
+        assert!(
+            adapter
+                .resume_offset(&resuming, "search", &digest('e'), &cursor, observed_at)
+                .is_err(),
+            "a cursor must not resume for another query body"
         );
     }
 

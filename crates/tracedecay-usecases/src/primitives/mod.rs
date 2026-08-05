@@ -3,6 +3,7 @@
 pub mod concrete;
 pub mod grep_analysis;
 mod page_admission;
+mod page_body_digest;
 pub mod production;
 pub mod runtime;
 mod support;
@@ -20,6 +21,11 @@ pub use grep_analysis::{
 pub use page_admission::{
     ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
     ManagedTestRunCurrentScopePort, Pr12PrimitivePageOwner, SymbolGraphPageAdmissionAdapterV1,
+};
+pub use page_body_digest::{
+    callers_page_body_digest, diagnostics_page_body_digest, implementations_page_body_digest,
+    signature_search_page_body_digest, symbol_search_page_body_digest,
+    type_hierarchy_page_body_digest,
 };
 pub use production::{
     Pr12ProductionPrimitiveOpenRequestV1, TraceDecayAffectedTestsPortV1,

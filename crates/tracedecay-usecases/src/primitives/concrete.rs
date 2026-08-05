@@ -9,7 +9,7 @@ use tracedecay_application::{
     ApplicationContractError, OpaqueCursor, OperationBudgetUsage, RequestAdmission, RequestContext,
     ResolvedScope,
 };
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use super::symbol_graph::SymbolGraphCursorPort;
 use crate::context::read_modes::{LineRange, ReadMode};
@@ -127,6 +127,7 @@ pub trait SymbolGraphCursorSnapshotAuthority: Send + Sync {
         &self,
         context: &RequestContext,
         lane: &str,
+        body_digest: &ManifestDigest,
         observed_at: UtcMicros,
     ) -> Result<TemporalExecutionSnapshot, PrimitiveFailure>;
 }
@@ -159,11 +160,14 @@ where
         &self,
         context: &RequestContext,
         lane: &str,
+        body_digest: &ManifestDigest,
         cursor: &OpaqueCursor,
         observed_at: UtcMicros,
     ) -> Result<usize, PrimitiveFailure> {
         reauthorize_cursor_context(context, observed_at)?;
-        let snapshot = self.snapshots.snapshot(context, lane, observed_at)?;
+        let snapshot = self
+            .snapshots
+            .snapshot(context, lane, body_digest, observed_at)?;
         validate_cursor_snapshot(context, &snapshot)?;
         let sort_key = verify_cursor(cursor.as_str(), &snapshot, self.authenticator.as_ref())
             .map_err(cursor_verification_failure)?;
@@ -180,6 +184,7 @@ where
         &self,
         context: &RequestContext,
         lane: &str,
+        body_digest: &ManifestDigest,
         next_offset: usize,
         total: usize,
         observed_at: UtcMicros,
@@ -188,7 +193,9 @@ where
         if next_offset > total || lane.is_empty() || lane.chars().any(char::is_control) {
             return Err(invalid_cursor());
         }
-        let snapshot = self.snapshots.snapshot(context, lane, observed_at)?;
+        let snapshot = self
+            .snapshots
+            .snapshot(context, lane, body_digest, observed_at)?;
         validate_cursor_snapshot(context, &snapshot)?;
         let sort_key = StableSortKey {
             normalized_score_micros: u64::try_from(next_offset).map_err(|_| invalid_cursor())?,
@@ -339,6 +346,7 @@ mod tests {
             &self,
             _context: &RequestContext,
             _lane: &str,
+            _body_digest: &ManifestDigest,
             _observed_at: UtcMicros,
         ) -> Result<TemporalExecutionSnapshot, tracedecay_application::retrieval::PrimitiveFailure>
         {
@@ -364,13 +372,15 @@ mod tests {
             Arc::clone(&snapshots),
             Arc::clone(&authenticator),
         );
+        let body_digest =
+            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("digest");
 
         let cursor = adapter
-            .issue_cursor(&context, "search", 3, 8, NOW)
+            .issue_cursor(&context, "search", &body_digest, 3, 8, NOW)
             .expect("issue cursor");
         assert_eq!(
             adapter
-                .resume_offset(&context, "search", &cursor, NOW)
+                .resume_offset(&context, "search", &body_digest, &cursor, NOW)
                 .expect("resume cursor"),
             3
         );
@@ -392,14 +402,14 @@ mod tests {
         );
         assert!(
             changed
-                .resume_offset(&context, "search", &cursor, NOW)
+                .resume_offset(&context, "search", &body_digest, &cursor, NOW)
                 .is_err()
         );
         let (_, other_context, _) =
             application_context_for_project("symbol-graph", "project.pr12.other");
         assert!(
             adapter
-                .resume_offset(&other_context, "search", &cursor, NOW)
+                .resume_offset(&other_context, "search", &body_digest, &cursor, NOW)
                 .is_err()
         );
     }

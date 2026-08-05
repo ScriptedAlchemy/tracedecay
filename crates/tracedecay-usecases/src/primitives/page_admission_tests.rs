@@ -17,9 +17,9 @@ use tracedecay_tool_catalog::{
 
 use super::page_admission::{
     AuthenticatedDiagnosticCursorAuthorityV1, DiagnosticPageAdmissionAdapterV1,
-    DiagnosticPageLaneV1, SymbolGraphPageAdmissionAdapterV1, declared_primitive_page_owner,
+    DiagnosticPageLaneV1, ProjectSymbolGraphCursorSnapshotAuthority,
+    SymbolGraphPageAdmissionAdapterV1, declared_primitive_page_owner,
 };
-use super::production::ProjectSymbolGraphCursorSnapshotAuthority;
 use super::{AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorPort};
 use crate::diagnostics_query::DiagnosticQueryCursor;
 
@@ -160,17 +160,36 @@ async fn symbol_page_admission_uses_the_existing_authenticated_cursor_verifier()
             authenticator(&key),
         ));
     let observed_at = UtcMicros(2);
+    let body_digest = digest('d');
     let cursor = cursors
-        .issue_cursor(&context, "callers", 3, 8, observed_at)
+        .issue_cursor(&context, "callers", &body_digest, 3, 8, observed_at)
         .expect("authentic cursor");
     let scope_digest = context.scope().scope_digest.clone();
+    let cross_body = PageAdmissionRequest::new(
+        binding_id.clone(),
+        operation,
+        context.clone(),
+        observed_at,
+        scope_digest.clone(),
+        digest('e'),
+        PageRequest::new(25, Some(cursor.clone())).expect("page"),
+    )
+    .expect("admission request");
+    let rejected = PageAdmissionService::new(SymbolGraphPageAdmissionAdapterV1::new(
+        Arc::clone(&catalog),
+        Arc::clone(&cursors),
+    ))
+    .admit(cross_body)
+    .await;
+    assert_eq!(rejected, Err(PageAdmissionError::Denied));
+
     let request = PageAdmissionRequest::new(
         binding_id,
         operation,
         context,
         observed_at,
         scope_digest,
-        digest('d'),
+        body_digest,
         PageRequest::new(25, Some(cursor)).expect("page"),
     )
     .expect("admission request");
@@ -206,6 +225,7 @@ async fn diagnostic_page_admission_uses_generation_and_typed_lane() {
             &context,
             &generation,
             lane.as_str(),
+            &digest('d'),
             UtcMicros(2),
         )
         .expect("authentic cursor");

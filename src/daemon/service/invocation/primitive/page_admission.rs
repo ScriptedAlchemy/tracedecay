@@ -68,16 +68,8 @@ fn primitive_page_admission_input(
         ) => (
             request.meta.page.clone(),
             Pr12PrimitivePageOwner::SymbolGraph,
-            canonical_sha256(&(
-                "code_symbol_search",
-                request.query.as_bytes(),
-                request.query.sanitizer_revision(),
-                request.query.normalization_revision(),
-                &request.scope,
-                request.lazy_index_ignored_dependencies,
-                &request.meta,
-            ))
-            .map_err(|_| PageAdmissionError::InvalidRequest)?,
+            crate::application::primitives::symbol_search_page_body_digest(request)
+                .map_err(|_| PageAdmissionError::InvalidRequest)?,
         ),
         (
             crate::application_surface::ApplicationSurfaceOperation::CodeSignatureSearch,
@@ -85,7 +77,8 @@ fn primitive_page_admission_input(
         ) => (
             request.meta.page.clone(),
             Pr12PrimitivePageOwner::SymbolGraph,
-            canonical_sha256(request).map_err(|_| PageAdmissionError::InvalidRequest)?,
+            crate::application::primitives::signature_search_page_body_digest(request)
+                .map_err(|_| PageAdmissionError::InvalidRequest)?,
         ),
         (
             crate::application_surface::ApplicationSurfaceOperation::CodeImplementations,
@@ -93,7 +86,8 @@ fn primitive_page_admission_input(
         ) => (
             request.meta.page.clone(),
             Pr12PrimitivePageOwner::SymbolGraph,
-            canonical_sha256(request).map_err(|_| PageAdmissionError::InvalidRequest)?,
+            crate::application::primitives::implementations_page_body_digest(request)
+                .map_err(|_| PageAdmissionError::InvalidRequest)?,
         ),
         (
             crate::application_surface::ApplicationSurfaceOperation::CodeTypeHierarchy,
@@ -101,7 +95,8 @@ fn primitive_page_admission_input(
         ) => (
             request.meta.page.clone(),
             Pr12PrimitivePageOwner::SymbolGraph,
-            canonical_sha256(request).map_err(|_| PageAdmissionError::InvalidRequest)?,
+            crate::application::primitives::type_hierarchy_page_body_digest(request)
+                .map_err(|_| PageAdmissionError::InvalidRequest)?,
         ),
         (
             crate::application_surface::ApplicationSurfaceOperation::CodeCallers,
@@ -109,7 +104,8 @@ fn primitive_page_admission_input(
         ) => (
             request.meta.page.clone(),
             Pr12PrimitivePageOwner::SymbolGraph,
-            canonical_sha256(request).map_err(|_| PageAdmissionError::InvalidRequest)?,
+            crate::application::primitives::callers_page_body_digest(request)
+                .map_err(|_| PageAdmissionError::InvalidRequest)?,
         ),
         (
             crate::application_surface::ApplicationSurfaceOperation::DiagnosticsRead,
@@ -125,7 +121,8 @@ fn primitive_page_admission_input(
                 PageRequest::new(request.maximum_diagnostics, cursor)
                     .map_err(|_| PageAdmissionError::InvalidRequest)?,
                 Pr12PrimitivePageOwner::Diagnostics(request.clone()),
-                canonical_sha256(request).map_err(|_| PageAdmissionError::InvalidRequest)?,
+                crate::application::primitives::diagnostics_page_body_digest(request)
+                    .map_err(|_| PageAdmissionError::InvalidRequest)?,
             )
         }
         (

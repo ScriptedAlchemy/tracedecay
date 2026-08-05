@@ -9,10 +9,16 @@ use tracedecay_application::retrieval::{
     SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord, TypeHierarchyRequest,
 };
 use tracedecay_application::{OpaqueCursor, OperationBudgetUsage, PageRequest, RequestContext};
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::types::{EdgeKind, Node, NodeKind};
+
+use super::page_body_digest::{
+    callees_page_body_digest, callers_page_body_digest, exact_symbol_page_body_digest,
+    impact_page_body_digest, implementations_page_body_digest, signature_search_page_body_digest,
+    symbol_search_page_body_digest, type_hierarchy_page_body_digest,
+};
 
 const MAX_COMPATIBILITY_RESULTS: usize = 500;
 const MAX_IMPLEMENTATION_RESULTS: usize = 200;
@@ -24,6 +30,7 @@ pub trait SymbolGraphCursorPort: Send + Sync {
         &self,
         context: &RequestContext,
         lane: &str,
+        body_digest: &ManifestDigest,
         cursor: &OpaqueCursor,
         observed_at: UtcMicros,
     ) -> Result<usize, PrimitiveFailure>;
@@ -32,6 +39,7 @@ pub trait SymbolGraphCursorPort: Send + Sync {
         &self,
         context: &RequestContext,
         lane: &str,
+        body_digest: &ManifestDigest,
         next_offset: usize,
         total: usize,
         observed_at: UtcMicros,
@@ -46,21 +54,23 @@ where
         &self,
         context: &RequestContext,
         lane: &str,
+        body_digest: &ManifestDigest,
         cursor: &OpaqueCursor,
         observed_at: UtcMicros,
     ) -> Result<usize, PrimitiveFailure> {
-        (**self).resume_offset(context, lane, cursor, observed_at)
+        (**self).resume_offset(context, lane, body_digest, cursor, observed_at)
     }
 
     fn issue_cursor(
         &self,
         context: &RequestContext,
         lane: &str,
+        body_digest: &ManifestDigest,
         next_offset: usize,
         total: usize,
         observed_at: UtcMicros,
     ) -> Result<OpaqueCursor, PrimitiveFailure> {
-        (**self).issue_cursor(context, lane, next_offset, total, observed_at)
+        (**self).issue_cursor(context, lane, body_digest, next_offset, total, observed_at)
     }
 }
 
@@ -115,6 +125,7 @@ where
                 context,
                 &request.meta.page,
                 "search",
+                symbol_search_page_body_digest(request),
                 records,
                 gaps,
                 None,
@@ -152,6 +163,7 @@ where
                 context,
                 &request.meta.page,
                 "exact",
+                exact_symbol_page_body_digest(request),
                 records,
                 gaps,
                 None,
@@ -187,6 +199,7 @@ where
                 context,
                 &request.meta.page,
                 "signature",
+                signature_search_page_body_digest(request),
                 records,
                 Vec::new(),
                 None,
@@ -233,6 +246,7 @@ where
                 context,
                 &request.meta.page,
                 "implementations",
+                implementations_page_body_digest(request),
                 records,
                 Vec::new(),
                 None,
@@ -254,6 +268,7 @@ where
                         context,
                         &request.meta.page,
                         "hierarchy",
+                        type_hierarchy_page_body_digest(request),
                         Vec::new(),
                         Vec::new(),
                         None,
@@ -307,6 +322,7 @@ where
                 context,
                 &request.meta.page,
                 "hierarchy",
+                type_hierarchy_page_body_digest(request),
                 records,
                 Vec::new(),
                 None,
@@ -338,6 +354,7 @@ where
                 context,
                 &request.meta.page,
                 "callers",
+                callers_page_body_digest(request),
                 records,
                 Vec::new(),
                 None,
@@ -402,6 +419,7 @@ where
                 context,
                 &request.meta.page,
                 "callees",
+                callees_page_body_digest(request),
                 records,
                 Vec::new(),
                 None,
@@ -435,6 +453,7 @@ where
                 context,
                 &request.meta.page,
                 "impact",
+                impact_page_body_digest(request),
                 records,
                 Vec::new(),
                 Some(edge_count),
@@ -568,11 +587,18 @@ fn complete_or_failed<T>(
     context: SymbolGraphPortContext<'_>,
     request: &PageRequest,
     lane: &str,
+    body_digest: Result<ManifestDigest, tracedecay_application::ApplicationContractError>,
     items: Vec<T>,
     gaps: Vec<PrimitiveSupportGap>,
     related_edge_count: Option<u64>,
 ) -> SymbolGraphPortOutcome<T> {
-    let mut page = match paginate(cursors, context, request, lane, items) {
+    let body_digest = match body_digest {
+        Ok(body_digest) => body_digest,
+        Err(_) => {
+            return failed(context, "symbol graph page binding failed");
+        }
+    };
+    let mut page = match paginate(cursors, context, request, lane, &body_digest, items) {
         Ok(page) => page,
         Err(failure) => {
             return SymbolGraphPortOutcome::Failed {
@@ -604,12 +630,17 @@ fn paginate<T>(
     context: SymbolGraphPortContext<'_>,
     request: &PageRequest,
     lane: &str,
+    body_digest: &ManifestDigest,
     items: Vec<T>,
 ) -> Result<SymbolGraphPage<T>, PrimitiveFailure> {
     let offset = match request.cursor.as_ref() {
-        Some(cursor) => {
-            cursors.resume_offset(context.request, lane, cursor, context.observed_at)?
-        }
+        Some(cursor) => cursors.resume_offset(
+            context.request,
+            lane,
+            body_digest,
+            cursor,
+            context.observed_at,
+        )?,
         None => 0,
     };
     let total = items.len();
@@ -625,7 +656,14 @@ fn paginate<T>(
     let has_more = end < total;
     let page_items = items.into_iter().skip(offset).take(page_size).collect();
     let next_cursor = if has_more {
-        Some(cursors.issue_cursor(context.request, lane, end, total, context.observed_at)?)
+        Some(cursors.issue_cursor(
+            context.request,
+            lane,
+            body_digest,
+            end,
+            total,
+            context.observed_at,
+        )?)
     } else {
         None
     };
