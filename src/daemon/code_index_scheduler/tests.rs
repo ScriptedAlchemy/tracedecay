@@ -1024,10 +1024,17 @@ async fn watcher_overflow_and_exact_hook_share_one_retained_dirty_frontier() {
     fixture.edit("src/a.rs", "pub fn a() -> u32 { 1 }\n");
     fixture.edit("src/b.rs", "pub fn b() -> u32 { 2 }\n");
 
-    let identity = super::identity::IndexingIdentityV1::resolve(fixture.path())
-        .expect("resolve exact watcher identity");
+    let identity =
+        match tracedecay_runtime_core::git_discovery::discover_repository_identity_bounded(
+            fixture.path(),
+        ) {
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+                identity,
+            ) => identity,
+            outcome => panic!("resolve structural watcher identity: {outcome:?}"),
+        };
     assert_eq!(
-        registry.request_for_root(fixture.path(), identity),
+        registry.request_for_root(&identity),
         super::GitStateChangeRequestV1::Accepted
     );
     assert!(
