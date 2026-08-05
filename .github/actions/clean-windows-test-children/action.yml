@@ -1,7 +1,7 @@
 name: Clean abandoned Windows test children
 description: >-
-  Stop tracedecay.exe processes launched from this workspace whose parent has
-  already exited, so a leaked daemon cannot hold the runner or the workspace.
+  Stop abandoned tracedecay.exe processes launched from this workspace and
+  service-E2E task children scoped to this run's temporary profile root.
 
 runs:
   using: composite
@@ -9,6 +9,8 @@ runs:
     - shell: pwsh
       run: |
         $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+        $runnerTemp = (Resolve-Path $env:RUNNER_TEMP).Path
+        $serviceE2EProfilePrefix = Join-Path $runnerTemp "tracedecay-service-e2e-"
         $all = Get-CimInstance Win32_Process
         $liveProcessIds = [System.Collections.Generic.HashSet[uint32]]::new()
         foreach ($process in $all) {
@@ -22,14 +24,16 @@ runs:
             continue
           }
           $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
-          if (-not $inCurrentWorkspace) {
-            continue
-          }
-          if (-not $liveProcessIds.Contains([uint32]$process.ParentProcessId)) {
+          $inServiceE2EProfile = $process.CommandLine.IndexOf($serviceE2EProfilePrefix, [StringComparison]::OrdinalIgnoreCase) -ge 0
+          $orphanedWorkspaceChild = $inCurrentWorkspace -and -not $liveProcessIds.Contains([uint32]$process.ParentProcessId)
+          # Task Scheduler owns native-service children, so their parent stays
+          # alive after the E2E PowerShell process exits. The unique profile
+          # prefix is the per-run ownership boundary for those task children.
+          if ($orphanedWorkspaceChild -or $inServiceE2EProfile) {
             $process
           }
         }
         foreach ($process in $stale) {
-          Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId)"
+          Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId) command=$($process.CommandLine)"
           Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
         }
