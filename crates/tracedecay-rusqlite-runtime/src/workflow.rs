@@ -732,7 +732,7 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         reconcile_workflow_effect(
             &self.storage,
             identity,
-            WorkflowEffectJournalRecordV1::terminal(
+            WorkflowEffectJournalRecordV1::with_terminal(
                 WorkflowEffectJournalStateV1::Committed,
                 terminal,
             )?,
@@ -774,7 +774,7 @@ fn decode_workflow_effect_record(
             {
                 return Err(workflow_effect_codec_unavailable());
             }
-            WorkflowEffectJournalRecordV1::terminal(state, terminal)
+            WorkflowEffectJournalRecordV1::with_terminal(state, terminal)
         }
         Some(ExactSqlValue::Null)
             if matches!(
@@ -910,5 +910,5 @@ fn reconcile_workflow_effect(
         return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
     }
     transaction.commit().map_err(workflow_effect_unavailable)?;
-    WorkflowEffectJournalRecordV1::terminal(WorkflowEffectJournalStateV1::Reconciled, terminal)
+    WorkflowEffectJournalRecordV1::with_terminal(WorkflowEffectJournalStateV1::Reconciled, terminal)
 }
