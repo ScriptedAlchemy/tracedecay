@@ -3,9 +3,7 @@
 //! Installs tracedecay's Cursor plugin bundle into Cursor's local plugin
 //! directory. The plugin owns MCP, hooks, and rule configuration.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
 use serde_json::{Value, json};
 
@@ -53,18 +51,6 @@ impl AgentIntegration for CursorIntegration {
 
     fn supports_local_install(&self) -> bool {
         true
-    }
-
-    /// Cursor's project-local install writes nothing project-local itself —
-    /// the shared home plugin owns every surface and the component-set
-    /// transaction owns the project receipt markers. There is nothing to
-    /// remove here, but the operation must succeed so a failed local install
-    /// can roll back instead of stranding the transaction in recovery.
-    fn post_install<'a>(
-        &'a self,
-        project_path: Option<&'a Path>,
-    ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
-        Box::pin(track_branch_after_install(project_path))
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
@@ -193,110 +179,6 @@ impl AgentIntegration for CursorIntegration {
 
     fn has_tracedecay(&self, home: &Path) -> bool {
         cursor_plugin_manifest_path(home).exists()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Post-install hook
-// ---------------------------------------------------------------------------
-
-const CURSOR_BRANCH_ADD_TOOL: &str = "tracedecay_admin_branch_add";
-
-/// Decoded `tracedecay_admin_branch_add` daemon response.
-///
-/// The root crate's `branch::BranchAddOutcome` is the *producer* side of this
-/// contract and stays above this crate with the branch store it mutates. What
-/// crosses the daemon boundary is the JSON `outcome` string below, so the
-/// install path decodes it into its own value instead of taking a dependency
-/// edge on the producer. The wire strings are the shared contract; the two
-/// enums must keep the same variant set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BranchAddOutcome {
-    /// The project has no `.tracedecay/` index; nothing was done.
-    NotIndexed,
-    /// The branch was already tracked; no copy/sync was performed.
-    AlreadyTracked,
-    /// A new branch DB was created from the nearest ancestor and synced.
-    Added,
-    /// Another process was adding or syncing; catch-up sync was deferred.
-    Deferred,
-}
-
-fn cursor_branch_add_arguments(branch_name: &str) -> Value {
-    json!({ "branch": branch_name })
-}
-
-fn parse_cursor_branch_add_outcome(response: &Value) -> Result<BranchAddOutcome> {
-    match response.get("outcome").and_then(Value::as_str) {
-        Some("not_indexed") => Ok(BranchAddOutcome::NotIndexed),
-        Some("already_tracked") => Ok(BranchAddOutcome::AlreadyTracked),
-        Some("added") => Ok(BranchAddOutcome::Added),
-        Some("deferred") => Ok(BranchAddOutcome::Deferred),
-        Some(outcome) => Err(TraceDecayError::Config {
-            message: format!("daemon Cursor branch add returned unknown outcome: {outcome}"),
-        }),
-        None => Err(TraceDecayError::Config {
-            message: "daemon Cursor branch add response omitted outcome".to_string(),
-        }),
-    }
-}
-
-async fn add_cursor_branch_via_daemon(
-    project_path: &Path,
-    branch_name: &str,
-) -> Result<BranchAddOutcome> {
-    let response = match crate::ports::hook_runtime::daemon_tool_json(
-        Some(project_path),
-        CURSOR_BRANCH_ADD_TOOL,
-        cursor_branch_add_arguments(branch_name),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(err) => {
-            eprintln!(
-                "\x1b[33mwarning:\x1b[0m deferred Cursor branch tracking for '{branch_name}' because the TraceDecay daemon request was unavailable: {err}"
-            );
-            return Ok(BranchAddOutcome::Deferred);
-        }
-    };
-    parse_cursor_branch_add_outcome(&response)
-}
-
-/// Registers the project's current git branch for tracedecay indexing after a
-/// Cursor plugin install, so per-branch graphs stay in sync from the moment
-/// the integration is set up.
-///
-/// No-ops when there is no project path, no branch can be resolved, or the
-/// project has not been indexed yet (so it never bootstraps an index on its
-/// own).
-async fn track_branch_after_install(project_path: Option<&Path>) {
-    let Some(project_path) = project_path else {
-        return;
-    };
-    // Memory materialization belongs to Cursor's session hooks, where the
-    // active user profile is authoritative. Install/update tests inject a
-    // temporary `InstallContext::home`; resolving `dirs::home_dir()` here
-    // would escape that boundary and write into the operator's live profile.
-    let Some(branch_name) = crate::branch::current_branch(project_path) else {
-        return;
-    };
-    match add_cursor_branch_via_daemon(project_path, &branch_name).await {
-        Ok(BranchAddOutcome::Added) => {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Tracked Cursor branch '{branch_name}' for tracedecay indexing"
-            );
-        }
-        Ok(
-            BranchAddOutcome::AlreadyTracked
-            | BranchAddOutcome::Deferred
-            | BranchAddOutcome::NotIndexed,
-        ) => {}
-        Err(err) => {
-            eprintln!(
-                "\x1b[33mwarning:\x1b[0m could not track Cursor branch '{branch_name}' for tracedecay indexing: {err}"
-            );
-        }
     }
 }
 
@@ -2116,56 +1998,5 @@ mod tests {
 
         assert_eq!(counters.issues, 0);
         assert_eq!(counters.warnings, 1);
-    }
-
-    #[test]
-    fn cursor_branch_add_request_uses_daemon_admin_contract() {
-        assert_eq!(
-            cursor_branch_add_arguments("feature/cursor"),
-            serde_json::json!({ "branch": "feature/cursor" })
-        );
-    }
-
-    #[test]
-    fn cursor_branch_add_outcomes_are_strictly_decoded() {
-        for (name, expected) in [
-            ("not_indexed", BranchAddOutcome::NotIndexed),
-            ("already_tracked", BranchAddOutcome::AlreadyTracked),
-            ("added", BranchAddOutcome::Added),
-            ("deferred", BranchAddOutcome::Deferred),
-        ] {
-            assert_eq!(
-                parse_cursor_branch_add_outcome(&serde_json::json!({ "outcome": name }))
-                    .expect("known daemon outcome"),
-                expected
-            );
-        }
-
-        for response in [
-            serde_json::json!({}),
-            serde_json::json!({ "outcome": "other" }),
-        ] {
-            assert!(parse_cursor_branch_add_outcome(&response).is_err());
-        }
-    }
-
-    /// The Cursor `post_install` hook (the branch-tracking logic that moved
-    /// off `main` and onto the integration) must be safe to run on a project
-    /// tracedecay has not indexed: it must not bootstrap a `.tracedecay/` index
-    /// or panic.
-    #[tokio::test]
-    async fn post_install_does_not_bootstrap_index() {
-        let project = tempfile::tempdir().expect("tempdir");
-        CursorIntegration.post_install(Some(project.path())).await;
-        assert!(
-            !project.path().join(".tracedecay").exists(),
-            "post_install must not create an index on an unindexed project"
-        );
-    }
-
-    /// A `None` project path is a no-op and must not panic.
-    #[tokio::test]
-    async fn post_install_handles_missing_project_path() {
-        CursorIntegration.post_install(None).await;
     }
 }

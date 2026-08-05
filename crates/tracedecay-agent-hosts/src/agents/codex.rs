@@ -108,7 +108,8 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        let cached_install_present = !codex_plugin_cached_install_dirs(&ctx.home).is_empty();
+        let cached_install_present =
+            codex_exact_cache_manifest_path(&ctx.home)?.is_some_and(|path| path.is_file());
         let source_present = codex_plugin_manifest_path(&ctx.home).exists();
         let mut staged = Vec::new();
         if cached_install_present || source_present {
@@ -247,21 +248,6 @@ impl AgentIntegration for CodexIntegration {
             Err(()) => return State::Corrupt,
         }
 
-        let mut candidates = codex_plugin_cached_install_dirs(&ctx.home);
-        candidates.extend([
-            ctx.home.join(".codex/plugins/tracedecay"),
-            codex_plugin_install_dir(&ctx.home),
-        ]);
-        let Some(plugin_dir) = candidates
-            .into_iter()
-            .find(|path| path.join(".codex-plugin/plugin.json").is_file())
-        else {
-            return State::Missing;
-        };
-        let manifest = load_json_file(&plugin_dir.join(".codex-plugin/plugin.json"));
-        if manifest.get("name").and_then(serde_json::Value::as_str) != Some("tracedecay") {
-            return State::Corrupt;
-        }
         // A deployed source bundle alone is not activation. Codex's own
         // readback for "this plugin is installed and enabled" is its native
         // cache plus `enabled = true` in `config.toml`; TraceDecay reads this
@@ -280,10 +266,13 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
-        Some(codex_plugin_cached_install_dirs(home).pop().map_or_else(
-            || codex_plugin_manifest_path(home),
-            |dir| dir.join(".codex-plugin/plugin.json"),
-        ))
+        let current_cache =
+            codex_plugin_current_cached_install_dir(home).join(".codex-plugin/plugin.json");
+        Some(if current_cache.is_file() {
+            current_cache
+        } else {
+            codex_plugin_manifest_path(home)
+        })
     }
 
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
@@ -297,9 +286,6 @@ impl AgentIntegration for CodexIntegration {
         ]);
         let current_cache = codex_plugin_current_cached_install_dir(home);
         paths.extend(codex_plugin_managed_paths(&current_cache));
-        for cache in codex_plugin_cached_install_dirs(home) {
-            paths.extend(codex_plugin_managed_paths(&cache));
-        }
         paths.sort();
         paths.dedup();
         paths
@@ -384,6 +370,21 @@ fn codex_cached_marketplace_name(home: &Path) -> String {
 fn codex_plugin_current_cached_install_dir(home: &Path) -> PathBuf {
     codex_plugin_cached_root(home, &codex_cached_marketplace_name(home))
         .join(crate::PRODUCT_VERSION)
+}
+
+fn codex_exact_cache_manifest_path(home: &Path) -> Result<Option<PathBuf>> {
+    let marketplace_name =
+        codex_exact_personal_marketplace_name(home).map_err(|()| TraceDecayError::Config {
+            message: format!(
+                "could not read exact Codex marketplace identity at {}",
+                codex_personal_marketplace_path(home).display()
+            ),
+        })?;
+    Ok(marketplace_name.map(|marketplace_name| {
+        codex_plugin_cached_root(home, &marketplace_name)
+            .join(crate::PRODUCT_VERSION)
+            .join(".codex-plugin/plugin.json")
+    }))
 }
 
 fn codex_plugin_cached_install_dirs(home: &Path) -> Vec<PathBuf> {
@@ -1029,15 +1030,21 @@ fn codex_registration_residue(home: &Path) -> std::result::Result<bool, ()> {
     Ok(hook_trust_residue || mcp_residue || activation_residue || marketplace_residue)
 }
 
-/// Whether Codex would load this plugin: some `tracedecay@<marketplace>` record
-/// says `enabled = true` and the cached bundle that record points at exists.
+/// Whether Codex would load this exact personal-catalog plugin: its catalog
+/// source, activation key, and versioned cache must all name the same
+/// marketplace and current TraceDecay version.
 /// `Err(())` marks a config TraceDecay cannot read, which the caller reports as
 /// a corrupt registration rather than a merely repairable one.
 fn codex_plugin_activation_state(home: &Path) -> std::result::Result<bool, ()> {
-    Ok(codex_plugin_enabled(home)? && codex_loaded_cache_matches_catalog_version(home)?)
+    Ok(codex_source_manifest_matches_catalog_version(home)?
+        && codex_plugin_enabled(home)?
+        && codex_loaded_cache_matches_catalog_version(home)?)
 }
 
 fn codex_plugin_enabled(home: &Path) -> std::result::Result<bool, ()> {
+    let Some(marketplace_name) = codex_exact_personal_marketplace_name(home)? else {
+        return Ok(false);
+    };
     let config_path = codex_config_path(home);
     if !config_path.exists() {
         return Ok(false);
@@ -1049,26 +1056,71 @@ fn codex_plugin_enabled(home: &Path) -> std::result::Result<bool, ()> {
     let Some(plugins) = plugins.as_table() else {
         return Err(());
     };
-    Ok(plugins.iter().any(|(key, record)| {
-        key.starts_with(CODEX_PLUGIN_ACTIVATION_KEY_PREFIX)
-            && record
-                .get("enabled")
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(false)
-    }))
+    Ok(plugins
+        .get(&format!("tracedecay@{marketplace_name}"))
+        .and_then(|record| record.get("enabled"))
+        .and_then(toml::Value::as_bool)
+        == Some(true))
 }
 
 fn codex_loaded_cache_matches_catalog_version(home: &Path) -> std::result::Result<bool, ()> {
-    for cache in codex_plugin_cached_install_dirs(home) {
-        let manifest =
-            load_json_file_strict(&cache.join(".codex-plugin/plugin.json")).map_err(|_| ())?;
-        if manifest.get("version").and_then(serde_json::Value::as_str)
-            == Some(crate::PRODUCT_VERSION)
-        {
-            return Ok(true);
-        }
+    let Some(marketplace_name) = codex_exact_personal_marketplace_name(home)? else {
+        return Ok(false);
+    };
+    codex_plugin_manifest_matches_catalog_version(
+        &codex_plugin_cached_root(home, &marketplace_name)
+            .join(crate::PRODUCT_VERSION)
+            .join(".codex-plugin/plugin.json"),
+    )
+}
+
+fn codex_source_manifest_matches_catalog_version(home: &Path) -> std::result::Result<bool, ()> {
+    codex_plugin_manifest_matches_catalog_version(&codex_plugin_manifest_path(home))
+}
+
+fn codex_plugin_manifest_matches_catalog_version(path: &Path) -> std::result::Result<bool, ()> {
+    if !path.exists() {
+        return Ok(false);
     }
-    Ok(false)
+    let manifest = load_json_file_strict(path).map_err(|_| ())?;
+    Ok(
+        manifest.get("name").and_then(serde_json::Value::as_str) == Some("tracedecay")
+            && manifest.get("version").and_then(serde_json::Value::as_str)
+                == Some(crate::PRODUCT_VERSION),
+    )
+}
+
+fn codex_exact_personal_marketplace_name(home: &Path) -> std::result::Result<Option<String>, ()> {
+    let path = codex_personal_marketplace_path(home);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let marketplace = load_json_file_strict(&path).map_err(|_| ())?;
+    let Some(name) = marketplace
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(None);
+    };
+    validate_codex_marketplace_name(name).map_err(|_| ())?;
+    let source_matches = marketplace
+        .get("plugins")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|plugins| {
+            plugins.iter().any(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str) == Some("tracedecay")
+                    && entry
+                        .pointer("/source/source")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("local")
+                    && entry
+                        .pointer("/source/path")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("./plugins/tracedecay")
+            })
+        });
+    Ok(source_matches.then(|| name.to_string()))
 }
 
 fn codex_plugin_is_natively_active(home: &Path) -> Result<bool> {
@@ -1087,13 +1139,28 @@ fn codex_non_interactive_install_state(
     if codex_plugin_is_natively_active(home)? {
         return Ok(NonInteractiveInstallOutcome::Ready);
     }
-    let marketplace_name = codex_cached_marketplace_name(home);
+    let exact_marketplace_name =
+        codex_exact_personal_marketplace_name(home).map_err(|()| TraceDecayError::Config {
+            message: format!(
+                "could not read Codex marketplace identity at {}",
+                codex_personal_marketplace_path(home).display()
+            ),
+        })?;
+    let marketplace_name = exact_marketplace_name
+        .clone()
+        .unwrap_or_else(|| codex_cached_marketplace_name(home));
+    let exact_cache_present = exact_marketplace_name.is_some_and(|marketplace_name| {
+        codex_plugin_cached_root(home, &marketplace_name)
+            .join(crate::PRODUCT_VERSION)
+            .join(".codex-plugin/plugin.json")
+            .is_file()
+    });
     if codex_plugin_enabled(home).map_err(|()| TraceDecayError::Config {
         message: format!(
             "could not read Codex native plugin activation state at {}",
             codex_config_path(home).display()
         ),
-    })? && !codex_plugin_cached_install_dirs(home).is_empty()
+    })? && exact_cache_present
     {
         return Ok(NonInteractiveInstallOutcome::DeferredUserAction(
             DeferredUserAction {

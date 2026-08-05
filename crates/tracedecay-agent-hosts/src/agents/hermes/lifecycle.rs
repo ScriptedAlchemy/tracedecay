@@ -11,8 +11,14 @@ use crate::agents::InstallContext;
 use crate::errors::Result;
 
 pub(super) fn activate_catalog_plugin_profiles(ctx: &InstallContext) -> Result<()> {
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
     for profile_plugin_dir in super::profile_plugin_dirs(&ctx.home) {
-        install_supported_plugin(&profile_plugin_dir, &ctx.tracedecay_bin, ctx.dashboard)?;
+        install_supported_plugin(
+            &profile_plugin_dir,
+            &ctx.tracedecay_bin,
+            ctx.dashboard,
+            &profile_root,
+        )?;
     }
     Ok(())
 }
@@ -21,9 +27,12 @@ fn install_supported_plugin(
     plugin_dir: &Path,
     tracedecay_bin: &str,
     deploy_dashboard: bool,
+    profile_root: &Path,
 ) -> Result<()> {
     let existed = plugin_dir.join("plugin.yaml").is_file();
-    if let Err(error) = super::install_plugin(plugin_dir, tracedecay_bin, deploy_dashboard) {
+    if let Err(error) =
+        super::install_plugin(plugin_dir, tracedecay_bin, deploy_dashboard, profile_root)
+    {
         if !existed && let Err(cleanup_error) = super::remove_generated_plugin_files(plugin_dir) {
             tracing::warn!(
                 plugin_dir = %plugin_dir.display(),
@@ -55,13 +64,13 @@ mod tests {
 
     const NEW_BIN: &str = "/new/bin/tracedecay";
 
-    fn ctx(home: &Path, tracedecay_bin: &str) -> InstallContext {
+    fn ctx(home: &Path, tracedecay_bin: &str, dashboard: bool) -> InstallContext {
         InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
             tool_permissions: crate::agents::expected_tool_perms(),
             project_root: None,
-            dashboard: true,
+            dashboard,
         }
     }
 
@@ -74,7 +83,7 @@ mod tests {
     fn activation_writes_plugin_and_enables_profile_config() {
         let home = TempDir::new().unwrap();
 
-        activate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN)).unwrap();
+        activate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN, true)).unwrap();
         let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
 
         assert!(plugin_dir.join("plugin.yaml").is_file());
@@ -92,6 +101,19 @@ mod tests {
             config.contains("engine: tracedecay"),
             "config should select tracedecay context engine:\n{config}"
         );
+    }
+
+    #[test]
+    fn activation_without_dashboard_leaves_no_wrapper_or_child() {
+        let home = TempDir::new().unwrap();
+
+        activate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN, false)).unwrap();
+        let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
+
+        assert!(plugin_dir.join("plugin.yaml").is_file());
+        assert!(!plugin_dir.join("dashboard/manifest.json").exists());
+        assert!(!plugin_dir.join("dashboard/plugin_api.py").exists());
+        assert!(!plugin_dir.join("dashboard/dist/index.js").exists());
     }
 
     #[test]
@@ -115,7 +137,7 @@ mod tests {
             .unwrap();
         }
 
-        activate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN)).unwrap();
+        activate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN, true)).unwrap();
 
         assert!(
             home.path()
@@ -134,9 +156,9 @@ mod tests {
     #[test]
     fn deactivation_removes_generated_current_plugin_state() {
         let home = TempDir::new().unwrap();
-        activate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN)).unwrap();
+        activate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN, true)).unwrap();
 
-        deactivate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN)).unwrap();
+        deactivate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN, true)).unwrap();
         let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
 
         assert!(!plugin_dir.join("plugin.yaml").exists());
@@ -154,7 +176,7 @@ mod tests {
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::write(&config_path, "memory:\n  provider: other\n").unwrap();
 
-        let err = activate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN)).unwrap_err();
+        let err = activate_catalog_plugin_profiles(&ctx(home.path(), NEW_BIN, true)).unwrap_err();
 
         assert!(
             err.to_string()

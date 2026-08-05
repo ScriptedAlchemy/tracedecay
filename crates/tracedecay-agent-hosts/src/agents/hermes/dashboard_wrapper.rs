@@ -52,6 +52,20 @@ pub(super) fn is_current(plugin_dir: &Path) -> bool {
         .all(|relative| !plugin_dir.join(relative).exists())
 }
 
+pub(super) fn is_absent(plugin_dir: &Path) -> bool {
+    managed_paths(plugin_dir)
+        .into_iter()
+        .all(|path| !path.exists())
+}
+
+pub(super) fn matches_policy(plugin_dir: &Path, enabled: bool) -> bool {
+    if enabled {
+        is_current(plugin_dir)
+    } else {
+        is_absent(plugin_dir)
+    }
+}
+
 pub(super) fn managed_paths(plugin_dir: &Path) -> Vec<std::path::PathBuf> {
     [
         "dashboard/manifest.json",

@@ -35,9 +35,7 @@ pub mod vibe;
 pub mod zed;
 
 use std::cell::RefCell;
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -201,21 +199,6 @@ pub trait AgentIntegration {
         false
     }
 
-    /// Optional hook run after a successful catalog component transaction.
-    /// The default is a no-op.
-    ///
-    /// Agents that need to react to their own installation override this — for
-    /// example, Cursor registers the project's current git branch for
-    /// tracedecay indexing. Keeping per-agent post-install behavior behind the
-    /// trait means the `install` / `reinstall` command flow never has to
-    /// special-case individual agents by id.
-    fn post_install<'a>(
-        &'a self,
-        _project_path: Option<&'a Path>,
-    ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
-        Box::pin(std::future::ready(()))
-    }
-
     /// Validate non-interactive install readiness without changing host state.
     ///
     /// This is the read-only counterpart to
@@ -324,6 +307,18 @@ pub trait AgentIntegration {
         host_bundle_v2::HostBundleRegistrationStateV1::Missing
     }
 
+    /// Registration state for a concrete lifecycle policy. Most hosts ignore
+    /// install policy; Hermes uses it to distinguish dashboard-enabled and
+    /// dashboard-disabled registrations without weakening doctor readback.
+    fn host_component_registration_for_lifecycle(
+        &self,
+        component: host_bundle_v2::HostBundleComponentV1,
+        health: &HealthcheckContext,
+        _install: &InstallContext,
+    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
+        self.host_component_registration(component, health)
+    }
+
     /// Returns true if this agent appears to be installed on the system
     /// (its config directory exists).
     fn is_detected(&self, _home: &Path) -> bool {
@@ -364,6 +359,18 @@ pub trait AgentIntegration {
         home: &Path,
     ) -> Vec<PathBuf> {
         self.host_registration_paths(home)
+    }
+
+    /// Fallible exact registration inventory used by the transaction backup.
+    ///
+    /// Hosts whose paths depend on validated profile data override this rather
+    /// than silently dropping files from rollback ownership.
+    fn host_component_registration_paths_checked(
+        &self,
+        components: &[host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(self.host_component_registration_paths(components, home))
     }
 
     /// Exact project-scoped paths the catalog registration projection may

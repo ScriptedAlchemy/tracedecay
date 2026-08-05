@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::config_error;
 use crate::agents::safe_write_text_file;
 use crate::automation::managed_skills::{
-    ManagedSkill, ManagedSupportFile, load_active_managed_skills_snapshot,
-    validate_managed_support_files,
+    ManagedSkill, load_active_managed_skills_snapshot, validate_managed_support_files,
 };
 use crate::config::{TRACEDECAY_DIR, USER_DATA_DIR_ENV};
 use crate::errors::{Result, TraceDecayError};
@@ -57,6 +56,11 @@ struct NativeSkillManifest {
     exported: Vec<SkillExportEntry>,
 }
 
+struct RenderedNativeSkillOverlay {
+    files: Vec<(PathBuf, Vec<u8>)>,
+    exported: Vec<SkillExportEntry>,
+}
+
 pub fn install_managed_skills(
     profile_root: &Path,
     target: SkillInstallTarget,
@@ -86,9 +90,9 @@ pub fn export_native_skill_overlay(
         )));
     }
 
-    let skills = load_active_managed_skills_for_target(profile_root, target)?;
     let overlay_root = plugin_root.join("skills").join(NATIVE_NAMESPACE_DIR);
-    if skills.is_empty() {
+    let rendered = render_native_skill_overlay(profile_root, target, plugin_root)?;
+    if rendered.files.is_empty() {
         if overlay_root.exists() {
             fs::remove_dir_all(&overlay_root)?;
         }
@@ -99,79 +103,106 @@ pub fn export_native_skill_overlay(
             exported: Vec::new(),
         });
     }
-    let mut native_markdown = Vec::with_capacity(skills.len());
-    for skill in &skills {
-        validate_managed_support_files(&skill.support_files)?;
-        native_markdown.push(skill.render_native_skill_markdown()?);
-    }
-
     let stage_root = unique_overlay_sibling(&overlay_root, "tmp");
     if stage_root.exists() {
         fs::remove_dir_all(&stage_root)?;
     }
     fs::create_dir_all(&stage_root)?;
-    let mut exported = Vec::new();
-    let write_result =
-        (|| -> Result<()> {
-            for (skill, skill_markdown) in skills.iter().zip(native_markdown.iter()) {
-                let package_dir = stage_root.join(&skill.metadata.id);
-                fs::create_dir_all(&package_dir)?;
-                let skill_path = package_dir.join("SKILL.md");
-                fs::write(&skill_path, skill_markdown)?;
-                for support in &skill.support_files {
-                    write_support_file(&package_dir, support)?;
-                }
-                exported.push(SkillExportEntry {
-                    id: skill.metadata.id.clone(),
-                    title: skill.metadata.title.clone(),
-                    checksum: skill.metadata.checksum.clone(),
-                    path: skill_path,
-                });
-            }
-
-            let mut manifest_exported = Vec::with_capacity(exported.len());
-            for mut entry in exported.iter().cloned() {
-                let relative_path = entry.path.strip_prefix(&stage_root).map_err(|err| {
-                    TraceDecayError::Config {
+    let write_result = (|| -> Result<()> {
+        for (path, bytes) in &rendered.files {
+            let relative =
+                path.strip_prefix(&overlay_root)
+                    .map_err(|err| TraceDecayError::Config {
                         message: format!(
-                            "native skill export path '{}' escaped stage root '{}': {err}",
-                            entry.path.display(),
-                            stage_root.display()
+                            "native skill export path '{}' escaped overlay root '{}': {err}",
+                            path.display(),
+                            overlay_root.display()
                         ),
-                    }
-                })?;
-                entry.path = overlay_root.join(relative_path);
-                manifest_exported.push(entry);
+                    })?;
+            let staged = stage_root.join(relative);
+            if let Some(parent) = staged.parent() {
+                fs::create_dir_all(parent)?;
             }
-            let manifest = NativeSkillManifest {
-                version: 1,
-                target,
-                exported: manifest_exported,
-            };
-            fs::write(
-                stage_root.join(NATIVE_MANIFEST_FILE),
-                serde_json::to_vec_pretty(&manifest)?,
-            )?;
-            Ok(())
-        })();
+            fs::write(staged, bytes)?;
+        }
+        Ok(())
+    })();
     if let Err(err) = write_result {
         fs::remove_dir_all(&stage_root).ok();
         return Err(err);
     }
 
     swap_overlay_dirs(&overlay_root, &stage_root)?;
-    for entry in &mut exported {
-        if let Ok(relative) = entry.path.strip_prefix(&stage_root) {
-            entry.path = overlay_root.join(relative);
-        }
-    }
-
     Ok(SkillInstallSummary {
         target,
         output: plugin_root.to_path_buf(),
-        exported_count: exported.len(),
-        exported,
+        exported_count: rendered.exported.len(),
+        exported: rendered.exported,
     })
+}
+
+/// Render the complete native managed-skill overlay without mutating it.
+///
+/// Receipt-backed host lifecycles use this to declare and back up every
+/// overlay file before applying the same canonical bytes transactionally.
+pub fn rendered_native_skill_overlay_files(
+    profile_root: &Path,
+    target: SkillInstallTarget,
+    plugin_root: &Path,
+) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+    Ok(render_native_skill_overlay(profile_root, target, plugin_root)?.files)
+}
+
+fn render_native_skill_overlay(
+    profile_root: &Path,
+    target: SkillInstallTarget,
+    plugin_root: &Path,
+) -> Result<RenderedNativeSkillOverlay> {
+    if !target.is_native_overlay() {
+        return Err(config_error(format!(
+            "{target:?} does not support native skill overlays"
+        )));
+    }
+    let skills = load_active_managed_skills_for_target(profile_root, target)?;
+    if skills.is_empty() {
+        return Ok(RenderedNativeSkillOverlay {
+            files: Vec::new(),
+            exported: Vec::new(),
+        });
+    }
+    let overlay_root = plugin_root.join("skills").join(NATIVE_NAMESPACE_DIR);
+    let mut files = Vec::new();
+    let mut exported = Vec::new();
+    for skill in skills {
+        validate_managed_support_files(&skill.support_files)?;
+        let package_dir = overlay_root.join(&skill.metadata.id);
+        let skill_path = package_dir.join("SKILL.md");
+        files.push((
+            skill_path.clone(),
+            skill.render_native_skill_markdown()?.into_bytes(),
+        ));
+        for support in skill.support_files {
+            let relative = safe_relative_path(&support.path)?;
+            files.push((package_dir.join(relative), support.bytes));
+        }
+        exported.push(SkillExportEntry {
+            id: skill.metadata.id,
+            title: skill.metadata.title,
+            checksum: skill.metadata.checksum,
+            path: skill_path,
+        });
+    }
+    let manifest = NativeSkillManifest {
+        version: 1,
+        target,
+        exported: exported.clone(),
+    };
+    files.push((
+        overlay_root.join(NATIVE_MANIFEST_FILE),
+        serde_json::to_vec_pretty(&manifest)?,
+    ));
+    files.sort_by(|(left, _), (right, _)| left.cmp(right));
+    Ok(RenderedNativeSkillOverlay { files, exported })
 }
 
 pub fn export_prompt_skill_index(
@@ -577,16 +608,6 @@ fn swap_overlay_dirs(overlay_root: &Path, stage_root: &Path) -> Result<()> {
     if backup_root.exists() {
         fs::remove_dir_all(backup_root)?;
     }
-    Ok(())
-}
-
-fn write_support_file(package_dir: &Path, support: &ManagedSupportFile) -> Result<()> {
-    let relative = safe_relative_path(&support.path)?;
-    let path = package_dir.join(relative);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, &support.bytes)?;
     Ok(())
 }
 
