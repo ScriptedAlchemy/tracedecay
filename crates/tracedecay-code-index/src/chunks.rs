@@ -2513,6 +2513,23 @@ mod tests {
             self.calls.fetch_add(1, Ordering::Relaxed);
             tracedecay_code_extraction::RustExtractor.extract(file_path, source)
         }
+
+        fn extract_parsed(
+            &self,
+            file_path: &str,
+            source: &str,
+            tree: &tree_sitter::Tree,
+            scope: tracedecay_code_extraction::parsed_extraction::ParsedExtractionScope<'_>,
+        ) -> tracedecay_code_extraction::parsed_extraction::ParsedExtraction {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            tracedecay_code_extraction::LanguageExtractor::extract_parsed(
+                &tracedecay_code_extraction::RustExtractor,
+                file_path,
+                source,
+                tree,
+                scope,
+            )
+        }
     }
 
     #[test]

@@ -71,6 +71,7 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 [dev-dependencies]
 tempfile = "3"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", features = ["test-helpers"] }
+tree-sitter = "0.26"
 
 [[bench]]
 name = "code_index_chunks"

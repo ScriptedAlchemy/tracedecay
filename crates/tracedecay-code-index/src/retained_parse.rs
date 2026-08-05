@@ -58,6 +58,8 @@ pub struct RetainedParsePoolStats {
     pub partial_parses: u64,
     pub failed_parses: u64,
     pub evicted_documents: u64,
+    /// Top-level extraction-range bytes reparsed through retained-tree reuse.
+    /// Cold and reset work is reported by its distinct parse counters.
     pub changed_bytes: u64,
     pub parse_micros: u64,
     pub full_extractions: u64,
@@ -470,6 +472,9 @@ fn record_success(
         ParseReuse::Initial => stats.initial_parses = stats.initial_parses.saturating_add(1),
         ParseReuse::Incremental => {
             stats.incremental_parses = stats.incremental_parses.saturating_add(1);
+            stats.changed_bytes = stats
+                .changed_bytes
+                .saturating_add(report.metrics.changed_bytes as u64);
         }
         ParseReuse::Noop => stats.noop_parses = stats.noop_parses.saturating_add(1),
         ParseReuse::Reset { .. } => stats.reset_parses = stats.reset_parses.saturating_add(1),
@@ -480,9 +485,6 @@ fn record_success(
     ) {
         stats.partial_parses = stats.partial_parses.saturating_add(1);
     }
-    stats.changed_bytes = stats
-        .changed_bytes
-        .saturating_add(report.metrics.changed_bytes as u64);
     stats.parse_micros = stats
         .parse_micros
         .saturating_add(report.metrics.parse_elapsed.as_micros() as u64);

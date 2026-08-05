@@ -194,6 +194,16 @@ pub(crate) fn merge_changed_extraction(
     merged.unresolved_refs.append(&mut delta.unresolved_refs);
     merged.errors.append(&mut delta.errors);
     merged.duration_ms = delta.duration_ms;
+    merged.nodes.sort_by(|left, right| {
+        let left_is_file = left.kind == NodeKind::File;
+        let right_is_file = right.kind == NodeKind::File;
+        right_is_file
+            .cmp(&left_is_file)
+            .then_with(|| left.start_line.cmp(&right.start_line))
+            .then_with(|| left.start_column.cmp(&right.start_column))
+            .then_with(|| right.end_line.cmp(&left.end_line))
+            .then_with(|| right.end_column.cmp(&left.end_column))
+    });
     merged.sanitize();
     Some(merged)
 }
