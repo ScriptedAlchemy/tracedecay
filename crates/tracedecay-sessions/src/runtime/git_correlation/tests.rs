@@ -353,7 +353,7 @@ async fn partial_git_correlation_schema_is_rejected_without_rewrite() {
 
     let err = ensure_git_correlation_schema(&conn).await.unwrap_err();
     assert!(err.to_string().contains("not exact-final"));
-    assert_eq!(schema_version(&conn).await.unwrap(), Some(99));
+    assert_eq!(schema_identity(&conn).await.unwrap(), Some(99));
 }
 
 #[tokio::test]

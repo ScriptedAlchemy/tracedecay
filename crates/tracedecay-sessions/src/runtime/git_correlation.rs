@@ -18,7 +18,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value, params
 use super::SessionMessageRecord;
 
 /// Exact-final git-correlation schema identity.
-pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 1;
+pub const GIT_CORRELATION_SCHEMA_IDENTITY: i64 = 0x5444_4743_0000_0001;
 
 const SCHEMA_IDENTITY_KEY: &str = "schema_identity";
 
@@ -580,7 +580,7 @@ pub async fn ensure_git_correlation_schema_in_transaction(
     ];
     if existing.iter().any(|exists| *exists) {
         if existing.iter().all(|exists| *exists)
-            && schema_version(conn).await? == Some(GIT_CORRELATION_SCHEMA_VERSION)
+            && schema_identity(conn).await? == Some(GIT_CORRELATION_SCHEMA_IDENTITY)
         {
             return validate_git_correlation_schema(conn).await;
         }
@@ -650,13 +650,13 @@ pub async fn ensure_git_correlation_schema_in_transaction(
     .await?;
     conn.execute(
         "INSERT INTO git_correlation_meta(key, value) VALUES (?1, ?2)",
-        params![SCHEMA_IDENTITY_KEY, GIT_CORRELATION_SCHEMA_VERSION],
+        params![SCHEMA_IDENTITY_KEY, GIT_CORRELATION_SCHEMA_IDENTITY],
     )
     .await?;
     validate_git_correlation_schema(conn).await
 }
 
-async fn schema_version(
+async fn schema_identity(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<Option<i64>, GitCorrelationError> {
     let mut rows = conn
