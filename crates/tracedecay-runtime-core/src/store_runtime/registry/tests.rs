@@ -86,6 +86,27 @@ async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
 }
 
 #[tokio::test]
+async fn inventory_exposes_admitted_open_before_publication() {
+    let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    publisher.block.store(true, Ordering::SeqCst);
+    let request = project_request("project.telemetry-opening", &pin);
+
+    let opening = registry.begin_or_join_open(&request);
+    wait_for_calls(&publisher.calls, 2).await;
+    let inventory = registry.inventory(tracedecay_store::AdmissionConfigV1::default(), None);
+
+    assert_eq!(inventory.opening_shards, 1);
+    assert_eq!(inventory.entries.len(), 1);
+
+    publisher.release.notify_one();
+    assert!(matches!(
+        opening.wait().await,
+        StoreRuntimeOpenResult::Published(_)
+    ));
+}
+
+#[tokio::test]
 async fn failed_open_wakes_joiners_and_retry_uses_a_higher_fence() {
     let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;

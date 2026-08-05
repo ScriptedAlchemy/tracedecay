@@ -14,7 +14,7 @@ use tracedecay_store::{
     AdmissionConfigV1, QueueBudgetV1, RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, WalBudgetV1,
 };
 
-use super::registry::PhysicalRuntimeSnapshot;
+use super::registry::{PhysicalRuntimeSnapshot, PhysicalWriterRuntimeSnapshot};
 use super::shard::{
     ShardRuntimeEvictionEligibility, ShardRuntimeHealth, ShardRuntimeHealthSnapshot,
     ShardRuntimeObservation,
@@ -51,13 +51,15 @@ impl From<ShardRuntimeObservation> for RuntimeRegistryInventoryEntry {
 /// Path-free registry inventory supplied by the daemon after it has collected
 /// shard health snapshots.
 ///
-/// `global_queued_bytes` is an explicit registry observation. It must not be
-/// synthesized by summing shard queues because global admission can include
-/// work not yet associated with a shard.
+/// `global_queued_bytes` is present only when supplied by the owning global
+/// admission authority. It must not be synthesized by summing shard queues
+/// because global admission can include work not yet associated with a shard.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeRegistryInventory {
     pub admission: AdmissionConfigV1,
-    pub global_queued_bytes: u64,
+    pub global_queued_bytes: Option<u64>,
+    /// Open attempts admitted by the registry but not yet published.
+    pub opening_shards: u32,
     pub entries: Vec<RuntimeRegistryInventoryEntry>,
 }
 
@@ -101,6 +103,7 @@ pub struct ShardRuntimeTelemetry {
     pub health_reader_waiters: u16,
     pub leases: ShardRuntimeLeaseCounts,
     pub writer_busy_events: u64,
+    pub writer: Option<PhysicalWriterRuntimeSnapshot>,
     pub wal_bytes: u64,
     pub wal_budget: WalBudgetV1,
     pub memory_estimate_bytes: u64,
@@ -174,6 +177,21 @@ pub struct RuntimeTelemetryAggregate {
     pub general_reader_waiters: u64,
     pub health_reader_waiters: u64,
     pub writer_busy_events: u64,
+    pub writer_telemetry_shards: u32,
+    pub writer_telemetry_complete: bool,
+    pub offered_operations: u64,
+    pub admitted_operations: u64,
+    pub completed_operations: u64,
+    pub shed_operations: u64,
+    pub retried_operations: u64,
+    pub cancelled_operations: u64,
+    pub deadline_exceeded_operations: u64,
+    pub conflicted_operations: u64,
+    pub committed_batches: u64,
+    pub writer_queue_wait_micros: u64,
+    pub writer_transaction_micros: u64,
+    pub writer_error_events: u64,
+    pub health_lane_services: u64,
     pub queued_operations: u64,
     pub queued_bytes: u64,
     pub general_reader_leases: u64,
@@ -185,7 +203,8 @@ pub struct RuntimeTelemetryAggregate {
     pub total_leases: u64,
     pub wal_bytes: u64,
     pub memory_estimate_bytes: u64,
-    pub global_queued_bytes: u64,
+    /// Current global admission usage, when the owning authority exposes it.
+    pub global_queued_bytes: Option<u64>,
 }
 
 impl RuntimeTelemetryAggregate {
@@ -214,6 +233,44 @@ impl RuntimeTelemetryAggregate {
         self.writer_busy_events = self
             .writer_busy_events
             .saturating_add(entry.physical.writer_busy_events);
+        if let Some(writer) = entry.physical.writer {
+            self.writer_telemetry_shards = self.writer_telemetry_shards.saturating_add(1);
+            self.offered_operations = self
+                .offered_operations
+                .saturating_add(writer.offered_operations);
+            self.admitted_operations = self
+                .admitted_operations
+                .saturating_add(writer.admitted_operations);
+            self.completed_operations = self
+                .completed_operations
+                .saturating_add(writer.completed_operations);
+            self.shed_operations = self.shed_operations.saturating_add(writer.shed_operations);
+            self.retried_operations = self
+                .retried_operations
+                .saturating_add(writer.retried_operations);
+            self.cancelled_operations = self
+                .cancelled_operations
+                .saturating_add(writer.cancelled_operations);
+            self.deadline_exceeded_operations = self
+                .deadline_exceeded_operations
+                .saturating_add(writer.deadline_exceeded_operations);
+            self.conflicted_operations = self
+                .conflicted_operations
+                .saturating_add(writer.conflicted_operations);
+            self.committed_batches = self
+                .committed_batches
+                .saturating_add(writer.committed_batches);
+            self.writer_queue_wait_micros = self
+                .writer_queue_wait_micros
+                .saturating_add(writer.queue_wait_micros);
+            self.writer_transaction_micros = self
+                .writer_transaction_micros
+                .saturating_add(writer.transaction_micros);
+            self.writer_error_events = self.writer_error_events.saturating_add(writer.error_events);
+            self.health_lane_services = self
+                .health_lane_services
+                .saturating_add(writer.health_lane_services);
+        }
         self.queued_operations = self
             .queued_operations
             .saturating_add(u64::from(health.queued_operations));
@@ -274,17 +331,26 @@ fn project_runtime_telemetry_with_limit(
     let mut entries = inventory.entries.iter().collect::<Vec<_>>();
     entries.sort_by(|left, right| compare_binding(&left.health.binding, &right.health.binding));
 
+    let opening_shards = match usize::try_from(inventory.opening_shards) {
+        Ok(count) => count,
+        Err(_) => usize::MAX,
+    };
+    let inventory_len = entries.len().saturating_add(opening_shards);
     let returned_len = entries.len().min(max_shards);
     let mut aggregate = RuntimeTelemetryAggregate {
-        inventory_shards: bounded_count(entries.len()),
+        inventory_shards: bounded_count(inventory_len),
         returned_shards: bounded_count(returned_len),
-        omitted_shards: bounded_count(entries.len().saturating_sub(returned_len)),
+        omitted_shards: bounded_count(inventory_len.saturating_sub(returned_len)),
         global_queued_bytes: inventory.global_queued_bytes,
         ..RuntimeTelemetryAggregate::default()
     };
+    aggregate.states.opening = inventory.opening_shards;
+    aggregate.health.unknown = inventory.opening_shards;
     for entry in &entries {
         aggregate.observe(entry);
     }
+    aggregate.writer_telemetry_complete =
+        aggregate.writer_telemetry_shards == aggregate.writer_present;
 
     let shards = entries
         .into_iter()
@@ -319,6 +385,7 @@ fn project_shard(
         health_reader_waiters: entry.physical.health_reader_waiters,
         leases: ShardRuntimeLeaseCounts::from_health(health),
         writer_busy_events: entry.physical.writer_busy_events,
+        writer: entry.physical.writer,
         wal_bytes: health.wal_bytes,
         wal_budget: admission.wal.clone(),
         memory_estimate_bytes: health.memory_estimate_bytes,
@@ -423,7 +490,8 @@ mod tests {
     fn inventory(entries: Vec<RuntimeRegistryInventoryEntry>) -> RuntimeRegistryInventory {
         RuntimeRegistryInventory {
             admission: AdmissionConfigV1::default(),
-            global_queued_bytes: 2_048,
+            global_queued_bytes: Some(2_048),
+            opening_shards: 0,
             entries,
         }
     }
@@ -462,7 +530,7 @@ mod tests {
         assert_eq!(projection.aggregate.total_leases, 21);
         assert_eq!(projection.aggregate.wal_bytes, 24_576);
         assert_eq!(projection.aggregate.memory_estimate_bytes, 49_152);
-        assert_eq!(projection.aggregate.global_queued_bytes, 2_048);
+        assert_eq!(projection.aggregate.global_queued_bytes, Some(2_048));
         assert_eq!(
             projection.per_shard_queue_budget,
             inventory.admission.per_shard_queue
@@ -475,7 +543,8 @@ mod tests {
 
     #[test]
     fn projection_preserves_passive_writer_and_reader_contention() {
-        let health = fixture_health("project.contention", 1, RuntimeMaintenanceStateV1::Ready);
+        let mut health = fixture_health("project.contention", 1, RuntimeMaintenanceStateV1::Ready);
+        health.writer_present = true;
         let projection =
             project_runtime_telemetry(&inventory(vec![RuntimeRegistryInventoryEntry {
                 health,
@@ -488,6 +557,22 @@ mod tests {
                     general_reader_waiters: 5,
                     health_reader_waiters: 2,
                     writer_busy_events: 7,
+                    writer: Some(PhysicalWriterRuntimeSnapshot {
+                        offered_operations: 13,
+                        admitted_operations: 12,
+                        completed_operations: 11,
+                        shed_operations: 1,
+                        retried_operations: 2,
+                        cancelled_operations: 3,
+                        deadline_exceeded_operations: 4,
+                        conflicted_operations: 5,
+                        committed_batches: 6,
+                        queue_wait_micros: 17,
+                        transaction_micros: 19,
+                        error_events: 23,
+                        health_lane_services: 29,
+                        commit_sequence: tracedecay_store::CommitSequenceV1(31),
+                    }),
                     ..PhysicalRuntimeSnapshot::default()
                 },
             }]));
@@ -496,9 +581,67 @@ mod tests {
         assert_eq!(shard.general_reader_waiters, 5);
         assert_eq!(shard.health_reader_waiters, 2);
         assert_eq!(shard.writer_busy_events, 7);
+        assert_eq!(
+            shard
+                .writer
+                .expect("writer telemetry remains explicitly present")
+                .deadline_exceeded_operations,
+            4
+        );
+        assert_eq!(
+            shard
+                .writer
+                .expect("writer telemetry remains explicitly present")
+                .cancelled_operations,
+            3
+        );
         assert_eq!(projection.aggregate.general_reader_waiters, 5);
         assert_eq!(projection.aggregate.health_reader_waiters, 2);
         assert_eq!(projection.aggregate.writer_busy_events, 7);
+        assert_eq!(projection.aggregate.writer_telemetry_shards, 1);
+        assert!(projection.aggregate.writer_telemetry_complete);
+        assert_eq!(projection.aggregate.deadline_exceeded_operations, 4);
+        assert_eq!(projection.aggregate.cancelled_operations, 3);
+        assert_eq!(projection.aggregate.writer_queue_wait_micros, 17);
+    }
+
+    #[test]
+    fn projection_includes_admitted_startup_without_fabricating_shard_detail() {
+        let mut inventory = inventory(vec![entry(
+            fixture_health("project.ready", 1, RuntimeMaintenanceStateV1::Ready),
+            vec![],
+        )]);
+        inventory.opening_shards = 2;
+
+        let projection = project_runtime_telemetry(&inventory);
+
+        assert_eq!(projection.aggregate.inventory_shards, 3);
+        assert_eq!(projection.aggregate.returned_shards, 1);
+        assert_eq!(projection.aggregate.omitted_shards, 2);
+        assert_eq!(projection.aggregate.states.opening, 2);
+        assert_eq!(projection.aggregate.health.unknown, 2);
+    }
+
+    #[test]
+    fn projection_preserves_unknown_global_queue_usage() {
+        let mut inventory = inventory(vec![]);
+        inventory.global_queued_bytes = None;
+
+        let projection = project_runtime_telemetry(&inventory);
+
+        assert_eq!(projection.aggregate.global_queued_bytes, None);
+    }
+
+    #[test]
+    fn projection_marks_missing_active_writer_metrics_as_partial() {
+        let mut health = fixture_health("project.partial", 1, RuntimeMaintenanceStateV1::Ready);
+        health.writer_present = true;
+
+        let projection = project_runtime_telemetry(&inventory(vec![entry(health, vec![])]));
+
+        assert_eq!(projection.aggregate.writer_present, 1);
+        assert_eq!(projection.aggregate.writer_telemetry_shards, 0);
+        assert!(!projection.aggregate.writer_telemetry_complete);
     }
 
     #[test]
@@ -551,15 +694,23 @@ mod tests {
         first.general_reader_leases = u32::MAX;
         let mut second = fixture_health("project.two", 1, RuntimeMaintenanceStateV1::Ready);
         second.general_reader_leases = 1;
-        let projection = project_runtime_telemetry(&inventory(vec![
-            entry(first, vec![]),
-            entry(second, vec![]),
-        ]));
+        let mut first = entry(first, vec![]);
+        first.physical.writer = Some(PhysicalWriterRuntimeSnapshot {
+            deadline_exceeded_operations: u64::MAX,
+            ..PhysicalWriterRuntimeSnapshot::default()
+        });
+        let mut second = entry(second, vec![]);
+        second.physical.writer = Some(PhysicalWriterRuntimeSnapshot {
+            deadline_exceeded_operations: 1,
+            ..PhysicalWriterRuntimeSnapshot::default()
+        });
+        let projection = project_runtime_telemetry(&inventory(vec![first, second]));
 
         assert_eq!(
             projection.aggregate.general_reader_leases,
             u64::from(u32::MAX) + 1
         );
         assert_eq!(projection.aggregate.total_leases, u64::from(u32::MAX) + 11);
+        assert_eq!(projection.aggregate.deadline_exceeded_operations, u64::MAX);
     }
 }

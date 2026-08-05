@@ -38,7 +38,10 @@ use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 
 #[cfg(test)]
 pub(crate) use attachment::EmptyPhysicalRuntimeAttachment;
-pub use attachment::{PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime};
+pub use attachment::{
+    PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PhysicalWriterRuntimeSnapshot,
+    PublishedShardRuntime,
+};
 pub use capacity::StoreRuntimeRegistryConfig;
 pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
 pub use close::ClosedStoreRuntime;
@@ -836,11 +839,16 @@ impl StoreRuntimeRegistry {
     pub fn inventory(
         &self,
         admission: AdmissionConfigV1,
-        global_queued_bytes: u64,
+        global_queued_bytes: Option<u64>,
     ) -> RuntimeRegistryInventory {
-        let handles = {
+        let (opening_shards, handles) = {
             let state = self.lock_state();
-            state
+            let opening_shards = state
+                .entries
+                .values()
+                .filter(|entry| matches!(entry, RegistryEntry::Opening(_)))
+                .count();
+            let handles = state
                 .entries
                 .values()
                 .filter_map(|entry| match entry {
@@ -848,7 +856,12 @@ impl StoreRuntimeRegistry {
                     RegistryEntry::Opening(_) => None,
                     RegistryEntry::Evicting(evicting) => Some(evicting.handle.clone()),
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let opening_shards = match u32::try_from(opening_shards) {
+                Ok(count) => count,
+                Err(_) => u32::MAX,
+            };
+            (opening_shards, handles)
         };
         let entries = handles
             .into_iter()
@@ -864,8 +877,12 @@ impl StoreRuntimeRegistry {
                     .health
                     .queued_bytes
                     .saturating_add(physical.queued_bytes);
-                observation.health.wal_bytes = physical.wal_bytes;
-                observation.health.memory_estimate_bytes = physical.memory_estimate_bytes;
+                if let Some(wal_bytes) = physical.wal_bytes {
+                    observation.health.wal_bytes = wal_bytes;
+                }
+                if let Some(memory_estimate_bytes) = physical.memory_estimate_bytes {
+                    observation.health.memory_estimate_bytes = memory_estimate_bytes;
+                }
                 if !physical.healthy
                     && observation.health.health != super::shard::ShardRuntimeHealth::Faulted
                 {
@@ -879,6 +896,7 @@ impl StoreRuntimeRegistry {
         RuntimeRegistryInventory {
             admission,
             global_queued_bytes,
+            opening_shards,
             entries,
         }
     }

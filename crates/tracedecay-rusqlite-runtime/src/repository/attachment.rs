@@ -28,6 +28,11 @@ use crate::{
 
 use super::{ConcreteRepositoryReadExecutor, ConcreteRepositoryWriteExecutor};
 
+mod telemetry;
+
+use telemetry::wal_bytes;
+pub use telemetry::{RepositoryRuntimePhysicalSnapshot, RepositoryWriterRuntimeSnapshot};
+
 const ATTACHMENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const ATTACHMENT_DRAIN_POLL: Duration = Duration::from_millis(5);
 
@@ -323,28 +328,6 @@ impl Error for RepositoryAttachmentStartError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RepositoryRuntimePhysicalSnapshot {
-    pub healthy: bool,
-    pub writer_present: bool,
-    pub reader_handles: u32,
-    pub general_reader_waiters: u16,
-    pub health_reader_waiters: u16,
-    pub queued_operations: u32,
-    pub queued_bytes: u64,
-    pub writer_busy_events: u64,
-    pub wal_bytes: u64,
-}
-
-impl RepositoryRuntimePhysicalSnapshot {
-    pub const fn is_drained(self) -> bool {
-        !self.writer_present
-            && self.reader_handles == 0
-            && self.queued_operations == 0
-            && self.queued_bytes == 0
-    }
-}
-
 pub struct RepositoryRuntimePhysicalAttachment {
     state: Mutex<RepositoryRuntimePhysicalState>,
 }
@@ -433,6 +416,15 @@ impl RepositoryRuntimePhysicalAttachment {
             writer_busy_events: writer_telemetry
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.busy_events),
+            writer: writer_telemetry
+                .as_ref()
+                .map(|snapshot| RepositoryWriterRuntimeSnapshot {
+                    operations: snapshot.operations,
+                    batches: snapshot.batches,
+                    error_events: snapshot.error_events,
+                    health_lane_services: snapshot.health_lane_services,
+                    commit_sequence: snapshot.commit_sequence,
+                }),
             wal_bytes: wal_bytes(&state.database_path),
         }
     }
@@ -758,12 +750,6 @@ fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
     }
 }
 
-fn wal_bytes(database_path: &std::path::Path) -> u64 {
-    let mut name = database_path.as_os_str().to_os_string();
-    name.push("-wal");
-    std::fs::metadata(PathBuf::from(name)).map_or(0, |metadata| metadata.len())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{fs, time::Duration};
@@ -883,6 +869,10 @@ mod tests {
                     AdmissionConfigV1::default(),
                 )
                 .unwrap();
+            assert!(
+                attachment.snapshot().writer.is_some(),
+                "a writable attachment must expose its retained writer telemetry"
+            );
             let handle = attachment.exact_sql_handle().unwrap();
             handle
                 .execute_batch(
@@ -972,6 +962,7 @@ mod tests {
         assert_eq!(snapshot.general_reader_waiters, 0);
         assert_eq!(snapshot.health_reader_waiters, 0);
         assert_eq!(snapshot.writer_busy_events, 0);
+        assert_eq!(snapshot.writer, None);
         let handle = attachment.exact_sql_handle().unwrap();
         let rows = handle
             .query(
