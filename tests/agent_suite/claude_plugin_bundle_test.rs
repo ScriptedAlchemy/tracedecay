@@ -2,7 +2,7 @@
 //! the shared `plugin/` tree.
 //!
 //! These mirror the sibling bundle tests (`plugin_manifest_schema_test.rs`,
-//! `plugin_config_schema_test.rs`, `plugin_skill_contract_test.rs`) but operate
+//! `plugin_config_schema_test.rs`, `shared_skill_contract_test.rs`) but operate
 //! purely on the on-disk shared tree, asserting Claude's manifests, MCP config,
 //! lifecycle hooks, skills, commands, and agents are shaped correctly and stay
 //! in sync with the canonical agent catalog (`plugin/agents/`).
@@ -84,7 +84,7 @@ const EXPECTED_AGENTS: &[&str] = &[
 
 /// Reads a required scalar frontmatter field from a `---`-fenced markdown file,
 /// asserting it is present and non-empty. Mirrors the frontmatter approach in
-/// `plugin_skill_contract_test.rs` (manual parse via `parse_skill_frontmatter`,
+/// `shared_skill_contract_test.rs` (manual parse via `parse_skill_frontmatter`,
 /// no new YAML dependency).
 fn required_scalar(raw: &str, field: &str, path: &Path) -> String {
     let frontmatter = parse_skill_frontmatter(raw)

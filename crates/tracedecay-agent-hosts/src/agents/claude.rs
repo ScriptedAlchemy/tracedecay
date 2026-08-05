@@ -38,17 +38,6 @@ impl AgentIntegration for ClaudeIntegration {
         "claude"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let deploy_dir = deploy_plugin_bundle(&ctx.home, &ctx.tracedecay_bin)?;
-        if claude_plugin_is_natively_active(&ctx.home)? {
-            Ok(())
-        } else {
-            Err(deferred_user_action_error(claude_native_install_action(
-                Some(&deploy_dir),
-            )))
-        }
-    }
-
     fn supports_local_install(&self) -> bool {
         true
     }
@@ -70,31 +59,6 @@ impl AgentIntegration for ClaudeIntegration {
 
     fn interactive_activation_guidance(&self) -> Option<String> {
         Some(claude_native_install_action(None).remediation)
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let claude_dir = project_path.join(".claude");
-        let claude_md_path = claude_dir.join("CLAUDE.md");
-        // The only genuinely project-local write is `.claude/CLAUDE.md`; refuse
-        // to follow a symlinked `.claude` that would escape the project root.
-        super::ensure_project_local_safe_path(project_path, &claude_md_path)?;
-        ensure_claude_dir(&claude_dir)?;
-        install_claude_md_rules(&claude_md_path)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &claude_md_path,
-            crate::automation::skill_targets::SkillInstallTarget::Claude,
-        )
-    }
-
-    fn uninstall_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let claude_md_path = project_path.join(".claude/CLAUDE.md");
-        super::remove_managed_skill_prompt_index(
-            &ctx.home,
-            &claude_md_path,
-            crate::automation::skill_targets::SkillInstallTarget::Claude,
-        )?;
-        uninstall_claude_md_rules(&claude_md_path)
     }
 
     fn activate_project_host_component_registration(
@@ -139,18 +103,6 @@ impl AgentIntegration for ClaudeIntegration {
             crate::automation::skill_targets::SkillInstallTarget::Claude,
         )?;
         uninstall_claude_md_rules(&claude_md_path)
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        if claude_plugin_is_natively_active(&ctx.home)? {
-            return Err(deferred_user_action_error(claude_native_remove_action()));
-        }
-        remove_deployed_bundle(&ctx.home)?;
-
-        eprintln!();
-        eprintln!("Uninstall complete. TraceDecay has been removed from Claude Code.");
-        eprintln!("Restart Claude Code for changes to take effect.");
-        Ok(())
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
@@ -233,17 +185,21 @@ impl AgentIntegration for ClaudeIntegration {
         if !marketplace_residue && !settings_residue {
             return State::Missing;
         }
+        let cache_current = match claude_loaded_cache_matches_catalog_version(&ctx.home) {
+            Ok(current) => current,
+            Err(()) => return State::Corrupt,
+        };
         if matches!(
             component,
             HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
         ) {
-            return if marketplace_registered && enabled {
+            return if marketplace_registered && enabled && cache_current {
                 State::Current
             } else {
                 State::Repairable
             };
         }
-        let core_current = marketplace_registered && enabled;
+        let core_current = marketplace_registered && enabled && cache_current;
         if core_current {
             State::Current
         } else {
@@ -304,11 +260,13 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
-        vec![
+        let mut paths = vec![
             plugin_marketplace_manifest_path(home),
             known_marketplaces_path(home),
             home.join(".claude/settings.json"),
-        ]
+        ];
+        paths.extend(claude_cached_plugin_manifest_paths(home));
+        paths
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
@@ -322,6 +280,15 @@ fn claude_non_interactive_install_state(
 ) -> Result<NonInteractiveInstallOutcome> {
     if claude_plugin_is_natively_active(home)? {
         Ok(NonInteractiveInstallOutcome::Ready)
+    } else if claude_plugin_registration_is_active(home)? {
+        Ok(NonInteractiveInstallOutcome::DeferredUserAction(
+            DeferredUserAction {
+                remediation: format!(
+                    "Claude Code's loaded TraceDecay cache is stale. Run `claude plugin update {PLUGIN_IDENTIFIER}`, restart Claude Code, then retry the TraceDecay lifecycle."
+                ),
+                staged_paths,
+            },
+        ))
     } else {
         Ok(NonInteractiveInstallOutcome::DeferredUserAction(
             claude_native_install_action(staged_paths.first().map(PathBuf::as_path)),
@@ -330,6 +297,16 @@ fn claude_non_interactive_install_state(
 }
 
 fn claude_plugin_is_natively_active(home: &Path) -> Result<bool> {
+    let active = claude_plugin_registration_is_active(home)?;
+    let cache_current = claude_loaded_cache_matches_catalog_version(home).map_err(|()| {
+        TraceDecayError::Config {
+            message: "could not read Claude native plugin cache state".to_string(),
+        }
+    })?;
+    Ok(active && cache_current)
+}
+
+fn claude_plugin_registration_is_active(home: &Path) -> Result<bool> {
     let settings_path = home.join(".claude/settings.json");
     let settings = read_optional_json(&settings_path).map_err(|()| TraceDecayError::Config {
         message: format!(
@@ -355,6 +332,41 @@ fn claude_plugin_is_natively_active(home: &Path) -> Result<bool> {
             .and_then(|marketplace| marketplace.pointer("/tracedecay/source/source"))
             .and_then(serde_json::Value::as_str)
             == Some("directory"))
+}
+
+fn claude_cached_plugin_manifest_paths(home: &Path) -> Vec<PathBuf> {
+    let root = home.join(".claude/plugins/cache/tracedecay/tracedecay");
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut manifests = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir())
+        .map(|path| path.join(".claude-plugin/plugin.json"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    manifests.sort();
+    manifests
+}
+
+fn plugin_manifest_version(path: &Path) -> std::result::Result<Option<String>, ()> {
+    let manifest = read_optional_json(path)?.ok_or(())?;
+    if manifest.get("name").and_then(serde_json::Value::as_str) != Some("tracedecay") {
+        return Ok(None);
+    }
+    Ok(manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string))
+}
+
+fn claude_loaded_cache_matches_catalog_version(home: &Path) -> std::result::Result<bool, ()> {
+    for manifest in claude_cached_plugin_manifest_paths(home) {
+        if plugin_manifest_version(&manifest)?.as_deref() == Some(crate::PRODUCT_VERSION) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn claude_native_install_action(staged_dir: Option<&Path>) -> DeferredUserAction {
@@ -588,25 +600,6 @@ fn stamp_plugin_version(raw: &str) -> Result<String> {
 /// path, so the plugin does not rely on `tracedecay` being on PATH.
 fn set_mcp_command(raw: &str, tracedecay_bin: &str) -> Result<String> {
     super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)
-}
-
-/// Remove the deployed bundle dir (idempotent; only touches the tracedecay
-/// marketplace dir).
-fn remove_deployed_bundle(home: &Path) -> Result<()> {
-    let deploy_dir = plugin_deploy_dir(home);
-    match std::fs::remove_dir_all(&deploy_dir) {
-        Ok(()) => {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Removed deployed plugin bundle at {}",
-                deploy_dir.display()
-            );
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", deploy_dir.display()),
-        }),
-    }
 }
 
 // ---------------------------------------------------------------------------

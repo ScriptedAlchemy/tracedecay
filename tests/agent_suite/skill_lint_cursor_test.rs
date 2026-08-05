@@ -27,7 +27,7 @@
 //! H1 / heading levels / no `## When to Use`, the 500-line cap, LF hygiene,
 //! placeholder + reserved-prefix checks, and resource-dir layout — now lives
 //! once in `tests/agent_suite/shared_skill_contract_test.rs` over the single
-//! `plugin/skills/` tree. `plugin_skill_contract_test.rs` owns install
+//! `plugin/skills/` tree. The receipt-backed lifecycle suite owns install
 //! byte-parity + host-extra frontmatter + metadata budgets. This file keeps
 //! only the Cursor-specific reference-integrity checks (skill/tool/link
 //! resolution and `paths` glob scoping) plus the native-command lint.

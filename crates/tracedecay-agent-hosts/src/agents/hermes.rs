@@ -14,9 +14,7 @@ use crate::errors::{Result, TraceDecayError};
 pub use profile_config::read_config_pinned_project_root;
 use profile_config::{disable_plugin, enable_plugin};
 
-use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-};
+use super::{AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext};
 
 mod templates;
 
@@ -32,23 +30,12 @@ impl AgentIntegration for HermesIntegration {
         "hermes"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        lifecycle::install(ctx)?;
-        self.reconcile_managed_skills(ctx)?;
-        Ok(())
+    fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        lifecycle::activate_catalog_plugin_profiles(ctx)
     }
 
-    fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        let outcome = lifecycle::update_plugin(ctx)?;
-        if matches!(outcome, UpdatePluginOutcome::Refreshed(_)) {
-            self.reconcile_managed_skills(ctx)?;
-        }
-        Ok(outcome)
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        lifecycle::uninstall(ctx)?;
-        Ok(())
+    fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        lifecycle::deactivate_catalog_plugin_profiles(ctx)
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -63,14 +50,31 @@ impl AgentIntegration for HermesIntegration {
     ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
         use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
 
-        let plugin = hermes_home(&ctx.home).join("plugins/tracedecay/plugin.yaml");
-        if !plugin.is_file() {
+        let plugin_dirs = profile_plugin_dirs(&ctx.home);
+        let default_plugin = hermes_home(&ctx.home).join("plugins/tracedecay");
+        if !default_plugin.join("plugin.yaml").is_file() {
             return State::Missing;
         }
-        match profile_config::registration_state(&hermes_home(&ctx.home).join("config.yaml")) {
-            State::Missing => State::Repairable,
-            state => state,
+        if !managed_plugin_paths(&default_plugin)
+            .into_iter()
+            .all(|path| path.is_file())
+            || !dashboard_wrapper::is_current(&default_plugin)
+        {
+            return State::Repairable;
         }
+        for plugin_dir in plugin_dirs {
+            let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) else {
+                return State::Corrupt;
+            };
+            if profile_config::registration_state(&profile_dir.join("config.yaml"))
+                != State::Current
+                || !dashboard_wrapper::is_current(&plugin_dir)
+                || !managed_profile_files_match(&default_plugin, &plugin_dir)
+            {
+                return State::Repairable;
+            }
+        }
+        State::Current
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -82,11 +86,23 @@ impl AgentIntegration for HermesIntegration {
     }
 
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
-        let config = hermes_home(home).join("config.yaml");
-        vec![
-            config.clone(),
-            profile_config::original_config_path(&config),
-        ]
+        let default_plugin = hermes_home(home).join("plugins/tracedecay");
+        let mut paths = Vec::new();
+        for plugin_dir in profile_plugin_dirs(home) {
+            let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) else {
+                continue;
+            };
+            let config = profile_dir.join("config.yaml");
+            paths.push(config.clone());
+            paths.push(profile_config::original_config_path(&config));
+            paths.extend(dashboard_wrapper::managed_paths(&plugin_dir));
+            if plugin_dir != default_plugin {
+                paths.extend(managed_plugin_paths(&plugin_dir));
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
@@ -109,14 +125,6 @@ impl AgentIntegration for HermesIntegration {
             )?);
         }
         Ok(exports)
-    }
-}
-
-impl HermesIntegration {
-    fn reconcile_managed_skills(&self, ctx: &InstallContext) -> Result<()> {
-        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
-        self.export_managed_skills(&ctx.home, &profile_root)?;
-        Ok(())
     }
 }
 
@@ -254,6 +262,33 @@ pub(super) fn detected_plugin_dirs(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn managed_plugin_paths(plugin_dir: &Path) -> Vec<PathBuf> {
+    [
+        "plugin.yaml",
+        "schemas.py",
+        "schemas.json",
+        "tools.py",
+        "__init__.py",
+        "cli.py",
+        "skills/tracedecay/SKILL.md",
+    ]
+    .into_iter()
+    .map(|relative| plugin_dir.join(relative))
+    .collect()
+}
+
+fn managed_profile_files_match(default_plugin: &Path, profile_plugin: &Path) -> bool {
+    managed_plugin_paths(default_plugin)
+        .into_iter()
+        .zip(managed_plugin_paths(profile_plugin))
+        .chain(
+            dashboard_wrapper::managed_paths(default_plugin)
+                .into_iter()
+                .zip(dashboard_wrapper::managed_paths(profile_plugin)),
+        )
+        .all(|(expected, observed)| std::fs::read(expected).ok() == std::fs::read(observed).ok())
+}
+
 pub(super) fn uninstall_plugin(plugin_dir: &Path) -> Result<()> {
     if let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) {
         disable_plugin(&profile_dir.join("config.yaml"))?;
@@ -308,36 +343,11 @@ pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
 }
 
 pub(super) fn write_text_file(path: &Path, contents: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to create {}: {e}", parent.display()),
-        })?;
-    }
     let current = std::fs::read_to_string(path).unwrap_or_default();
     if current == contents {
         return Ok(());
     }
-    // Write-to-.new-then-rename so a mid-write crash can never leave a
-    // truncated/corrupt generated file behind (same pattern as
-    // write_config_file, minus the backup — these files are regenerable).
-    let new_path = PathBuf::from(format!("{}.new", path.display()));
-    if let Err(e) = std::fs::write(&new_path, contents) {
-        std::fs::remove_file(&new_path).ok();
-        return Err(TraceDecayError::Config {
-            message: format!("failed to write {}: {e}", new_path.display()),
-        });
-    }
-    if let Err(e) = std::fs::rename(&new_path, path) {
-        std::fs::remove_file(&new_path).ok();
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "failed to replace {} with {}: {e}",
-                path.display(),
-                new_path.display()
-            ),
-        });
-    }
-    Ok(())
+    super::safe_write_text_file(path, contents, None)
 }
 
 pub(super) fn remove_generated_file(path: &Path) -> Result<()> {

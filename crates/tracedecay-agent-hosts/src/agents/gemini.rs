@@ -7,17 +7,10 @@
 
 use std::path::Path;
 
-use serde_json::json;
-
-use crate::errors::Result;
-
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
-    McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry, load_json_file,
-    load_json_file_strict, uninstall_mcp_server_entry,
+    AgentIntegration, DoctorCounters, HealthcheckContext, McpDoctorLabels,
+    doctor_check_mcp_registration, load_json_file,
 };
-
-use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 
 /// Gemini CLI agent.
 pub struct GeminiIntegration;
@@ -31,52 +24,8 @@ impl AgentIntegration for GeminiIntegration {
         "gemini"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let gemini_dir = ctx.home.join(".gemini");
-        std::fs::create_dir_all(&gemini_dir).ok();
-        let settings_path = gemini_dir.join("settings.json");
-
-        install_mcp_server(&settings_path, &ctx.tracedecay_bin)?;
-
-        let gemini_md = gemini_dir.join("GEMINI.md");
-        install_prompt_rules(&gemini_md)?;
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Start a new Gemini CLI session — tracedecay tools are now available");
-        Ok(())
-    }
-
     fn supports_local_install(&self) -> bool {
         true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let settings = project_path.join(".gemini/settings.json");
-        let gemini_md = project_path.join("GEMINI.md");
-        super::ensure_project_local_safe_paths(
-            project_path,
-            [settings.as_path(), gemini_md.as_path()],
-        )?;
-        std::fs::create_dir_all(project_path.join(".gemini")).ok();
-        install_mcp_server(&settings, &ctx.tracedecay_bin)?;
-        install_prompt_rules(&gemini_md)
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let gemini_dir = ctx.home.join(".gemini");
-        let settings_path = gemini_dir.join("settings.json");
-
-        uninstall_mcp_server(&settings_path);
-
-        let gemini_md = gemini_dir.join("GEMINI.md");
-        uninstall_prompt_rules(&gemini_md);
-
-        eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from Gemini CLI.");
-        eprintln!("Start a new Gemini CLI session for changes to take effect.");
-        Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -102,58 +51,6 @@ impl AgentIntegration for GeminiIntegration {
         let servers = json.get("mcpServers");
         servers.and_then(|v| v.get("tracedecay")).is_some()
     }
-}
-
-// ---------------------------------------------------------------------------
-// Install helpers
-// ---------------------------------------------------------------------------
-
-/// Register MCP server in ~/.gemini/settings.json.
-fn install_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    install_mcp_server_entry(
-        settings_path,
-        "mcpServers",
-        json!({
-            "command": tracedecay_bin,
-            "args": ["serve"],
-            "trust": true
-        }),
-        "Gemini CLI",
-        load_json_file_strict,
-    )
-}
-
-/// Install-or-refresh prompt rules in GEMINI.md.
-fn install_prompt_rules(gemini_md: &Path) -> Result<()> {
-    let block = super::prompt_rules::standard_prompt_rules(
-        PROMPT_RULE_MARKER,
-        &PromptRulesOptions {
-            extra_paragraphs: &[],
-        },
-    );
-    super::prompt_rules::reconcile_prompt_rules(gemini_md, PROMPT_RULE_MARKER, &block)
-}
-
-// ---------------------------------------------------------------------------
-// Uninstall helpers
-// ---------------------------------------------------------------------------
-
-/// Remove MCP server from ~/.gemini/settings.json.
-fn uninstall_mcp_server(settings_path: &Path) {
-    uninstall_mcp_server_entry(
-        settings_path,
-        "mcpServers",
-        load_json_file,
-        McpUninstallPolicy {
-            prune_empty_root: true,
-            remove_empty_file: true,
-        },
-    );
-}
-
-/// Remove tracedecay rules from GEMINI.md.
-fn uninstall_prompt_rules(gemini_md: &Path) {
-    super::prompt_rules::remove_prompt_rules(gemini_md, PROMPT_RULE_MARKER);
 }
 
 // ---------------------------------------------------------------------------

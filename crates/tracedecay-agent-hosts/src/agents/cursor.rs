@@ -51,38 +51,8 @@ impl AgentIntegration for CursorIntegration {
         "cursor"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        install_cursor_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Reload Cursor — the tracedecay plugin is now installed");
-        eprintln!(
-            "  3. Optional: Cursor's Auto-review mode reviews every MCP call; to let \
-             tracedecay's read-only tools run without per-call review, copy the \
-             permissions.json mcpAllowlist snippet from the plugin README \
-             ({})",
-            cursor_plugin_install_dir(&ctx.home)
-                .join("README.md")
-                .display()
-        );
-        Ok(())
-    }
-
     fn supports_local_install(&self) -> bool {
         true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_cursor_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        sweep_legacy_project_artifacts(project_path)?;
-
-        eprintln!();
-        eprintln!("Cursor local setup uses the tracedecay Cursor plugin.");
-        eprintln!("Reload Cursor so the plugin loads for this workspace.");
-        Ok(())
     }
 
     /// Cursor's project-local install writes nothing project-local itself —
@@ -90,10 +60,6 @@ impl AgentIntegration for CursorIntegration {
     /// transaction owns the project receipt markers. There is nothing to
     /// remove here, but the operation must succeed so a failed local install
     /// can roll back instead of stranding the transaction in recovery.
-    fn uninstall_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
-        Ok(())
-    }
-
     fn post_install<'a>(
         &'a self,
         project_path: Option<&'a Path>,
@@ -132,27 +98,6 @@ impl AgentIntegration for CursorIntegration {
                 &cursor_plugin_install_dir(home),
             )?,
         ])
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let install_dir = cursor_plugin_install_dir(&ctx.home);
-        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
-        crate::automation::memory_digest::remove_memory_digest_export(
-            &profile_root,
-            crate::automation::skill_targets::SkillInstallTarget::Cursor,
-            &install_dir,
-        )?;
-        remove_cursor_plugin_install(&install_dir)?;
-        remove_cursor_native_extension_registration(&ctx.home)?;
-        remove_retired_global_cursor_memory_rule(&ctx.home)?;
-        let mcp_path = ctx.home.join(".cursor/mcp.json");
-        uninstall_mcp_server(&mcp_path);
-        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
-
-        eprintln!();
-        eprintln!("Uninstall complete. TraceDecay has been removed from Cursor.");
-        eprintln!("Restart Cursor for changes to take effect.");
-        Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {

@@ -122,16 +122,6 @@ fn plugin_skill_tree_files(root: &Path) -> Vec<String> {
     files
 }
 
-fn install_ctx(home: &Path) -> InstallContext {
-    InstallContext {
-        home: home.to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
-        tool_permissions: vec!["mcp__tracedecay__search".to_string()],
-        project_root: None,
-        dashboard: true,
-    }
-}
-
 /// The composed Claude deploy set (sourced from the shared `plugin/` tree
 /// via `claude_files`) must cover every shared model-invocable skill, the
 /// 13 canonical `tracedecay-*` dispatchers, all 8 subagents, all 13 slash
@@ -300,26 +290,6 @@ fn deploy_refuses_to_replace_non_tracedecay_dir() {
     );
 }
 
-/// Staging must leave host-native marketplace and settings files untouched.
-#[test]
-fn install_stages_source_without_rewriting_host_state() {
-    let home = tempfile::tempdir().unwrap();
-    let ctx = install_ctx(home.path());
-    let settings_path = home.path().join(".claude/settings.json");
-    let known_path = home.path().join(".claude/plugins/known_marketplaces.json");
-    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    std::fs::write(&settings_path, br#"{"enabledPlugins":{"other":true}}"#).unwrap();
-    std::fs::write(&known_path, br#"{"other":{"source":{"source":"github"}}}"#).unwrap();
-    let settings_before = std::fs::read(&settings_path).unwrap();
-    let known_before = std::fs::read(&known_path).unwrap();
-
-    let error = ClaudeIntegration.install(&ctx).unwrap_err().to_string();
-    assert!(error.contains("Claude Code owns marketplace registration"));
-    assert!(plugin_marketplace_manifest_path(home.path()).is_file());
-    assert_eq!(std::fs::read(settings_path).unwrap(), settings_before);
-    assert_eq!(std::fs::read(known_path).unwrap(), known_before);
-}
-
 /// The managed-block range must extend across only its own owned
 /// sub-heading, not a user's own `## …tracedecay…` heading placed after
 /// the block — otherwise uninstall would swallow the user's section.
@@ -350,33 +320,6 @@ fn uninstall_preserves_user_tracedecay_heading_after_block() {
         !after.contains(CLAUDE_MD_MARKER),
         "the managed block itself must be removed"
     );
-}
-
-#[test]
-fn uninstall_after_native_removal_cleans_source_without_rewriting_host_state() {
-    let home = tempfile::tempdir().unwrap();
-    let ctx = install_ctx(home.path());
-    deploy_plugin_bundle(home.path(), &ctx.tracedecay_bin).unwrap();
-    let settings_path = home.path().join(".claude/settings.json");
-    let marketplace_path = known_marketplaces_path(home.path());
-    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    std::fs::write(&settings_path, br#"{"enabledPlugins":{"other":true}}"#).unwrap();
-    std::fs::write(
-        &marketplace_path,
-        br#"{"other":{"source":{"source":"github"}}}"#,
-    )
-    .unwrap();
-    let settings_before = std::fs::read(&settings_path).unwrap();
-    let marketplace_before = std::fs::read(&marketplace_path).unwrap();
-    assert!(plugin_marketplace_manifest_path(home.path()).exists());
-
-    ClaudeIntegration.uninstall(&ctx).unwrap();
-    assert!(
-        !plugin_deploy_dir(home.path()).exists(),
-        "deploy dir removed"
-    );
-    assert_eq!(std::fs::read(settings_path).unwrap(), settings_before);
-    assert_eq!(std::fs::read(marketplace_path).unwrap(), marketplace_before);
 }
 
 #[cfg(target_os = "linux")]

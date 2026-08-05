@@ -775,7 +775,7 @@ fn apply_canonical_component_set_with_tracedecay_bin(
             component_set,
             &mut registration,
         )
-        .map_err(host_bundle_error)?;
+        .map_err(|error| host_bundle_error_for_agent(agent_id, error))?;
     eprintln!(
         "\x1b[32m✔\x1b[0m {} {:?}: {} component(s), receipt {}",
         agent_id,
@@ -2714,6 +2714,24 @@ fn host_bundle_error_for_agent(
     agent_id: &str,
     error: tracedecay::agents::host_bundle_v2::HostBundleError,
 ) -> tracedecay::errors::TraceDecayError {
+    if error == tracedecay::agents::host_bundle_v2::HostBundleError::NativeUpdateRequired {
+        let message = match agent_id {
+            "claude" => {
+                "Claude Code's loaded TraceDecay cache is stale. Run `claude plugin update \
+                 tracedecay@tracedecay`, restart Claude Code, then retry the TraceDecay lifecycle."
+            }
+            "codex" => {
+                "Codex's loaded TraceDecay cache is stale. Run `codex plugin update \
+                 tracedecay@personal`, re-trust changed hooks, then retry the TraceDecay lifecycle."
+            }
+            _ => {
+                "The host-native TraceDecay plugin cache is stale; update it through the host and retry."
+            }
+        };
+        return tracedecay::errors::TraceDecayError::Config {
+            message: message.to_string(),
+        };
+    }
     if agent_id == "codex"
         && error == tracedecay::agents::host_bundle_v2::HostBundleError::UnsupportedCapability
     {
@@ -5243,7 +5261,12 @@ mod tests {
             .path()
             .join(".codex/plugins/cache/personal/tracedecay/native/.codex-plugin/plugin.json");
         std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
-        std::fs::write(&cache_manifest, br#"{"name":"tracedecay"}"#).unwrap();
+        std::fs::copy(
+            home.path()
+                .join("plugins/tracedecay/.codex-plugin/plugin.json"),
+            &cache_manifest,
+        )
+        .unwrap();
 
         let results =
             reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
@@ -5262,6 +5285,31 @@ mod tests {
             .unwrap()
             .is_some()
         );
+
+        std::fs::write(
+            &cache_manifest,
+            br#"{"name":"tracedecay","version":"stale"}"#,
+        )
+        .unwrap();
+        let stale =
+            reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
+                .await;
+        assert!(
+            matches!(stale.as_slice(), [(id, Err(error))] if id == "codex" && error.to_string().contains("loaded TraceDecay cache is stale"))
+        );
+        std::fs::copy(
+            home.path()
+                .join("plugins/tracedecay/.codex-plugin/plugin.json"),
+            &cache_manifest,
+        )
+        .unwrap();
+        let recovered =
+            reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
+                .await;
+        assert!(matches!(
+            recovered.as_slice(),
+            [(id, Ok(AgentReinstallOutcome::Installed))] if id == "codex"
+        ));
     }
 
     #[tokio::test]
@@ -5289,7 +5337,17 @@ mod tests {
             .join(".codex/plugins/cache/personal/tracedecay/native");
         let cache_manifest = cache_root.join(".codex-plugin/plugin.json");
         std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
-        std::fs::write(&cache_manifest, br#"{"name":"tracedecay"}"#).unwrap();
+        std::fs::create_dir_all(source_manifest.parent().unwrap()).unwrap();
+        let rendered_manifest = component_set
+            .component_set
+            .components
+            .iter()
+            .flat_map(|component| component.contents.iter())
+            .find(|artifact| {
+                artifact.relative_path == "plugins/tracedecay/.codex-plugin/plugin.json"
+            })
+            .unwrap();
+        std::fs::write(&cache_manifest, &rendered_manifest.bytes).unwrap();
         let options = crate::cli::HostBundleCliOptions {
             component: None,
             dry_run: false,

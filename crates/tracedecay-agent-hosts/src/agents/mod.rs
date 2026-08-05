@@ -1,10 +1,9 @@
 // Rust guideline compliant 2025-10-17
 //! Agent integration layer for CLI tools (Claude Code, `OpenCode`, Codex, etc.).
 //!
-//! Each supported agent implements the [`AgentIntegration`] trait which provides
-//! `install`, `uninstall`, and `healthcheck` operations. The MCP server
-//! itself is agent-agnostic; this module handles the per-agent config
-//! plumbing (registering the MCP server, permissions, hooks, prompt rules).
+//! Each supported agent implements the [`AgentIntegration`] trait for native
+//! registration, health, and managed exports. Receipt-backed catalog
+//! transactions own installation and removal.
 
 pub mod antigravity;
 pub mod claude;
@@ -116,7 +115,7 @@ pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> boo
 /// Re-runs the managed-skill overlay/prompt-index export for every agent
 /// integration that already has tracedecay installed under `home`, so a
 /// lifecycle change (approve/disable/archive/restore) deploys without
-/// waiting for the next `tracedecay install` / `update-plugin`.
+/// waiting for the next catalog lifecycle or `update-plugin` pass.
 ///
 /// Failures are collected per agent instead of aborting the sweep: a broken
 /// export for one host must not block the others (or the lifecycle action
@@ -197,37 +196,13 @@ pub trait AgentIntegration {
     /// CLI identifier used in `--agent <id>` (e.g. "claude").
     fn id(&self) -> &'static str;
 
-    /// Register MCP server, permissions, hooks, and prompt rules.
-    fn install(&self, ctx: &InstallContext) -> Result<()>;
-
     /// Returns true when this agent supports project-local configuration.
     fn supports_local_install(&self) -> bool {
         false
     }
 
-    /// Register MCP server, permissions, hooks, and prompt rules under a
-    /// project/workspace directory instead of the user's global config.
-    fn install_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
-        Err(TraceDecayError::Config {
-            message: format!(
-                "{} does not support `tracedecay install --local` yet. \
-                 Run `tracedecay install --agent {}` for a global install.",
-                self.name(),
-                self.id()
-            ),
-        })
-    }
-
-    /// Remove only the project-local registration and generated assets owned
-    /// by [`AgentIntegration::install_local`].
-    fn uninstall_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
-        Err(TraceDecayError::Config {
-            message: format!("{} does not support project-local uninstall", self.name()),
-        })
-    }
-
-    /// Optional hook run after a successful [`AgentIntegration::install`] or
-    /// [`AgentIntegration::install_local`]. The default is a no-op.
+    /// Optional hook run after a successful catalog component transaction.
+    /// The default is a no-op.
     ///
     /// Agents that need to react to their own installation override this — for
     /// example, Cursor registers the project's current git branch for
@@ -243,7 +218,7 @@ pub trait AgentIntegration {
 
     /// Validate non-interactive install readiness without changing host state.
     ///
-    /// This is the pre-migration counterpart to
+    /// This is the read-only counterpart to
     /// [`AgentIntegration::prepare_non_interactive_install`]. Hosts that need
     /// manual activation report the same typed deferral without staging files.
     fn preflight_non_interactive_install(
@@ -302,8 +277,8 @@ pub trait AgentIntegration {
     /// empty list for agents that either do not distribute managed skills
     /// or have no detected tracedecay installation under `home`.
     ///
-    /// Implementors must never create a new installation here — only
-    /// refresh artifacts that `install` already wrote.
+    /// Implementors must never create a new installation here — only refresh
+    /// artifacts already owned by a catalog receipt.
     fn export_managed_skills(
         &self,
         _home: &Path,
@@ -312,9 +287,9 @@ pub trait AgentIntegration {
         Ok(Vec::new())
     }
 
-    /// Re-export active managed skills into destinations created by
-    /// [`AgentIntegration::install_local`] under a project/workspace. The
-    /// default is a no-op for agents without project-local skill exports.
+    /// Re-export active managed skills into receipt-owned destinations under a
+    /// project/workspace. The default is a no-op for agents without
+    /// project-local skill exports.
     fn export_managed_skills_local(
         &self,
         _project_root: &Path,
@@ -322,9 +297,6 @@ pub trait AgentIntegration {
     ) -> Result<Vec<SkillInstallSummary>> {
         Ok(Vec::new())
     }
-
-    /// Remove everything installed by [`AgentIntegration::install`].
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()>;
 
     /// Verify installation health (replaces agent-specific doctor checks).
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext);
@@ -364,8 +336,8 @@ pub trait AgentIntegration {
         false
     }
 
-    /// The single config file this agent rewrites on install / uninstall, if
-    /// any. Returning `Some(path)` lets tests (and any future external tool)
+    /// The primary native config file this agent's catalog registration
+    /// projection owns, if any. Returning `Some(path)` lets tests and lifecycle tools
     /// ask the integration for its own path instead of re-deriving it via
     /// `#[cfg(target_os = ...)]`, which is how the v4.3.15 zed regression
     /// test silently disagreed with the Windows install path. Implementors
@@ -523,7 +495,7 @@ pub enum UpdatePluginOutcome {
     DeferredUserAction(DeferredUserAction),
 }
 
-/// Context passed to [`AgentIntegration::install`] and [`AgentIntegration::uninstall`].
+/// Context passed to catalog-backed host registration and refresh operations.
 pub struct InstallContext {
     pub home: PathBuf,
     pub tracedecay_bin: String,

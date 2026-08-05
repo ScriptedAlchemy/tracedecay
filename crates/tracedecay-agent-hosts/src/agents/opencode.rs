@@ -41,62 +41,8 @@ impl AgentIntegration for OpenCodeIntegration {
         "opencode"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let config_path = opencode_config_path(&ctx.home);
-        install_mcp_server(&config_path, &ctx.tracedecay_bin)?;
-        install_opencode_plugin(&opencode_plugin_path(&ctx.home), &ctx.tracedecay_bin)?;
-
-        let global_prompt = opencode_prompt_path(&ctx.home);
-        install_prompt_rules(&global_prompt)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &global_prompt,
-            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
-        )?;
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Start a new OpenCode session — tracedecay tools are now available");
-        eprintln!("  3. OpenCode will prompt for approval on first use of each tool");
-        Ok(())
-    }
-
     fn supports_local_install(&self) -> bool {
         true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let mcp_path = project_path.join("opencode.json");
-        let agents_md = project_path.join("AGENTS.md");
-        super::ensure_project_local_safe_paths(
-            project_path,
-            [mcp_path.as_path(), agents_md.as_path()],
-        )?;
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
-        install_opencode_plugin(
-            &project_path.join(".opencode/plugins/tracedecay.ts"),
-            &ctx.tracedecay_bin,
-        )?;
-        install_prompt_rules(&agents_md)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &agents_md,
-            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
-        )
-    }
-
-    fn uninstall_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        uninstall_mcp_server(&project_path.join("opencode.json"));
-        remove_opencode_plugin(&project_path.join(".opencode/plugins/tracedecay.ts"))?;
-        let agents_md = project_path.join("AGENTS.md");
-        super::remove_managed_skill_prompt_index(
-            &ctx.home,
-            &agents_md,
-            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
-        )?;
-        uninstall_prompt_rules(&agents_md);
-        Ok(())
     }
 
     fn activate_project_host_component_registration(
@@ -155,25 +101,6 @@ impl AgentIntegration for OpenCodeIntegration {
             crate::automation::skill_targets::SkillInstallTarget::OpenCode,
         )?;
         uninstall_prompt_rules(&agents_md);
-        Ok(())
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let config_path = opencode_config_path(&ctx.home);
-        uninstall_mcp_server(&config_path);
-        remove_opencode_plugin(&opencode_plugin_path(&ctx.home))?;
-
-        let global_prompt = opencode_prompt_path(&ctx.home);
-        super::remove_managed_skill_prompt_index(
-            &ctx.home,
-            &global_prompt,
-            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
-        )?;
-        uninstall_prompt_rules(&global_prompt);
-
-        eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from OpenCode.");
-        eprintln!("Start a new OpenCode session for changes to take effect.");
         Ok(())
     }
 
