@@ -111,7 +111,7 @@ impl DaemonLspSessionFactory {
         let mut cancellation = BTreeMap::new();
         let mut context = BTreeMap::new();
         let mut gateway_capabilities: Option<GatewayCapabilities> = None;
-        let mut upstream_capabilities = None;
+        let mut upstream_capabilities: Option<UpstreamCapabilities> = None;
         for (root, factory) in factories {
             if !workspace.roots().contains(&root) || feedback.contains_key(root.uri()) {
                 return None;
