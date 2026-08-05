@@ -104,6 +104,37 @@ impl RepositoryMutationQueue {
             }
         };
         cancellation_observed = cancellation_observed.or_else(cancellation_requested);
-        Ok(operation(cancellation_observed))
+        let result = operation(cancellation_observed);
+        drop(_guard);
+        self.release_idle_gate(repository_id, &gate)?;
+        Ok(result)
+    }
+
+    fn release_idle_gate(
+        &self,
+        repository_id: &RepositoryId,
+        gate: &Arc<Mutex<()>>,
+    ) -> Result<(), RepositoryMutationQueueError> {
+        let mut gates = self
+            .gates
+            .lock()
+            .map_err(|_| RepositoryMutationQueueError::Unavailable)?;
+        if gates
+            .get(repository_id)
+            .is_some_and(|current| Arc::ptr_eq(current, gate) && Arc::strong_count(current) == 2)
+        {
+            gates.remove(repository_id);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_gate_count_for_test(
+        &self,
+    ) -> Result<usize, RepositoryMutationQueueError> {
+        self.gates
+            .lock()
+            .map(|gates| gates.len())
+            .map_err(|_| RepositoryMutationQueueError::Unavailable)
     }
 }
