@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,14 @@ use crate::config::retrieval::{
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_search_eval::DirectEvaluationReportV1;
+use tracedecay_search_eval::semantic_native::SemanticNativeStageResultV1;
+use tracedecay_search_eval::{
+    CandidateWorkloadV1, DirectEvaluationReportV1, direct_evaluated_profile_material,
+};
+
+const ACTIVATION_WORKLOAD_JSON: &str = include_str!(
+    "../../../../tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
+);
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profiles_v1 (
@@ -59,21 +67,18 @@ impl RegisteredSemanticAcceptedProfileAuthorityV1 {
 
     /// Persists only a profile whose private evaluation value can be
     /// reconstructed from this real direct-evaluator report.
-    pub async fn publish(
+    pub(super) async fn publish(
         &self,
+        evaluation_repository_root: &Path,
         report: DirectEvaluationReportV1,
         accepted_profile: AcceptedRetrievalProfileV1,
         runtime: RetrievalRuntimeCompatibilityV1,
         freshness_vector_digest: ManifestDigest,
     ) -> Result<(), SemanticAcceptedProfileAuthorityErrorV1> {
-        let evaluation = PassingRetrievalEvaluationV1::from_report(
-            &report,
-            accepted_profile.evaluation().evaluated_profile_id(),
-        )
-        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
-        if &evaluation != accepted_profile.evaluation() {
-            return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
-        }
+        let evaluation_repository_root = evaluation_repository_root
+            .canonicalize()
+            .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?;
+        validate_report_authority(&evaluation_repository_root, &report, &accepted_profile)?;
         accepted_profile
             .executable_under(&runtime)
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
@@ -81,6 +86,7 @@ impl RegisteredSemanticAcceptedProfileAuthorityV1 {
             .validate()
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
         let stored = StoredAcceptedProfileAuthorityV1 {
+            evaluation_repository_root,
             report,
             accepted_profile: accepted_profile.clone(),
             runtime,
@@ -176,6 +182,7 @@ impl SemanticAcceptedProfileAuthorityPortV1 for RegisteredSemanticAcceptedProfil
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredAcceptedProfileAuthorityV1 {
+    evaluation_repository_root: PathBuf,
     report: DirectEvaluationReportV1,
     accepted_profile: AcceptedRetrievalProfileV1,
     runtime: RetrievalRuntimeCompatibilityV1,
@@ -191,14 +198,18 @@ impl StoredAcceptedProfileAuthorityV1 {
         if self.accepted_profile.profile_digest() != expected_digest {
             return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
         }
-        let evaluation = PassingRetrievalEvaluationV1::from_report(
-            &self.report,
-            self.accepted_profile.evaluation().evaluated_profile_id(),
-        )
-        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
-        if &evaluation != self.accepted_profile.evaluation() {
+        let evaluation_repository_root = self
+            .evaluation_repository_root
+            .canonicalize()
+            .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?;
+        if evaluation_repository_root != self.evaluation_repository_root {
             return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
         }
+        validate_report_authority(
+            &evaluation_repository_root,
+            &self.report,
+            &self.accepted_profile,
+        )?;
         self.accepted_profile
             .executable_under(&self.runtime)
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
@@ -211,4 +222,92 @@ impl StoredAcceptedProfileAuthorityV1 {
             freshness_vector_digest: self.freshness_vector_digest,
         })
     }
+}
+
+fn validate_report_authority(
+    evaluation_repository_root: &Path,
+    report: &DirectEvaluationReportV1,
+    accepted_profile: &AcceptedRetrievalProfileV1,
+) -> Result<(), SemanticAcceptedProfileAuthorityErrorV1> {
+    let workload: CandidateWorkloadV1 = serde_json::from_str(ACTIVATION_WORKLOAD_JSON)
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+    report
+        .validate_for_activation(evaluation_repository_root, &workload)
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+    let evaluated_profile_id = accepted_profile.evaluation().evaluated_profile_id();
+    let evaluation = PassingRetrievalEvaluationV1::from_report(report, evaluated_profile_id)
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+    if &evaluation != accepted_profile.evaluation() {
+        return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+    }
+    let material = direct_evaluated_profile_material(&workload, evaluated_profile_id)
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+    let mut expected_profile = material.profile;
+    expected_profile.evaluation_result_anchor = evaluation.evaluation_anchor().clone();
+    let mut expected_diversity = material.diversity;
+    expected_diversity.evaluation_result_anchor = Some(evaluation.evaluation_anchor().clone());
+    let expected_rerank = material.rerank.map(|mut rerank| {
+        rerank.evaluation_result_anchor = evaluation.evaluation_anchor().clone();
+        rerank
+    });
+    if accepted_profile.profile() != &expected_profile
+        || accepted_profile.diversity() != &expected_diversity
+        || accepted_profile.rerank() != expected_rerank.as_ref()
+    {
+        return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+    }
+    validate_runtime_evidence(report, accepted_profile, evaluated_profile_id)
+}
+
+fn validate_runtime_evidence(
+    report: &DirectEvaluationReportV1,
+    accepted_profile: &AcceptedRetrievalProfileV1,
+    evaluated_profile_id: &str,
+) -> Result<(), SemanticAcceptedProfileAuthorityErrorV1> {
+    let outputs = report
+        .raw_outputs
+        .iter()
+        .filter(|output| output.profile_id == evaluated_profile_id)
+        .collect::<Vec<_>>();
+    if outputs.is_empty() {
+        return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+    }
+    if let Some(semantic) = accepted_profile.compatibility().semantic.as_ref() {
+        for output in &outputs {
+            let resources = output
+                .native_resources
+                .as_ref()
+                .ok_or(SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+            for sample in resources.samples.values() {
+                let SemanticNativeStageResultV1::Complete(sample) = sample else {
+                    return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+                };
+                if sample.provenance.vector_generation_id.as_deref()
+                    != Some(semantic.vector_generation_id.as_digest().as_str())
+                    || sample.provenance.artifact_digest.as_deref()
+                        != Some(semantic.artifact_manifest_digest.as_str())
+                {
+                    return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+                }
+            }
+        }
+    }
+    if let Some(rerank) = accepted_profile.compatibility().rerank.as_ref() {
+        for output in outputs {
+            for query in &output.queries {
+                let native = query
+                    .native
+                    .as_ref()
+                    .ok_or(SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+                let SemanticNativeStageResultV1::Complete(execution) = &native.rerank.execution
+                else {
+                    return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+                };
+                if execution.artifact_manifest_digest != rerank.artifact_manifest_digest {
+                    return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+                }
+            }
+        }
+    }
+    Ok(())
 }

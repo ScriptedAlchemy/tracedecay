@@ -144,6 +144,22 @@ impl DaemonInvocationState {
         .await
     }
 
+    pub(super) async fn mount_core_query_authority_for_project(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        cursor_keys: &crate::global_db::session_temporal::GlobalDbCursorKeyProvider,
+    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
+    {
+        code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
+            &self.code_index_schedulers,
+            project_root,
+            scope,
+            cursor_keys,
+        )
+        .await
+    }
+
     pub(super) fn restore_initial_query_authority_for_project(
         &self,
         scope: tracedecay_application::ResolvedScope,

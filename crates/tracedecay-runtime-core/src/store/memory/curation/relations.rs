@@ -21,6 +21,7 @@ use crate::privacy::{
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use thiserror::Error;
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactCurationActionV1, FactEventId,
     FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, UtcMicros,
@@ -31,6 +32,14 @@ use tracedecay_store::{
     CompatibilityRelationProvenanceV1, FactStoreError, FactStoreResult, FactWriteBatch,
     StoredFactV1,
 };
+
+#[derive(Debug, Error)]
+#[error("invalid receipt-bound legacy relation provenance")]
+struct LegacyRelationProvenanceErrorV1 {
+    #[source]
+    source: serde_json::Error,
+}
+
 pub(super) fn compatibility_relation_label(relation: CompatibilityFactRelationV1) -> &'static str {
     match relation {
         CompatibilityFactRelationV1::Supports => "supports",
@@ -234,10 +243,10 @@ pub(super) async fn compatibility_legacy_relation_provenance(
     value: &Value,
 ) -> FactStoreResult<CompatibilityRelationProvenanceV1> {
     if value.get("metadata").is_some() || value.get("sanitization_receipt").is_some() {
-        return serde_json::from_value(value.clone()).map_err(|error| {
+        return serde_json::from_value(value.clone()).map_err(|source| {
             storage_error(
                 COMPATIBILITY_WRITE_OPERATION,
-                format!("invalid receipt-bound legacy relation provenance: {error}"),
+                LegacyRelationProvenanceErrorV1 { source },
             )
         });
     }

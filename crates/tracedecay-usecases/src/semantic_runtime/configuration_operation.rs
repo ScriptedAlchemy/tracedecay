@@ -149,6 +149,7 @@ impl SemanticEvaluationAuthorityPublicationV1 {
         let profile_digest = self.accepted_profile.profile_digest().clone();
         self.accepted_profiles
             .publish(
+                &expected.project_root,
                 self.report,
                 self.accepted_profile,
                 expected.runtime.clone(),
