@@ -447,6 +447,13 @@ impl DaemonSessionRuntimeRegistryV1 {
         Arc::clone(&self.remote_credential_authority)
     }
 
+    pub(crate) fn remote_replay_transaction(
+        &self,
+    ) -> Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>
+    {
+        Arc::clone(&self.remote_replay_transaction)
+    }
+
     pub(crate) async fn remote_recovery_authority(
         &self,
         node_id: &BrainNodeId,

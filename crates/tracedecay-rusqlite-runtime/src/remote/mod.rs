@@ -67,6 +67,7 @@ pub use recovery_authority::{
     RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
     RemoteRecoveryPhysicalEffectsV1, RemoteRecoverySqliteAuthorityV1,
 };
+pub use replay_authority::RemoteQueryAuthoritySnapshotV1;
 pub use replay_recovery::RemoteReplayStartupRecoveryV1;
 use rows::*;
 pub use schema::REMOTE_NODE_LOCAL_SCHEMA;

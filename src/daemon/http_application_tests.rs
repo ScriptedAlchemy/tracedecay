@@ -573,9 +573,11 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     })
     .to_string();
     let credentials = runtime.remote_credential_authority();
-    let remote =
-        super::remote_protocol::build_daemon_remote_protocol_router(Arc::clone(&credentials))
-            .expect("remote protocol router");
+    let remote = super::remote_protocol::build_daemon_remote_protocol_router(
+        Arc::clone(&credentials),
+        runtime.remote_replay_transaction(),
+    )
+    .expect("remote protocol router");
     let registry = DaemonHttpApplicationRegistry::default();
     registry
         .install_remote(remote, credentials, Some(Arc::clone(&runtime)))
@@ -621,9 +623,17 @@ async fn remote_protocol_mount_authenticates_before_json_and_outside_local_admis
             UserProfileId::new("profile.remote-http").expect("remote profile identity"),
         ),
     );
-    let router =
-        super::remote_protocol::build_daemon_remote_protocol_router(Arc::clone(&credentials))
-            .expect("remote protocol router");
+    let transaction = Arc::new(
+        super::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(
+            tokio::runtime::Handle::current(),
+        )
+        .expect("remote replay transaction authority"),
+    );
+    let router = super::remote_protocol::build_daemon_remote_protocol_router(
+        Arc::clone(&credentials),
+        transaction,
+    )
+    .expect("remote protocol router");
     registry
         .install_remote(router, credentials, None)
         .expect("install Remote Brain router");

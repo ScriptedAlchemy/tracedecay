@@ -5,7 +5,6 @@
 //! path, request body, or caller-supplied node identity can select a store.
 
 use std::collections::BTreeMap;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -27,14 +26,18 @@ use tracedecay_application::remote::protocol::{
 };
 use tracedecay_application::remote::protocol_owner::RemoteProtocolOwnerV1;
 use tracedecay_application::remote::query::{
-    RemoteQueryRequestV1, RemoteQueryResultV1, remote_exact_observation_query_result_contract_v1,
+    RemoteExactObservationQueryProtocolAdapterV1, RemoteExactObservationQueryServiceV1,
+    RemoteQueryRequestV1, RemoteQueryResultV1,
 };
 use tracedecay_application::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1, RemoteRecoveryProtocolOwnerV1,
     StagedRestoreConfirmationV1, StagedRestoreProgressV1,
 };
-use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_application::remote::replay::{
+    RemoteReplayOutcomeV1, RemoteReplayProtocolAdapterV1, RemoteReplayRequestV1,
+    RemoteReplayServiceV1,
+};
 use tracedecay_application::{CancellationSignal, RequestId, ResultContractRef};
 use tracedecay_domain::{
     BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1,
@@ -47,6 +50,8 @@ use tracedecay_rusqlite_runtime::remote::{
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::SchemaId;
 
+use crate::daemon::remote_query::DaemonRemoteExactObservationQueryPortV1;
+use crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
 use crate::errors::{Result, TraceDecayError};
 
 const MAX_REGISTERED_REMOTE_NODES: usize = 128;
@@ -466,9 +471,91 @@ impl RemoteEnrollmentProtocolPortV1 for DaemonRemoteEnrollmentProtocolPortV1 {
     }
 }
 
-struct UnavailableRemoteProtocolPortV1<Request, Output> {
-    contract: ResultContractRef,
-    _request: PhantomData<fn(Request) -> Output>,
+struct DaemonRemoteReplayProtocolPortV1 {
+    credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
+    transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
+}
+
+impl RemoteProtocolPortV1<RemoteReplayRequestV1> for DaemonRemoteReplayProtocolPortV1 {
+    type Output = RemoteReplayOutcomeV1;
+
+    fn execute(
+        &self,
+        request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<Self::Output> {
+        let request_id = request.request_id.clone();
+        let observed_at = request.sent_at;
+        let registered = match self
+            .credentials
+            .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
+        {
+            Ok(registered) => registered,
+            Err(_) => {
+                return unavailable_response(
+                    request_id,
+                    observed_at,
+                    remote_replay_result_contract_v1(),
+                );
+            }
+        };
+        let storage = Arc::new(registered.storage);
+        RemoteReplayProtocolAdapterV1::new(RemoteReplayServiceV1::new(
+            storage.clone(),
+            storage.clone(),
+            storage.clone(),
+            storage.clone(),
+            storage.clone(),
+            storage.clone(),
+            self.transaction.clone(),
+            storage,
+        ))
+        .execute(request, credential)
+    }
+}
+
+struct DaemonRemoteQueryProtocolPortV1 {
+    credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
+    targets: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
+}
+
+impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPortV1 {
+    type Output = RemoteQueryResultV1;
+
+    fn execute(
+        &self,
+        request: RemoteProtocolRequestV1<RemoteQueryRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<Self::Output> {
+        let request_id = request.request_id.clone();
+        let observed_at = request.sent_at;
+        let registered = match self
+            .credentials
+            .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
+        {
+            Ok(registered) => registered,
+            Err(_) => {
+                return unavailable_response(
+                    request_id,
+                    observed_at,
+                    tracedecay_application::remote::query::
+                        remote_exact_observation_query_result_contract_v1(),
+                );
+            }
+        };
+        let storage = Arc::new(registered.storage);
+        RemoteExactObservationQueryProtocolAdapterV1::new(
+            RemoteExactObservationQueryServiceV1::new(
+                storage.clone(),
+                storage.clone(),
+                Arc::new(DaemonRemoteExactObservationQueryPortV1::new(
+                    storage,
+                    Arc::clone(&self.targets),
+                )),
+            ),
+        )
+        .execute(request, credential)
+    }
 }
 
 struct DaemonRemoteRecoveryControlV1 {
@@ -596,31 +683,9 @@ macro_rules! impl_daemon_remote_recovery_protocol {
     };
 }
 
-impl<Request, Output> UnavailableRemoteProtocolPortV1<Request, Output> {
-    fn new(contract: ResultContractRef) -> Self {
-        Self {
-            contract,
-            _request: PhantomData,
-        }
-    }
-}
-
-impl<Request, Output> RemoteProtocolPortV1<Request>
-    for UnavailableRemoteProtocolPortV1<Request, Output>
-{
-    type Output = Output;
-
-    fn execute(
-        &self,
-        request: RemoteProtocolRequestV1<Request>,
-        _credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<Self::Output> {
-        unavailable_response(request.request_id, request.sent_at, self.contract.clone())
-    }
-}
-
 pub(crate) fn build_daemon_remote_protocol_router(
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
+    transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
 ) -> Result<Router> {
     let recovery = Arc::new(DaemonRemoteRecoveryProtocolPortV1 {
         credentials: Arc::clone(&credentials),
@@ -632,16 +697,14 @@ pub(crate) fn build_daemon_remote_protocol_router(
         Arc::new(DaemonRemoteEnrollmentProtocolPortV1 {
             credentials: Arc::clone(&credentials),
         }),
-        Arc::new(UnavailableRemoteProtocolPortV1::<
-            RemoteReplayRequestV1,
-            RemoteReplayOutcomeV1,
-        >::new(remote_replay_result_contract_v1())),
-        Arc::new(UnavailableRemoteProtocolPortV1::<
-            RemoteQueryRequestV1,
-            RemoteQueryResultV1,
-        >::new(
-            remote_exact_observation_query_result_contract_v1()
-        )),
+        Arc::new(DaemonRemoteReplayProtocolPortV1 {
+            credentials: Arc::clone(&credentials),
+            transaction: Arc::clone(&transaction),
+        }),
+        Arc::new(DaemonRemoteQueryProtocolPortV1 {
+            credentials: Arc::clone(&credentials),
+            targets: transaction,
+        }),
         recovery.clone(),
         recovery.clone(),
         recovery,

@@ -18,6 +18,7 @@ use tracedecay_application::remote::{
         RemoteCredentialClassV1, RemoteCredentialLookupErrorV1, RemoteCredentialLookupPortV1,
         RemoteCredentialUseV1,
     },
+    query::RemoteExactObservationQueryErrorV1,
     replay::{
         RemoteReplayApplicationErrorV1, RemoteReplayFrameLookupPortV1,
         RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidencePortV1,
@@ -651,6 +652,31 @@ fn capture_is_encrypted_and_idempotent() {
         !bytes
             .windows(b"plaintext-must-not-appear-in-spool".len())
             .any(|window| window == b"plaintext-must-not-appear-in-spool")
+    );
+}
+
+#[test]
+fn query_authority_snapshot_is_exactly_scope_and_registry_bound() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let writer = writer();
+    let authority =
+        tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(writer.authority.clone());
+    storage
+        .publish_authority(&authority, &writer, UtcMicros(10))
+        .unwrap();
+
+    let snapshot = storage
+        .query_authority_snapshot(&writer.scope, UtcMicros(11))
+        .unwrap();
+    assert_eq!(snapshot.authority, authority);
+    assert_eq!(snapshot.writer, writer);
+
+    let mut foreign_scope = writer.scope.clone();
+    foreign_scope.project_id = tracedecay_domain::ProjectId::new("project.foreign").unwrap();
+    assert_eq!(
+        storage.query_authority_snapshot(&foreign_scope, UtcMicros(11)),
+        Err(RemoteExactObservationQueryErrorV1::ScopeMismatch)
     );
 }
 
