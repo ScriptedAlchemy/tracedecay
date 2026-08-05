@@ -126,6 +126,12 @@ export function CoreSample({
             every row remains in the table
           </span>
         ) : null}
+        {payload.capped.nodes || payload.capped.edges ? (
+          <span className="text-3xs text-state-unknown">
+            server projection capped at {payload.limits.nodes} nodes / {payload.limits.edges}{' '}
+            edges; identities beyond that projection are not present in this sample or table
+          </span>
+        ) : null}
       </div>
       <div className="min-h-[24rem] overflow-x-auto border-b border-edge-subtle">
         <div className="flex min-w-max">
