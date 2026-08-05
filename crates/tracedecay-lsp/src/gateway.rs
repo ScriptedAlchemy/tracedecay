@@ -2203,6 +2203,10 @@ where
         &self.workspace
     }
 
+    pub(crate) fn replace_workspace(&mut self, workspace: AuthorizedLspWorkspace) {
+        self.workspace = workspace;
+    }
+
     pub fn root_for_document(
         &self,
         document_uri: &str,

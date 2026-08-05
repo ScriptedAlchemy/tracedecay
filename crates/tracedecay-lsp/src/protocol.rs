@@ -61,6 +61,7 @@ use crate::session::{
     LspRequestFailure, LspRequestId, LspSessionControl, MAX_PUBLICATION_BYTES,
     PublicationAdmission, SessionLifecycle,
 };
+use crate::workspace::{WorkspaceFolderMutation, WorkspaceFolderMutationApplyError};
 
 /// A protocol actor allows bounded synchronous work before returning a typed
 /// cancellation response. Long-running adapters receive the same deadline via
@@ -109,6 +110,7 @@ where
     diagnostics: DiagnosticsController<D>,
     context: ContextController,
     semantic: SemanticController,
+    pending_workspace_mutation: Option<WorkspaceFolderMutation>,
 }
 
 impl<P, S, D> DaemonLspProtocolSession<P, S, D>
@@ -170,6 +172,50 @@ where
                 SessionLifecycle::Exited | SessionLifecycle::Expired
             ),
         }
+    }
+
+    pub fn take_workspace_folder_mutation(&mut self) -> Option<WorkspaceFolderMutation> {
+        self.pending_workspace_mutation.take()
+    }
+
+    pub fn apply_workspace_folder_mutation(
+        &mut self,
+        mutation: &WorkspaceFolderMutation,
+        workspace: AuthorizedLspWorkspace,
+    ) -> Result<(), WorkspaceFolderMutationApplyError> {
+        if self.lifecycle.gateway.workspace().scope_set_digest()
+            != mutation.observed_scope_digest.as_ref()
+        {
+            return Err(WorkspaceFolderMutationApplyError::StaleWorkspace);
+        }
+        self.lifecycle.gateway.replace_workspace(workspace);
+        Ok(())
+    }
+
+    pub(crate) fn handle_workspace_folders_changed(
+        &mut self,
+        params: &Value,
+    ) -> Result<(), RpcFailure> {
+        self.require_ready()?;
+        if !self
+            .lifecycle
+            .gateway
+            .capabilities()
+            .workspace_folders_supported
+        {
+            return Err(RpcFailure::unavailable(
+                "workspace/didChangeWorkspaceFolders",
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            ));
+        }
+        if self.pending_workspace_mutation.is_some() {
+            return Err(RpcFailure::invalid_params(
+                "a workspace folder mutation is already pending",
+            ));
+        }
+        self.pending_workspace_mutation =
+            WorkspaceFolderMutation::parse(params, self.lifecycle.gateway.workspace())?;
+        Ok(())
     }
 
     /// Runs only coalesced overlay work. A daemon scheduler can call this when

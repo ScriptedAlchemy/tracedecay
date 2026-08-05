@@ -27,6 +27,7 @@ pub(crate) enum LspClientMethod {
     TextDocumentDidChange,
     TextDocumentDidClose,
     TextDocumentDidSave,
+    WorkspaceDidChangeWorkspaceFolders,
     TextDocumentDiagnostic,
     TextDocumentDeclaration,
     TextDocumentDefinition,
@@ -62,6 +63,7 @@ impl LspClientMethod {
             "textDocument/didChange" => Self::TextDocumentDidChange,
             "textDocument/didClose" => Self::TextDocumentDidClose,
             "textDocument/didSave" => Self::TextDocumentDidSave,
+            "workspace/didChangeWorkspaceFolders" => Self::WorkspaceDidChangeWorkspaceFolders,
             "textDocument/diagnostic" => Self::TextDocumentDiagnostic,
             "textDocument/declaration" => Self::TextDocumentDeclaration,
             "textDocument/definition" => Self::TextDocumentDefinition,
@@ -219,6 +221,9 @@ fn dispatch_notification<P, S, D>(
         }
         LspClientMethod::TextDocumentDidSave => {
             let _ = session.handle_did_save(&params, now_ms);
+        }
+        LspClientMethod::WorkspaceDidChangeWorkspaceFolders => {
+            let _ = session.handle_workspace_folders_changed(&params);
         }
         LspClientMethod::TraceDecayNativeDiagnostics => {
             session.handle_native_diagnostics_notification(&params, now_ms);
@@ -423,7 +428,8 @@ fn dispatch_request<P, S, D>(
         | LspClientMethod::TextDocumentDidOpen
         | LspClientMethod::TextDocumentDidChange
         | LspClientMethod::TextDocumentDidClose
-        | LspClientMethod::TextDocumentDidSave => {
+        | LspClientMethod::TextDocumentDidSave
+        | LspClientMethod::WorkspaceDidChangeWorkspaceFolders => {
             let _ = session.enqueue_value(error_response(
                 response_id,
                 RpcFailure {
