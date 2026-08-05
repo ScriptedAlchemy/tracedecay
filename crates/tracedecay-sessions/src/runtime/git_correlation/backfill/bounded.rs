@@ -416,7 +416,7 @@ async fn record_span_in_transaction<T: GitCorrelationWriteTxn>(
     control: &BoundedGitControl,
 ) -> Result<(), BoundedBackfillInterruption> {
     control.check()?;
-    super::record_span_observation_in_transaction(
+    super::super::record_span_observation_in_transaction(
         transaction,
         &SpanObservation {
             provider: row.provider.clone(),
@@ -444,7 +444,7 @@ async fn record_commit_in_transaction<T: GitCorrelationWriteTxn>(
     control: &BoundedGitControl,
 ) -> Result<bool, BoundedBackfillInterruption> {
     control.check()?;
-    let inserted = super::upsert_commit_session(
+    let inserted = super::super::upsert_commit_session(
         transaction,
         &CommitSessionRecord {
             commit_sha: sha.to_owned(),
