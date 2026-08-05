@@ -6,20 +6,20 @@ use tracedecay_lsp::{
     AdmittedRoot, IndexedWorkspaceDocument, IndexedWorkspaceDocuments, LspRuntimeFailure,
     LspRuntimeFuture, MAX_WORKSPACE_DIAGNOSTIC_RESULTS,
 };
-use tracedecay_usecases::lsp_support::LspWorkspaceDocumentIndexPort;
 use url::Url;
 
+use crate::application::lsp_runtime::LspWorkspaceDocumentIndexPort;
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 #[derive(Clone)]
-pub(super) struct PublishedCodeIndexWorkspaceDocuments {
+pub(in crate::daemon::service::invocation) struct PublishedCodeIndexWorkspaceDocuments {
     registry: CodeIndexSchedulerRegistryV1,
     scope: ResolvedScope,
     project_root: Option<PathBuf>,
 }
 
 impl PublishedCodeIndexWorkspaceDocuments {
-    pub(super) fn new(
+    pub(in crate::daemon::service::invocation) fn new(
         registry: CodeIndexSchedulerRegistryV1,
         scope: ResolvedScope,
         project_root: PathBuf,

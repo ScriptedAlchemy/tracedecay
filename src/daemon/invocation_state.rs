@@ -13,6 +13,8 @@ use tracedecay_lsp::LspSessionRegistry;
 
 use crate::errors::{Result, TraceDecayError};
 
+use super::lsp_sessions::registered_lsp_root_selectors_for_uris;
+use super::service::invocation::now_millis;
 use super::*;
 
 /// Daemon-generation-local state for the closed invocation protocol.
@@ -888,7 +890,7 @@ impl DaemonInvocationState {
                 .pending_lsp_workspace_mutation(
                     &self.lsp_session_registry,
                     session.clone(),
-                    service::invocation::now_millis(),
+                    now_millis(),
                 )
                 .await
             {
@@ -900,7 +902,7 @@ impl DaemonInvocationState {
                             mutation,
                             &deadline,
                             &cancellation,
-                            service::invocation::now_millis(),
+                            now_millis(),
                         )
                         .await
                     {
