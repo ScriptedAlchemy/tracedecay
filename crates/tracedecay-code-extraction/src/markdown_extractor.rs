@@ -35,10 +35,13 @@ struct ExtractionState {
     /// One inline parser, lazily initialised, reused for every `(inline)`
     /// node we encounter to avoid re-creating it per heading/paragraph.
     inline_parser: Option<Parser>,
+    /// The supplied block tree cannot represent the inline grammar. Retained
+    /// extraction disables this path and reports a typed reset.
+    extract_inline_links: bool,
 }
 
 impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+    fn new(file_path: &str, source: &str, extract_inline_links: bool) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -51,6 +54,7 @@ impl ExtractionState {
             timestamp,
             node_stack: Vec::new(),
             inline_parser: None,
+            extract_inline_links,
         }
     }
 
@@ -65,6 +69,9 @@ impl ExtractionState {
     /// byte/row positions are anchored in the original source via
     /// `set_included_ranges`.
     fn parse_inline(&mut self, inline_node: TsNode<'_>) -> Option<Tree> {
+        if !self.extract_inline_links {
+            return None;
+        }
         let parser = self.inline_parser.get_or_insert_with(|| {
             let mut p = Parser::new();
             let _ =
@@ -87,8 +94,43 @@ impl ExtractionState {
 impl MarkdownExtractor {
     pub fn extract_markdown(file_path: &str, source: &str) -> ExtractionResult {
         let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
+        let mut state = ExtractionState::new(file_path, source, true);
+        Self::add_file_node(&mut state, file_path, source);
 
+        if let Ok(tree) = Self::parse(source) {
+            Self::visit(&mut state, tree.root_node());
+        }
+
+        Self::build_result(state, start)
+    }
+
+    fn extract_supplied_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source, false);
+        Self::add_file_node(&mut state, file_path, source);
+
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit(&mut state, child);
+        });
+
+        // Links require a second inline-language parse, which the supplied
+        // block tree cannot represent. This output is therefore not a valid
+        // incremental delta and must force a cold extraction upstream.
+        crate::parsed_extraction::ParsedExtraction {
+            result: Self::build_result(state, start),
+            disposition: crate::parsed_extraction::ParsedExtractionDisposition::Reset {
+                reason: crate::parsed_extraction::ParsedExtractionResetReason::CompositeGrammar,
+            },
+            metrics,
+        }
+    }
+
+    fn add_file_node(state: &mut ExtractionState, file_path: &str, source: &str) {
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -119,12 +161,9 @@ impl MarkdownExtractor {
         state
             .node_stack
             .push((file_path.to_string(), file_node_id, 0));
+    }
 
-        if let Ok(tree) = Self::parse(source) {
-            let root = tree.root_node();
-            Self::visit(&mut state, root);
-        }
-
+    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {
             nodes: state.nodes,
             edges: state.edges,
@@ -396,5 +435,15 @@ impl crate::LanguageExtractor for MarkdownExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_markdown(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_supplied_tree(file_path, source, tree, scope)
     }
 }

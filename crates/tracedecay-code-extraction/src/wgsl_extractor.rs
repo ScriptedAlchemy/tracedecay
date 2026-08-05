@@ -65,16 +65,32 @@ impl ExtractionState {
 
 impl WgslExtractor {
     pub fn extract_source(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
+
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -105,11 +121,16 @@ impl WgslExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     fn parse_source(source: &str) -> Result<Tree, String> {
@@ -121,18 +142,6 @@ impl WgslExtractor {
         parser
             .parse(source, None)
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
-    }
-
-    fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                Self::visit_node(state, cursor.node());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -561,5 +570,15 @@ impl crate::LanguageExtractor for WgslExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         WgslExtractor::extract_source(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        WgslExtractor::extract_tree(file_path, source, tree, scope)
     }
 }

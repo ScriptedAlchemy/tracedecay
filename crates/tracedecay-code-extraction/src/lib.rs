@@ -4,6 +4,8 @@
 //! Sanitized intake capabilities, generation authority, exact admission, and
 //! publication remain in `tracedecay-code-index`.
 
+use std::borrow::Cow;
+
 mod types;
 
 // Lite — always available (no cfg needed)
@@ -209,7 +211,7 @@ pub use wgsl_extractor::WgslExtractor;
 pub use zig_extractor::ZigExtractor;
 
 use crate::types::ExtractionResult;
-use parsed_extraction::{ParsedExtraction, ParsedExtractionResetReason, ParsedExtractionScope};
+use parsed_extraction::{ParsedExtraction, ParsedExtractionScope};
 use tree_sitter::Tree;
 
 /// Trait for language-specific source code extractors.
@@ -223,6 +225,34 @@ pub trait LanguageExtractor: Send + Sync {
     /// Human-readable language name.
     fn language_name(&self) -> &str;
 
+    /// Grammar key used by the shared retained parser for this path.
+    fn retained_grammar_key(&self, file_path: &str) -> String {
+        match self.language_name() {
+            "Astro" | "Svelte" => "typescript".to_owned(),
+            "C#" => "c_sharp".to_owned(),
+            "C++" | "Metal" => "cpp".to_owned(),
+            "F#" => "fsharp".to_owned(),
+            "GW-BASIC" => "gwbasic".to_owned(),
+            "MS BASIC 2.0" => "msbasic2".to_owned(),
+            "Objective-C" => "objc".to_owned(),
+            "QuickBASIC" => "qbasic".to_owned(),
+            "TypeScript" => match file_path.rsplit('.').next() {
+                Some("tsx") => "tsx".to_owned(),
+                Some("js" | "jsx") => "javascript".to_owned(),
+                _ => "typescript".to_owned(),
+            },
+            "VB.NET" => "vbnet".to_owned(),
+            language => language.to_ascii_lowercase(),
+        }
+    }
+
+    /// Source presented to the retained grammar. Composite adapters may mask
+    /// non-code bytes, but must preserve exact byte length and newline offsets
+    /// so InputEdit and source positions remain authoritative.
+    fn prepare_parse_source<'a>(&self, source: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(source)
+    }
+
     /// Extract nodes, edges, and unresolved refs from source code.
     ///
     /// `file_path` is the relative path used for qualified names and node IDs.
@@ -232,22 +262,13 @@ pub trait LanguageExtractor: Send + Sync {
     /// Extract from the shared retained tree. Implementations traverse only
     /// the requested complete top-level regions and never acquire a parser.
     ///
-    /// The default is a truthful typed reset while adapters are migrated. It
-    /// remains correct, but callers can distinguish it from retained-tree
-    /// extraction and must never count it as incremental work.
     fn extract_parsed(
         &self,
         file_path: &str,
         source: &str,
-        _tree: &Tree,
-        _scope: ParsedExtractionScope<'_>,
-    ) -> ParsedExtraction {
-        ParsedExtraction::reset(
-            self.extract(file_path, source),
-            ParsedExtractionResetReason::AdapterColdParserFallback,
-            source.len(),
-        )
-    }
+        tree: &Tree,
+        scope: ParsedExtractionScope<'_>,
+    ) -> ParsedExtraction;
 }
 
 /// Registry of all available language extractors.

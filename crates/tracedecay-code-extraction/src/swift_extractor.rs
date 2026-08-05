@@ -77,15 +77,33 @@ impl SwiftExtractor {
     /// `source` is the Swift source code to parse.
     pub fn extract_swift(file_path: &str, source: &str) -> ExtractionResult {
         let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+            start,
+        )
+        .result
+    }
+
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+        start: Instant,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let mut state = ExtractionState::new(file_path, source);
 
         // Create the File root node.
         let file_node = Node {
@@ -117,13 +135,17 @@ impl SwiftExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -1413,5 +1435,71 @@ impl crate::LanguageExtractor for SwiftExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_swift(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope, Instant::now())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        incremental::ParseChangedRange,
+        parsed_extraction::{ParsedExtractionDisposition, ParsedExtractionScope},
+    };
+
+    #[test]
+    fn parsed_extraction_limits_swift_to_changed_top_level_declaration() {
+        let source = "func untouched() {}\n\nfunc changed() {}\n";
+        let tree = SwiftExtractor::parse_source(source).expect("parse Swift source");
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        let changed = root
+            .children(&mut cursor)
+            .find(|node| {
+                node.kind() == "function_declaration"
+                    && source[node.start_byte()..node.end_byte()].contains("changed")
+            })
+            .expect("changed top-level Swift declaration");
+        let range = ParseChangedRange {
+            start_byte: changed.start_byte().saturating_add(1),
+            end_byte: changed.end_byte().saturating_sub(1),
+            start_position: changed.start_position().into(),
+            end_position: changed.end_position().into(),
+        };
+
+        let extracted = crate::LanguageExtractor::extract_parsed(
+            &SwiftExtractor,
+            "sample.swift",
+            source,
+            &tree,
+            ParsedExtractionScope::ChangedRegions(&[range]),
+        );
+
+        assert_eq!(
+            extracted.disposition,
+            ParsedExtractionDisposition::ChangedRegions
+        );
+        assert_eq!(extracted.metrics.visited_top_level_nodes, 1);
+        assert_eq!(
+            extracted.metrics.visited_bytes,
+            changed.end_byte() - changed.start_byte()
+        );
+        let functions = extracted
+            .result
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Function)
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(functions, vec!["changed"]);
     }
 }

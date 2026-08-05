@@ -21,8 +21,8 @@ pub enum ParsedExtractionScope<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParsedExtractionResetReason {
-    AdapterColdParserFallback,
     ChangedRootIdentity,
+    CompositeGrammar,
     FullReplacement,
     LanguageChanged,
     MissingPriorExtraction,
@@ -136,6 +136,9 @@ pub(crate) fn merge_changed_extraction(
     old_start_row: u32,
     old_end_row: u32,
 ) -> Option<ExtractionResult> {
+    if !previous.errors.is_empty() || !delta.errors.is_empty() {
+        return None;
+    }
     let _delta_file = delta
         .nodes
         .iter()

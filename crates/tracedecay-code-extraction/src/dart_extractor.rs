@@ -76,16 +76,32 @@ impl DartExtractor {
     /// `file_path` is used for qualified names and node IDs (not for I/O).
     /// `source` is the Dart source code to parse.
     pub fn extract_dart(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
+
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
 
         // Create the File root node.
         let file_node = Node {
@@ -117,13 +133,17 @@ impl DartExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST using the program-level visitor.
-        let root = tree.root_node();
-        Self::visit_program_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_program_child(&mut state, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -138,51 +158,40 @@ impl DartExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit children of the program node. In Dart's grammar, top-level items
-    /// like `function_signature` + `function_body` appear as siblings at the program level.
-    fn visit_program_children(state: &mut ExtractionState, node: TsNode<'_>) {
-        let mut cursor = node.walk();
-        if !cursor.goto_first_child() {
-            return;
-        }
-
-        loop {
-            let child = cursor.node();
-            match child.kind() {
-                "library_name" => Self::visit_library(state, child),
-                "import_or_export" => Self::visit_import(state, child),
-                "class_definition" | "class_declaration" => Self::visit_class(state, child),
-                "mixin_declaration" => Self::visit_mixin(state, child),
-                "extension_declaration" => Self::visit_extension(state, child),
-                "enum_declaration" => Self::visit_enum(state, child),
-                "type_alias" => Self::visit_type_alias(state, child),
-                "function_signature" => {
-                    // Top-level function: function_signature followed by function_body sibling.
-                    let body = child
-                        .next_named_sibling()
-                        .filter(|s| s.kind() == "function_body");
-                    Self::visit_top_level_function(state, child, body);
-                }
-                "function_declaration" => {
-                    // tree-sitter-dart 0.2 wraps top-level functions in
-                    // `function_declaration { function_signature, function_body }`.
-                    if let Some(sig) = find_direct_child_by_kind(child, "function_signature") {
-                        let body = find_direct_child_by_kind(child, "function_body");
-                        Self::visit_top_level_function(state, sig, body);
-                    }
-                }
-                "declaration" => Self::visit_declaration(state, child),
-                // tree-sitter-dart 0.1 misparses `library foo;` as a variable
-                // declaration with type `library`. Detect that shape and treat
-                // it as a library directive.
-                "top_level_variable_declaration" if Self::is_library_directive(state, child) => {
-                    Self::visit_library_misparse(state, child);
-                }
-                _ => {}
+    /// Visit one top-level program child. Dart's grammar can represent a
+    /// top-level function as sibling signature and body nodes.
+    fn visit_program_child(state: &mut ExtractionState, child: TsNode<'_>) {
+        match child.kind() {
+            "library_name" => Self::visit_library(state, child),
+            "import_or_export" => Self::visit_import(state, child),
+            "class_definition" | "class_declaration" => Self::visit_class(state, child),
+            "mixin_declaration" => Self::visit_mixin(state, child),
+            "extension_declaration" => Self::visit_extension(state, child),
+            "enum_declaration" => Self::visit_enum(state, child),
+            "type_alias" => Self::visit_type_alias(state, child),
+            "function_signature" => {
+                // Top-level function: function_signature followed by function_body sibling.
+                let body = child
+                    .next_named_sibling()
+                    .filter(|s| s.kind() == "function_body");
+                Self::visit_top_level_function(state, child, body);
             }
-            if !cursor.goto_next_sibling() {
-                break;
+            "function_declaration" => {
+                // tree-sitter-dart 0.2 wraps top-level functions in
+                // `function_declaration { function_signature, function_body }`.
+                if let Some(sig) = find_direct_child_by_kind(child, "function_signature") {
+                    let body = find_direct_child_by_kind(child, "function_body");
+                    Self::visit_top_level_function(state, sig, body);
+                }
             }
+            "declaration" => Self::visit_declaration(state, child),
+            // tree-sitter-dart 0.1 misparses `library foo;` as a variable
+            // declaration with type `library`. Detect that shape and treat
+            // it as a library directive.
+            "top_level_variable_declaration" if Self::is_library_directive(state, child) => {
+                Self::visit_library_misparse(state, child);
+            }
+            _ => {}
         }
     }
 
@@ -1853,5 +1862,15 @@ impl crate::LanguageExtractor for DartExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         DartExtractor::extract_dart(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        DartExtractor::extract_tree(file_path, source, tree, scope)
     }
 }

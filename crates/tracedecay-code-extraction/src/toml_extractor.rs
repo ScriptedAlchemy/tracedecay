@@ -49,9 +49,46 @@ impl ExtractionState {
 
 impl TomlExtractor {
     pub fn extract_toml(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
+        let tree = match Self::parse(source) {
+            Ok(tree) => tree,
+            Err(_msg) => {
+                return Self::build_result(
+                    Self::initialize_state(file_path, source),
+                    Instant::now(),
+                );
+            }
+        };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
 
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = Self::initialize_state(file_path, source);
+
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
+
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
+    }
+
+    fn initialize_state(file_path: &str, source: &str) -> ExtractionState {
+        let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
             kind: NodeKind::File,
@@ -78,11 +115,10 @@ impl TomlExtractor {
             parent_id: None,
         };
         state.nodes.push(file_node);
+        state
+    }
 
-        if let Ok(tree) = Self::parse(source) {
-            Self::visit_document(&mut state, tree.root_node());
-        }
-
+    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {
             nodes: state.nodes,
             edges: state.edges,
@@ -103,23 +139,13 @@ impl TomlExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    fn visit_document(state: &mut ExtractionState, root: TsNode<'_>) {
-        let mut cursor = root.walk();
-        if !cursor.goto_first_child() {
-            return;
-        }
+    fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         let file_id = state.file_node_id.clone();
         let file_qn = state.file_path.clone();
-        loop {
-            let child = cursor.node();
-            match child.kind() {
-                "pair" => Self::emit_pair(state, child, &file_id, &file_qn),
-                "table" | "table_array_element" => Self::emit_table(state, child),
-                _ => {}
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
+        match node.kind() {
+            "pair" => Self::emit_pair(state, node, &file_id, &file_qn),
+            "table" | "table_array_element" => Self::emit_table(state, node),
+            _ => {}
         }
     }
 
@@ -283,5 +309,15 @@ impl crate::LanguageExtractor for TomlExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_toml(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

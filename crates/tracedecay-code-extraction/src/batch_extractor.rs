@@ -91,16 +91,33 @@ impl BatchExtractor {
     /// `file_path` is used for qualified names and node IDs (not for I/O).
     /// `source` is the Batch source code to parse.
     pub fn extract_batch(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
+
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
 
         // Create the File root node.
         let file_node = Node {
@@ -132,13 +149,18 @@ impl BatchExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_top_level(&mut state, root);
+        let children = collect_children(tree.root_node());
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_root_child(&mut state, &children, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -153,7 +175,7 @@ impl BatchExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Visit all top-level children of the root program node.
+    /// Visit one top-level child of the root program node.
     ///
     /// Batch files use labels as function-like constructs. Labels are top-level
     /// siblings in the AST (not containers). We group code between consecutive
@@ -164,19 +186,20 @@ impl BatchExtractor {
     /// `root.child(i)` repeatedly — tree-sitter's `child(i)` is O(i), so the
     /// previous index loops were O(N²) on large `.bat` files. See `complexity.rs`
     /// for the same fix on the universal hot path.
-    fn visit_top_level(state: &mut ExtractionState, root: TsNode<'_>) {
-        let children = collect_children(root);
-
-        for (i, child) in children.iter().enumerate() {
-            match child.kind() {
-                "label" => {
-                    Self::visit_label(state, &children, i);
+    fn visit_root_child(state: &mut ExtractionState, children: &[TsNode<'_>], child: TsNode<'_>) {
+        match child.kind() {
+            "label" => {
+                if let Some(index) = children
+                    .iter()
+                    .position(|candidate| candidate.id() == child.id())
+                {
+                    Self::visit_label(state, children, index);
                 }
-                "variable_assignment" => {
-                    Self::visit_variable_assignment(state, *child);
-                }
-                _ => {}
             }
+            "variable_assignment" => {
+                Self::visit_variable_assignment(state, child);
+            }
+            _ => {}
         }
     }
 
@@ -342,9 +365,8 @@ impl BatchExtractor {
     /// Extract docstrings from `REM` or `::` comment lines preceding a label.
     ///
     /// Looks backward from the label's position in the root children list
-    /// for consecutive comment nodes. Takes a `&[TsNode]` slice (built once
-    /// by `visit_top_level`) instead of the root node — see the cursor
-    /// rationale on `visit_top_level`.
+    /// for consecutive comment nodes. Takes the root child slice materialized
+    /// by `extract_tree` rather than repeatedly walking sibling links.
     fn extract_docstring(
         state: &ExtractionState,
         children: &[TsNode<'_>],
@@ -475,5 +497,32 @@ impl crate::LanguageExtractor for BatchExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_batch(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        match scope {
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument => {
+                Self::extract_tree(file_path, source, tree, scope)
+            }
+            crate::parsed_extraction::ParsedExtractionScope::ChangedRegions(_) => {
+                let full = Self::extract_tree(
+                    file_path,
+                    source,
+                    tree,
+                    crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+                );
+                crate::parsed_extraction::ParsedExtraction::reset(
+                    full.result,
+                    crate::parsed_extraction::ParsedExtractionResetReason::ChangedRootIdentity,
+                    source.len(),
+                )
+            }
+        }
     }
 }
