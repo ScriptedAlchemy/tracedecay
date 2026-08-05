@@ -282,15 +282,17 @@ pub(in super::super) fn scan_reflog_chunk(
         }
     }
     if !complete && earliest_processed == 0 {
-        let segment_end = cursor.segment_end;
-        push_segment(
-            &mut cursor,
-            &mut segments,
-            &state,
-            window_start,
-            segment_end,
-            segment_tip,
-        )?;
+        if !segment_tip.is_null() {
+            let segment_end = cursor.segment_end;
+            push_segment(
+                &mut cursor,
+                &mut segments,
+                &state,
+                window_start,
+                segment_end,
+                segment_tip,
+            )?;
+        }
         complete = true;
     }
     cursor.byte_offset = earliest_processed;

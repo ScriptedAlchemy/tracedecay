@@ -76,6 +76,16 @@ fn repository_fixture() -> tempfile::TempDir {
     fixture
 }
 
+fn head_commit_time(path: &Path) -> i64 {
+    gix::discover(path)
+        .unwrap()
+        .head_commit()
+        .unwrap()
+        .time()
+        .unwrap()
+        .seconds
+}
+
 async fn prepare_store(path: &Path, project_path: &Path) -> TestStore {
     let store = TestStore::open(path);
     crate::runtime::git_correlation::ensure_git_correlation_schema(&store.connection)
@@ -196,14 +206,16 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
 #[tokio::test]
 async fn activity_change_finishes_sealed_candidate_before_newer_row() {
     let repository = repository_fixture();
+    let old_activity = head_commit_time(repository.path());
+    let new_activity = old_activity.checked_add(1).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("sessions.db");
     let store = prepare_store(&database, repository.path()).await;
     store
         .connection
         .execute(
-            "UPDATE sessions SET ended_at = 100 WHERE session_id = 'session-1'",
-            (),
+            "UPDATE sessions SET ended_at = ?1 WHERE session_id = 'session-1'",
+            params![old_activity],
         )
         .await
         .unwrap();
@@ -224,14 +236,14 @@ async fn activity_change_finishes_sealed_candidate_before_newer_row() {
             "SELECT activity_timestamp FROM git_history_index_progress"
         )
         .await,
-        100
+        old_activity
     );
 
     store
         .connection
         .execute(
-            "UPDATE sessions SET ended_at = 200 WHERE session_id = 'session-1'",
-            (),
+            "UPDATE sessions SET ended_at = ?1 WHERE session_id = 'session-1'",
+            params![new_activity],
         )
         .await
         .unwrap();
@@ -242,7 +254,7 @@ async fn activity_change_finishes_sealed_candidate_before_newer_row() {
     )
     .await
     .unwrap();
-    assert_eq!(resumed.frontier.activity_timestamp, 100);
+    assert_eq!(resumed.frontier.activity_timestamp, old_activity);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
@@ -255,21 +267,25 @@ async fn activity_change_finishes_sealed_candidate_before_newer_row() {
     )
     .await
     .unwrap();
-    assert_eq!(newer.frontier.activity_timestamp, 200);
+    assert_eq!(newer.frontier.activity_timestamp, new_activity);
 }
 
 #[tokio::test]
 async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_clears_it() {
     let malformed_repository = repository_fixture();
     let valid_repository = repository_fixture();
+    let malformed_activity = head_commit_time(malformed_repository.path());
+    let valid_activity =
+        head_commit_time(valid_repository.path()).max(malformed_activity.checked_add(1).unwrap());
+    let recovered_activity = valid_activity.checked_add(1).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("sessions.db");
     let store = prepare_store(&database, malformed_repository.path()).await;
     store
         .connection
         .execute(
-            "UPDATE sessions SET ended_at = 100 WHERE session_id = 'session-1'",
-            (),
+            "UPDATE sessions SET ended_at = ?1 WHERE session_id = 'session-1'",
+            params![malformed_activity],
         )
         .await
         .unwrap();
@@ -277,8 +293,8 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
         .connection
         .execute(
             "INSERT INTO sessions(provider, session_id, project_path, started_at, ended_at)
-             VALUES ('codex', 'session-2', ?1, 0, 200)",
-            params![valid_repository.path().to_str().unwrap()],
+             VALUES ('codex', 'session-2', ?1, 0, ?2)",
+            params![valid_repository.path().to_str().unwrap(), valid_activity],
         )
         .await
         .unwrap();
@@ -298,7 +314,7 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
     .await
     .unwrap();
     assert_eq!(outcome.interruption, None);
-    assert_eq!(outcome.frontier.activity_timestamp, 200);
+    assert_eq!(outcome.frontier.activity_timestamp, valid_activity);
     assert_eq!(outcome.stats.skipped_git_error, 1);
     assert_eq!(outcome.unresolved_failures, 1);
     assert_eq!(outcome.remaining_sessions, 0);
@@ -319,8 +335,8 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
     store
         .connection
         .execute(
-            "UPDATE sessions SET ended_at = 300 WHERE session_id = 'session-1'",
-            (),
+            "UPDATE sessions SET ended_at = ?1 WHERE session_id = 'session-1'",
+            params![recovered_activity],
         )
         .await
         .unwrap();
@@ -331,7 +347,7 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
     )
     .await
     .unwrap();
-    assert_eq!(recovered.frontier.activity_timestamp, 300);
+    assert_eq!(recovered.frontier.activity_timestamp, recovered_activity);
     assert_eq!(recovered.unresolved_failures, 0);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_failures").await,
