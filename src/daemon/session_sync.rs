@@ -78,15 +78,14 @@ struct SessionSyncProjectContext {
 
 enum SessionSyncWorkResult {
     Finished {
+        interruption: Option<work::SessionSyncInterruption>,
         committed: bool,
         stats: SessionSyncStatsV1,
         coverage: Vec<SessionSyncSourceCoverageV1>,
         source_frontiers: Vec<SessionSyncSourceFrontierV1>,
         failure_codes: Vec<String>,
     },
-    Cancelled,
-    TimedOut,
-    Shutdown,
+    Interrupted(work::SessionSyncInterruption),
 }
 
 impl Default for DaemonSessionSyncService {
@@ -545,18 +544,13 @@ impl DaemonSessionSyncService {
         };
         drop(permit);
         match work {
-            SessionSyncWorkResult::Shutdown => {}
-            SessionSyncWorkResult::Cancelled => {
-                let _ = self
-                    .persist_interruption(&context, &key, OperationTermination::Cancelled)
-                    .await;
-            }
-            SessionSyncWorkResult::TimedOut => {
-                let _ = self
-                    .persist_interruption(&context, &key, OperationTermination::TimedOut)
-                    .await;
+            SessionSyncWorkResult::Interrupted(interruption) => {
+                if let Some(termination) = interruption.termination() {
+                    let _ = self.persist_interruption(&context, &key, termination).await;
+                }
             }
             SessionSyncWorkResult::Finished {
+                interruption,
                 committed,
                 stats,
                 coverage,
@@ -566,6 +560,7 @@ impl DaemonSessionSyncService {
                 let coverage_complete = !coverage.is_empty()
                     && coverage.iter().all(|entry| entry.coverage.is_complete());
                 let termination = completion_termination(
+                    interruption.and_then(work::SessionSyncInterruption::termination),
                     committed,
                     &stats,
                     coverage_complete,
@@ -892,12 +887,15 @@ fn decode_matching_journal(
 }
 
 fn completion_termination(
+    requested: Option<OperationTermination>,
     committed: bool,
     stats: &SessionSyncStatsV1,
     coverage_complete: bool,
     failures_empty: bool,
 ) -> OperationTermination {
-    if failures_empty && coverage_complete {
+    if let Some(requested) = requested {
+        requested
+    } else if failures_empty && coverage_complete {
         OperationTermination::Completed
     } else if committed || stats != &SessionSyncStatsV1::default() {
         OperationTermination::Partial

@@ -1,5 +1,30 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) enum SessionSyncInterruption {
+    Cancelled,
+    TimedOut,
+    Shutdown,
+}
+
+impl SessionSyncInterruption {
+    pub(super) const fn termination(self) -> Option<OperationTermination> {
+        match self {
+            Self::Cancelled => Some(OperationTermination::Cancelled),
+            Self::TimedOut => Some(OperationTermination::TimedOut),
+            Self::Shutdown => None,
+        }
+    }
+
+    const fn git_after_commit_reason(self) -> &'static str {
+        match self {
+            Self::Cancelled => "git_sync_cancelled_after_commit",
+            Self::TimedOut => "git_sync_timed_out_after_commit",
+            Self::Shutdown => "git_sync_shutdown_after_commit",
+        }
+    }
+}
+
 impl DaemonSessionSyncService {
     pub(super) async fn recover_project(
         &self,
@@ -637,13 +662,13 @@ impl SessionSyncProjectContext {
                 () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
                     if shutdown.is_cancelled() {
                         cancellation.cancel();
-                        interrupted = Some(SessionSyncWorkResult::Shutdown);
+                        interrupted = Some(SessionSyncInterruption::Shutdown);
                     } else if request.cancellation().is_cancelled() {
                         cancellation.cancel();
-                        interrupted = Some(SessionSyncWorkResult::Cancelled);
+                        interrupted = Some(SessionSyncInterruption::Cancelled);
                     } else if request.deadline().is_elapsed_at(now_micros()) {
                         cancellation.cancel();
-                        interrupted = Some(SessionSyncWorkResult::TimedOut);
+                        interrupted = Some(SessionSyncInterruption::TimedOut);
                     }
                 }
             }
@@ -665,6 +690,7 @@ impl SessionSyncProjectContext {
         let source_frontiers = source_frontiers.unwrap_or(project_frontiers);
         if committed {
             return SessionSyncWorkResult::Finished {
+                interruption: interrupted,
                 committed: true,
                 stats,
                 coverage,
@@ -673,8 +699,9 @@ impl SessionSyncProjectContext {
             };
         }
         match interrupted {
-            Some(interrupted) => interrupted,
+            Some(interrupted) => SessionSyncWorkResult::Interrupted(interrupted),
             None => SessionSyncWorkResult::Finished {
+                interruption: None,
                 committed: false,
                 stats,
                 coverage,
@@ -691,13 +718,13 @@ impl SessionSyncProjectContext {
         shutdown: &crate::application::observation::ObservationCancellation,
     ) -> SessionSyncWorkResult {
         if shutdown.is_cancelled() {
-            return SessionSyncWorkResult::Shutdown;
+            return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::Shutdown);
         }
         if request.cancellation().is_cancelled() {
-            return SessionSyncWorkResult::Cancelled;
+            return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::Cancelled);
         }
         if request.deadline().is_elapsed_at(now_micros()) {
-            return SessionSyncWorkResult::TimedOut;
+            return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::TimedOut);
         }
         let cancellation = crate::application::observation::ObservationCancellation::default();
         let control = crate::sessions::git_correlation::BoundedGitControl::new(
@@ -721,101 +748,23 @@ impl SessionSyncProjectContext {
                 () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
                     if shutdown.is_cancelled() {
                         cancellation.cancel();
-                        requested_interruption = Some(SessionSyncWorkResult::Shutdown);
+                        requested_interruption = Some(SessionSyncInterruption::Shutdown);
                     } else if request.cancellation().is_cancelled() {
                         cancellation.cancel();
-                        requested_interruption = Some(SessionSyncWorkResult::Cancelled);
+                        requested_interruption = Some(SessionSyncInterruption::Cancelled);
                     } else if request.deadline().is_elapsed_at(now_micros()) {
                         cancellation.cancel();
-                        requested_interruption = Some(SessionSyncWorkResult::TimedOut);
+                        requested_interruption = Some(SessionSyncInterruption::TimedOut);
                     }
                 }
             }
         };
         match result {
-            Ok(outcome) => {
-                let stats = SessionSyncStatsV1 {
-                    sessions_scanned: saturating_usize_to_u64(outcome.stats.sessions_scanned),
-                    spans_written: saturating_usize_to_u64(outcome.stats.spans_written),
-                    commits_attributed: saturating_usize_to_u64(outcome.stats.commits_attributed),
-                    skipped: saturating_usize_to_u64(outcome.stats.skipped_total()),
-                    ..SessionSyncStatsV1::default()
-                };
-                let interrupted =
-                    outcome.interruption.is_some() || requested_interruption.is_some();
-                if interrupted && !outcome.committed {
-                    let reason_code = outcome
-                        .interruption
-                        .map(git_history_interruption_reason)
-                        .unwrap_or("git_sync_interrupted");
-                    let mut failure_codes = vec![reason_code.to_owned()];
-                    if outcome.unresolved_failures > 0 {
-                        failure_codes.push("git_source_failed".to_owned());
-                    }
-                    return requested_interruption.unwrap_or(SessionSyncWorkResult::Finished {
-                        committed: false,
-                        stats,
-                        coverage: vec![SessionSyncSourceCoverageV1 {
-                            store_scope: "git".to_owned(),
-                            coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
-                        }],
-                        source_frontiers: Vec::new(),
-                        failure_codes,
-                    });
-                }
-                let git_errors = saturating_usize_to_u64(outcome.stats.skipped_git_error);
-                let remaining_work = outcome
-                    .remaining_sessions
-                    .max(git_errors)
-                    .max(outcome.unresolved_failures)
-                    .max(u64::from(interrupted));
-                let coverage = if remaining_work > 0 {
-                    SessionSyncCoverageV1::Partial {
-                        deferred_units: remaining_work,
-                    }
-                } else {
-                    SessionSyncCoverageV1::Complete
-                };
-                let mut failure_codes = Vec::new();
-                if interrupted {
-                    failure_codes.push(match requested_interruption {
-                        Some(SessionSyncWorkResult::Cancelled) => {
-                            "git_sync_cancelled_after_commit".to_owned()
-                        }
-                        Some(SessionSyncWorkResult::TimedOut) => {
-                            "git_sync_timed_out_after_commit".to_owned()
-                        }
-                        Some(SessionSyncWorkResult::Shutdown) => {
-                            "git_sync_shutdown_after_commit".to_owned()
-                        }
-                        _ => outcome
-                            .interruption
-                            .map(git_history_interruption_reason)
-                            .unwrap_or("git_sync_interrupted")
-                            .to_owned(),
-                    });
-                }
-                if git_errors > 0 || outcome.unresolved_failures > 0 {
-                    failure_codes.push("git_source_failed".to_owned());
-                }
-                let source_frontiers = vec![git_history_source_frontier(
-                    &self.project_id,
-                    outcome.frontier,
-                )];
-                SessionSyncWorkResult::Finished {
-                    committed: outcome.committed,
-                    stats,
-                    coverage: vec![SessionSyncSourceCoverageV1 {
-                        store_scope: "git".to_owned(),
-                        coverage,
-                    }],
-                    source_frontiers,
-                    failure_codes,
-                }
-            }
+            Ok(outcome) => git_sync_work_result(&self.project_id, outcome, requested_interruption),
             Err(error) => {
                 tracing::warn!(%error, "session git sync failed");
                 SessionSyncWorkResult::Finished {
+                    interruption: None,
                     committed: false,
                     stats: SessionSyncStatsV1::default(),
                     coverage: vec![SessionSyncSourceCoverageV1 {
@@ -827,6 +776,71 @@ impl SessionSyncProjectContext {
                 }
             }
         }
+    }
+}
+
+pub(super) fn git_sync_work_result(
+    project_id: &ProjectId,
+    outcome: crate::sessions::git_correlation::BoundedBackfillOutcome,
+    requested_interruption: Option<SessionSyncInterruption>,
+) -> SessionSyncWorkResult {
+    let stats = SessionSyncStatsV1 {
+        sessions_scanned: saturating_usize_to_u64(outcome.stats.sessions_scanned),
+        spans_written: saturating_usize_to_u64(outcome.stats.spans_written),
+        commits_attributed: saturating_usize_to_u64(outcome.stats.commits_attributed),
+        skipped: saturating_usize_to_u64(outcome.stats.skipped_total()),
+        ..SessionSyncStatsV1::default()
+    };
+    let interrupted = outcome.interruption.is_some() || requested_interruption.is_some();
+    if !outcome.committed
+        && let Some(interruption) = requested_interruption
+    {
+        return SessionSyncWorkResult::Interrupted(interruption);
+    }
+    let git_errors = saturating_usize_to_u64(outcome.stats.skipped_git_error);
+    let terminal_without_progress = interrupted && !outcome.committed;
+    let remaining_work = if terminal_without_progress {
+        1
+    } else {
+        outcome
+            .remaining_sessions
+            .max(git_errors)
+            .max(outcome.unresolved_failures)
+            .max(u64::from(interrupted))
+    };
+    let coverage = if remaining_work > 0 {
+        SessionSyncCoverageV1::Partial {
+            deferred_units: remaining_work,
+        }
+    } else {
+        SessionSyncCoverageV1::Complete
+    };
+    let mut failure_codes = Vec::new();
+    if interrupted {
+        failure_codes.push(
+            requested_interruption
+                .map(SessionSyncInterruption::git_after_commit_reason)
+                .or_else(|| outcome.interruption.map(git_history_interruption_reason))
+                .unwrap_or("git_sync_interrupted")
+                .to_owned(),
+        );
+    }
+    if git_errors > 0 || outcome.unresolved_failures > 0 {
+        failure_codes.push("git_source_failed".to_owned());
+    }
+    SessionSyncWorkResult::Finished {
+        interruption: requested_interruption,
+        committed: outcome.committed,
+        stats,
+        coverage: vec![SessionSyncSourceCoverageV1 {
+            store_scope: "git".to_owned(),
+            coverage,
+        }],
+        source_frontiers: (!terminal_without_progress)
+            .then(|| git_history_source_frontier(project_id, outcome.frontier))
+            .into_iter()
+            .collect(),
+        failure_codes,
     }
 }
 
