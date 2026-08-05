@@ -29,7 +29,11 @@ pub const REQUIRED_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("table", "memory_facts"),
     ("table", "memory_entities"),
     ("table", "memory_fact_entities"),
+    ("table", "memory_banks"),
+    ("table", "memory_bank_dirty"),
     ("table", "memory_feedback_events"),
+    ("table", "memory_oplog"),
+    ("table", "memory_fact_relations"),
     ("table", "memory_v2_facts"),
     ("table", "memory_v2_lineage_events"),
     ("table", "memory_v2_current_facts"),
@@ -43,6 +47,11 @@ pub const REQUIRED_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_nodes_file_path_start_line"),
     ("index", "idx_edges_unique"),
     ("index", "idx_memory_facts_updated_at"),
+    ("index", "idx_memory_banks_updated_at"),
+    ("index", "idx_memory_oplog_ts"),
+    ("index", "idx_memory_fact_relations_source"),
+    ("index", "idx_memory_fact_relations_target"),
+    ("index", "idx_memory_fact_relations_kind"),
     ("index", "idx_memory_v2_current_page"),
     ("index", "idx_memory_v2_events_fact"),
     ("index", "idx_evidence_occurrences_timeline"),
@@ -97,6 +106,125 @@ pub const REQUIRED_SCHEMA_COLUMNS: &[(&str, &[&str])] = &[
             "occurrence_set_id",
             "anchor_id",
             "record_digest",
+        ],
+    ),
+    (
+        "memory_banks",
+        &[
+            "bank_id",
+            "bank_name",
+            "vector",
+            "hrr_algebra",
+            "hrr_dim",
+            "fact_count",
+            "updated_at",
+        ],
+    ),
+    ("memory_bank_dirty", &["bank_name", "updated_at"]),
+    (
+        "memory_oplog",
+        &["id", "ts", "op", "fact_id", "detail_json"],
+    ),
+    (
+        "memory_fact_relations",
+        &[
+            "source_fact_id",
+            "target_fact_id",
+            "relation",
+            "confidence",
+            "source",
+            "metadata",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+];
+
+const EXACT_SCHEMA_COLUMNS: &[(&str, &[&str])] = &[
+    ("edges", &["id", "source", "target", "kind", "line"]),
+    ("memory_fact_entities", &["fact_id", "entity_id"]),
+    (
+        "memory_feedback_events",
+        &[
+            "event_id",
+            "fact_id",
+            "action",
+            "trust_delta",
+            "old_trust",
+            "new_trust",
+            "created_at",
+            "source",
+            "note",
+        ],
+    ),
+    (
+        "memory_banks",
+        &[
+            "bank_id",
+            "bank_name",
+            "vector",
+            "hrr_algebra",
+            "hrr_dim",
+            "fact_count",
+            "updated_at",
+        ],
+    ),
+    ("memory_bank_dirty", &["bank_name", "updated_at"]),
+    (
+        "memory_oplog",
+        &["id", "ts", "op", "fact_id", "detail_json"],
+    ),
+    (
+        "memory_fact_relations",
+        &[
+            "source_fact_id",
+            "target_fact_id",
+            "relation",
+            "confidence",
+            "source",
+            "metadata",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+];
+
+const REQUIRED_SCHEMA_FOREIGN_KEYS: &[(&str, &[(&str, &str, &str, &str)])] = &[
+    (
+        "edges",
+        &[
+            ("source", "nodes", "id", "CASCADE"),
+            ("target", "nodes", "id", "CASCADE"),
+        ],
+    ),
+    (
+        "unresolved_refs",
+        &[("from_node_id", "nodes", "id", "CASCADE")],
+    ),
+    ("vectors", &[("node_id", "nodes", "id", "CASCADE")]),
+    (
+        "memory_fact_entities",
+        &[
+            ("fact_id", "memory_facts", "fact_id", "CASCADE"),
+            ("entity_id", "memory_entities", "entity_id", "CASCADE"),
+        ],
+    ),
+    (
+        "memory_feedback_events",
+        &[("fact_id", "memory_facts", "fact_id", "CASCADE")],
+    ),
+    (
+        "memory_fact_relations",
+        &[
+            ("source_fact_id", "memory_facts", "fact_id", "CASCADE"),
+            ("target_fact_id", "memory_facts", "fact_id", "CASCADE"),
+        ],
+    ),
+    (
+        "redundancy_pairs",
+        &[
+            ("node_a_id", "nodes", "id", "CASCADE"),
+            ("node_b_id", "nodes", "id", "CASCADE"),
         ],
     ),
 ];
@@ -467,6 +595,77 @@ pub async fn validate_schema_identity_connection(conn: &impl QueryExecutor) -> R
             .find(|column| !columns.contains(**column))
         {
             return Err(reset_required(format!("missing column {table}.{missing}")));
+        }
+    }
+    for (table, expected_columns) in EXACT_SCHEMA_COLUMNS {
+        let mut rows = conn
+            .query(&format!("PRAGMA table_xinfo({table})"), ())
+            .await
+            .map_err(|_| reset_required(format!("unreadable table {table}")))?;
+        let mut actual = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| reset_required(format!("unreadable table {table}")))?
+        {
+            let hidden = row
+                .get::<i64>(6)
+                .map_err(|_| reset_required(format!("invalid columns for table {table}")))?;
+            if hidden == 0 {
+                actual.push(
+                    row.get::<String>(1).map_err(|_| {
+                        reset_required(format!("invalid columns for table {table}"))
+                    })?,
+                );
+            }
+        }
+        if actual != *expected_columns {
+            return Err(reset_required(format!(
+                "non-final columns for table {table}: {actual:?}"
+            )));
+        }
+    }
+    for (table, expected_foreign_keys) in REQUIRED_SCHEMA_FOREIGN_KEYS {
+        let mut rows = conn
+            .query(&format!("PRAGMA foreign_key_list({table})"), ())
+            .await
+            .map_err(|_| reset_required(format!("unreadable foreign keys for table {table}")))?;
+        let mut actual = std::collections::BTreeSet::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| reset_required(format!("unreadable foreign keys for table {table}")))?
+        {
+            actual.insert((
+                row.get::<String>(3).map_err(|_| {
+                    reset_required(format!("invalid foreign keys for table {table}"))
+                })?,
+                row.get::<String>(2).map_err(|_| {
+                    reset_required(format!("invalid foreign keys for table {table}"))
+                })?,
+                row.get::<String>(4).map_err(|_| {
+                    reset_required(format!("invalid foreign keys for table {table}"))
+                })?,
+                row.get::<String>(6).map_err(|_| {
+                    reset_required(format!("invalid foreign keys for table {table}"))
+                })?,
+            ));
+        }
+        let expected = expected_foreign_keys
+            .iter()
+            .map(|&(from, target_table, target_column, on_delete)| {
+                (
+                    from.to_owned(),
+                    target_table.to_owned(),
+                    target_column.to_owned(),
+                    on_delete.to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if actual != expected {
+            return Err(reset_required(format!(
+                "non-final foreign keys for table {table}"
+            )));
         }
     }
     let mut violations = conn

@@ -190,6 +190,58 @@ async fn stamped_empty_partial_and_foreign_schemas_require_reset() {
     ));
 }
 
+#[tokio::test]
+async fn missing_memory_authority_objects_require_reset() {
+    for table in ["memory_banks", "memory_oplog", "memory_fact_relations"] {
+        let (conn, _dir) = create_schema_db().await;
+        conn.execute(&format!("DROP TABLE {table}"), ())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                ensure_schema_current_connection(&conn).await,
+                Err(crate::errors::TraceDecayError::ResetRequired { .. })
+            ),
+            "dropping {table} must invalidate the graph schema identity"
+        );
+        assert!(!table_exists(&conn, table).await);
+    }
+}
+
+#[tokio::test]
+async fn foreign_keyless_edge_lookalike_requires_reset_without_rewrite() {
+    let (conn, _dir) = create_schema_db().await;
+    conn.execute_batch(
+        "DROP TABLE edges;
+         CREATE TABLE edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            target TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            line INTEGER
+         );
+         CREATE UNIQUE INDEX idx_edges_unique
+            ON edges(source, target, kind, COALESCE(line, -1));",
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        ensure_schema_current_connection(&conn).await,
+        Err(crate::errors::TraceDecayError::ResetRequired { .. })
+    ));
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('edges')"
+        )
+        .await,
+        0,
+        "identity validation must not repair the lookalike table"
+    );
+}
+
 /// Creation is atomic: an interrupted create leaves neither DDL nor a version
 /// stamp behind, and the retry still produces the full shape.
 #[tokio::test]
