@@ -570,8 +570,13 @@ pub(super) fn test_port_from_preview(
     let allow = Arc::clone(&policy.allow);
     let policy_calls = Arc::clone(&policy.calls);
     let policy_evaluated_at = Arc::clone(&policy.evaluated_at);
-    let port =
-        DaemonGitIndexTransactionPort::new(store, native, GitEffectClassifierV1::default(), policy);
+    let port = DaemonGitIndexTransactionPort::new(
+        store,
+        native,
+        GitEffectClassifierV1::default(),
+        policy,
+        Arc::new(super::RepositoryMutationQueue::default()),
+    );
     let preview = port
         .preview(&preview_request)
         .expect("preview reaches the native owner")

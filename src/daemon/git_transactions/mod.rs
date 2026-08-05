@@ -75,11 +75,18 @@ where
         native: N,
         classifier: C,
         authorization: A,
+        queue: std::sync::Arc<RepositoryMutationQueue>,
         observed_at: UtcMicros,
     ) -> Result<Self, GitIndexTransactionPortError> {
-        let port = DaemonGitIndexTransactionPort::new(store, native, classifier, authorization);
+        let port =
+            DaemonGitIndexTransactionPort::new(store, native, classifier, authorization, queue);
         port.recover_startup(observed_at)?;
         Ok(Self { port })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mutation_queue_for_test(&self) -> &std::sync::Arc<RepositoryMutationQueue> {
+        &self.port.queue
     }
 }
 
