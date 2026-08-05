@@ -32,6 +32,7 @@ pub mod production;
 pub mod projection;
 pub mod provider;
 pub mod receipts;
+pub mod retained_parse;
 pub mod test_attribution;
 
 pub use self::intake::CodeIndexIntake;

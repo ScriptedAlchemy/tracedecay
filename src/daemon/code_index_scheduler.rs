@@ -22,9 +22,10 @@ use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
     PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    ScoreDomainId, SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
+    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
+    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerDispositionV1, SanitizerRevision, ScoreDomainId,
+    SensitivityLevelV1, SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
 };
 
 use crate::{
@@ -39,7 +40,8 @@ use crate::{
             CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
             CodeIndexGenerationScopeV1, CodeIndexInputErrorV1, CodeIndexProductionConfigV1,
             CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-            CodeIndexPublishedGenerationV1, SharedPhysicalCodeArtifactPoolV1,
+            CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+            SharedPhysicalCodeArtifactPoolV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
@@ -892,6 +894,7 @@ struct CapturedCandidateV1 {
 
 struct CapturedSnapshotV1 {
     snapshot: SanitizedCodeSnapshotV1,
+    repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
     captured_files: Vec<CodeIndexCapturedFileV1>,
     changed_paths: BTreeSet<String>,
     /// Strong references to this snapshot's interned bytes. The shared byte
@@ -1491,6 +1494,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     captured_files: captured.captured_files,
                     changed_files,
                     invalidations: BTreeSet::new(),
+                    repository_parse_identity: captured.repository_parse_identity,
                     sealed_at: now_micros(),
                     target_projection_key: projection_key()?,
                 },
@@ -2014,6 +2018,17 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         let candidate_paths = classification.candidate_paths();
         let changed_paths = classification.changed_paths();
+        let dirty = if classification
+            .changes()
+            .iter()
+            .any(|change| change.class == classification::WorktreeChangeClassV1::Conflicted)
+        {
+            RepositoryDirtyStateV1::Conflicted
+        } else if classification.changes().is_empty() {
+            RepositoryDirtyStateV1::Clean
+        } else {
+            RepositoryDirtyStateV1::Dirty
+        };
 
         let registry = StaticLanguageRegistry::new();
         // Read + sanitize + digest is per-file pure work over independent
@@ -2051,6 +2066,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
         let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
         Ok(CapturedSnapshotV1 {
+            repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+                tree: self.identity.head_tree().cloned(),
+                dirty,
+            },
             snapshot: SanitizedCodeSnapshotV1 {
                 repository: self.repository_id.clone(),
                 worktree: Some(self.worktree_id.clone()),

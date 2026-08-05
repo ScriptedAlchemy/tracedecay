@@ -41,6 +41,7 @@ use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
     CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
     CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    CodeIndexRepositoryParseIdentityV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1, build_batch_receipt,
@@ -54,11 +55,11 @@ use tracedecay_domain::{
     PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
     ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
     PublicRetrieverStatus, QueryFallbackSubpayload, QueryNormalizationRevision, RelationEdgeKindV1,
-    RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalFailure,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SnapshotFileDispositionV1,
-    TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
+    RepositoryDirtyStateV1, RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget,
+    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
+    RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1,
+    SnapshotFileDispositionV1, TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -2668,6 +2669,10 @@ fn publish_corpus_with_scale(
         captured_files: captured,
         changed_files: BTreeSet::new(),
         invalidations: BTreeSet::new(),
+        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+        },
         sealed_at: UtcMicros(1_100_000),
         target_projection_key: target_projection_key.clone(),
     };
@@ -2786,6 +2791,10 @@ fn publish_corpus_with_scale(
                 captured_files: incremental_captured,
                 changed_files: BTreeSet::from([incremental_document.source_path.clone()]),
                 invalidations: BTreeSet::new(),
+                repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+                    tree: None,
+                    dirty: RepositoryDirtyStateV1::Dirty,
+                },
                 sealed_at: UtcMicros(1_200_000),
                 target_projection_key: target_projection_key.clone(),
             },
@@ -2984,6 +2993,10 @@ fn build_projection_source_generation(
                 captured_files,
                 changed_files,
                 invalidations: BTreeSet::new(),
+                repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+                    tree: None,
+                    dirty: RepositoryDirtyStateV1::Dirty,
+                },
                 sealed_at,
                 target_projection_key,
             },
@@ -3133,6 +3146,10 @@ fn prove_cancellation(
         captured_files: captured,
         changed_files: BTreeSet::new(),
         invalidations: BTreeSet::new(),
+        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+        },
         sealed_at: UtcMicros(1_100_000),
         target_projection_key: ProjectionKeyV1 {
             kind: ProjectionKindV1::Lexical,
