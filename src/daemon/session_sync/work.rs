@@ -1,7 +1,7 @@
 use super::*;
 
 impl DaemonSessionSyncService {
-    async fn recover_project(
+    pub(super) async fn recover_project(
         &self,
         context: &Arc<SessionSyncProjectContext>,
     ) -> crate::errors::Result<bool> {
@@ -146,7 +146,7 @@ impl DaemonSessionSyncService {
         Ok(recovered_import)
     }
 
-    async fn mirror_primary_terminal(
+    pub(super) async fn mirror_primary_terminal(
         &self,
         context: &SessionSyncProjectContext,
         alias_key: &str,
@@ -178,7 +178,7 @@ impl DaemonSessionSyncService {
         .map(Some)
     }
 
-    fn coalesce_import(
+    pub(super) fn coalesce_import(
         &self,
         context: Arc<SessionSyncProjectContext>,
         key: String,
@@ -299,7 +299,10 @@ impl DaemonSessionSyncService {
         tasks.push(task);
     }
 
-    async fn cancel_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
+    pub(super) async fn cancel_request(
+        &self,
+        control: SessionSyncControlV1,
+    ) -> SessionSyncOutcomeV1 {
         let Some(context) = self.context_for(control.scope()) else {
             return SessionSyncOutcomeV1::WrongScope;
         };
@@ -415,7 +418,7 @@ impl DaemonSessionSyncService {
 }
 
 impl SessionSyncProjectContext {
-    async fn source_frontiers_for(
+    pub(super) async fn source_frontiers_for(
         &self,
         source: &SessionSyncCommandV1,
     ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
@@ -425,7 +428,9 @@ impl SessionSyncProjectContext {
         }
     }
 
-    async fn source_frontiers(&self) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+    pub(super) async fn source_frontiers(
+        &self,
+    ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let mut frontiers = Vec::new();
         for (store_scope, database) in [
             ("project", &self.project_sessions),
@@ -485,7 +490,7 @@ impl SessionSyncProjectContext {
         )
     }
 
-    async fn import_transcripts(
+    pub(super) async fn import_transcripts(
         &self,
         service: &DaemonSessionSyncService,
         journal_key: &str,
@@ -526,15 +531,16 @@ impl SessionSyncProjectContext {
             let project_progress_failed = project_progress.is_err();
             let project_frontiers = project_progress.unwrap_or_default();
 
-            let completed_profile_sweeps = service
-                .completed_profile_sweeps
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let profile_sweep_satisfied = completed_profile_sweep_covers(
-                completed_profile_sweeps.get(self.profile_id.as_str()),
-                admitted_at,
-            );
-            drop(completed_profile_sweeps);
+            let profile_sweep_satisfied = {
+                let completed_profile_sweeps = service
+                    .completed_profile_sweeps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                completed_profile_sweep_covers(
+                    completed_profile_sweeps.get(self.profile_id.as_str()),
+                    admitted_at,
+                )
+            };
             let (user, profile_sweep_started_at) = if profile_sweep_satisfied
                 || pass_cancellation.is_cancelled()
             {
@@ -678,7 +684,7 @@ impl SessionSyncProjectContext {
         }
     }
 
-    async fn synchronize_git(
+    pub(super) async fn synchronize_git(
         &self,
         request: &SessionSyncRequestV1,
         options: SessionGitSyncV1,
@@ -699,16 +705,14 @@ impl SessionSyncProjectContext {
             GIT_SYNC_COMMAND_DEADLINE,
         );
         let store = GlobalDbGitCorrelationStore::new(Arc::clone(&self.project_sessions));
-        let backfill = store.run_bounded_history_index_page(
-            &crate::sessions::git_correlation::BackfillOptions {
-                since: options.since_unix(),
-                limit_sessions: options.max_sessions(),
-                merge_gap_secs: crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
-                max_commits_per_repo: usize::MAX,
-                dry_run: options.dry_run(),
-            },
-            &control,
-        );
+        let backfill_options = crate::sessions::git_correlation::BackfillOptions {
+            since: options.since_unix(),
+            limit_sessions: options.max_sessions(),
+            merge_gap_secs: crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+            max_commits_per_repo: usize::MAX,
+            dry_run: options.dry_run(),
+        };
+        let backfill = store.run_bounded_history_index_page(&backfill_options, &control);
         tokio::pin!(backfill);
         let mut requested_interruption = None;
         let result = loop {

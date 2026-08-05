@@ -41,6 +41,7 @@ pub use ingest::{
     classify_transcript_ingest_failure, home_dir, ingest_project_sources_for_provider,
     ingest_project_sources_for_provider_with_cancellation,
     ingest_user_global_sources_for_provider_with_authorities,
+    ingest_user_global_sources_for_provider_with_authorities_and_cancellation,
     ingest_user_global_sources_for_startup_with_db, registered_project_roots_from,
     try_ingest_user_codex_sessions_with_db_and_admission, with_transcript_source_home,
 };

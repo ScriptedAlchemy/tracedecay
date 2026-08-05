@@ -270,28 +270,6 @@ pub async fn ingest_user_global_sources_for_provider_with_authorities_and_cancel
     .await
 }
 
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots<
-    A: SessionIngestAuthority,
->(
-    brain_id: &BrainId,
-    profile_id: &UserProfileId,
-    registered: &A,
-    profile_root: &Path,
-    provider: Option<SessionProvider>,
-    roots: Vec<PathBuf>,
-) -> TranscriptIngestOutcome {
-    ingest_user_global_sources_for_provider_with_roots_and_cancellation(
-        brain_id,
-        profile_id,
-        registered,
-        profile_root,
-        provider,
-        roots,
-        &ObservationCancellation::default(),
-    )
-    .await
-}
-
 pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cancellation<
     A: SessionIngestAuthority,
 >(

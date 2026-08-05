@@ -15,6 +15,7 @@ pub struct TranscriptIngestOutcome {
     pub stats: TranscriptIngestStats,
     pub failures: Vec<TranscriptCatchUpFailure>,
     pub coverage: IngestPassCoverage,
+    pub scheduling_state_written: bool,
 }
 
 impl TranscriptIngestOutcome {
@@ -26,6 +27,7 @@ impl TranscriptIngestOutcome {
             stats,
             failures,
             coverage: IngestPassCoverage::Complete,
+            scheduling_state_written: false,
         }
     }
 
@@ -34,6 +36,7 @@ impl TranscriptIngestOutcome {
             stats: outcome.stats,
             failures: outcome.failures,
             coverage: outcome.coverage,
+            scheduling_state_written: outcome.scheduling_state_written,
         }
     }
 
