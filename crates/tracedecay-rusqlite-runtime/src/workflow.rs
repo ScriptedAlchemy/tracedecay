@@ -152,8 +152,8 @@ fn require_columns(
             .all(|(row, column)| {
                 matches!(row.values.get(1), Some(ExactSqlValue::Text(actual)) if actual == column.name)
                     && matches!(row.values.get(2), Some(ExactSqlValue::Text(actual)) if actual == column.sql_type)
-                    && matches!(row.values.get(3), Some(ExactSqlValue::Integer(actual)) if actual == column.not_null)
-                    && matches!(row.values.get(5), Some(ExactSqlValue::Integer(actual)) if actual == column.primary_key)
+                    && matches!(row.values.get(3), Some(ExactSqlValue::Integer(actual)) if *actual == column.not_null)
+                    && matches!(row.values.get(5), Some(ExactSqlValue::Integer(actual)) if *actual == column.primary_key)
             });
     if exact {
         Ok(())
