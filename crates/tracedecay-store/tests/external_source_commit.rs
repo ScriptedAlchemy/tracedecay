@@ -14,8 +14,9 @@ use tracedecay_domain::{
 use tracedecay_store::{
     SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitV1,
     SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
-    SourceStoreErrorV1, SourceStoreStateV1, apply_source_authority_publication,
-    apply_source_commit,
+    SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1, SourceStoreErrorV1,
+    SourceStoreStateV1, apply_source_authority_publication, apply_source_commit,
+    apply_source_projection, build_source_projection,
 };
 
 fn digest(seed: char) -> ManifestDigest {
@@ -214,7 +215,6 @@ fn commit_for_partition(
         definition.clone(),
         binding.clone(),
         partition,
-        ComponentVersion::new("github-review-source-projector-v1").unwrap(),
         digest(idempotency_seed),
         digest('1'),
         expected,
@@ -228,6 +228,25 @@ fn committed(outcome: SourceCommitApplyOutcomeV1) -> SourceStoreStateV1 {
     match outcome {
         SourceCommitApplyOutcomeV1::Committed(state) => *state,
         other => panic!("expected a committed source state, got {other:?}"),
+    }
+}
+
+fn projected(state: SourceStoreStateV1) -> SourceStoreStateV1 {
+    let pending = SourcePendingProjectionV1::from_state(
+        &state,
+        state.definition().clone(),
+        state.binding().clone(),
+        state.receipt().clone(),
+    )
+    .unwrap();
+    let projection = build_source_projection(
+        &pending,
+        ComponentVersion::new("github-review-source-projector-v1").unwrap(),
+    )
+    .unwrap();
+    match apply_source_projection(&state, &pending, projection).unwrap() {
+        SourceProjectionApplyOutcomeV1::Projected(state) => *state,
+        other => panic!("expected projected source state, got {other:?}"),
     }
 }
 
@@ -253,7 +272,7 @@ fn replay_partial_coverage_and_complete_snapshot_preserve_tombstone_rules() {
         Some(BTreeSet::from([live.native_object().clone()])),
         '2',
     );
-    let state = committed(apply_source_commit(None, first.clone()).unwrap());
+    let state = projected(committed(apply_source_commit(None, first.clone()).unwrap()));
 
     let restarted: SourceStoreStateV1 =
         serde_json::from_str(&serde_json::to_string(&state).unwrap())
@@ -272,7 +291,9 @@ fn replay_partial_coverage_and_complete_snapshot_preserve_tombstone_rules() {
         Some(BTreeSet::from([live.native_object().clone()])),
         '3',
     );
-    let state = committed(apply_source_commit(Some(&restarted), unchanged_complete).unwrap());
+    let state = projected(committed(
+        apply_source_commit(Some(&restarted), unchanged_complete).unwrap(),
+    ));
     assert_eq!(
         state.projected_objects()[live.native_object()].content_state(),
         SourceContentStateV1::Live
@@ -287,7 +308,9 @@ fn replay_partial_coverage_and_complete_snapshot_preserve_tombstone_rules() {
         None,
         '4',
     );
-    let state = committed(apply_source_commit(Some(&state), partial).unwrap());
+    let state = projected(committed(
+        apply_source_commit(Some(&state), partial).unwrap(),
+    ));
     assert_eq!(
         state
             .projected_objects()
@@ -306,7 +329,9 @@ fn replay_partial_coverage_and_complete_snapshot_preserve_tombstone_rules() {
         Some(BTreeSet::new()),
         '5',
     );
-    let state = committed(apply_source_commit(Some(&state), complete).unwrap());
+    let state = projected(committed(
+        apply_source_commit(Some(&state), complete).unwrap(),
+    ));
     assert_eq!(
         state
             .projected_objects()
@@ -316,16 +341,20 @@ fn replay_partial_coverage_and_complete_snapshot_preserve_tombstone_rules() {
         SourceContentStateV1::AuthoritativeDeleted
     );
     assert_eq!(
-        state.revision_history(live.native_object()).unwrap().len(),
-        2
+        state
+            .latest_mutation(live.native_object())
+            .unwrap()
+            .observation(),
+        &live,
+        "projection-derived absence must not rewrite source evidence"
     );
     assert_eq!(
-        state.lineage()[0].transition(),
+        state.projection().unwrap().lineage()[0].transition(),
         SourceObjectTransitionV1::Tombstone
     );
     assert!(matches!(
-        apply_source_commit(Some(&state), first).unwrap(),
-        SourceCommitApplyOutcomeV1::ExactDuplicate(_)
+        apply_source_commit(Some(&state), first),
+        Err(SourceStoreErrorV1::FrontierConflict)
     ));
 }
 
@@ -346,7 +375,7 @@ fn complete_snapshot_tombstones_only_its_partition() {
         SourceObjectTransitionV1::Initial,
         '2',
     );
-    let state = committed(
+    let state = projected(committed(
         apply_source_commit(
             None,
             commit_for_partition(
@@ -362,7 +391,7 @@ fn complete_snapshot_tombstones_only_its_partition() {
             .unwrap(),
         )
         .unwrap(),
-    );
+    ));
     let moved = object_with('c', '5', '6', SourceContentStateV1::Live);
     let moved = mutation(
         &binding,
@@ -397,7 +426,7 @@ fn complete_snapshot_tombstones_only_its_partition() {
         SourceObjectTransitionV1::Initial,
         '3',
     );
-    let state = committed(
+    let state = projected(committed(
         apply_source_commit(
             Some(&state),
             commit_for_partition(
@@ -413,8 +442,8 @@ fn complete_snapshot_tombstones_only_its_partition() {
             .unwrap(),
         )
         .unwrap(),
-    );
-    let state = committed(
+    ));
+    let state = projected(committed(
         apply_source_commit(
             Some(&state),
             commit_for_partition(
@@ -430,7 +459,7 @@ fn complete_snapshot_tombstones_only_its_partition() {
             .unwrap(),
         )
         .unwrap(),
-    );
+    ));
 
     assert_eq!(
         state.projected_objects()[first_object.native_object()].content_state(),
@@ -532,6 +561,7 @@ fn revision_history_and_explicit_lineage_are_immutable() {
         )
         .unwrap(),
     );
+    let first_receipt = state.receipt().clone();
     let correction = object_with('c', '6', '7', SourceContentStateV1::Live);
     let corrected = mutation(
         &binding,
@@ -556,6 +586,7 @@ fn revision_history_and_explicit_lineage_are_immutable() {
         )
         .unwrap(),
     );
+    let correction_receipt = state.receipt().clone();
     let deleted = object_with('c', '8', '9', SourceContentStateV1::AuthoritativeDeleted);
     let tombstone = mutation(
         &binding,
@@ -580,6 +611,7 @@ fn revision_history_and_explicit_lineage_are_immutable() {
         )
         .unwrap(),
     );
+    let tombstone_receipt = state.receipt().clone();
     let reappeared = object_with('c', 'a', 'b', SourceContentStateV1::Live);
     let reappearance = mutation(
         &binding,
@@ -605,24 +637,272 @@ fn revision_history_and_explicit_lineage_are_immutable() {
         .unwrap(),
     );
 
-    let history = state.revision_history(initial.native_object()).unwrap();
-    assert_eq!(history.len(), 4);
-    assert_eq!(history[0].observation(), &initial);
-    assert_eq!(history[1].observation(), &correction);
-    assert_eq!(history[2].observation(), &deleted);
-    assert_eq!(history[3].observation(), &reappeared);
+    let reappearance_receipt = state.receipt().clone();
     assert_eq!(
-        state
-            .lineage()
-            .iter()
-            .map(|edge| edge.transition())
-            .collect::<Vec<_>>(),
+        [
+            &first_receipt,
+            &correction_receipt,
+            &tombstone_receipt,
+            &reappearance_receipt,
+        ]
+        .into_iter()
+        .flat_map(|receipt| receipt.mutations())
+        .map(|mutation| mutation.observation())
+        .collect::<Vec<_>>(),
+        vec![&initial, &correction, &deleted, &reappeared]
+    );
+    assert_eq!(
+        [
+            &correction_receipt,
+            &tombstone_receipt,
+            &reappearance_receipt,
+        ]
+        .into_iter()
+        .flat_map(|receipt| receipt.lineage())
+        .map(|edge| edge.transition())
+        .collect::<Vec<_>>(),
         vec![
             SourceObjectTransitionV1::Correction,
             SourceObjectTransitionV1::Tombstone,
             SourceObjectTransitionV1::Reappearance,
         ]
     );
+    assert_eq!(
+        state
+            .latest_mutation(initial.native_object())
+            .unwrap()
+            .observation(),
+        &reappeared
+    );
+}
+
+#[test]
+fn source_commit_does_not_publish_projection_inline() {
+    let definition = definition();
+    let binding = binding(&definition);
+    let observation = object();
+    let mutation = mutation(
+        &binding,
+        &partition(),
+        observation.clone(),
+        None,
+        SourceObjectTransitionV1::Initial,
+        '2',
+    );
+    let source = commit(
+        &definition,
+        &binding,
+        None,
+        SourceCoverageV1::Partial,
+        vec![mutation],
+        None,
+        '2',
+    );
+
+    let state = committed(apply_source_commit(None, source).unwrap());
+
+    assert_eq!(
+        state
+            .latest_mutation(observation.native_object())
+            .unwrap()
+            .observation(),
+        &observation
+    );
+    assert!(
+        state.projected_objects().is_empty(),
+        "source acknowledgement must precede projection publication"
+    );
+}
+
+fn source_with_one_observation(
+    idempotency_seed: char,
+) -> (
+    SourceDefinitionV1,
+    SourceBindingV1,
+    SourceObjectObservationV1,
+    SourceStoreStateV1,
+) {
+    let definition = definition();
+    let binding = binding(&definition);
+    let observation = object();
+    let mutation = mutation(
+        &binding,
+        &partition(),
+        observation.clone(),
+        None,
+        SourceObjectTransitionV1::Initial,
+        idempotency_seed,
+    );
+    let source = commit(
+        &definition,
+        &binding,
+        None,
+        SourceCoverageV1::Partial,
+        vec![mutation],
+        None,
+        idempotency_seed,
+    );
+    (
+        definition,
+        binding,
+        observation,
+        committed(apply_source_commit(None, source).unwrap()),
+    )
+}
+
+#[test]
+fn separate_projector_publishes_committed_evidence_once() {
+    let (_, _, observation, source_state) = source_with_one_observation('2');
+    let pending = SourcePendingProjectionV1::from_state(
+        &source_state,
+        source_state.definition().clone(),
+        source_state.binding().clone(),
+        source_state.receipt().clone(),
+    )
+    .unwrap();
+    let projection = build_source_projection(
+        &pending,
+        ComponentVersion::new("github-review-source-projector-v1").unwrap(),
+    )
+    .unwrap();
+
+    assert!(source_state.projection().is_none());
+    let projected =
+        match apply_source_projection(&source_state, &pending, projection.clone()).unwrap() {
+            SourceProjectionApplyOutcomeV1::Projected(state) => *state,
+            other => panic!("expected projection publication, got {other:?}"),
+        };
+    assert_eq!(
+        projected
+            .projected_objects()
+            .get(observation.native_object()),
+        Some(&observation)
+    );
+    assert_eq!(
+        projected.projection().unwrap().source_frontier(),
+        source_state.source_frontier()
+    );
+
+    assert!(matches!(
+        apply_source_projection(&projected, &pending, projection).unwrap(),
+        SourceProjectionApplyOutcomeV1::ExactDuplicate(_)
+    ));
+}
+
+#[test]
+fn stale_projection_cas_leaves_newer_source_state_unmodified() {
+    let (definition, binding, first_observation, first_source) = source_with_one_observation('2');
+    let pending = SourcePendingProjectionV1::from_state(
+        &first_source,
+        definition.clone(),
+        binding.clone(),
+        first_source.receipt().clone(),
+    )
+    .unwrap();
+    let stale_projection = build_source_projection(
+        &pending,
+        ComponentVersion::new("github-review-source-projector-v1").unwrap(),
+    )
+    .unwrap();
+    let successor = object_with('c', '5', '6', SourceContentStateV1::Live);
+    let successor_mutation = mutation(
+        &binding,
+        &partition(),
+        successor,
+        Some(first_observation.revision().clone()),
+        SourceObjectTransitionV1::Successor,
+        '3',
+    );
+    let newer_source = committed(
+        apply_source_commit(
+            Some(&first_source),
+            commit(
+                &definition,
+                &binding,
+                Some(first_source.source_frontier().clone()),
+                SourceCoverageV1::Partial,
+                vec![successor_mutation],
+                None,
+                '3',
+            ),
+        )
+        .unwrap(),
+    );
+    let before = serde_json::to_vec(&newer_source).unwrap();
+
+    assert!(matches!(
+        apply_source_projection(&newer_source, &pending, stale_projection),
+        Ok(SourceProjectionApplyOutcomeV1::Projected(_))
+    ));
+    assert_eq!(serde_json::to_vec(&newer_source).unwrap(), before);
+    assert!(newer_source.projection().is_none());
+}
+
+#[test]
+fn three_source_commits_before_projection_drain_in_predecessor_order() {
+    let definition = definition();
+    let binding = binding(&definition);
+    let first_observation = object();
+    let first = commit(
+        &definition,
+        &binding,
+        None,
+        SourceCoverageV1::Partial,
+        vec![mutation(
+            &binding,
+            &partition(),
+            first_observation.clone(),
+            None,
+            SourceObjectTransitionV1::Initial,
+            '2',
+        )],
+        None,
+        '2',
+    );
+    let mut state = committed(apply_source_commit(None, first).unwrap());
+    let mut receipts = vec![state.receipt().clone()];
+    for seed in ['3', '4'] {
+        let next = commit(
+            &definition,
+            &binding,
+            Some(state.source_frontier().clone()),
+            SourceCoverageV1::Partial,
+            Vec::new(),
+            None,
+            seed,
+        );
+        state = committed(apply_source_commit(Some(&state), next).unwrap());
+        receipts.push(state.receipt().clone());
+    }
+
+    for (expected_sequence, receipt) in (1..=3).zip(receipts) {
+        let pending = SourcePendingProjectionV1::from_state(
+            &state,
+            definition.clone(),
+            binding.clone(),
+            receipt,
+        )
+        .unwrap();
+        let projection = build_source_projection(
+            &pending,
+            ComponentVersion::new("github-review-source-projector-v1").unwrap(),
+        )
+        .unwrap();
+        state = match apply_source_projection(&state, &pending, projection).unwrap() {
+            SourceProjectionApplyOutcomeV1::Projected(state) => *state,
+            other => panic!("expected queued projection publication, got {other:?}"),
+        };
+        assert_eq!(
+            state
+                .projection()
+                .unwrap()
+                .source_frontier()
+                .partition(&partition())
+                .unwrap()
+                .sequence(),
+            expected_sequence
+        );
+    }
 }
 
 #[test]
@@ -758,56 +1038,17 @@ fn sequential_definition_and_binding_revisions_preserve_immutable_history() {
     )
     .unwrap();
 
-    let revised = apply_source_authority_publication(&state, publication).unwrap();
+    let (revised, receipt) = apply_source_authority_publication(&state, publication)
+        .unwrap()
+        .into_parts();
 
     assert_eq!(
-        revised
-            .definition_history()
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
-        [1, 2]
+        receipt.definition_digest(),
+        &definition_v2.definition_digest
     );
-    assert_eq!(
-        revised
-            .binding_history()
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
-        [1, 2]
-    );
+    assert_eq!(receipt.binding_digest(), &binding_v2.binding_digest);
     assert_eq!(revised.definition(), &definition_v2);
     assert_eq!(revised.binding(), &binding_v2);
-}
-
-#[test]
-fn source_commit_does_not_publish_projection_inline() {
-    let definition = definition();
-    let binding = binding(&definition);
-    let observation = object();
-    let source = commit(
-        &definition,
-        &binding,
-        None,
-        SourceCoverageV1::Partial,
-        vec![mutation(
-            &binding,
-            &partition(),
-            observation.clone(),
-            None,
-            SourceObjectTransitionV1::Initial,
-            '2',
-        )],
-        None,
-        '2',
-    );
-
-    let state = committed(apply_source_commit(None, source).unwrap());
-
-    assert!(
-        state.projected_objects().is_empty(),
-        "source acknowledgement must precede projection publication"
-    );
 }
 
 /// Build a state whose validation touches every memoized record kind: a
@@ -987,7 +1228,7 @@ fn authority_publication_revalidates_the_mutated_successor() {
         2,
     )
     .unwrap();
-    let revised = apply_source_authority_publication(
+    let (revised, _) = apply_source_authority_publication(
         &state,
         SourceAuthorityPublicationV1::new(
             &definition_v2,
@@ -999,7 +1240,8 @@ fn authority_publication_revalidates_the_mutated_successor() {
         )
         .unwrap(),
     )
-    .unwrap();
+    .unwrap()
+    .into_parts();
     assert_eq!(revised.definition(), &definition_v2);
     assert_eq!(revised.binding(), &binding_v2);
     assert!(revised.validate().is_ok());
@@ -1008,6 +1250,6 @@ fn authority_publication_revalidates_the_mutated_successor() {
     let revised_encoded = serde_json::to_string(&revised).unwrap();
     assert_ne!(revised_encoded, serde_json::to_string(&state).unwrap());
     let round_tripped: SourceStoreStateV1 = serde_json::from_str(&revised_encoded).unwrap();
-    assert_eq!(round_tripped, revised);
+    assert_eq!(round_tripped, *revised);
     assert!(round_tripped.validate().is_ok());
 }

@@ -25,9 +25,10 @@ use crate::{
     FactCurrentQuery, FactLineageQuery, GitIndexTransactionRecordV1,
     RepositoryProvenanceAttachmentV1, RetrievalAnchorDerivativeV1,
     RetrievalAnchorDispositionRecordV1, RetrievalAnchorOwnerV1, RetrievalAnchorTombstoneV1,
-    SessionTemporalProjectionBatchV1, SourceStoreStateV1, StorageRuntimeContractErrorV1,
-    StoreEffectIdV1, StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1, StoredFactV1,
-    StoredRetrievalAnchorRecordV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    SessionTemporalProjectionBatchV1, SourceCommitReceiptV1, SourcePendingProjectionV1,
+    SourceStoreStateV1, StorageRuntimeContractErrorV1, StoreEffectIdV1, StoreRuntimeBindingV1,
+    StoreShardIdV1, StoreShardScopeV1, StoredFactV1, StoredRetrievalAnchorRecordV1,
+    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 /// One repository read operation, dispatched across the profile, project,
@@ -180,7 +181,12 @@ fn external_source_read_matches_shard(
     shard: &StoreShardIdV1,
 ) -> bool {
     let binding = match operation {
-        ExternalSourceReadOperationV1::State { binding } => binding,
+        ExternalSourceReadOperationV1::State { binding }
+        | ExternalSourceReadOperationV1::CommitReceipt { binding, .. } => binding,
+        ExternalSourceReadOperationV1::NextPendingProjection {
+            binding: Some(binding),
+        } => binding,
+        ExternalSourceReadOperationV1::NextPendingProjection { binding: None } => return true,
     };
     binding.validate().is_ok()
         && match (&binding.owner, &shard.scope) {
@@ -333,13 +339,24 @@ pub enum ProjectReadResultV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalSourceReadOperationV1 {
-    State { binding: SourceBindingIdentityV1 },
+    State {
+        binding: SourceBindingIdentityV1,
+    },
+    CommitReceipt {
+        binding: SourceBindingIdentityV1,
+        idempotency_key: tracedecay_domain::ManifestDigest,
+    },
+    NextPendingProjection {
+        binding: Option<SourceBindingIdentityV1>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalSourceReadResultV1 {
     State(Option<Box<SourceStoreStateV1>>),
+    CommitReceipt(Option<Box<SourceCommitReceiptV1>>),
+    PendingProjection(Option<Box<SourcePendingProjectionV1>>),
 }
 
 /// Retrieval-anchor authority reads. Application authorization must run before

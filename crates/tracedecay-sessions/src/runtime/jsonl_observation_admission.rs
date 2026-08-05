@@ -256,7 +256,8 @@ impl ActiveAdmission<'_> {
         // hot loop awaits it directly with a bounded debug poll frame and no
         // per-frame heap allocation at the call site.
         match self.admission.capture_observation(capture).await {
-            Ok(CaptureObservationOutcome::Persisted { .. }) => {
+            Ok(CaptureObservationOutcome::Persisted { .. })
+            | Ok(CaptureObservationOutcome::AcceptedForReplay { .. }) => {
                 let should_update = match persisted_cursor_update {
                     PersistedCursorUpdate::Replace => true,
                     PersistedCursorUpdate::Monotonic => {
