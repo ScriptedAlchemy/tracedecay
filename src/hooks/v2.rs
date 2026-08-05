@@ -605,7 +605,7 @@ fn prepare_bound_hook(
         serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
     let native_session_id = native_fields.session_id().map(str::to_owned);
     let native_lifecycle = native_context_scout_lifecycle(host, &native_fields);
-    let material = native_material(&native_fields, decoded.family(), now)?;
+    let material = native_material(&native_fields, decoded.family(), event_json.as_bytes(), now)?;
     let envelope = decoded.into_envelope(binding, material).ok()?;
     Some(PreparedBoundHook {
         host,
@@ -820,10 +820,23 @@ fn append_for_replay(
 fn native_material(
     fields: &NativeIdentityFields,
     family: tracedecay_hooks::HookEventFamily,
+    event_material: &[u8],
     observed_at: UtcMicros,
 ) -> Option<NativeEnvelopeMaterialV1> {
     let session = fields.session_id()?;
-    let event_id = hash16(fields.event_key()?.as_bytes());
+    let event_id = fields.event_key().map_or_else(
+        || native_event_digest(family, b"exact-event-material", event_material),
+        |event_key| {
+            if family == tracedecay_hooks::HookEventFamily::SavedEdit {
+                fields.file_path().map_or_else(
+                    || native_event_digest(family, b"provider-event-key", event_key.as_bytes()),
+                    |file_path| saved_edit_event_id(event_key, file_path),
+                )
+            } else {
+                native_event_digest(family, b"provider-event-key", event_key.as_bytes())
+            }
+        },
+    );
     Some(NativeEnvelopeMaterialV1 {
         event_id,
         protected_session_id: protected_session_id_for_native(session),
@@ -838,6 +851,43 @@ fn native_material(
     })
 }
 
+fn saved_edit_event_id(event_key: &str, file_path: &str) -> [u8; 16] {
+    let mut material = Vec::with_capacity(event_key.len() + file_path.len() + 16);
+    material.extend_from_slice(&(event_key.len() as u64).to_le_bytes());
+    material.extend_from_slice(event_key.as_bytes());
+    material.extend_from_slice(&(file_path.len() as u64).to_le_bytes());
+    material.extend_from_slice(file_path.as_bytes());
+    native_event_digest(
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        b"provider-event-key-and-file",
+        &material,
+    )
+}
+
+/// Hash native event identity in the event-family domain. Provider hook
+/// surfaces legitimately reuse IDs across lifecycle families, while the spool
+/// keys pending records only by this ID.
+fn native_event_digest(
+    family: tracedecay_hooks::HookEventFamily,
+    source: &[u8],
+    material: &[u8],
+) -> [u8; 16] {
+    let family_tag = match family {
+        tracedecay_hooks::HookEventFamily::SessionBoundary => 1u8,
+        tracedecay_hooks::HookEventFamily::PromptBoundary => 2,
+        tracedecay_hooks::HookEventFamily::ToolLifecycle => 3,
+        tracedecay_hooks::HookEventFamily::SavedEdit => 4,
+        tracedecay_hooks::HookEventFamily::TestLifecycle => 5,
+    };
+    let mut digest_material = Vec::with_capacity(source.len() + material.len() + 49);
+    digest_material.extend_from_slice(b"tracedecay.hook-v2.native-event.v2");
+    digest_material.push(family_tag);
+    digest_material.extend_from_slice(&(source.len() as u64).to_le_bytes());
+    digest_material.extend_from_slice(source);
+    digest_material.extend_from_slice(&(material.len() as u64).to_le_bytes());
+    digest_material.extend_from_slice(material);
+    hash16(&digest_material)
+}
 fn hash16(bytes: &[u8]) -> [u8; 16] {
     let digest = Sha256::digest(bytes);
     let mut output = [0; 16];
