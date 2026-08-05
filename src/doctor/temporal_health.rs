@@ -164,16 +164,6 @@ fn finding_contract(
             "summary derived-index corruption",
             "Preserve the database and request explicit derived-index repair from the daemon-owned writer; only session_summary_nodes_fts is repairable.",
         ),
-        SessionTemporalHealthFindingKind::SummaryCycle => (
-            "summary_cycle",
-            "summary lineage cycle",
-            "Pause temporal refresh, preserve the database, and report this stable code for daemon-owned lineage recovery.",
-        ),
-        SessionTemporalHealthFindingKind::StaleClosure => (
-            "stale_closure",
-            "incomplete summary stale closure",
-            "Pause temporal refresh and rerun the daemon-owned stale-closure rebuild before serving summaries.",
-        ),
         SessionTemporalHealthFindingKind::MissingAnchor => (
             "missing_anchor",
             "missing retrieval anchor",
@@ -238,6 +228,26 @@ fn finding_contract(
             "compatibility_drift",
             "canonical-to-compatibility projection drift",
             "Preserve canonical temporal rows and request a daemon-owned compatibility projection rebuild.",
+        ),
+        SessionTemporalHealthFindingKind::RelationGraphUnavailable => (
+            "relation_graph_unavailable",
+            "native relation graph unavailable",
+            "Preserve the session store and retry after the daemon remounts its exact project or profile graph owner.",
+        ),
+        SessionTemporalHealthFindingKind::RelationGraphResetRequired => (
+            "relation_graph_reset_required",
+            "native relation graph reset required",
+            "Pause relation publication, preserve the graph store, and run daemon-owned reset recovery.",
+        ),
+        SessionTemporalHealthFindingKind::RelationGraphDurabilityUncertain => (
+            "relation_graph_durability_uncertain",
+            "native relation graph durability uncertain",
+            "Pause relation publication and preserve the graph store for daemon-owned recovery before reopening it.",
+        ),
+        SessionTemporalHealthFindingKind::RelationGraphCorruption => (
+            "relation_graph_corruption",
+            "native relation graph corruption",
+            "Pause relation publication, preserve the graph store, and report this stable code for daemon-owned recovery.",
         ),
     }
 }
