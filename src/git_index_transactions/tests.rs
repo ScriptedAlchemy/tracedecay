@@ -97,6 +97,7 @@ fn configured_merge_diff_and_filter_drivers_are_preview_only() {
     let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
 
     for key in [
+        "diff.external",
         "merge.tracedecay.driver",
         "diff.tracedecay.command",
         "diff.tracedecay.textconv",
@@ -129,6 +130,38 @@ fn configured_merge_diff_and_filter_drivers_are_preview_only() {
     }
 }
 
+#[test]
+fn configured_openpgp_program_keeps_signing_preview_only() {
+    let directory = tempdir().expect("temporary repository");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init starts")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args([
+                "config",
+                "--local",
+                "gpg.openpgp.program",
+                "external-provider",
+            ])
+            .status()
+            .expect("git config starts")
+            .success()
+    );
+    let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+    assert!(
+        !runner
+            .signing_key_available("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .expect("signing classification")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn merge_and_reference_transaction_hooks_are_applicable() {
@@ -158,4 +191,169 @@ fn merge_and_reference_transaction_hooks_are_applicable() {
         fs::remove_file(path).expect("remove hook");
         assert!(!runner.has_applicable_commit_hooks().expect("hook removed"));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_worktree_uses_common_directory_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repository = tempdir().expect("repository");
+    let linked_parent = tempdir().expect("linked worktree parent");
+    let linked = linked_parent.path().join("linked");
+    assert!(
+        Command::new("git")
+            .current_dir(repository.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init starts")
+            .success()
+    );
+    fs::write(repository.path().join("tracked.txt"), b"tracked\n").expect("tracked file");
+    assert!(
+        Command::new("git")
+            .current_dir(repository.path())
+            .args(["add", "--", "tracked.txt"])
+            .status()
+            .expect("git add starts")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(repository.path())
+            .args([
+                "-c",
+                "user.name=TraceDecay",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ])
+            .status()
+            .expect("git commit starts")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(repository.path())
+            .args([
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "linked",
+                linked.to_str().expect("utf-8 linked path"),
+            ])
+            .status()
+            .expect("git worktree add starts")
+            .success()
+    );
+    let hook = repository.path().join(".git/hooks/pre-merge-commit");
+    fs::write(&hook, b"#!/bin/sh\nexit 0\n").expect("hook");
+    let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).expect("hook permissions");
+
+    let runner = FixedGitIndexRunner::new(&linked).expect("linked runner");
+    assert!(
+        runner
+            .has_applicable_commit_hooks()
+            .expect("linked hook classification")
+    );
+}
+
+#[test]
+fn repository_control_redirection_never_retargets_a_retained_runner() {
+    let retained = tempdir().expect("retained repository");
+    let foreign = tempdir().expect("foreign repository");
+    for repository in [retained.path(), foreign.path()] {
+        assert!(
+            Command::new("git")
+                .current_dir(repository)
+                .args(["init", "--quiet"])
+                .status()
+                .expect("git init starts")
+                .success()
+        );
+    }
+    let runner = FixedGitIndexRunner::new(retained.path()).expect("runner");
+    let retained_git_dir = retained.path().join(".git");
+    let displaced_git_dir = retained.path().join(".git.retained");
+    fs::rename(&retained_git_dir, &displaced_git_dir).expect("displace retained control directory");
+    fs::write(
+        &retained_git_dir,
+        format!("gitdir: {}\n", foreign.path().join(".git").display()),
+    )
+    .expect("foreign repository redirection");
+
+    assert!(
+        runner.refs_digest().is_err(),
+        "the runner must fail closed instead of following the replacement .git authority"
+    );
+}
+
+#[test]
+fn tracked_worktree_digest_is_independent_of_index_publication() {
+    let directory = tempdir().expect("temporary repository");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init starts")
+            .success()
+    );
+    fs::write(directory.path().join("tracked.txt"), b"before\n").expect("tracked file");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["add", "--", "tracked.txt"])
+            .status()
+            .expect("git add starts")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args([
+                "-c",
+                "user.name=TraceDecay",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ])
+            .status()
+            .expect("git commit starts")
+            .success()
+    );
+    let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+    fs::write(directory.path().join("tracked.txt"), b"after\n").expect("changed file");
+    let before_stage = runner
+        .tracked_worktree_digest()
+        .expect("worktree digest before stage");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["add", "--", "tracked.txt"])
+            .status()
+            .expect("git add starts")
+            .success()
+    );
+    let after_stage = runner
+        .tracked_worktree_digest()
+        .expect("worktree digest after stage");
+    assert_eq!(before_stage, after_stage);
+
+    fs::write(directory.path().join("tracked.txt"), b"concurrent drift\n").expect("drift file");
+    assert_ne!(
+        after_stage,
+        runner
+            .tracked_worktree_digest()
+            .expect("worktree digest after drift")
+    );
 }

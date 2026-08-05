@@ -18,19 +18,22 @@ use tracedecay_domain::{
     GitIndexSigningPolicyV1, GitIndexTransactionOperationV1, GitOidV1, HunkDirectionV1, HunkRefV1,
     ManifestDigest, canonical_sha256,
 };
+use tracedecay_runtime_core::git_discovery::{
+    GitRepositoryIdentity, GitRepositoryIdentityOutcome, discover_repository_identity_bounded,
+};
 
 pub(crate) const GIT_INDEX_ADAPTER_REVISION: &str = "tracedecay.git-index-adapter.v1";
 
 mod patch;
 mod process;
+mod safety;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use patch::ValidatedIndexPatch;
 use process::{
-    absolute_git_path, current_operation_state, git_command, git_timestamp, is_executable_hook,
-    joined_patch_bytes, parse_git_oid, read_optional_file, run_command_with_stdin, run_git_at,
-    sync_parent_directory, worktree_mode,
+    current_operation_state, git_command, git_timestamp, joined_patch_bytes, parse_git_oid,
+    run_command_with_stdin, sync_parent_directory, worktree_mode,
 };
 
 #[derive(Debug, Error)]
@@ -97,6 +100,7 @@ impl NativeGitIndexError {
 pub(crate) struct FixedGitIndexRunner {
     repository_root: PathBuf,
     git_dir: PathBuf,
+    common_dir: PathBuf,
     index_path: PathBuf,
     objects_path: PathBuf,
 }
@@ -121,27 +125,24 @@ impl Drop for NativeIndexLock {
 
 impl FixedGitIndexRunner {
     pub(crate) fn new(repository_root: impl AsRef<Path>) -> Result<Self, NativeGitIndexError> {
-        let repository_root = repository_root
-            .as_ref()
-            .canonicalize()
-            .map_err(|error| NativeGitIndexError::RepositoryUnavailable(error.to_string()))?;
-        let git_dir_text = run_git_at(&repository_root, "rev-parse", &["rev-parse", "--git-dir"])?;
-        let git_dir = absolute_git_path(&repository_root, &git_dir_text)?;
-        let index_path_text = run_git_at(
-            &repository_root,
-            "rev-parse",
-            &["rev-parse", "--git-path", "index"],
-        )?;
-        let index_path = absolute_git_path(&repository_root, &index_path_text)?;
-        let objects_path_text = run_git_at(
-            &repository_root,
-            "rev-parse",
-            &["rev-parse", "--git-path", "objects"],
-        )?;
-        let objects_path = absolute_git_path(&repository_root, &objects_path_text)?;
+        let GitRepositoryIdentityOutcome::Resolved(identity) =
+            discover_repository_identity_bounded(repository_root.as_ref())
+        else {
+            return Err(NativeGitIndexError::RepositoryUnavailable(
+                "bounded Git repository identity discovery did not resolve".to_owned(),
+            ));
+        };
+        let GitRepositoryIdentity {
+            worktree_root: repository_root,
+            git_dir,
+            common_dir,
+        } = identity;
+        let index_path = git_dir.join("index");
+        let objects_path = common_dir.join("objects");
         Ok(Self {
             repository_root,
             git_dir,
+            common_dir,
             index_path,
             objects_path,
         })
@@ -184,66 +185,6 @@ impl FixedGitIndexRunner {
             })
     }
 
-    pub(crate) fn has_applicable_commit_hooks(&self) -> Result<bool, NativeGitIndexError> {
-        match self.ensure_no_applicable_hooks() {
-            Ok(()) => Ok(false),
-            Err(NativeGitIndexError::UnsupportedHookPolicy) => Ok(true),
-            Err(error) => Err(error),
-        }
-    }
-
-    pub(crate) fn signing_key_available(
-        &self,
-        key_reference: &str,
-    ) -> Result<bool, NativeGitIndexError> {
-        let format = self.run_git_output(&["config", "--get", "gpg.format"])?;
-        let format = if format.status.success() {
-            String::from_utf8(format.stdout)
-                .map_err(|_| NativeGitIndexError::MalformedOutput {
-                    operation: "config",
-                })?
-                .trim()
-                .to_owned()
-        } else if format.status.code() == Some(1) {
-            "openpgp".to_owned()
-        } else {
-            return Err(NativeGitIndexError::GitFailed {
-                operation: "config",
-                status: format.status.to_string(),
-            });
-        };
-        if format != "openpgp" {
-            // SSH and X.509 key availability can depend on an agent or
-            // provider that cannot be proven by a read-only native probe.
-            return Ok(false);
-        }
-        let configured_program = self.run_git_output(&["config", "--get", "gpg.program"])?;
-        if configured_program.status.success() && !configured_program.stdout.is_empty() {
-            // Apply would use an arbitrary configured provider. V1 does not
-            // execute it during preview, so availability remains unproven.
-            return Ok(false);
-        }
-        if !configured_program.status.success() && configured_program.status.code() != Some(1) {
-            return Err(NativeGitIndexError::GitFailed {
-                operation: "config",
-                status: configured_program.status.to_string(),
-            });
-        }
-        let output = Command::new("gpg")
-            .args([
-                "--batch",
-                "--list-secret-keys",
-                "--with-colons",
-                "--",
-                key_reference,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
-        Ok(output.is_ok_and(|output| output.status.success()))
-    }
-
     pub(crate) fn acquire_index_lock(&self) -> Result<NativeIndexLock, NativeGitIndexError> {
         let path = self.index_lock_path();
         let file = OpenOptions::new()
@@ -266,7 +207,14 @@ impl FixedGitIndexRunner {
     }
 
     pub(crate) fn git_version(&self) -> Result<String, NativeGitIndexError> {
-        run_git_at(&self.repository_root, "version", &["--version"])
+        let output = self.run_git("version", &["--version"])?;
+        String::from_utf8(output.stdout)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or(NativeGitIndexError::MalformedOutput {
+                operation: "version",
+            })
     }
 
     pub(crate) fn refs_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
@@ -303,74 +251,6 @@ impl FixedGitIndexRunner {
                 operation: "rev-parse",
             })
         }
-    }
-
-    pub(crate) fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
-        let output = self.run_git(
-            "diff",
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-color",
-                "--binary",
-                "--full-index",
-            ],
-        )?;
-        canonical_sha256(&output.stdout).map_err(Into::into)
-    }
-
-    pub(crate) fn configuration_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
-        let output = self.run_git("config", &["config", "--null", "--show-origin", "--list"])?;
-        canonical_sha256(&output.stdout).map_err(Into::into)
-    }
-
-    pub(crate) fn attributes_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
-        let paths = self.run_git("ls-files", &["ls-files", "-z"])?;
-        let mut command = self.command();
-        command
-            .args(["check-attr", "-z", "-a", "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let attributes = run_command_with_stdin(command, "check-attr", &paths.stdout)?;
-        canonical_sha256(&attributes.stdout).map_err(Into::into)
-    }
-
-    pub(crate) fn has_external_drivers(&self) -> Result<bool, NativeGitIndexError> {
-        let output = self.run_git_output(&[
-            "config",
-            "--get-regexp",
-            r"^(merge\..*\.driver|diff\..*\.(command|textconv)|filter\..*\.(clean|smudge|process))$",
-        ])?;
-        if output.status.success() {
-            return Ok(!output.stdout.is_empty());
-        }
-        if output.status.code() == Some(1) {
-            return Ok(false);
-        }
-        Err(NativeGitIndexError::GitFailed {
-            operation: "config",
-            status: output.status.to_string(),
-        })
-    }
-
-    pub(crate) fn sparse_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
-        let sparse_path = absolute_git_path(
-            &self.repository_root,
-            &run_git_at(
-                &self.repository_root,
-                "rev-parse",
-                &["rev-parse", "--git-path", "info/sparse-checkout"],
-            )?,
-        )?;
-        let sparse_bytes = read_optional_file(&sparse_path)?;
-        canonical_sha256(&sparse_bytes).map_err(Into::into)
-    }
-
-    pub(crate) fn submodule_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
-        let output = self.run_git("ls-files", &["ls-files", "--stage", "-z"])?;
-        let gitmodules = read_optional_file(&self.repository_root.join(".gitmodules"))?;
-        canonical_sha256(&(output.stdout, gitmodules)).map_err(Into::into)
     }
 
     pub(crate) fn has_intent_to_add(&self) -> Result<bool, NativeGitIndexError> {
@@ -604,6 +484,11 @@ impl FixedGitIndexRunner {
         // therefore proven no-change at the PR11 repository-state boundary.
         let output = run_command_with_stdin(command, "commit-tree", intent.message.as_bytes())?;
         let created_commit = parse_git_oid("commit-tree", &output.stdout)?;
+        self.verify_native_preconditions(lock, preview)?;
+        if let GitIndexSigningPolicyV1::SignatureRequired { key_reference } = &intent.signing_policy
+        {
+            self.verify_created_commit_signature(&created_commit, key_reference)?;
+        }
 
         let update = self
             .run_git_output(&[
@@ -743,7 +628,8 @@ impl FixedGitIndexRunner {
     ) -> Result<(), NativeGitIndexError> {
         let snapshot = &preview.repository_snapshot;
         let checksum = canonical_sha256(&self.index_bytes()?)?;
-        if checksum != snapshot.index.checksum
+        if !self.repository_identity_unchanged()
+            || checksum != snapshot.index.checksum
             || self.index_tree_under_lock(lock).ok().as_ref() != snapshot.index.tree_id.as_ref()
             || self.tracked_worktree_digest().ok().as_ref()
                 != Some(&snapshot.working_tree.tracked_digest)
@@ -924,34 +810,13 @@ impl FixedGitIndexRunner {
         self.index_path.with_file_name(name)
     }
 
-    fn ensure_no_applicable_hooks(&self) -> Result<(), NativeGitIndexError> {
-        let configured = self.run_git_output(&["config", "--get", "core.hooksPath"])?;
-        if configured.status.success() && !configured.stdout.is_empty() {
-            return Err(NativeGitIndexError::UnsupportedHookPolicy);
-        }
-        if !configured.status.success() && configured.status.code() != Some(1) {
-            return Err(NativeGitIndexError::GitFailed {
-                operation: "config",
-                status: configured.status.to_string(),
-            });
-        }
-        for hook in [
-            "pre-commit",
-            "pre-merge-commit",
-            "prepare-commit-msg",
-            "commit-msg",
-            "post-commit",
-            "reference-transaction",
-        ] {
-            if is_executable_hook(&self.git_dir.join("hooks").join(hook)) {
-                return Err(NativeGitIndexError::UnsupportedHookPolicy);
-            }
-        }
-        Ok(())
-    }
-
     fn command(&self) -> Command {
-        git_command(&self.repository_root)
+        let mut command = git_command(&self.repository_root);
+        command
+            .env("GIT_DIR", &self.git_dir)
+            .env("GIT_COMMON_DIR", &self.common_dir)
+            .env("GIT_WORK_TREE", &self.repository_root);
+        command
     }
 
     fn quarantine_command(&self, index_path: &Path, object_path: &Path) -> Command {
