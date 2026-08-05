@@ -790,6 +790,9 @@ impl DaemonWorkRuntimeRegistrar {
         policy_digest: ManifestDigest,
         configuration_digest: ManifestDigest,
         config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
+        executable_bindings: Arc<
+            dyn crate::config::work_executable_binding::WorkExecutableBindingResolver + Send + Sync,
+        >,
     ) -> Result<(), TraceDecayError> {
         if authority.project_id() != &grant.scope.project_id
             || authority.repository_id() != &grant.scope.repository_id
@@ -834,6 +837,7 @@ impl DaemonWorkRuntimeRegistrar {
                         authority,
                         database.work_storage()?,
                         config,
+                        executable_bindings,
                         configuration_digest.clone(),
                         Arc::clone(&database),
                         project_root.clone(),

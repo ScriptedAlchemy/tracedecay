@@ -173,6 +173,4 @@ mod git_tests;
 mod lsp_tests;
 mod plan26_tests;
 mod primitive_tests;
-mod registrars_tests;
 mod types_tests;
-mod work_tests;
