@@ -2,12 +2,14 @@ use std::collections::BTreeSet;
 
 use thiserror::Error;
 use tracedecay_application::{
-    ApplicationOutcome, Deadline, OpaqueCursor, OperationTermination, PageRequest,
+    ApplicationOutcome, CancellationStage, Deadline, OpaqueCursor, OperationReceipt,
+    OperationTermination, PageRequest,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{
-    BindingSurface, CancellationContract, CapabilityManifestV1, CatalogSnapshotV1, FeatureId,
-    ProfileId, ReceiptContract, SurfaceBindingV1, SurfaceOperationName, TerminalState,
+    BindingSurface, CancellationContract, CancellationPoint, CapabilityManifestV1,
+    CatalogSnapshotV1, DeadlineBehavior, FeatureId, ProfileId, ReceiptContract, SurfaceBindingV1,
+    SurfaceOperationName, TerminalState,
 };
 
 /// Catalog-owned semantics for one concrete HTTP binding.
@@ -34,24 +36,33 @@ pub enum HttpManifestContractError {
     Unavailable,
     #[error("deadline is outside the representable HTTP range")]
     DeadlineOutOfRange,
+    #[error("the caller or admission authority must supply an explicit deadline")]
+    CallerDeadlineRequired,
+    #[error("the observed effective deadline exceeds the capability manifest")]
+    EffectiveDeadlineExceedsManifest,
+    #[error("the admitted terminal state conflicts with the manifest deadline behavior")]
+    DeadlineBehaviorMismatch,
     #[error("operation does not support pagination")]
     PaginationUnsupported,
     #[error("page request exceeds the capability manifest")]
     InvalidPage,
+    #[error(
+        "opaque cursor requires authenticated cursor authority within {cursor_ttl_millis} milliseconds"
+    )]
+    CursorAuthorityRequired { cursor_ttl_millis: u64 },
+    #[error("application outcome contains an invalid operation receipt")]
+    InvalidReceipt,
     #[error("application outcome receipt does not match the capability manifest")]
     ReceiptMismatch,
     #[error("application outcome terminal state is not declared by the capability manifest")]
     TerminalStateNotDeclared,
+    #[error("application outcome records cancellation for a non-cancellable capability")]
+    CancellationNotSupported,
+    #[error("application outcome cancellation stage is not declared by the capability manifest")]
+    CancellationStageNotDeclared,
 }
 
 impl HttpManifestContract {
-    pub fn new(
-        binding: &SurfaceBindingV1,
-        capability: &CapabilityManifestV1,
-    ) -> Result<Self, HttpManifestContractError> {
-        Self::new_for_surface(binding, capability, BindingSurface::Http)
-    }
-
     pub fn resolve(
         catalog: &CatalogSnapshotV1,
         profile_id: &ProfileId,
@@ -125,21 +136,27 @@ impl HttpManifestContract {
             .ok_or(HttpManifestContractError::DeadlineOutOfRange)
     }
 
+    pub fn deadline_behavior(&self) -> DeadlineBehavior {
+        self.capability.deadline().behavior()
+    }
+
     /// Resolve a caller deadline against the capability's declared maximum.
     ///
-    /// Omission selects the manifest maximum. An earlier caller deadline stays
-    /// earlier, including an already-expired deadline.
+    /// A maximum duration does not define omission semantics, so the caller or
+    /// admission authority must supply an explicit deadline. A deadline beyond
+    /// the manifest ceiling is bounded to the declared maximum.
     pub fn effective_deadline(
         &self,
         observed_at: UtcMicros,
         caller_deadline: Option<&Deadline>,
     ) -> Result<Deadline, HttpManifestContractError> {
+        let caller_deadline =
+            caller_deadline.ok_or(HttpManifestContractError::CallerDeadlineRequired)?;
         let maximum = observed_at
             .0
             .checked_add(self.maximum_deadline_micros()?)
             .ok_or(HttpManifestContractError::DeadlineOutOfRange)?;
-        let expires_at =
-            caller_deadline.map_or(maximum, |deadline| deadline.expires_at.0.min(maximum));
+        let expires_at = caller_deadline.expires_at.0.min(maximum);
         Deadline::new(UtcMicros(expires_at))
             .map_err(|_| HttpManifestContractError::DeadlineOutOfRange)
     }
@@ -162,6 +179,11 @@ impl HttpManifestContract {
         let page_size = requested_page_size.unwrap_or(pagination.default_page_size());
         if page_size > pagination.maximum_page_size() {
             return Err(HttpManifestContractError::InvalidPage);
+        }
+        if cursor.is_some() {
+            return Err(HttpManifestContractError::CursorAuthorityRequired {
+                cursor_ttl_millis: pagination.cursor_ttl_millis(),
+            });
         }
         PageRequest::new(page_size, cursor)
             .map(Some)
@@ -202,18 +224,78 @@ impl HttpManifestContract {
         &self,
         outcome: &ApplicationOutcome<T>,
     ) -> Result<(), HttpManifestContractError> {
-        let (receipt, termination) = match outcome {
-            ApplicationOutcome::Evidence(packet) => {
-                (ReceiptContract::Operation, packet.execution.termination)
-            }
+        let (receipt_contract, execution) = match outcome {
+            ApplicationOutcome::Evidence(packet) => (ReceiptContract::Operation, &packet.execution),
             ApplicationOutcome::Preview(preview) => {
-                (ReceiptContract::Operation, preview.execution.termination)
+                (ReceiptContract::Operation, &preview.execution)
             }
             ApplicationOutcome::Effect(effect) => {
-                (ReceiptContract::DurableEffect, effect.execution.termination)
+                (ReceiptContract::DurableEffect, &effect.execution)
             }
         };
-        self.validate_observed_receipt(receipt, termination)
+        self.validate_observed_receipt(receipt_contract, execution.termination)?;
+        self.validate_deadline_behavior(receipt_contract, execution.termination)?;
+        self.validate_operation_receipt(execution)
+    }
+
+    fn validate_deadline_behavior(
+        &self,
+        receipt: ReceiptContract,
+        termination: OperationTermination,
+    ) -> Result<(), HttpManifestContractError> {
+        match (self.deadline_behavior(), receipt, termination) {
+            (DeadlineBehavior::RejectBeforeAdmission, _, OperationTermination::TimedOut) => {
+                Err(HttpManifestContractError::DeadlineBehaviorMismatch)
+            }
+            (DeadlineBehavior::RejectBeforeAdmission, _, _)
+            | (DeadlineBehavior::ReturnOperationReceipt, ReceiptContract::Operation, _)
+            | (DeadlineBehavior::ReturnEffectReceipt, ReceiptContract::DurableEffect, _) => Ok(()),
+            _ => Err(HttpManifestContractError::DeadlineBehaviorMismatch),
+        }
+    }
+
+    fn validate_operation_receipt(
+        &self,
+        receipt: &OperationReceipt,
+    ) -> Result<(), HttpManifestContractError> {
+        receipt
+            .validate()
+            .map_err(|_| HttpManifestContractError::InvalidReceipt)?;
+
+        let maximum_deadline = receipt
+            .started_at
+            .0
+            .checked_add(self.maximum_deadline_micros()?)
+            .ok_or(HttpManifestContractError::DeadlineOutOfRange)?;
+        if receipt.effective_deadline.expires_at.0 > maximum_deadline {
+            return Err(HttpManifestContractError::EffectiveDeadlineExceedsManifest);
+        }
+        if receipt.effective_deadline.expires_at <= receipt.started_at
+            && receipt.termination != OperationTermination::TimedOut
+        {
+            return Err(HttpManifestContractError::InvalidReceipt);
+        }
+
+        let Some(cancellation) = &receipt.cancellation else {
+            return Ok(());
+        };
+        if cancellation.observed_at < receipt.started_at
+            || cancellation.observed_at > receipt.ended_at
+        {
+            return Err(HttpManifestContractError::InvalidReceipt);
+        }
+        let cancellation_point = cancellation_point(cancellation.stage);
+        match self.cancellation() {
+            CancellationContract::NotCancellable => {
+                Err(HttpManifestContractError::CancellationNotSupported)
+            }
+            CancellationContract::Cooperative { .. }
+                if !self.cancellation().observes(cancellation_point) =>
+            {
+                Err(HttpManifestContractError::CancellationStageNotDeclared)
+            }
+            CancellationContract::Cooperative { .. } => Ok(()),
+        }
     }
 }
 
@@ -229,18 +311,42 @@ const fn operation_terminal_state(termination: OperationTermination) -> Terminal
     }
 }
 
+const fn cancellation_point(stage: CancellationStage) -> CancellationPoint {
+    match stage {
+        CancellationStage::BeforeAdmission => CancellationPoint::BeforeAdmission,
+        CancellationStage::BeforeRead => CancellationPoint::BeforeRead,
+        CancellationStage::DuringRead => CancellationPoint::DuringRead,
+        CancellationStage::BeforeEffect => CancellationPoint::BeforeEffect,
+        CancellationStage::EffectInFlight => CancellationPoint::EffectInFlight,
+        CancellationStage::Reconciling => CancellationPoint::Reconciling,
+        CancellationStage::AfterCommit => CancellationPoint::AfterCommit,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::OperationTermination;
+    use std::collections::BTreeSet;
+
+    use tracedecay_application::{
+        ApplicationOutcome, AuthorityReceipt, CancellationObservation, CancellationStage,
+        CapabilityGrantId, Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain,
+        EvidencePacket, OperationBudgetUsage, OperationReceipt, OperationTermination, PageState,
+        PolicyDecisionRef, TemporalState,
+    };
+    use tracedecay_domain::{ComponentVersion, ManifestDigest, UtcMicros};
     use tracedecay_tool_catalog::{
-        AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
-        CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-        CapabilityManifestV1, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy,
-        EffectClass, IdempotencyContract, InverseContract, LifecycleClass, PaginationContract,
-        PrivacyClass, ProtocolRevisionRange, ReceiptContract, ReconciliationContract,
-        RevalidationContract, RoutingContractV1, SchemaId, SchemaRef, ScopeRequirement,
-        StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
-        TerminalState, TerminalStateContract, UnavailabilityReason, UseCaseId,
+        ApplicationHandlerDescriptorV1, AuthorityRequirement, AvailabilityContract, BindingId,
+        BindingStatus, BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
+        CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
+        CatalogContributionV1, CatalogSnapshotBuilderV1, ContributionId, DeadlineBehavior,
+        DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
+        InverseContract, LifecycleClass, PaginationContract, PrivacyClass, ProfileBudget,
+        ProfileDefinition, ProfileDefinitionInputV1, ProfileId, ProfileKind, ProtocolRevisionRange,
+        ReceiptContract, ReconciliationContract, RevalidationContract, RoutingContractV1,
+        RoutingFixtureExpectation, RoutingFixtureV1, SchemaId, SchemaRef, ScopeRequirement,
+        SortContractId, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
+        SurfaceOperationName, TerminalState, TerminalStateContract, UnavailabilityReason,
+        UseCaseId,
     };
 
     use super::{HttpManifestContract, HttpManifestContractError};
@@ -259,11 +365,42 @@ mod tests {
         .unwrap()
     }
 
+    fn detached_contract(
+        binding: &SurfaceBindingV1,
+        capability: &CapabilityManifestV1,
+    ) -> Result<HttpManifestContract, HttpManifestContractError> {
+        HttpManifestContract::new_for_surface(binding, capability, BindingSurface::Http)
+    }
+
     fn manifest(
         capability_id: &str,
         binding_ids: Vec<&str>,
         availability: AvailabilityContract,
         terminal_states: Vec<TerminalState>,
+    ) -> CapabilityManifestV1 {
+        manifest_with_lifecycle(
+            capability_id,
+            binding_ids,
+            availability,
+            terminal_states,
+            DeadlineBehavior::ReturnOperationReceipt,
+            Some(PaginationContract::new(12, 40, 60_000).unwrap()),
+            CancellationContract::cooperative(vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::DuringRead,
+            ])
+            .unwrap(),
+        )
+    }
+
+    fn manifest_with_lifecycle(
+        capability_id: &str,
+        binding_ids: Vec<&str>,
+        availability: AvailabilityContract,
+        terminal_states: Vec<TerminalState>,
+        deadline_behavior: DeadlineBehavior,
+        pagination: Option<PaginationContract>,
+        cancellation: CancellationContract,
     ) -> CapabilityManifestV1 {
         CapabilityManifestV1::new(CapabilityManifestInputV1 {
             capability_id: CapabilityId::new(capability_id).unwrap(),
@@ -285,14 +422,9 @@ mod tests {
             privacy: PrivacyClass::PublicMetadata,
             lifecycle: LifecycleClass::Stateless,
             streaming: StreamingContract::Unsupported,
-            cancellation: CancellationContract::cooperative(vec![
-                CancellationPoint::BeforeAdmission,
-                CancellationPoint::DuringRead,
-            ])
-            .unwrap(),
-            deadline: DeadlineContract::new(2_500, DeadlineBehavior::ReturnOperationReceipt)
-                .unwrap(),
-            pagination: Some(PaginationContract::new(12, 40, 60_000).unwrap()),
+            cancellation,
+            deadline: DeadlineContract::new(2_500, deadline_behavior).unwrap(),
+            pagination,
             idempotency: IdempotencyContract::NotRequired,
             inverse: InverseContract::NotApplicable,
             authority_revalidation: RevalidationContract::NotRequired,
@@ -304,7 +436,7 @@ mod tests {
                 .into_iter()
                 .map(|id| BindingId::new(id).unwrap())
                 .collect(),
-            profile_eligibility: Vec::new(),
+            profile_eligibility: vec![ProfileId::new("profile.default").unwrap()],
             required_features: Vec::new(),
         })
         .unwrap()
@@ -318,6 +450,155 @@ mod tests {
             TerminalState::Failed,
             TerminalState::Partial,
         ]
+    }
+
+    fn digest(byte: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    fn evidence_outcome(execution: OperationReceipt) -> ApplicationOutcome<()> {
+        ApplicationOutcome::Evidence(EvidencePacket {
+            temporal: TemporalState::current(UtcMicros(100)),
+            authority: AuthorityReceipt {
+                grant_id: CapabilityGrantId::new("grant.fixture").unwrap(),
+                grant_revision: 1,
+                grant_digest: digest('a'),
+                authorized_scope_digest: digest('b'),
+                disclosure: DisclosureClass::Evidence,
+                policy: PolicyDecisionRef::new(
+                    "policy.fixture",
+                    1,
+                    digest('c'),
+                    ComponentVersion::new("policy.fixture.v1").unwrap(),
+                )
+                .unwrap(),
+                revalidated_at: UtcMicros(100),
+            },
+            evidence_authorities: Vec::new(),
+            coverage: EvidenceCoverage::complete(vec![EvidenceDomain::Source], 1, 1, 1).unwrap(),
+            omissions: Vec::new(),
+            scores: Vec::new(),
+            contributions: Vec::new(),
+            page: PageState::first_page(
+                SortContractId::new("sort.source.fixture").unwrap(),
+                1,
+                Some(1),
+                1,
+            )
+            .unwrap(),
+            execution,
+            payload: Some(()),
+        })
+    }
+
+    fn operation_receipt(
+        termination: OperationTermination,
+        cancellation: Option<CancellationObservation>,
+    ) -> OperationReceipt {
+        OperationReceipt {
+            started_at: UtcMicros(100),
+            ended_at: UtcMicros(200),
+            effective_deadline: Deadline::new(UtcMicros(150)).unwrap(),
+            cancellation,
+            budget: OperationBudgetUsage::default(),
+            termination,
+        }
+    }
+
+    fn contract() -> HttpManifestContract {
+        contract_with_lifecycle(
+            DeadlineBehavior::ReturnOperationReceipt,
+            Some(PaginationContract::new(12, 40, 60_000).unwrap()),
+            CancellationContract::cooperative(vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::DuringRead,
+            ])
+            .unwrap(),
+        )
+    }
+
+    fn contract_with_lifecycle(
+        deadline_behavior: DeadlineBehavior,
+        pagination: Option<PaginationContract>,
+        cancellation: CancellationContract,
+    ) -> HttpManifestContract {
+        let binding = binding(
+            "binding.http.source_read",
+            "source.read",
+            BindingSurface::Http,
+        );
+        let capability = manifest_with_lifecycle(
+            "source.read",
+            vec!["binding.http.source_read"],
+            AvailabilityContract::Available,
+            base_terminal_states(),
+            deadline_behavior,
+            pagination,
+            cancellation,
+        );
+        detached_contract(&binding, &capability).unwrap()
+    }
+
+    fn catalog() -> (
+        tracedecay_tool_catalog::CatalogSnapshotV1,
+        ProfileId,
+        SurfaceOperationName,
+    ) {
+        let profile_id = ProfileId::new("profile.default").unwrap();
+        let binding = binding(
+            "binding.http.source_read",
+            "source.read",
+            BindingSurface::Http,
+        );
+        let capability = manifest(
+            "source.read",
+            vec!["binding.http.source_read"],
+            AvailabilityContract::Available,
+            base_terminal_states(),
+        );
+        let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
+            contribution_id: ContributionId::new("contribution.source").unwrap(),
+            depends_on: Vec::new(),
+            capabilities: vec![capability.clone()],
+            retrieval_primitives: Vec::new(),
+            bindings: vec![binding],
+        })
+        .unwrap();
+        let profile = ProfileDefinition::new(ProfileDefinitionInputV1 {
+            profile_id: profile_id.clone(),
+            kind: ProfileKind::Default,
+            capability_ids: vec![capability.capability_id().clone()],
+            enabled_surfaces: vec![BindingSurface::Http],
+            requires_cli_mcp_pairing: false,
+            budget: ProfileBudget::new(8, 2_000).unwrap(),
+            routing_fixtures: vec![
+                RoutingFixtureV1::new(
+                    "read source",
+                    RoutingFixtureExpectation::Select {
+                        capability_id: capability.capability_id().clone(),
+                    },
+                )
+                .unwrap(),
+                RoutingFixtureV1::new("do nothing", RoutingFixtureExpectation::Reject).unwrap(),
+            ],
+        })
+        .unwrap();
+        let handler = ApplicationHandlerDescriptorV1::new(
+            capability.capability_id().clone(),
+            capability.use_case_id().clone(),
+            capability.request_schema().clone(),
+            capability.result_schema().clone(),
+        );
+        let mut builder = CatalogSnapshotBuilderV1::new();
+        builder
+            .add_contribution(contribution)
+            .add_profile(profile)
+            .add_handler(handler);
+        (
+            builder.build().unwrap(),
+            profile_id,
+            SurfaceOperationName::new("source_read").unwrap(),
+        )
     }
 
     #[test]
@@ -335,7 +616,7 @@ mod tests {
         );
 
         assert_eq!(
-            HttpManifestContract::new(&binding, &capability).unwrap_err(),
+            detached_contract(&binding, &capability).unwrap_err(),
             HttpManifestContractError::NotHttp
         );
     }
@@ -355,7 +636,7 @@ mod tests {
         );
 
         assert_eq!(
-            HttpManifestContract::new(&binding, &capability).unwrap_err(),
+            detached_contract(&binding, &capability).unwrap_err(),
             HttpManifestContractError::CapabilityMismatch
         );
     }
@@ -375,7 +656,7 @@ mod tests {
         );
 
         assert_eq!(
-            HttpManifestContract::new(&binding, &capability).unwrap_err(),
+            detached_contract(&binding, &capability).unwrap_err(),
             HttpManifestContractError::BindingNotDeclared
         );
     }
@@ -397,25 +678,14 @@ mod tests {
         );
 
         assert_eq!(
-            HttpManifestContract::new(&binding, &capability).unwrap_err(),
+            detached_contract(&binding, &capability).unwrap_err(),
             HttpManifestContractError::Unavailable
         );
     }
 
     #[test]
     fn derives_lifecycle_constraints_from_the_capability_manifest() {
-        let binding = binding(
-            "binding.http.source_read",
-            "source.read",
-            BindingSurface::Http,
-        );
-        let capability = manifest(
-            "source.read",
-            vec!["binding.http.source_read"],
-            AvailabilityContract::Available,
-            base_terminal_states(),
-        );
-        let contract = HttpManifestContract::new(&binding, &capability).unwrap();
+        let contract = contract();
 
         assert_eq!(contract.maximum_deadline_micros().unwrap(), 2_500_000);
         assert_eq!(
@@ -449,7 +719,7 @@ mod tests {
             AvailabilityContract::Available,
             terminal_states,
         );
-        let contract = HttpManifestContract::new(&binding, &capability).unwrap();
+        let contract = detached_contract(&binding, &capability).unwrap();
 
         let expectations = [
             (OperationTermination::Completed, true),
@@ -467,5 +737,247 @@ mod tests {
                 "unexpected contract decision for {termination:?}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_returns_only_the_snapshot_selected_http_contract() {
+        let (catalog, profile_id, operation) = catalog();
+        let contract = HttpManifestContract::resolve(
+            &catalog,
+            &profile_id,
+            BindingSurface::Http,
+            &operation,
+            1,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            contract.binding().binding_id().as_str(),
+            "binding.http.source_read"
+        );
+        assert_eq!(
+            contract.capability().capability_id().as_str(),
+            "source.read"
+        );
+        assert!(
+            HttpManifestContract::resolve(
+                &catalog,
+                &ProfileId::new("profile.other").unwrap(),
+                BindingSurface::Http,
+                &operation,
+                1,
+                &BTreeSet::new(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn omitted_deadline_requires_caller_owned_admission_semantics() {
+        let contract = contract();
+
+        assert_eq!(
+            contract.deadline_behavior(),
+            DeadlineBehavior::ReturnOperationReceipt
+        );
+        assert_eq!(
+            contract
+                .effective_deadline(UtcMicros(100), None)
+                .unwrap_err(),
+            HttpManifestContractError::CallerDeadlineRequired
+        );
+    }
+
+    #[test]
+    fn unsupported_pagination_rejects_http_page_controls() {
+        let contract = contract_with_lifecycle(
+            DeadlineBehavior::ReturnOperationReceipt,
+            None,
+            CancellationContract::NotCancellable,
+        );
+
+        assert_eq!(contract.page_request(None, None).unwrap(), None);
+        assert_eq!(
+            contract.page_request(Some(1), None).unwrap_err(),
+            HttpManifestContractError::PaginationUnsupported
+        );
+    }
+
+    #[test]
+    fn opaque_cursor_requires_authenticated_ttl_authority() {
+        let contract = contract();
+
+        assert_eq!(
+            contract
+                .page_request(
+                    Some(12),
+                    Some(tracedecay_application::OpaqueCursor::new("opaque.cursor").unwrap()),
+                )
+                .unwrap_err(),
+            HttpManifestContractError::CursorAuthorityRequired {
+                cursor_ttl_millis: 60_000,
+            }
+        );
+    }
+
+    #[test]
+    fn observed_receipt_family_must_match_the_manifest() {
+        let contract = contract();
+
+        assert_eq!(
+            contract
+                .validate_observed_receipt(
+                    ReceiptContract::DurableEffect,
+                    OperationTermination::Completed,
+                )
+                .unwrap_err(),
+            HttpManifestContractError::ReceiptMismatch
+        );
+    }
+
+    #[test]
+    fn validate_outcome_rejects_a_malformed_operation_receipt() {
+        let contract = contract();
+        let mut receipt = operation_receipt(OperationTermination::Completed, None);
+        receipt.ended_at = UtcMicros(99);
+
+        assert_eq!(
+            contract
+                .validate_outcome(&evidence_outcome(receipt))
+                .unwrap_err(),
+            HttpManifestContractError::InvalidReceipt
+        );
+    }
+
+    #[test]
+    fn validate_outcome_rejects_an_undeclared_cancellation_stage() {
+        let contract = contract();
+        let receipt = operation_receipt(
+            OperationTermination::Completed,
+            Some(CancellationObservation {
+                stage: CancellationStage::BeforeRead,
+                observed_at: UtcMicros(150),
+            }),
+        );
+
+        assert_eq!(
+            contract
+                .validate_outcome(&evidence_outcome(receipt))
+                .unwrap_err(),
+            HttpManifestContractError::CancellationStageNotDeclared
+        );
+    }
+
+    #[test]
+    fn validate_outcome_rejects_an_out_of_range_cancellation_observation() {
+        let contract = contract();
+        let receipt = operation_receipt(
+            OperationTermination::Cancelled,
+            Some(CancellationObservation {
+                stage: CancellationStage::DuringRead,
+                observed_at: UtcMicros(201),
+            }),
+        );
+
+        assert_eq!(
+            contract
+                .validate_outcome(&evidence_outcome(receipt))
+                .unwrap_err(),
+            HttpManifestContractError::InvalidReceipt
+        );
+    }
+
+    #[test]
+    fn validate_outcome_rejects_an_effective_deadline_above_the_manifest_ceiling() {
+        let contract = contract();
+        let mut receipt = operation_receipt(OperationTermination::Completed, None);
+        receipt.effective_deadline = Deadline::new(UtcMicros(2_500_101)).unwrap();
+
+        assert_eq!(
+            contract
+                .validate_outcome(&evidence_outcome(receipt))
+                .unwrap_err(),
+            HttpManifestContractError::EffectiveDeadlineExceedsManifest
+        );
+    }
+
+    #[test]
+    fn validate_outcome_rejects_cancellation_for_a_non_cancellable_capability() {
+        let contract = contract_with_lifecycle(
+            DeadlineBehavior::ReturnOperationReceipt,
+            None,
+            CancellationContract::NotCancellable,
+        );
+        let receipt = operation_receipt(
+            OperationTermination::Completed,
+            Some(CancellationObservation {
+                stage: CancellationStage::DuringRead,
+                observed_at: UtcMicros(150),
+            }),
+        );
+
+        assert_eq!(
+            contract
+                .validate_outcome(&evidence_outcome(receipt))
+                .unwrap_err(),
+            HttpManifestContractError::CancellationNotSupported
+        );
+    }
+
+    #[test]
+    fn reject_before_admission_cannot_surface_an_admitted_timeout_receipt() {
+        let contract = contract_with_lifecycle(
+            DeadlineBehavior::RejectBeforeAdmission,
+            None,
+            CancellationContract::cooperative(vec![CancellationPoint::DuringRead]).unwrap(),
+        );
+        let receipt = operation_receipt(
+            OperationTermination::TimedOut,
+            Some(CancellationObservation {
+                stage: CancellationStage::DuringRead,
+                observed_at: UtcMicros(150),
+            }),
+        );
+
+        assert_eq!(
+            contract
+                .validate_outcome(&evidence_outcome(receipt))
+                .unwrap_err(),
+            HttpManifestContractError::DeadlineBehaviorMismatch
+        );
+    }
+
+    #[test]
+    fn return_operation_receipt_preserves_an_already_elapsed_caller_deadline() {
+        let contract = contract();
+        let mut receipt = operation_receipt(
+            OperationTermination::TimedOut,
+            Some(CancellationObservation {
+                stage: CancellationStage::DuringRead,
+                observed_at: UtcMicros(100),
+            }),
+        );
+        receipt.effective_deadline = Deadline::new(UtcMicros(99)).unwrap();
+
+        assert!(
+            contract
+                .validate_outcome(&evidence_outcome(receipt))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_outcome_accepts_a_well_formed_declared_receipt() {
+        let contract = contract();
+
+        assert!(
+            contract
+                .validate_outcome(&evidence_outcome(operation_receipt(
+                    OperationTermination::Completed,
+                    None,
+                )))
+                .is_ok()
+        );
     }
 }
