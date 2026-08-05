@@ -801,7 +801,6 @@ pub(super) async fn production_project_server(
                     project_sessions: Arc::clone(&session_db),
                     user_sessions: Arc::clone(&user_session_db),
                     registry: Arc::clone(&registry_db),
-                    analytics: accounting_db.clone(),
                     startup_import: cg.get_config().sync.session_start_sync,
                     project_refresh: project_session_refresh_wake.clone(),
                     user_refresh: user_session_refresh_wake.clone(),

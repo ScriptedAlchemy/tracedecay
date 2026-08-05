@@ -734,6 +734,7 @@ fn render_session_sync_outcome(outcome: SessionSyncOutcomeV1) -> Value {
             "status": "complete",
             "operation_id": receipt.admission.operation_id,
             "idempotency_key": receipt.admission.idempotency_key,
+            "coalesced_primary": receipt.coalesced_primary,
             "termination": receipt.termination,
             "stats": receipt.stats,
             "coverage": receipt.coverage,

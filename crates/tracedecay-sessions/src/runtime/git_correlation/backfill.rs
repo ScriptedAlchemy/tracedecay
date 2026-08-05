@@ -1,18 +1,26 @@
-use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::store::GitCorrelationSessionStore;
 
 use super::{
     AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, CommitEvidence, CommitRelation,
-    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, GitCorrelationWriteTxn,
-    ScannedCommit, SpanObservation, SpanOverlapKind, SpanScanTarget, SpanSource, TargetScan,
-    normalize_worktree, run_commit_attribution_sweep,
+    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GIT_HISTORY_ROWID_FRONTIER_KEY,
+    GitCorrelationError, GitCorrelationWriteTxn, ScannedCommit, SpanObservation, SpanOverlapKind,
+    SpanScanTarget, SpanSource, TargetScan, normalize_worktree, run_commit_attribution_sweep,
 };
 
 mod bounded;
 pub use bounded::{
-    BoundedBackfillInterruption, BoundedBackfillOutcome, BoundedGitControl, run_bounded_backfill,
+    BoundedBackfillInterruption, BoundedBackfillOutcome, BoundedGitControl,
+    GitHistoryIndexFrontier, run_bounded_history_index_page,
 };
+
+#[derive(Debug)]
+pub(super) struct SessionActivityPageRow {
+    pub source_rowid: i64,
+    pub activity_timestamp: i64,
+    pub session: SessionActivityRow,
+}
 
 // Historical backfill for sessions that predate live span recording.
 
@@ -76,7 +84,7 @@ impl SessionActivityRow {
     /// The activity timestamp the incremental backfill orders and watermarks by:
     /// the newest message time, else the declared end, else the start. Mirrors
     /// the `COALESCE(MAX(m.timestamp), s.ended_at, s.started_at)` key used by
-    /// [`session_activity_rows_since`], so the returned value compares directly
+    /// [`session_activity_page_after`], so the returned value compares directly
     /// against the persisted watermark (both are raw, un-normalized bounds).
     pub fn activity_sort_key(&self) -> Option<i64> {
         self.message_max_ts.or(self.ended_at).or(self.started_at)
@@ -410,10 +418,8 @@ pub const DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS: usize = 50;
 /// newest activity in the batch. Fresh sessions recorded after a pass are
 /// picked up by a later pass; a fully-drained store scans nothing.
 ///
-/// Analytics timestamps are not consulted here (the manual
-/// `tracedecay sessions git-sync` remains the exhaustive, watermark-free,
-/// analytics-aware path); auto-backfill relies on session and reflog
-/// timestamps alone, which is enough to populate branch/worktree spans.
+/// Analytics timestamps are not consulted here. Canonical history indexing
+/// derives bounded pages from durable session activity and Git evidence.
 pub async fn run_incremental_backfill<S: GitCorrelationSessionStore, G>(
     session_store: &S,
     git: &G,
@@ -431,10 +437,17 @@ where
     let watermark = super::read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY)
         .await?
         .unwrap_or(0);
-    let rows = session_activity_rows_since(&snapshot, watermark, limit_sessions)
+    let rowid_frontier = super::read_meta_value(&snapshot, GIT_HISTORY_ROWID_FRONTIER_KEY)
+        .await?
+        .unwrap_or(0);
+    let page = session_activity_page_after(&snapshot, watermark, rowid_frontier, limit_sessions)
         .await
         .map_err(GitCorrelationError::Db)?;
     drop(snapshot);
+    let rows = page
+        .iter()
+        .map(|row| row.session.clone())
+        .collect::<Vec<_>>();
 
     // `since` is left at 0: the query already excludes anything at or below the
     // watermark, so a second time floor would only drop legitimately-new spans.
@@ -449,19 +462,22 @@ where
         let no_analytics: &[super::AnalyticsSessionTimestamp] = &[];
         backfill_rows(session_store, git, &opts, &rows, no_analytics, &mut stats).await?;
 
-        // Advance the watermark to the newest activity attempted this pass.
-        // Rows are ordered oldest-first, so the last row carries the max; fall
-        // back to a scan to stay correct if the query's ordering ever changes.
-        let new_watermark = rows
-            .iter()
-            .filter_map(SessionActivityRow::activity_sort_key)
-            .max();
-        if let Some(new_watermark) = new_watermark
-            && new_watermark > watermark
+        // Advance both tuple components together so equal activity timestamps
+        // resume at the exact unprocessed session row.
+        let new_frontier = page.last();
+        if let Some(new_frontier) = new_frontier
+            && (new_frontier.activity_timestamp, new_frontier.source_rowid)
+                > (watermark, rowid_frontier)
         {
             let transaction = session_store.open_write_transaction().await?;
-            super::write_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY, new_watermark)
-                .await?;
+            advance_history_frontier(
+                &transaction,
+                GitHistoryIndexFrontier {
+                    activity_timestamp: new_frontier.activity_timestamp,
+                    source_rowid: new_frontier.source_rowid,
+                },
+            )
+            .await?;
             GitCorrelationWriteTxn::commit(transaction).await?;
         }
     }
@@ -481,6 +497,38 @@ where
         .await?;
     GitCorrelationWriteTxn::commit(transaction).await?;
     Ok(stats)
+}
+
+pub(super) async fn advance_history_frontier(
+    transaction: &(impl QueryExecutor + Executor + ?Sized),
+    candidate: GitHistoryIndexFrontier,
+) -> Result<GitHistoryIndexFrontier, GitCorrelationError> {
+    let current = GitHistoryIndexFrontier {
+        activity_timestamp: super::read_meta_value(transaction, AUTO_BACKFILL_WATERMARK_KEY)
+            .await?
+            .unwrap_or(0),
+        source_rowid: super::read_meta_value(transaction, GIT_HISTORY_ROWID_FRONTIER_KEY)
+            .await?
+            .unwrap_or(0),
+    };
+    if (candidate.activity_timestamp, candidate.source_rowid)
+        <= (current.activity_timestamp, current.source_rowid)
+    {
+        return Ok(current);
+    }
+    super::write_meta_value(
+        transaction,
+        AUTO_BACKFILL_WATERMARK_KEY,
+        candidate.activity_timestamp,
+    )
+    .await?;
+    super::write_meta_value(
+        transaction,
+        GIT_HISTORY_ROWID_FRONTIER_KEY,
+        candidate.source_rowid,
+    )
+    .await?;
+    Ok(candidate)
 }
 
 /// Scans one span target's branch history through the backfill's git source,
@@ -547,8 +595,17 @@ where
 
     for row in rows {
         stats.sessions_scanned += 1;
-        if let Err(reason) =
-            backfill_one_session(session_store, git, opts, row, &analytics_ts, stats).await
+        let mut committed = false;
+        if let Err(reason) = backfill_one_session(
+            session_store,
+            git,
+            opts,
+            row,
+            &analytics_ts,
+            stats,
+            &mut committed,
+        )
+        .await
         {
             stats.record_skip(reason);
         }
@@ -563,6 +620,7 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
     row: &SessionActivityRow,
     analytics_ts: &std::collections::HashMap<(String, String), Vec<i64>>,
     stats: &mut BackfillStats,
+    committed: &mut bool,
 ) -> Result<(), BackfillSkipReason> {
     let (mut win_start, win_end) = row.window().ok_or(BackfillSkipReason::NoActivityWindow)?;
     if win_end < opts.since {
@@ -637,6 +695,7 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
                 GitCorrelationWriteTxn::commit(transaction)
                     .await
                     .map_err(|_| BackfillSkipReason::GitError)?;
+                *committed = true;
             }
         }
         stats.spans_written += 1;
@@ -682,6 +741,7 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
             GitCorrelationWriteTxn::commit(transaction)
                 .await
                 .map_err(|_| BackfillSkipReason::GitError)?;
+            *committed = true;
             if inserted {
                 stats.commits_attributed += 1;
             }
@@ -725,17 +785,12 @@ pub(super) async fn session_activity_rows(
     Ok(out)
 }
 
-/// Reads per-session activity windows whose activity timestamp is strictly
-/// greater than `since_exclusive`, oldest-first and capped at `limit`. Backs the
-/// incremental auto-backfill: paired with a persisted watermark it drains
-/// history forward in bounded batches. Sessions with no timestamp at all are
-/// excluded (their `COALESCE` key is `NULL`, so the `HAVING` filter drops them —
-/// they carry no derivable activity window anyway).
-pub(super) async fn session_activity_rows_since(
+pub(super) async fn session_activity_page_after(
     conn: &(impl QueryExecutor + ?Sized),
-    since_exclusive: i64,
+    activity_timestamp: i64,
+    source_rowid: i64,
     limit: usize,
-) -> Result<Vec<SessionActivityRow>, String> {
+) -> Result<Vec<SessionActivityPageRow>, String> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -743,25 +798,44 @@ pub(super) async fn session_activity_rows_since(
         .query(
             "SELECT s.provider, s.session_id, s.project_path,
                     s.started_at, s.ended_at,
-                    MIN(m.timestamp), MAX(m.timestamp)
+                    MIN(m.timestamp), MAX(m.timestamp),
+                    s.rowid,
+                    COALESCE(MAX(m.timestamp), s.ended_at, s.started_at)
              FROM sessions s
              LEFT JOIN session_messages m
                     ON m.provider = s.provider AND m.session_id = s.session_id
-             GROUP BY s.provider, s.session_id
+             GROUP BY s.rowid, s.provider, s.session_id
              HAVING COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) > ?1
-             ORDER BY COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) ASC
-             LIMIT ?2",
-            params![since_exclusive, i64::try_from(limit).unwrap_or(i64::MAX)],
+                 OR (
+                    COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) = ?1
+                    AND s.rowid > ?2
+                 )
+             ORDER BY COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) ASC,
+                      s.rowid ASC
+             LIMIT ?3",
+            params![
+                activity_timestamp,
+                source_rowid,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
         )
         .await
-        .map_err(|e| format!("failed to query session activity rows: {e}"))?;
+        .map_err(|error| format!("failed to query git history session page: {error}"))?;
     let mut out = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|e| format!("failed to read session activity row: {e}"))?
+        .map_err(|error| format!("failed to read git history session page: {error}"))?
     {
-        out.push(decode_session_activity_row(&row)?);
+        out.push(SessionActivityPageRow {
+            source_rowid: row
+                .get(7)
+                .map_err(|error| format!("failed to decode session rowid: {error}"))?,
+            activity_timestamp: row
+                .get(8)
+                .map_err(|error| format!("failed to decode session activity: {error}"))?,
+            session: decode_session_activity_row(&row)?,
+        });
     }
     Ok(out)
 }

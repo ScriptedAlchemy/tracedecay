@@ -1,11 +1,20 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracedecay_application::OperationTermination;
-use tracedecay_application::session_sync::SessionSyncStatsV1;
+use tracedecay_application::session_sync::{
+    SessionSyncCommandV1, SessionSyncCompletionReceiptV1, SessionSyncCoverageV1,
+    SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
+    SessionSyncScopeV1, SessionSyncSourceCoverageV1, SessionSyncStatsV1, SessionTranscriptImportV1,
+};
+use tracedecay_application::{
+    CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId,
+};
 
-use super::{DaemonSessionSyncService, completed_profile_sweep_covers, completion_termination};
-use tracedecay_domain::UtcMicros;
+use super::{
+    DaemonSessionSyncService, completed_profile_sweep_covers, completion_termination,
+    decode_matching_journal,
+};
+use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
 
 #[test]
 fn committed_result_stays_terminal_when_cancel_or_deadline_arrives_late() {
@@ -60,6 +69,48 @@ fn completed_profile_sweep_only_covers_already_admitted_work() {
         UtcMicros(21)
     ));
     assert!(!completed_profile_sweep_covers(None, UtcMicros(19)));
+}
+
+#[test]
+fn completed_alias_replay_survives_its_original_deadline() {
+    let request = SessionSyncRequestV1::new(
+        RequestId::new("session-sync.alias").unwrap(),
+        IdempotencyKey::new("session-sync.alias").unwrap(),
+        SessionSyncScopeV1::new(
+            ProjectId::new("project.fixture").unwrap(),
+            UserProfileId::new("profile.fixture").unwrap(),
+        ),
+        Deadline::new(UtcMicros(20)).unwrap(),
+        CancellationSignal::active("session-sync.alias").unwrap(),
+        SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
+    );
+    let primary = IdempotencyKey::new("session-sync.primary").unwrap();
+    let mut journal = SessionSyncJournalV1::coalesced(&request, UtcMicros(10), primary.clone());
+    journal.status = SessionSyncJournalStatusV1::Complete;
+    journal.completion = Some(SessionSyncCompletionReceiptV1 {
+        admission: journal.admission.clone(),
+        coalesced_primary: Some(primary),
+        completed_at: UtcMicros(15),
+        termination: OperationTermination::Completed,
+        stats: SessionSyncStatsV1::default(),
+        coverage: vec![SessionSyncSourceCoverageV1 {
+            store_scope: "profile".to_owned(),
+            coverage: SessionSyncCoverageV1::Complete,
+        }],
+        source_frontiers: Vec::new(),
+        failure_codes: Vec::new(),
+    });
+
+    assert!(request.admit_at(UtcMicros(30)).is_err());
+    let encoded = serde_json::to_string(&journal).unwrap();
+    assert!(matches!(
+        decode_matching_journal(&encoded, &request)
+            .unwrap()
+            .outcome(),
+        SessionSyncOutcomeV1::Complete(receipt)
+            if receipt.admission.idempotency_key == *request.idempotency_key()
+                && receipt.coalesced_primary.is_some()
+    ));
 }
 
 #[tokio::test]

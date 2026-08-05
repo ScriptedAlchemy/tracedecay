@@ -15,7 +15,7 @@ use crate::sessions::git_correlation::{
     BoundedGitControl, CommitRelationFilter, CorrelationIndexHealth, GitCorrelationError,
     GitCorrelationSessionStore, GitCorrelationWriteTxn, GitReflogSource, SessionGitCorrelationHit,
     SessionsForQuery, SpanObservation, correlation_index_health,
-    record_span_observation_in_transaction, run_backfill, run_bounded_backfill,
+    record_span_observation_in_transaction, run_backfill, run_bounded_history_index_page,
     run_incremental_backfill, sessions_for_with_relation,
 };
 
@@ -108,16 +108,12 @@ where
         run_incremental_backfill(self, git, limit_sessions).await
     }
 
-    pub(crate) async fn run_bounded_backfill<E>(
+    pub(crate) async fn run_bounded_history_index_page(
         &self,
-        analytics_events: &[E],
         opts: &BackfillOptions,
         control: &BoundedGitControl,
-    ) -> Result<BoundedBackfillOutcome, GitCorrelationError>
-    where
-        E: AnalyticsSessionTimestampSource,
-    {
-        run_bounded_backfill(self, analytics_events, opts, control).await
+    ) -> Result<BoundedBackfillOutcome, GitCorrelationError> {
+        run_bounded_history_index_page(self, opts, control).await
     }
 
     pub(crate) async fn correlation_index_health(

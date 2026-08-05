@@ -50,6 +50,9 @@ pub const MAX_SESSIONS_FOR_LIMIT: usize = 100;
 /// the highest session-activity timestamp the incremental backfill has already
 /// attempted. See [`run_incremental_backfill`].
 pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+/// Row-id tie-breaker paired with [`AUTO_BACKFILL_WATERMARK_KEY`] so sessions
+/// sharing one activity timestamp resume without duplication or omission.
+pub const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
 
 /// Errors from the git-correlation store.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1891,9 +1894,9 @@ mod store;
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
     BoundedBackfillOutcome, BoundedGitControl, BranchTimelineEntry,
-    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitReflogSource, SessionActivityRow, SystemGit,
-    WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, run_bounded_backfill,
-    window_branch_segments,
+    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitHistoryIndexFrontier, GitReflogSource,
+    SessionActivityRow, SystemGit, WindowBranchSegment, branch_timeline_from_reflog,
+    parse_commit_log, run_bounded_history_index_page, window_branch_segments,
 };
 pub use backfill::{run_backfill, run_incremental_backfill};
 pub use store::AnalyticsSessionTimestamp;
