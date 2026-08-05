@@ -38,9 +38,7 @@ use super::{
         DeterministicCodeChunker, ExactExtractionAuthorityV1, ExtractionAdmittedCodeSearchChunkV1,
         content_digest,
     },
-    extract::{
-        ExtractionCancellation, LanguageExtractor, TreeSitterExtractor, rebind_extraction_batch,
-    },
+    extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
     generations::{
         FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1, RebuildTriggerV1,
     },

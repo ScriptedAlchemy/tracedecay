@@ -5879,6 +5879,7 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tree-sitter",
 ]
 
 [[package]]
