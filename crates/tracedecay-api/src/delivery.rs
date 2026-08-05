@@ -29,27 +29,22 @@ const IMMUTABLE_CACHE_POLICY: &str = "public, max-age=31536000, immutable";
 const MAX_EMBEDDED_ASSETS: usize = 4_096;
 const MAX_EMBEDDED_ASSET_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EMBEDDED_PATH_BYTES: usize = 1_024;
-const MAX_ETAG_BYTES: usize = 256;
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// One compile-time asset admitted to the bounded in-memory asset service.
 #[derive(Clone, Copy, Debug)]
 pub struct EmbeddedAsset {
     path: &'static str,
     contents: &'static [u8],
-    etag: &'static str,
 }
 
 impl EmbeddedAsset {
-    /// Defines an embedded asset with an opaque strong ETag token.
+    /// Defines an embedded asset whose strong ETag is derived from its bytes.
     ///
-    /// The token must identify these exact bytes and is quoted by the service.
-    /// Router construction validates its HTTP field syntax.
-    pub const fn new(path: &'static str, contents: &'static [u8], etag: &'static str) -> Self {
-        Self {
-            path,
-            contents,
-            etag,
-        }
+    /// Router construction computes the validator; callers cannot supply an
+    /// identity that diverges from the representation.
+    pub const fn new(path: &'static str, contents: &'static [u8]) -> Self {
+        Self { path, contents }
     }
 }
 
@@ -64,8 +59,8 @@ pub enum EmbeddedAssetError {
     ApiPath { path: &'static str },
     #[error("embedded asset `{path}` exceeds the per-asset body limit")]
     BodyTooLarge { path: &'static str },
-    #[error("embedded asset `{path}` has an invalid strong ETag token")]
-    InvalidEtag { path: &'static str },
+    #[error("embedded asset `{path}` validator could not be encoded as an HTTP header")]
+    HeaderEncoding { path: &'static str },
     #[error("embedded asset path `{path}` is duplicated")]
     DuplicatePath { path: &'static str },
     #[error("embedded shell `{path}` is absent from the asset set")]
@@ -128,7 +123,7 @@ pub fn embedded_asset_router(
         if asset.contents.len() > MAX_EMBEDDED_ASSET_BYTES {
             return Err(EmbeddedAssetError::BodyTooLarge { path: asset.path });
         }
-        let etag = strong_etag(asset.path, asset.etag)?;
+        let etag = content_etag(asset.path, asset.contents)?;
         let prepared_asset = PreparedAsset {
             contents: asset.contents,
             content_type: HeaderValue::from_static(content_type_for_path(asset.path)),
@@ -353,17 +348,16 @@ fn valid_asset_path(path: &str) -> bool {
             .any(|component| component.is_empty() || component == "." || component == "..")
 }
 
-fn strong_etag(path: &'static str, token: &'static str) -> Result<HeaderValue, EmbeddedAssetError> {
-    if token.is_empty()
-        || token.len() > MAX_ETAG_BYTES
-        || !token
-            .bytes()
-            .all(|byte| byte == b'!' || ((b'#'..=b'~').contains(&byte) && byte != b','))
-    {
-        return Err(EmbeddedAssetError::InvalidEtag { path });
+fn content_etag(path: &'static str, contents: &[u8]) -> Result<HeaderValue, EmbeddedAssetError> {
+    let digest = Sha256::digest(contents);
+    let mut encoded = [b'0'; 66];
+    encoded[0] = b'"';
+    encoded[65] = b'"';
+    for (index, byte) in digest.iter().copied().enumerate() {
+        encoded[index * 2 + 1] = HEX_DIGITS[(byte >> 4) as usize];
+        encoded[index * 2 + 2] = HEX_DIGITS[(byte & 0x0f) as usize];
     }
-    HeaderValue::from_str(&format!("\"{token}\""))
-        .map_err(|_| EmbeddedAssetError::InvalidEtag { path })
+    HeaderValue::from_bytes(&encoded).map_err(|_| EmbeddedAssetError::HeaderEncoding { path })
 }
 
 fn is_content_fingerprinted(path: &str, contents: &[u8]) -> bool {
@@ -565,14 +559,12 @@ mod tests {
                 EmbeddedAsset::new(
                     "index.html",
                     b"<!doctype html><html><body>TraceDecay shell</body></html>",
-                    "shell-v1",
                 ),
                 EmbeddedAsset::new(
                     "static/app.56e5f3600934df7e.js",
                     b"globalThis.TRACEDECAY = 'embedded and compressible';",
-                    "app-0123456789abcdef",
                 ),
-                EmbeddedAsset::new("static/plain.css", b"body { color: #123456; }", "plain-v1"),
+                EmbeddedAsset::new("static/plain.css", b"body { color: #123456; }"),
             ],
             "index.html",
         )
@@ -583,8 +575,8 @@ mod tests {
     fn embedded_assets_reject_the_api_namespace_at_admission() {
         let result = embedded_asset_router(
             [
-                EmbeddedAsset::new("index.html", b"shell", "shell-v1"),
-                EmbeddedAsset::new("api/status.json", b"{}", "api-status-v1"),
+                EmbeddedAsset::new("index.html", b"shell"),
+                EmbeddedAsset::new("api/status.json", b"{}"),
             ],
             "index.html",
         );
@@ -597,19 +589,19 @@ mod tests {
     }
 
     #[test]
-    fn embedded_asset_etags_reject_list_delimiters() {
-        let result = embedded_asset_router(
-            [EmbeddedAsset::new(
-                "index.html",
-                b"shell",
-                "shell,revision-1",
-            )],
-            "index.html",
+    fn embedded_asset_etags_are_derived_from_exact_contents() {
+        let shell =
+            super::content_etag("index.html", b"shell").expect("digest is a valid strong ETag");
+        let copy = super::content_etag("static/copy.txt", b"shell")
+            .expect("digest is a valid strong ETag");
+        let changed = super::content_etag("static/changed.txt", b"changed")
+            .expect("digest is a valid strong ETag");
+        assert_eq!(
+            shell,
+            "\"ce635c4eabff5e4f56dba8fb1e39ca235530aa2b6b18533eef1af3862016c577\""
         );
-        assert!(matches!(
-            result,
-            Err(super::EmbeddedAssetError::InvalidEtag { path: "index.html" })
-        ));
+        assert_eq!(shell, copy);
+        assert_ne!(shell, changed);
     }
 
     #[tokio::test]
@@ -907,7 +899,10 @@ mod tests {
             .expect("infallible router");
         assert_eq!(shell.headers()[CONTENT_TYPE], "text/html; charset=utf-8");
         assert_eq!(shell.headers()[CACHE_CONTROL], "no-cache");
-        assert_eq!(shell.headers()[ETAG], "\"shell-v1\"");
+        assert_eq!(
+            shell.headers()[ETAG],
+            "\"6e60d3062f6ed12a2e9cd2d3e4445cd68dbc92b124d9b8201e782acf98b3b285\""
+        );
 
         let fingerprinted = static_router()
             .oneshot(
@@ -944,11 +939,10 @@ mod tests {
     async fn hex_like_filename_without_matching_content_digest_is_not_immutable() {
         let router = embedded_asset_router(
             [
-                EmbeddedAsset::new("index.html", b"shell", "shell-v1"),
+                EmbeddedAsset::new("index.html", b"shell"),
                 EmbeddedAsset::new(
                     "static/app.0123456789abcdef.js",
                     b"content whose digest is not the filename token",
-                    "asset-v1",
                 ),
             ],
             "index.html",
