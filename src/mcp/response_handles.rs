@@ -618,6 +618,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",
         TraceDecayError::ProfileResetRequired { .. } => "profile_reset_required",
+        TraceDecayError::ResetRequired { .. } => "reset_required",
         TraceDecayError::ProjectRoute { .. } => "project_route",
         TraceDecayError::SyncLock { .. } => "sync_lock",
         TraceDecayError::Io(_) => "io",

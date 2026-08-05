@@ -19,15 +19,14 @@ use crate::RegisteredGlobalDb;
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ChangePlanId,
-    ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationAuditEventKindV1,
-    ConfigurationCandidateV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
-    ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
-    CredentialKindV1, CredentialReferenceId, CredentialReferenceMetadataV1, ProtectedChange,
-    ProtectedChangePlan, ProtectedChangeSnapshotError, RedactedConfigurationChangeV1,
-    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1,
-    ScopeSourceBinding, SettingKey, SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
+    ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
+    ConfigurationSnapshotV1, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
+    CredentialReferenceMetadataV1, ProtectedChange, ProtectedChangePlan,
+    ProtectedChangeSnapshotError, RedactedConfigurationChangeV1, RollbackModeV1, RuleEffect,
+    ScopeControlOperationV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
-use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros};
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
@@ -53,13 +52,12 @@ use activation::{
 };
 #[cfg(test)]
 use audit::decode_audit_row;
-use codec::{StoredConfigurationProtectedOperationV1, invalid_store_data, unavailable_store};
+use codec::{invalid_store_data, unavailable_store};
 #[cfg(test)]
 use mutation::validate_commit_bindings;
 use mutation::{
-    ConfigurationCommitDraft, build_configuration_commit, commit_configuration_transaction,
-    current_state_from_transaction, derived_identifier, map_protected_change_snapshot_error,
-    map_store_error, result_revision_id,
+    commit_configuration_transaction, current_state_from_transaction,
+    map_protected_change_snapshot_error, map_store_error, result_revision_id,
 };
 use read::read_revision_from_executor;
 use read::validate_snapshot_registry_completeness;
@@ -307,158 +305,6 @@ pub struct GlobalDbConfigurationControlStore<'db> {
 impl<'db> GlobalDbConfigurationControlStore<'db> {
     pub const fn new_registered(db: &'db RegisteredGlobalDb) -> Self {
         Self { db }
-    }
-
-    /// Converges the daemon-owned binding through an ordinary immutable
-    /// revision. Competing authority stays denied.
-    pub fn ensure_daemon_source_binding(
-        &self,
-        binding: ScopeSourceBinding,
-        occurred_at: UtcMicros,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
-        Box::pin(async move {
-            binding.validate().map_err(ConfigurationError::validation)?;
-            let transaction = self
-                .db
-                .begin_write_transaction()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let outcome = async {
-                let current = current_state_from_transaction(&transaction).await?;
-                validate_snapshot_registry_completeness(&current.snapshot)
-                    .map_err(map_store_error)?;
-                let base_snapshot = current.snapshot.clone();
-                let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
-                    .map_err(ConfigurationError::validation)?;
-                let configured = match base_snapshot.effective_values.get(&key) {
-                    Some(ConfigurationValueV1::SourceBindings(bindings)) => bindings,
-                    Some(_) => {
-                        return Err(ConfigurationError::validation_message(
-                            "source bindings setting has an incompatible typed value",
-                        ));
-                    }
-                    None => {
-                        return Err(ConfigurationError::validation_message(
-                            "source bindings setting is missing from the configuration snapshot",
-                        ));
-                    }
-                };
-                let authority_bindings = configured
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.source_kind == binding.source_kind
-                            && candidate.authority == binding.authority
-                    })
-                    .collect::<Vec<_>>();
-                if authority_bindings.len() > 1 {
-                    return Err(ConfigurationError::validation_message(
-                        "daemon source binding repair found ambiguous authority",
-                    ));
-                }
-                let exact_binding = authority_bindings.first().is_some_and(|candidate| {
-                    candidate.source_locator_digest == binding.source_locator_digest
-                });
-                let canonical_binding = authority_bindings
-                    .first()
-                    .is_some_and(|candidate| exact_binding && candidate.binding_id == binding.binding_id);
-                if canonical_binding {
-                    return Ok(current);
-                }
-                let change = match authority_bindings.first() {
-                    Some(_) if canonical_binding => {
-                        ProtectedChange::RebindSource(binding)
-                    }
-                    Some(_) if exact_binding => {
-                        return Err(ConfigurationError::validation_message(
-                            "daemon source binding registry repair found a non-canonical binding id",
-                        ));
-                    }
-                    Some(candidate) if candidate.binding_id == binding.binding_id => {
-                        ProtectedChange::RebindSource(binding)
-                    }
-                    Some(_) => {
-                        return Err(ConfigurationError::validation_message(
-                            "daemon source binding repair found a conflicting protected binding",
-                        ));
-                    }
-                    None
-                        if configured
-                            .iter()
-                            .any(|candidate| candidate.binding_id == binding.binding_id) =>
-                    {
-                        return Err(ConfigurationError::validation_message(
-                            "daemon source binding repair found the canonical id under another authority",
-                        ));
-                    }
-                    None => ProtectedChange::BindSource(binding),
-                };
-                let operation_digest = canonical_sha256(&(
-                    "tracedecay.configuration.daemon-source-binding-repair.v1",
-                    &current.revision_id,
-                    &base_snapshot.snapshot_id,
-                    &change,
-                ))
-                .map_err(ConfigurationError::validation)?;
-                let idempotency_digest = canonical_sha256(&(
-                    "tracedecay.configuration.daemon-source-binding-repair-idempotency.v1",
-                    &current.revision_id,
-                    &operation_digest,
-                ))
-                .map_err(ConfigurationError::validation)?;
-                let idempotency_key: ConfigurationIdempotencyKey = derived_identifier(
-                    "configuration.idempotency.daemon-source-binding-repair.v1",
-                    &idempotency_digest,
-                    "daemon source binding repair idempotency key",
-                )?;
-                let next_revision_id = result_revision_id(
-                    &current.revision_id,
-                    &idempotency_key,
-                    &operation_digest,
-                )?;
-                let snapshot = base_snapshot
-                    .apply_protected_change(&change, &next_revision_id)
-                    .map_err(map_protected_change_snapshot_error)?;
-                let actor_id = ActorId::new("actor.daemon-configuration".to_owned())
-                    .map_err(ConfigurationError::validation)?;
-                let sealed_target =
-                    StoredConfigurationProtectedOperationV1::Change(Box::new(change));
-                let (commit, sealed_target_reference) = build_configuration_commit(
-                    &transaction,
-                    ConfigurationCommitDraft {
-                        expected_base_revision_id: &current.revision_id,
-                        next_revision_id,
-                        snapshot,
-                        actor_id: &actor_id,
-                        operation_kind: "daemon_source_binding_repair",
-                        operation_digest,
-                        idempotency_key,
-                        change_plan: None,
-                        event_kind: ConfigurationAuditEventKindV1::Recovered,
-                        created_at: occurred_at,
-                        target: &sealed_target,
-                    },
-                )
-                .await?;
-                commit_configuration_transaction(
-                    &transaction,
-                    &commit,
-                    false,
-                    Some(&sealed_target_reference),
-                )
-                .await
-                .map_err(map_store_error)?;
-                current_state_from_transaction(&transaction).await
-            }
-            .await;
-            match outcome {
-                Ok(current) => transaction
-                    .commit()
-                    .await
-                    .map(|()| current)
-                    .map_err(|_| ConfigurationError::Unavailable),
-                Err(error) => Err(error),
-            }
-        })
     }
 
     /// Reports whether this exact final-shape control-plane store has no

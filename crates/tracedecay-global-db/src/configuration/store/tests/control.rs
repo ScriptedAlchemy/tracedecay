@@ -297,46 +297,6 @@ async fn owned_global_control_adapter_rejects_writes_after_daemon_scope_ends() {
 }
 
 #[tokio::test]
-async fn daemon_binding_repair_rejects_matching_locator_with_noncanonical_id() {
-    let directory = tempfile::tempdir().unwrap();
-    let profile_root = directory.path().join("profile");
-    let project_root = directory.path().join("project");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::project(
-        &profile_root,
-        &project_root,
-        ProjectId::new("project.configuration-binding-repair").unwrap(),
-    )
-    .await
-    .unwrap();
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let mut root = root_revision();
-    root.snapshot = source_binding_snapshot(&root.revision_id);
-    let transaction = db.begin_write_transaction().await.unwrap();
-    insert_revision(&transaction, &root).await.unwrap();
-    transaction.commit().await.unwrap();
-    let store = GlobalDbConfigurationControlStore::new_registered(db);
-    let canonical = ScopeSourceBinding::new(
-        id::<SourceBindingId>("binding.canonical.fixture"),
-        SourceKindV1::Cursor,
-        LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
-        AuthorityRef::Project(id("project.authoritative.fixture")),
-    )
-    .unwrap();
-
-    assert_eq!(
-        store
-            .ensure_daemon_source_binding(canonical, UtcMicros(20))
-            .await,
-        Err(ConfigurationError::Validation(
-            "daemon source binding registry repair found a non-canonical binding id".to_owned()
-        ))
-    );
-}
-
-#[tokio::test]
 async fn direct_audit_target_never_persists_sensitive_setting_values() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
