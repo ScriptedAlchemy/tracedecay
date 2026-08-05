@@ -14,11 +14,10 @@ pub(super) async fn advance_reflog_capture<S: GitCorrelationSessionStore>(
     let native_control = control.clone();
     let window_start = progress.window_start;
     let window_end = progress.window_end;
-    let chunk = tokio::task::spawn_blocking(move || {
+    let chunk = run_blocking(control, move || {
         native::scan_reflog_chunk(&path, window_start, window_end, cursor, &native_control)
     })
-    .await
-    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+    .await?;
     verify_source_without_writer(project_path, &chunk.cursor, control).await?;
 
     let mut next = progress.clone();
@@ -93,7 +92,7 @@ pub(super) async fn advance_reflog_verification<S: GitCorrelationSessionStore>(
     let path = project_path.to_owned();
     let scan_source = source.clone();
     let native_control = control.clone();
-    let chunk = tokio::task::spawn_blocking(move || {
+    let chunk = run_blocking(control, move || {
         native::scan_reflog_verification_chunk(
             &path,
             &scan_source,
@@ -102,8 +101,7 @@ pub(super) async fn advance_reflog_verification<S: GitCorrelationSessionStore>(
             &native_control,
         )
     })
-    .await
-    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+    .await?;
     verify_source_without_writer(project_path, &source, control).await?;
 
     let mut next = progress.clone();
@@ -216,7 +214,7 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
     let native_control = control.clone();
     let window_start = segment.start_ts;
     let window_end = segment.end_ts;
-    let chunk = tokio::task::spawn_blocking(move || {
+    let chunk = run_blocking(control, move || {
         native::scan_graph_chunk(
             &path,
             window_start,
@@ -227,8 +225,7 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
             &native_control,
         )
     })
-    .await
-    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+    .await?;
     apply_graph_chunk(
         session_store,
         row,
@@ -250,11 +247,10 @@ async fn verify_repository_without_writer(
     let path = project_path.to_owned();
     let seal = seal.clone();
     let native_control = control.clone();
-    tokio::task::spawn_blocking(move || {
+    run_blocking(control, move || {
         native::verify_repository_source(&path, &seal, &native_control)
     })
     .await
-    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
 }
 
 async fn verify_source_without_writer(
@@ -265,11 +261,10 @@ async fn verify_source_without_writer(
     let path = project_path.to_owned();
     let source = source.clone();
     let native_control = control.clone();
-    tokio::task::spawn_blocking(move || {
+    run_blocking(control, move || {
         native::verify_reflog_source(&path, &source, &native_control)
     })
     .await
-    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
 }
 
 async fn apply_segment<S: GitCorrelationSessionStore>(

@@ -10,10 +10,12 @@ use crate::observation::ObservationCancellation;
 
 use super::*;
 
+mod blocking;
 mod native;
 mod progress;
 mod state;
 
+use blocking::run as run_blocking;
 use progress::{
     copy_cursor_to_progress, cursor_from_progress, progress_from_cursor, progress_frontier,
     repository_seal_from_progress, session_row_from_progress,
@@ -428,11 +430,10 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
     if progress.is_none() {
         let native_control = control.clone();
         let native_path = project_path;
-        let cursor = tokio::task::spawn_blocking(move || {
+        let cursor = run_blocking(control, move || {
             native::initialize_reflog_cursor(&native_path, window_end, &native_control)
         })
-        .await
-        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+        .await;
         let cursor = match cursor {
             Ok(cursor) => cursor,
             Err(BoundedBackfillInterruption::UnsupportedSourceFraming) => {
@@ -573,18 +574,17 @@ async fn dry_run_native_history(
 ) -> Result<(), BoundedBackfillInterruption> {
     let path = project_path.to_owned();
     let native_control = control.clone();
-    let mut cursor = tokio::task::spawn_blocking(move || {
+    let mut cursor = run_blocking(control, move || {
         native::initialize_reflog_cursor(&path, window_end, &native_control)
     })
-    .await
-    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+    .await?;
     let initial_cursor = cursor.clone();
     let source_length = cursor.byte_offset;
     loop {
         let path = project_path.to_owned();
         let native_control = control.clone();
         let scan_cursor = cursor;
-        let chunk = tokio::task::spawn_blocking(move || {
+        let chunk = run_blocking(control, move || {
             native::scan_reflog_chunk(
                 &path,
                 window_start,
@@ -593,8 +593,7 @@ async fn dry_run_native_history(
                 &native_control,
             )
         })
-        .await
-        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+        .await?;
         cursor = chunk.cursor;
         if chunk.complete {
             break;
@@ -609,7 +608,7 @@ async fn dry_run_native_history(
         let path = project_path.to_owned();
         let source = cursor.clone();
         let native_control = control.clone();
-        let chunk = tokio::task::spawn_blocking(move || {
+        let chunk = run_blocking(control, move || {
             native::scan_reflog_verification_chunk(
                 &path,
                 &source,
@@ -618,8 +617,7 @@ async fn dry_run_native_history(
                 &native_control,
             )
         })
-        .await
-        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+        .await?;
         verification = chunk.cursor;
         if chunk.complete {
             break;
@@ -634,7 +632,7 @@ async fn dry_run_native_history(
         let path = project_path.to_owned();
         let native_control = control.clone();
         let replay_cursor = replay;
-        let chunk = tokio::task::spawn_blocking(move || {
+        let chunk = run_blocking(control, move || {
             native::scan_reflog_chunk(
                 &path,
                 window_start,
@@ -643,8 +641,7 @@ async fn dry_run_native_history(
                 &native_control,
             )
         })
-        .await
-        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+        .await?;
         for segment in chunk.segments {
             emitted = dry_run_segment(
                 project_path,
@@ -704,7 +701,7 @@ async fn dry_run_segment(
         let source = source.clone();
         let native_control = control.clone();
         let remaining = max_commits.saturating_sub(emitted);
-        let chunk = tokio::task::spawn_blocking(move || {
+        let chunk = run_blocking(control, move || {
             native::scan_graph_chunk(
                 &path,
                 window_start,
@@ -715,8 +712,7 @@ async fn dry_run_segment(
                 &native_control,
             )
         })
-        .await
-        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+        .await?;
         emitted = emitted.saturating_add(chunk.commits.len());
         for oid in chunk.newly_seen {
             if seen.insert(oid.clone()) {
