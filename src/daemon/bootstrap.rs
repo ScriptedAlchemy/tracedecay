@@ -493,6 +493,7 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
             });
         }
     };
+    transport::ensure_private_socket_parent(socket_path)?;
     match UnixStream::connect(socket_path).await {
         Ok(_) => Err(TraceDecayError::Config {
             message: format!(
@@ -507,5 +508,40 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
                 socket_path.display()
             ),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn insecure_socket_parent_rejection_preserves_stale_socket() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temporary fixture root");
+        let profile_root = root.path().join("profile");
+        std::fs::create_dir_all(&profile_root).expect("profile root");
+        std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
+            .expect("private profile root");
+        let socket_parent = root.path().join("public");
+        std::fs::create_dir_all(&socket_parent).expect("socket parent");
+        std::fs::set_permissions(&socket_parent, std::fs::Permissions::from_mode(0o755))
+            .expect("public socket parent");
+        let socket = socket_parent.join("daemon.sock");
+        drop(std::os::unix::net::UnixListener::bind(&socket).expect("stale socket"));
+
+        let endpoint = transport::DaemonEndpoint::Unix(socket.clone());
+        let authority = authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
+            .expect("daemon authority");
+        let error = prepare_socket_path(&authority)
+            .await
+            .expect_err("public socket parent must be rejected before stale cleanup");
+
+        assert!(matches!(error, TraceDecayError::Config { .. }), "{error}");
+        assert!(error.to_string().contains("private directory"), "{error}");
+        assert!(socket.exists(), "rejection must preserve the stale socket");
     }
 }
