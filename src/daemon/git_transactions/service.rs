@@ -120,6 +120,11 @@ impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A> {
             queue,
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn mutation_queue_for_test(&self) -> &std::sync::Arc<RepositoryMutationQueue> {
+        &self.queue
+    }
 }
 
 #[cfg(test)]
