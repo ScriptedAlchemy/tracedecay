@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tracedecay_agent_hosts::ports::project_runtime::{
     MemoryCurateOptions as AgentMemoryCurateOptions, ProfileRuntime, RuntimeFuture,
 };
+use tracedecay_domain::BrainNodeId;
 use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use super::register_registered_schema_installer;
@@ -70,6 +71,7 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     profile_database: Mutex<Option<Arc<RegisteredGlobalDb>>>,
     profile_memory: Mutex<Option<Arc<Database>>>,
     profile_sessions: Mutex<Option<Arc<RegisteredGlobalDb>>>,
+    remote_nodes: Mutex<BTreeMap<BrainNodeId, Arc<Database>>>,
     project_memory: Mutex<BTreeMap<ProjectId, Arc<Database>>>,
     project_sessions: Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,

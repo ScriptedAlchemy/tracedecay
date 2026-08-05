@@ -1,12 +1,32 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tracedecay_domain::BrainNodeId;
+use tracedecay_rusqlite_runtime::remote::{
+    RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
+};
+
 use super::maintenance::RegisteredSchemaConvergenceStatus;
 use super::{
     DaemonSessionRuntimeRegistryV1, DatabaseAccessMode, DatabaseAuthority,
     LocalProfileIdentityAuthorityV1, ProjectId, StoreShardIdV1, process_runtime_generation,
 };
 use crate::db::engine::{Executor, TestConnection};
+
+struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
+
+impl RemoteSpoolKeyringV1 for TestRemoteKeyring {
+    fn active_key(&self) -> Result<Arc<RemoteSpoolKeyV1>, RemoteSqliteStorageErrorV1> {
+        Ok(Arc::clone(&self.0))
+    }
+
+    fn key(
+        &self,
+        revision: u64,
+    ) -> Result<Option<Arc<RemoteSpoolKeyV1>>, RemoteSqliteStorageErrorV1> {
+        Ok((revision == self.0.revision()).then(|| Arc::clone(&self.0)))
+    }
+}
 
 async fn project_sessions_pending_convergence(
     project_name: &str,
@@ -205,6 +225,53 @@ async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pi
         )
     );
     assert_eq!(registered.db_path(), user_sessions_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_node_mount_uses_registered_identity_and_reuses_one_runtime() {
+    let temporary = tempfile::tempdir().expect("temporary profile parent");
+    let profile_root = temporary.path().join("profile");
+    #[cfg(unix)]
+    let endpoint =
+        crate::daemon::transport::DaemonEndpoint::Unix(profile_root.join("remote-runtime.sock"));
+    #[cfg(not(unix))]
+    let endpoint = crate::daemon::transport::default_loopback_endpoint();
+    let daemon_authority =
+        crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
+            .expect("daemon authority");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        daemon_authority.record().epoch,
+        "remote-node registry",
+    )
+    .expect("daemon database scope");
+    let identity = daemon_authority.profile_identity().clone();
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("session runtime registry");
+    let node_id = BrainNodeId::new("node.remote.mount").expect("remote node identity");
+    let keyring = Arc::new(TestRemoteKeyring(Arc::new(
+        RemoteSpoolKeyV1::from_secret_bytes(1, vec![7; 32]).expect("remote spool key"),
+    )));
+
+    let first = registry
+        .remote_node_storage(node_id.clone(), keyring.clone())
+        .await
+        .expect("first remote-node mount");
+    let second = registry
+        .remote_node_storage(node_id.clone(), keyring)
+        .await
+        .expect("cached remote-node mount");
+
+    assert_eq!(first.binding(), second.binding());
+    assert_eq!(
+        &first.binding().shard_id,
+        &StoreShardIdV1::remote_node(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            node_id,
+        )
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

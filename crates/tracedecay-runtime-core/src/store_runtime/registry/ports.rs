@@ -355,6 +355,17 @@ async fn migrate_before_publication(
                     message: error.to_string(),
                 })?;
         }
+        StoreShardScopeV1::RemoteNode { .. } => {
+            connection
+                .execute_batch(
+                    tracedecay_rusqlite_runtime::remote::REMOTE_NODE_LOCAL_SCHEMA,
+                )
+                .await
+                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "create initialized remote-node schema",
+                    message: error.to_string(),
+                })?;
+        }
     }
     Ok(true)
 }

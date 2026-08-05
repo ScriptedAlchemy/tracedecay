@@ -39,6 +39,24 @@ fn profile_project_databases_share_the_profile_scope() {
 }
 
 #[test]
+fn remote_node_databases_inherit_the_profile_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().join("profile");
+    let remote = profile.join(format!(
+        "remote/nodes/{}/remote.db",
+        "a".repeat(64)
+    ));
+    std::fs::create_dir_all(remote.parent().unwrap()).unwrap();
+
+    let identity = DatabaseIdentity::for_path(&remote).unwrap();
+    assert_eq!(
+        identity.profile_root,
+        profile.canonicalize().unwrap(),
+        "registered remote-node stores must inherit the profile lifecycle fence"
+    );
+}
+
+#[test]
 fn authority_clones_share_one_token_without_database_sidecars() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("database.db");

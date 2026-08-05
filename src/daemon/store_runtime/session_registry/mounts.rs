@@ -5,6 +5,10 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
+use tracedecay_domain::BrainNodeId;
+use tracedecay_rusqlite_runtime::remote::{
+    RemoteSpoolKeyringV1, RemoteSqliteStorageV1,
+};
 use tracedecay_store::{ProjectId, StoreShardIdV1};
 
 use super::{
@@ -72,6 +76,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             profile_database: Mutex::new(None),
             profile_memory: Mutex::new(None),
             profile_sessions: Mutex::new(None),
+            remote_nodes: Mutex::new(BTreeMap::new()),
             project_memory: Mutex::new(BTreeMap::new()),
             project_sessions: Mutex::new(BTreeMap::new()),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
@@ -150,6 +155,55 @@ impl DaemonSessionRuntimeRegistryV1 {
         crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
+    }
+
+    pub(crate) async fn remote_node_storage(
+        &self,
+        node_id: BrainNodeId,
+        keyring: Arc<dyn RemoteSpoolKeyringV1>,
+    ) -> Result<RemoteSqliteStorageV1> {
+        let database = {
+            let mut mounted = self.remote_nodes.lock().await;
+            if let Some(database) = mounted.get(&node_id) {
+                Arc::clone(database)
+            } else {
+                let shard_id = StoreShardIdV1::remote_node(
+                    self.identity.brain_id().clone(),
+                    self.identity.profile_id().clone(),
+                    node_id.clone(),
+                );
+                let runtime = open_runtime(
+                    &self.registry,
+                    self.resolver.as_ref(),
+                    shard_id,
+                    self.incarnation,
+                    Some(self.profile_pin.clone()),
+                    None,
+                    true,
+                    "mount Remote Brain node store",
+                )
+                .await?;
+                let database = Arc::new(
+                    Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?,
+                );
+                mounted.insert(node_id, Arc::clone(&database));
+                database
+            }
+        };
+        let authority = database.write_authority()?;
+        let runtime = database.retained_runtime();
+        let handle = runtime
+            .authorized_exact_sql_handle(authority)
+            .map_err(|error| {
+                session_registry_error(
+                    "attach Remote Brain node store",
+                    format!("registered storage handle unavailable: {error:?}"),
+                )
+            })?;
+        RemoteSqliteStorageV1::from_registered(handle, runtime.binding().clone(), keyring)
+            .map_err(|error| {
+                session_registry_error("attach Remote Brain node store", error.to_string())
+            })
     }
 
     pub(crate) async fn mounted_session_databases(&self) -> Vec<Arc<RegisteredGlobalDb>> {
