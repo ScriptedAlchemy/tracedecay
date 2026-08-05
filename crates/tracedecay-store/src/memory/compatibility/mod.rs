@@ -42,12 +42,11 @@ pub use dashboard::{
     CompatibilityDashboardVectorPointsQueryV1,
 };
 pub use proposal::{
-    CompatibilityFactProposalImportReceiptV1, CompatibilityFactProposalImportV1,
-    CompatibilityFactProposalLegacyRecordV1, CompatibilityFactProposalPageV1,
-    CompatibilityFactProposalPromotionDispositionV1, CompatibilityFactProposalPromotionResultV1,
-    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1,
-    FactProposalPromotionStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
+    CompatibilityFactProposalPageV1, CompatibilityFactProposalPromotionDispositionV1,
+    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
+    CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
+    CompatibilityFactProposalStateV1, FactProposalPromotionStateV1, PromoteFactProposal,
+    PromoteFactProposalOutcome,
 };
 pub use search::{
     CompatibilityFactContradictionPageV1, CompatibilityFactContradictionQueryV1,

@@ -1114,7 +1114,6 @@ fn references_for(
                 ],
             )?);
         }
-        Family::LegacyProposalMap => references.push(proposal_reference(values)?),
     }
     Ok(references)
 }
@@ -1761,27 +1760,6 @@ fn table_specs() -> &'static [TableSpec] {
                 "updated_at",
             ],
             key_columns: &["proposal_id", "owner_kind", "project_id"],
-            owner_filter: O::Scope,
-        },
-        TableSpec {
-            family: F::LegacyProposalMap,
-            table: "memory_v2_legacy_proposal_map",
-            columns: &[
-                "owner_kind",
-                "project_id",
-                "source_store_id",
-                "legacy_proposal_id",
-                "proposal_id",
-                "history_coverage",
-                "import_receipt_json",
-                "imported_at",
-            ],
-            key_columns: &[
-                "owner_kind",
-                "project_id",
-                "source_store_id",
-                "legacy_proposal_id",
-            ],
             owner_filter: O::Scope,
         },
     ];

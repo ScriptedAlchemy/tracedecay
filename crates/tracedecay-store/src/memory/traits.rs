@@ -16,8 +16,7 @@ use super::{
     CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
     CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
     CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
+    CompatibilityFactProjectionV1, CompatibilityFactProposalPageV1,
     CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
     CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
     CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
@@ -274,11 +273,6 @@ pub trait FactCompatibilityStore: FactProposalStore {
         reviewer: ActorId,
         reason: String,
     ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalRecordV1>> + Send;
-
-    fn import_legacy_compatibility_fact_proposals(
-        &self,
-        request: CompatibilityFactProposalImportV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1>> + Send;
 
     fn promote_compatibility_fact_proposal(
         &self,

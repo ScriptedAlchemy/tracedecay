@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactId, FactLineageEventV1, FactOwnerV1, LocatorDigest,
-    ProvenanceId, SourceStoreId,
+    ProvenanceId,
 };
 use tracedecay_store::{
     CompatibilityFactAddCommandV1, CompatibilityFactAddOutcomeV1,
@@ -13,16 +13,14 @@ use tracedecay_store::{
     CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
     CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
     CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
-    CompatibilityFactPageV1, CompatibilityFactProjectionV1,
-    CompatibilityFactProposalImportReceiptV1, CompatibilityFactProposalImportV1,
-    CompatibilityFactProposalPageV1, CompatibilityFactProposalPromotionDispositionV1,
-    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
-    CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
-    CompatibilityFactProposalStateV1, CompatibilityFactRelationV1,
-    CompatibilityFactRemoveCommandV1, CompatibilityFactRemoveOutcomeV1,
-    CompatibilityFactRetrievalCommandV1, CompatibilityFactSearchCursorV1,
-    CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
-    CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
+    CompatibilityFactPageV1, CompatibilityFactProjectionV1, CompatibilityFactProposalPageV1,
+    CompatibilityFactProposalPromotionDispositionV1, CompatibilityFactProposalPromotionResultV1,
+    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
+    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1,
+    CompatibilityFactRelationV1, CompatibilityFactRemoveCommandV1,
+    CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
+    CompatibilityFactSearchCursorV1, CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery,
+    CompatibilityFactTargetV1, CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
     CompatibilityMemoryStatusV1, FactCompatibilityStore,
 };
 
@@ -35,55 +33,8 @@ use tracedecay_runtime_core::memory::types::{
 
 use super::MemoryApplication;
 use super::context::{MemoryOperationContext, validate_operation_component};
-use super::error::{
-    MemoryApplicationError, MemoryCompatibilityScope, RUNTIME_MEMORY_COMPATIBILITY_SOURCE_STORE,
-};
+use super::error::{MemoryApplicationError, MemoryCompatibilityScope};
 use super::sanitize::sanitize_add_fact_request;
-
-/// Converts one legacy proposal payload into the portable command consumed by
-/// the authoritative proposal import. The operation identity is deterministic
-/// across retries of the same immutable legacy record.
-pub fn legacy_proposal_add_command(
-    owner: FactOwnerV1,
-    sidecar_digest: LocatorDigest,
-    legacy_proposal_id: i64,
-    request: AddFactRequest,
-) -> Result<CompatibilityFactAddCommandV1, MemoryApplicationError> {
-    owner.validate()?;
-    let source_store_id =
-        SourceStoreId::new(RUNTIME_MEMORY_COMPATIBILITY_SOURCE_STORE).map_err(|_| {
-            MemoryApplicationError::InvalidCompatibilityInput {
-                invariant: "runtime compatibility source store identity",
-            }
-        })?;
-    sidecar_digest
-        .validate()
-        .map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "legacy proposal sidecar digest",
-        })?;
-    if legacy_proposal_id <= 0 {
-        return Err(MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "legacy proposal numeric identity",
-        });
-    }
-    let request_id = format!(
-        "{}:{}:{legacy_proposal_id}",
-        source_store_id.as_str(),
-        sidecar_digest.as_str()
-    );
-    let context = MemoryOperationContext::from_trusted_request_id(
-        &owner,
-        "legacy-proposal-import",
-        &request_id,
-        None,
-    )?;
-    let Some(request) = sanitize_add_fact_request(request)? else {
-        return Err(MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "legacy proposal rejected by memory privacy sanitizer",
-        });
-    };
-    compatibility_add_command(owner, request, &context)
-}
 
 /// Converts a live automation proposal without manufacturing a legacy numeric
 /// identity. The deterministic operation identity makes repeated processing of
@@ -735,28 +686,6 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             });
         }
         Ok(proposal)
-    }
-
-    pub async fn import_legacy_compatibility_fact_proposals(
-        &self,
-        request: CompatibilityFactProposalImportV1,
-    ) -> Result<CompatibilityFactProposalImportReceiptV1, MemoryApplicationError> {
-        self.ensure_owner(request.owner())?;
-        let source_store_id = request.source_store_id().clone();
-        let sidecar_digest = request.sidecar_digest().clone();
-        let receipt = self
-            .authority
-            .import_legacy_compatibility_fact_proposals(request)
-            .await?;
-        if receipt.owner() != &self.owner
-            || receipt.source_store_id() != &source_store_id
-            || receipt.sidecar_digest() != &sidecar_digest
-        {
-            return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility proposal import identity",
-            });
-        }
-        Ok(receipt)
     }
 
     pub async fn promote_compatibility_fact_proposal(

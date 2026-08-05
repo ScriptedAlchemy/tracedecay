@@ -18,8 +18,7 @@ use tracedecay_store::{
     CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
     CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
     CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
+    CompatibilityFactProjectionV1, CompatibilityFactProposalPageV1,
     CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
     CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
     CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
@@ -56,8 +55,8 @@ use primitives::{QUERY_OPERATION, authority_storage_error, storage_error};
 use projection::resolve_legacy_fact_tx;
 use proposals::{
     count_pending_compatibility_fact_proposals_tx, get_compatibility_fact_proposal_tx,
-    import_legacy_compatibility_fact_proposals_tx, list_compatibility_fact_proposals_tx,
-    reject_compatibility_fact_proposal_tx, submit_compatibility_fact_proposal_tx,
+    list_compatibility_fact_proposals_tx, reject_compatibility_fact_proposal_tx,
+    submit_compatibility_fact_proposal_tx,
 };
 use repair::{compatibility_feedback_history_repair_progress_tx, repair_compatibility_memory_tx};
 use search::{
@@ -725,18 +724,6 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         .await
     }
 
-    async fn import_legacy_compatibility_fact_proposals(
-        &self,
-        request: CompatibilityFactProposalImportV1,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1> {
-        self.compatibility_write(move |transaction| {
-            Box::pin(async move {
-                import_legacy_compatibility_fact_proposals_tx(transaction, &request).await
-            })
-        })
-        .await
-    }
-
     async fn promote_compatibility_fact_proposal(
         &self,
         request: CompatibilityFactProposalPromotionV1,
@@ -968,9 +955,6 @@ impl FactCompatibilityStore for ProjectFactStore<'_> {
             reviewer: ActorId,
             reason: String,
         ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
-        fn import_legacy_compatibility_fact_proposals(
-            request: CompatibilityFactProposalImportV1,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1>;
         fn promote_compatibility_fact_proposal(
             request: CompatibilityFactProposalPromotionV1,
         ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
