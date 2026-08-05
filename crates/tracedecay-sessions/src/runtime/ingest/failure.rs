@@ -5,7 +5,6 @@ use crate::{
 use serde::Serialize;
 use tracedecay_domain::ObservationSourceRangeV1;
 
-use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{claude_observation, source};
 
@@ -99,16 +98,13 @@ pub(super) type ProviderRunFold = GenericProviderRunFold<TranscriptCatchUpFailur
 /// Callers must branch on this before warning, recording a source failure, or
 /// publishing provider coverage.
 pub(super) fn cancelled_provider_outcome(
-    error: Option<&source::TranscriptIngestError>,
-    cancellation: &ObservationCancellation,
+    error: &source::TranscriptIngestError,
 ) -> Option<ProviderRunOutcome> {
-    (cancellation.is_cancelled() || error.is_some_and(source::TranscriptIngestError::is_cancelled))
-        .then(ProviderRunOutcome::skipped)
+    error.is_cancelled().then(ProviderRunOutcome::skipped)
 }
 
 pub(super) fn cancelled_claude_provider_outcome(
     error: &claude_observation::ClaudeObservationIngestError,
-    cancellation: &ObservationCancellation,
 ) -> Option<ProviderRunOutcome> {
     use claude_observation::ClaudeObservationIngestError as Ingest;
 
@@ -117,7 +113,7 @@ pub(super) fn cancelled_claude_provider_outcome(
         Ingest::Transcript(error) => error.is_cancelled(),
         _ => false,
     };
-    (cancellation.is_cancelled() || typed_cancellation).then(ProviderRunOutcome::skipped)
+    typed_cancellation.then(ProviderRunOutcome::skipped)
 }
 
 /// Hard limits for one multi-source ingest pass.
@@ -341,14 +337,15 @@ pub fn classify_transcript_ingest_failure(
 mod cancellation_tests {
     use tracedecay_store::TranscriptStoreError;
 
+    use crate::observation::ObservationCancellation;
+
     use super::*;
 
     #[test]
     fn typed_cancellation_is_control_termination_without_source_failure() {
-        let cancellation = ObservationCancellation::default();
         let error = source::TranscriptIngestError::Cancelled { provider: "test" };
 
-        let outcome = cancelled_provider_outcome(Some(&error), &cancellation)
+        let outcome = cancelled_provider_outcome(&error)
             .expect("typed cancellation must terminate provider control flow");
 
         assert!(outcome.failures.is_empty());
@@ -359,12 +356,11 @@ mod cancellation_tests {
 
     #[test]
     fn typed_claude_cancellation_is_control_termination_without_source_failure() {
-        let cancellation = ObservationCancellation::default();
         let error = claude_observation::ClaudeObservationIngestError::Application(
             crate::observation::ObservationApplicationError::Cancelled,
         );
 
-        let outcome = cancelled_claude_provider_outcome(&error, &cancellation)
+        let outcome = cancelled_claude_provider_outcome(&error)
             .expect("typed Claude cancellation must terminate provider control flow");
 
         assert!(outcome.failures.is_empty());
@@ -372,7 +368,7 @@ mod cancellation_tests {
     }
 
     #[test]
-    fn cancellation_token_supersedes_concurrent_storage_failure() {
+    fn cancellation_token_does_not_suppress_storage_failure() {
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
         let error = source::TranscriptIngestError::Store(TranscriptStoreError::Storage {
@@ -380,21 +376,21 @@ mod cancellation_tests {
             source: Box::new(std::io::Error::other("test storage failure")),
         });
 
-        let outcome = cancelled_provider_outcome(Some(&error), &cancellation)
-            .expect("active cancellation must terminate provider control flow");
+        assert!(cancelled_provider_outcome(&error).is_none());
 
-        assert!(outcome.failures.is_empty());
+        let failure = classify_transcript_ingest_failure("test", "observation", &error);
+        assert_eq!(failure.reason_code, "transcript_storage_failed");
+        assert!(failure.retryable);
     }
 
     #[test]
     fn storage_failure_without_cancellation_remains_a_source_failure() {
-        let cancellation = ObservationCancellation::default();
         let error = source::TranscriptIngestError::Store(TranscriptStoreError::Storage {
             operation: "test",
             source: Box::new(std::io::Error::other("test storage failure")),
         });
 
-        assert!(cancelled_provider_outcome(Some(&error), &cancellation).is_none());
+        assert!(cancelled_provider_outcome(&error).is_none());
     }
 }
 

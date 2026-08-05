@@ -89,8 +89,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.deferred_by_byte_cap,
             ),
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 ProviderRunOutcome::failed(
@@ -121,8 +120,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.deferred_by_byte_cap,
             ),
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 ProviderRunOutcome::failed(
@@ -171,9 +169,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                     || observation_stats.source_bytes_scanned > self.max_new_bytes,
             ),
             Err(error) => {
-                if let Some(cancelled) =
-                    cancelled_claude_provider_outcome(&error, self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
                     return cancelled;
                 }
                 let failure = claude_catch_up_failure("observation", &error);
@@ -208,8 +204,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.deferred_by_byte_cap,
             ),
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 ProviderRunOutcome::failed(
@@ -252,8 +247,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 run
             }
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 let mut run = ProviderRunOutcome::failed(
@@ -316,8 +310,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 run
             }
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 let mut run = ProviderRunOutcome::failed(
@@ -377,8 +370,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.deferred_by_byte_cap,
             ),
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 let failure =
@@ -415,8 +407,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.deferred,
             ),
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
-                {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;
                 }
                 ProviderRunOutcome::failed(
