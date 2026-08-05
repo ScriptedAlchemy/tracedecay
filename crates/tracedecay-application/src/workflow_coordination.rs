@@ -100,6 +100,45 @@ pub struct WorkflowDefinitionRegisterRequest {
     pub definition: WorkflowDefinition,
 }
 
+/// Wire request for [`WorkflowDefinitionService::validate`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionValidateRequest {
+    pub definition: WorkflowDefinition,
+}
+
+/// Wire request for [`WorkflowDefinitionService::get`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionGetRequest {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub definition_version: u64,
+}
+
+/// Wire request for [`WorkflowDefinitionService::list`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionListRequest {}
+
+/// Wire request for [`WorkflowDefinitionService::history`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionHistoryRequest {
+    pub definition_id: WorkflowDefinitionId,
+}
+
+/// Wire request for [`WorkflowDefinitionService::diff`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionDiffRequest {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub from_version: u64,
+    #[schemars(range(min = 1))]
+    pub to_version: u64,
+}
+
 /// Wire request for [`WorkflowDefinitionService::activate`].
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -108,6 +147,15 @@ pub struct WorkflowDefinitionActivateRequest {
     pub expected_active_version: Option<u64>,
     #[schemars(range(min = 1))]
     pub replacement_version: u64,
+}
+
+/// Wire request for [`WorkflowDefinitionService::retire`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionRetireRequest {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub expected_active_version: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
