@@ -78,11 +78,7 @@ dependency now would replace this crate's 64 diagnostics with the sessions
 crate's 220 and never reach this crate at all.
 
 **Owed:** land the sessions lane's kernel repoint. Then this crate adds
-`tracedecay-sessions` and repoints all 29 refs with no other edit. Note that
-`sessions::{SessionRecord, SessionMessageRecord}` (`consolidate/tests.rs:38`,
-`hermes.rs:409`) actually resolve to `tracedecay_store::{SessionRecord,
-SessionMessageRecord}`, which this crate can already reach — they only wait on
-the same import rewrite.
+`tracedecay-sessions` and repoints all 29 refs with no other edit.
 
 ### 3. `daemon` — 21 refs — blocked by `daemon/store_runtime` having no owner
 
@@ -114,34 +110,9 @@ here for free and is the single highest-leverage move in the whole split.
 `QuiescedDaemonLifecycle` still need a home — a `tracedecay-daemon` crate, or
 the kernel for the first three, which are pure identity/probe logic.
 
-### 4. `agents` — 6 refs — blocked by `tracedecay-agent-hosts` being red
-
-`cargo check -p tracedecay-agent-hosts` reports 194 errors, again the same
-un-repointed `crate::errors` / `crate::db` shape. Same rule as sessions: the
-dependency cannot be taken until that lane lands.
-
-Three of the six refs are one pure function,
-`agents::hermes::read_config_pinned_project_root` (`hermes.rs:154`,
-`hermes.rs:313`, `hermes/resolution.rs:194`) — a YAML pin reader with no host
-state. If the agent-hosts lane slips, that one is a candidate to move down
-rather than wait. The other three (`agents::AgentIntegration`,
-`agents::hermes::HermesIntegration`, `agents::expected_tool_perms`) are the
-real host-integration surface and must wait.
-
-### 5. `application::host_admission` — 6 refs — blocked by non-extraction
-
-`host_admission` is **not** in `tracedecay-application`; it is still
-`src/application/host_admission.rs` in the root crate. Four of the six refs are
-test-only. The two library refs (`hermes/pipeline.rs:553-554`) build a
-`HostAdmissionFacade` purely to hand to
-`sessions::hermes::ingest_legacy_pinned_profile` on the next line, so they
-close together with seam 2 — most cleanly by making "ingest a legacy pinned
-profile into this target store" one call the sessions crate owns, with the
-facade constructed on its side of the boundary.
-
 ---
 
-## 6. Newly found gap: four kernel functions the kernel mover left behind
+## 4. Newly found gap: four kernel functions the kernel mover left behind
 
 These are **not** listed as owed in `crates/tracedecay-runtime-core/SEAMS.md`,
 so nobody currently owns them. Each is pure logic whose every dependency is
@@ -164,12 +135,10 @@ are three-line wrappers over the already-`pub`
 `tracedecay_runtime_core::storage::classify_registry_storage_fields`, so they
 follow `global_db` (seam 1) rather than needing a design of their own.
 
-## 7. `project_registry` — resolved, nothing owed
+## 5. `project_registry` — resolved, nothing owed
 
 The earlier catalog flagged a `project_registry` ambiguity. There are no
-`root_seam::project_registry` references in this crate; the only
-`project_registry` tokens (`hermes/resolution.rs:133`, `:139`) are calls to
-`RegisteredGlobalDb::project_registry_context_by_alias`, i.e. part of seam 1.
+`root_seam::project_registry` references in this crate.
 `primary_checkout_root` did move to `tracedecay_runtime_core::project_registry`
 as the kernel's SEAMS.md records, but this crate never referenced it.
 

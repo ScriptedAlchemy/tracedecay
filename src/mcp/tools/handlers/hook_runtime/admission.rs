@@ -2,6 +2,7 @@ use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -485,6 +486,118 @@ pub(super) async fn hook_v2_admit(
             }),
         },
     )
+}
+
+/// Admits a native event that has no project route into the authenticated
+/// profile's V2 ledger. The hook supplies only decoded, content-free native
+/// material; the daemon owns the profile scope binding and all durable writes.
+pub(super) fn hook_v2_profile_admit(
+    args: &Value,
+    action: &str,
+    profile_root: &Path,
+    profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+) -> Result<Value> {
+    let routed_profile_root = std::fs::canonicalize(profile_root).map_err(|error| {
+        crate::automation::config_error(format!(
+            "failed to resolve authenticated Hook V2 profile route: {error}"
+        ))
+    })?;
+    if profile_identity.profile_root() != routed_profile_root.as_path() {
+        return Err(crate::automation::config_error(
+            "authenticated profile identity does not match the hook route",
+        ));
+    }
+    let profile_root = profile_identity.profile_root();
+    let admission = args
+        .get("admission")
+        .cloned()
+        .ok_or_else(|| crate::automation::config_error(format!("{action} requires admission")))
+        .and_then(|value| {
+            serde_json::from_value::<tracedecay_hooks::ProfileScopedNativeHookAdmissionV1>(value)
+                .map_err(|error| {
+                    crate::automation::config_error(format!(
+                        "invalid profile-scoped Hook V2 admission: {error}"
+                    ))
+                })
+        })?;
+    let binding = profile_hook_v2_binding(profile_identity, admission.decoded.host);
+    let envelope = admission.into_envelope(&binding).map_err(|error| {
+        crate::automation::config_error(format!(
+            "profile-scoped Hook V2 envelope rejected: {error}"
+        ))
+    })?;
+    let ledger_root = profile_root
+        .join("hook-v2-profile-admissions")
+        .join(binding.host.hook_key());
+    let outcome = tracedecay_hooks::HookAdmissionLedgerV1::open(
+        ledger_root,
+        binding.host,
+        tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
+        hook_now(),
+    )
+    .and_then(|(mut ledger, _)| ledger.admit(&envelope, hook_now()));
+    Ok(match outcome {
+        Ok(tracedecay_hooks::HookAdmissionDecisionV1::Admitted) => json!({
+            "action": action,
+            "status": "accepted",
+            "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
+        }),
+        Ok(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate) => json!({
+            "action": action,
+            "status": "exact_duplicate",
+            "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
+        }),
+        Ok(tracedecay_hooks::HookAdmissionDecisionV1::Conflict) => hook_v2_catchup_response(action),
+        Err(_) => json!({
+            "action": action,
+            "status": "unavailable",
+        }),
+    })
+}
+
+fn profile_hook_v2_binding(
+    profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    host: tracedecay_hooks::HookHostV1,
+) -> tracedecay_hooks::HookScopeBindingV1 {
+    let profile_key = format!(
+        "{}:{}",
+        profile_identity.brain_id().as_str(),
+        profile_identity.profile_id().as_str()
+    );
+    let hash16 = |domain: &str| {
+        let mut digest = Sha256::new();
+        digest.update(b"tracedecay.profile-hook-v2.binding.v1");
+        digest.update(domain.as_bytes());
+        digest.update(profile_key.as_bytes());
+        let mut value = [0; 16];
+        value.copy_from_slice(&digest.finalize()[..16]);
+        value
+    };
+    let mut token_digest = Sha256::new();
+    token_digest.update(b"tracedecay.profile-hook-v2.binding-token.v1");
+    token_digest.update(profile_key.as_bytes());
+    token_digest.update(host.hook_key().as_bytes());
+    tracedecay_hooks::HookScopeBindingV1 {
+        host,
+        project_id: hash16("profile"),
+        repository_id: hash16("repository"),
+        worktree_id: hash16("worktree"),
+        worktree_epoch: 1,
+        binding_token: token_digest.finalize().into(),
+        capabilities: [
+            tracedecay_hooks::HookEventFamily::SessionBoundary,
+            tracedecay_hooks::HookEventFamily::PromptBoundary,
+            tracedecay_hooks::HookEventFamily::ToolLifecycle,
+            tracedecay_hooks::HookEventFamily::SavedEdit,
+            tracedecay_hooks::HookEventFamily::TestLifecycle,
+        ]
+        .into_iter()
+        .map(|family| tracedecay_hooks::HookCapabilityV1 {
+            family,
+            support: tracedecay_hooks::stock_event_support(host, family),
+        })
+        .collect(),
+    }
 }
 
 #[cfg(test)]

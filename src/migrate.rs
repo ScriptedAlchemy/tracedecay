@@ -5,5 +5,5 @@
 //! path keeps resolving after the one-shot crate split.
 
 pub use tracedecay_migrate::{
-    durability, final_v2, hermes, inventory, profile_backup, registry,
+    durability, final_v2, inventory, profile_backup, registry,
 };

@@ -9,7 +9,7 @@
 //! The Codex bundle manifest follows the same shape plus a Codex-specific
 //! `interface` marketplace block, so it is checked against the Cursor schema
 //! extended with that one key. Rendered (installed) manifests are covered by
-//! `tests/agent_suite/update_plugin_test.rs`.
+//! the receipt-backed host lifecycle acceptance suite.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

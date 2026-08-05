@@ -262,6 +262,10 @@ impl SnapshotAdmissionRunner {
                 scope,
             )
             .await?;
+            if cancellation.is_cancelled() {
+                self.budget.defer_unadmitted(input_bytes);
+                return Ok(());
+            }
             if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
                 continue;
             }

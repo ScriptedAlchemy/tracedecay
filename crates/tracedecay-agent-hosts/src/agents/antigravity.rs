@@ -8,20 +8,13 @@
 //!   CLI (`agy`) plugin file, same shape. Required because the IDE config
 //!   is not picked up by the CLI (#85).
 //!
-//! Both files are kept in sync by `install` and `uninstall`; `doctor` checks
-//! both and reports each location separately.
+//! `doctor` checks both locations and reports them separately.
 
 use std::path::Path;
 
-use serde_json::json;
-
-use crate::errors::Result;
-
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
-    McpUninstallPolicy, backup_config_file, doctor_check_mcp_registration,
-    install_mcp_server_entry, load_json_file, load_json_file_strict, safe_write_json_file,
-    uninstall_mcp_server_entry,
+    AgentIntegration, DoctorCounters, HealthcheckContext, McpDoctorLabels,
+    doctor_check_mcp_registration, load_json_file,
 };
 
 /// Google Antigravity agent.
@@ -44,62 +37,6 @@ impl AgentIntegration for AntigravityIntegration {
 
     fn id(&self) -> &'static str {
         "antigravity"
-    }
-
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        // 1. Antigravity IDE config (~/.gemini/antigravity/mcp_config.json)
-        let mcp_path = mcp_config_path(&ctx.home);
-        install_mcp_server_entry(
-            &mcp_path,
-            "mcpServers",
-            json!({
-                "command": ctx.tracedecay_bin,
-                "args": ["serve"]
-            }),
-            "Antigravity",
-            load_json_file_strict,
-        )?;
-
-        // 2. Antigravity CLI plugin (~/.gemini/antigravity-cli/plugins/tracedecay.json).
-        //    Same shape as the IDE config; required because the IDE config is
-        //    not picked up by the CLI (#85).
-        let plugin_path = cli_plugin_path(&ctx.home);
-        if let Some(parent) = plugin_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        let plugin_backup = backup_config_file(&plugin_path)?;
-        let plugin_settings = json!({
-            "mcpServers": {
-                "tracedecay": {
-                    "command": ctx.tracedecay_bin,
-                    "args": ["serve"],
-                }
-            }
-        });
-        safe_write_json_file(&plugin_path, &plugin_settings, plugin_backup.as_deref())?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Added tracedecay CLI plugin to {}",
-            plugin_path.display()
-        );
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!(
-            "  2. Restart Antigravity (IDE or `agy` CLI) — tracedecay tools are now available"
-        );
-        Ok(())
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let mcp_path = mcp_config_path(&ctx.home);
-        uninstall_mcp_server(&mcp_path);
-        uninstall_cli_plugin(&cli_plugin_path(&ctx.home));
-
-        eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from Antigravity.");
-        eprintln!("Restart Antigravity (IDE or `agy` CLI) for changes to take effect.");
-        Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -138,35 +75,6 @@ impl AgentIntegration for AntigravityIntegration {
             has_entry(&plugin_path)
         };
         ide_ok || cli_ok
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Uninstall helpers
-// ---------------------------------------------------------------------------
-
-fn uninstall_mcp_server(mcp_path: &Path) {
-    uninstall_mcp_server_entry(
-        mcp_path,
-        "mcpServers",
-        load_json_file,
-        McpUninstallPolicy {
-            prune_empty_root: false,
-            remove_empty_file: true,
-        },
-    );
-}
-
-/// Remove the per-plugin file the CLI loader picks up. Unlike the IDE config
-/// — which is shared across other tools — the plugin file belongs exclusively
-/// to tracedecay, so we just delete it.
-fn uninstall_cli_plugin(plugin_path: &Path) {
-    if !plugin_path.exists() {
-        eprintln!("  {} not found, skipping", plugin_path.display());
-        return;
-    }
-    if std::fs::remove_file(plugin_path).is_ok() {
-        eprintln!("\x1b[32m✔\x1b[0m Removed {} ", plugin_path.display());
     }
 }
 
