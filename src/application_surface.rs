@@ -46,10 +46,23 @@ use tracedecay_application::{
     WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
     WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
-use tracedecay_domain::configuration::{
-    ConfigurationAuditEventId, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationValueV1, CredentialKindV1, CredentialReferenceId, RollbackModeV1, SettingKey,
+pub use tracedecay_application::{
+    ConfigurationAuditRequestV1 as ConfigurationAuditSurfaceRequest,
+    ConfigurationBatchRequestV1 as ConfigurationBatchSurfaceRequest,
+    ConfigurationDirectMutationRequestV1 as ConfigurationDirectMutationSurfaceRequest,
+    ConfigurationGetRequestV1 as ConfigurationKeySurfaceRequest,
+    ConfigurationListRequestV1 as ConfigurationListSurfaceRequest,
+    ConfigurationObservedStateRequestV1 as ConfigurationObservedStateSurfaceRequest,
+    ConfigurationProtectedApplyRequestV1 as ConfigurationProtectedApplySurfaceRequest,
+    ConfigurationProtectedPreviewRequestV1 as ConfigurationProtectedPreviewSurfaceRequest,
+    ConfigurationRollbackApplyRequestV1 as ConfigurationRollbackApplySurfaceRequest,
+    ConfigurationRollbackPreviewRequestV1 as ConfigurationRollbackPreviewSurfaceRequest,
+    ConfigurationSetRequestV1 as ConfigurationSetSurfaceRequest,
+    ConfigurationUnsetRequestV1 as ConfigurationUnsetSurfaceRequest,
+    ConfigurationWireRequestV1 as ConfigurationSurfaceRequest,
+    ConfigurationWriteCredentialRequestV1 as ConfigurationWriteCredentialSurfaceRequest,
 };
+use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 use tracedecay_domain::{
     ExactTechnicalTermKindV1, GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexPreviewV1,
@@ -60,9 +73,6 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, CatalogSnapshotV1, CatalogValidationError, FeatureId,
     IdentifierError, ProfileId, RouteExposureV1, SchemaId, SurfaceOperationName, UseCaseId,
-};
-pub use tracedecay_usecases::application_surface::{
-    ConfigurationProtectedApplySurfaceRequest, ConfigurationProtectedPreviewSurfaceRequest,
 };
 
 use crate::application::feedback::observations::{
@@ -532,93 +542,6 @@ pub enum CallableCodeSurfaceRequest {
     Definition(CodeNavigationSurfaceRequest),
     TypeDefinition(CodeNavigationSurfaceRequest),
     References(CodeNavigationSurfaceRequest),
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationListSurfaceRequest {}
-
-pub type ConfigurationKeySurfaceRequest =
-    tracedecay_application::configuration::ConfigurationGetRequestV1;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "operation")]
-pub enum ConfigurationDirectMutationSurfaceRequest {
-    Set {
-        layer: ConfigurationLayerIdV1,
-        key: SettingKey,
-        value: ConfigurationValueV1,
-    },
-    Unset {
-        layer: ConfigurationLayerIdV1,
-        key: SettingKey,
-    },
-}
-
-pub type ConfigurationSetSurfaceRequest =
-    tracedecay_application::configuration::ConfigurationSetRequestV1;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationUnsetSurfaceRequest {
-    pub layer: ConfigurationLayerIdV1,
-    pub key: SettingKey,
-    pub expected_revision: ConfigurationRevisionId,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationBatchSurfaceRequest {
-    pub mutations: Vec<ConfigurationDirectMutationSurfaceRequest>,
-    pub expected_revision: ConfigurationRevisionId,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationWriteCredentialSurfaceRequest {
-    pub expected_reference_id: Option<CredentialReferenceId>,
-    pub kind: CredentialKindV1,
-    pub write_handle: String,
-    pub expected_revision: ConfigurationRevisionId,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationObservedStateSurfaceRequest {}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationRollbackPreviewSurfaceRequest {
-    pub target_revision_id: ConfigurationRevisionId,
-    pub mode: RollbackModeV1,
-}
-
-pub type ConfigurationRollbackApplySurfaceRequest = ConfigurationProtectedApplySurfaceRequest;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationAuditSurfaceRequest {
-    #[serde(default)]
-    pub after_event_id: Option<ConfigurationAuditEventId>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "operation", content = "request")]
-pub enum ConfigurationSurfaceRequest {
-    List(ConfigurationListSurfaceRequest),
-    Explain(ConfigurationKeySurfaceRequest),
-    Get(ConfigurationKeySurfaceRequest),
-    Set(ConfigurationSetSurfaceRequest),
-    Unset(ConfigurationUnsetSurfaceRequest),
-    Batch(ConfigurationBatchSurfaceRequest),
-    WriteCredential(ConfigurationWriteCredentialSurfaceRequest),
-    ObservedState(ConfigurationObservedStateSurfaceRequest),
-    ProtectedPreview(ConfigurationProtectedPreviewSurfaceRequest),
-    ProtectedApply(ConfigurationProtectedApplySurfaceRequest),
-    RollbackPreview(ConfigurationRollbackPreviewSurfaceRequest),
-    RollbackApply(ConfigurationRollbackApplySurfaceRequest),
-    Audit(ConfigurationAuditSurfaceRequest),
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
