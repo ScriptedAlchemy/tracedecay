@@ -60,6 +60,11 @@ pub struct UserConfig {
     #[serde(default)]
     pub installed_agents: Vec<String>,
 
+    /// Per-agent dashboard integration policy. Missing entries retain the
+    /// historical default of installing the dashboard integration.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_dashboard_enabled: BTreeMap<String, bool>,
+
     /// Debounce duration for the embedded MCP file watcher (e.g. "2s", "15s", "1m").
     #[serde(default = "default_watcher_debounce", alias = "daemon_debounce")]
     pub watcher_debounce: String,
@@ -160,6 +165,7 @@ impl Default for UserConfig {
             last_version_check_at: 0,
             last_version_warning_at: 0,
             installed_agents: Vec::new(),
+            agent_dashboard_enabled: BTreeMap::new(),
             watcher_debounce: default_watcher_debounce(),
             cached_country_flags: Vec::new(),
             last_flags_fetch_at: 0,
@@ -398,6 +404,16 @@ where
 }
 
 impl UserConfig {
+    /// Returns the persisted dashboard policy for an agent.
+    ///
+    /// Existing configs predate this field, so absence means enabled.
+    pub fn dashboard_enabled_for_agent(&self, agent_id: &str) -> bool {
+        self.agent_dashboard_enabled
+            .get(agent_id)
+            .copied()
+            .unwrap_or(true)
+    }
+
     /// Loads the user-level config file.
     /// Returns defaults if the file is missing or unreadable. A present but
     /// unparseable file prints a one-time warning to stderr (see
@@ -1020,5 +1036,21 @@ mod tests {
         assert!(saved.contains("[future_table]"));
         assert!(saved.contains("flag = true"));
         assert!(saved.contains("upload_enabled = false"));
+    }
+
+    #[test]
+    fn agent_dashboard_policy_defaults_enabled_and_round_trips_opt_out() {
+        let default = UserConfig::default();
+        assert!(default.dashboard_enabled_for_agent("hermes"));
+
+        let mut configured = UserConfig::default();
+        configured
+            .agent_dashboard_enabled
+            .insert("hermes".to_string(), false);
+        let encoded = toml::to_string(&configured).unwrap();
+        let decoded: UserConfig = toml::from_str(&encoded).unwrap();
+
+        assert!(!decoded.dashboard_enabled_for_agent("hermes"));
+        assert!(decoded.dashboard_enabled_for_agent("claude"));
     }
 }

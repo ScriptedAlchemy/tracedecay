@@ -6,6 +6,7 @@
 //! transactions own installation and removal.
 
 pub mod antigravity;
+mod bundle_identity;
 pub mod claude;
 pub mod cline;
 pub mod codex;
@@ -46,6 +47,7 @@ use crate::errors::TraceDecayError;
 use crate::ports::mcp_tools::advertised_tools;
 
 pub use antigravity::AntigravityIntegration;
+pub(crate) use bundle_identity::{observed_bundle_content_digest, rendered_bundle_content_digest};
 pub use claude::ClaudeIntegration;
 pub use cline::ClineIntegration;
 pub use codex::CodexIntegration;

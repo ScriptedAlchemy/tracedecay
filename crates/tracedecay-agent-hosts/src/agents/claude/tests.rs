@@ -2,7 +2,17 @@ use super::super::safe_write_json_file;
 use super::*;
 use serde_json::json;
 
-fn write_native_activation(home: &Path) {
+fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
+    let source = plugin_deploy_dir(home);
+    let cache = claude_current_cached_plugin_root(home);
+    for (relative, _) in rendered_plugin_files(tracedecay_bin).unwrap() {
+        let target = cache.join(relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(source.join(relative), target).unwrap();
+    }
+}
+
+fn write_native_activation(home: &Path, tracedecay_bin: &str) {
     let settings = home.join(".claude/settings.json");
     std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
     safe_write_json_file(
@@ -25,35 +35,29 @@ fn write_native_activation(home: &Path) {
         None,
     )
     .unwrap();
-    let cache_manifest = claude_current_cached_plugin_manifest_path(home);
-    std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
-    std::fs::copy(
-        plugin_deploy_dir(home).join(".claude-plugin/plugin.json"),
-        cache_manifest,
-    )
-    .unwrap();
+    copy_rendered_bundle_to_native_cache(home, tracedecay_bin);
 }
 
 #[test]
 fn native_activation_requires_exact_catalog_mount_and_versioned_cache() {
     let home = tempfile::tempdir().unwrap();
     deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
-    write_native_activation(home.path());
-    assert!(claude_plugin_is_natively_active(home.path()).unwrap());
+    write_native_activation(home.path(), "/bin/tracedecay");
+    assert!(claude_plugin_is_natively_active(home.path(), Some("/bin/tracedecay")).unwrap());
 
     let marketplace = known_marketplaces_path(home.path());
     let mut state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&marketplace).unwrap()).unwrap();
     state["tracedecay"]["installLocation"] = json!("/different/marketplace");
     safe_write_json_file(&marketplace, &state, None).unwrap();
-    assert!(!claude_plugin_is_natively_active(home.path()).unwrap());
+    assert!(!claude_plugin_is_natively_active(home.path(), Some("/bin/tracedecay")).unwrap());
 }
 
 #[test]
 fn native_activation_rejects_current_version_manifest_in_unbound_cache_directory() {
     let home = tempfile::tempdir().unwrap();
     deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
-    write_native_activation(home.path());
+    write_native_activation(home.path(), "/bin/tracedecay");
     let exact = claude_current_cached_plugin_manifest_path(home.path());
     let unbound = exact
         .parent()
@@ -64,7 +68,67 @@ fn native_activation_rejects_current_version_manifest_in_unbound_cache_directory
     std::fs::create_dir_all(unbound.parent().unwrap()).unwrap();
     std::fs::rename(&exact, &unbound).unwrap();
 
-    assert!(!claude_plugin_is_natively_active(home.path()).unwrap());
+    assert!(!claude_plugin_is_natively_active(home.path(), Some("/bin/tracedecay")).unwrap());
+}
+
+#[test]
+fn native_cache_content_drift_and_binary_relocation_require_refresh() {
+    let home = tempfile::tempdir().unwrap();
+    let old_bin = "/old/bin/tracedecay";
+    let new_bin = "/relocated/bin/tracedecay";
+    deploy_plugin_bundle(home.path(), old_bin).unwrap();
+    write_native_activation(home.path(), old_bin);
+    let old_ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tracedecay_bin: old_bin.to_string(),
+        tool_permissions: Vec::new(),
+        project_root: None,
+        dashboard: true,
+    };
+    assert!(matches!(
+        ClaudeIntegration
+            .preflight_non_interactive_install(&old_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::Ready
+    ));
+
+    std::fs::write(
+        claude_current_cached_plugin_root(home.path()).join(".mcp.json"),
+        "{}\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        ClaudeIntegration
+            .preflight_non_interactive_install(&old_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::DeferredUserAction(_)
+    ));
+    copy_rendered_bundle_to_native_cache(home.path(), old_bin);
+    assert!(matches!(
+        ClaudeIntegration
+            .preflight_non_interactive_install(&old_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::Ready
+    ));
+
+    deploy_plugin_bundle(home.path(), new_bin).unwrap();
+    let relocated_ctx = InstallContext {
+        tracedecay_bin: new_bin.to_string(),
+        ..old_ctx
+    };
+    assert!(matches!(
+        ClaudeIntegration
+            .preflight_non_interactive_install(&relocated_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::DeferredUserAction(_)
+    ));
+    copy_rendered_bundle_to_native_cache(home.path(), new_bin);
+    assert!(matches!(
+        ClaudeIntegration
+            .preflight_non_interactive_install(&relocated_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::Ready
+    ));
 }
 
 #[test]

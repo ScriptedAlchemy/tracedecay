@@ -424,8 +424,18 @@ fn install_ctx(home: &Path) -> InstallContext {
     }
 }
 
-fn write_exact_native_activation(home: &Path) {
-    install_codex_personal_bootstrap(home, TEST_BIN).unwrap();
+fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
+    let source = codex_plugin_install_dir(home);
+    let cache = codex_plugin_current_cached_install_dir(home);
+    for (relative, _) in rendered_global_plugin_files(tracedecay_bin).unwrap() {
+        let target = cache.join(relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(source.join(relative), target).unwrap();
+    }
+}
+
+fn write_exact_native_activation(home: &Path, tracedecay_bin: &str) {
+    install_codex_personal_bootstrap(home, tracedecay_bin).unwrap();
     let config = codex_config_path(home);
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(
@@ -433,42 +443,39 @@ fn write_exact_native_activation(home: &Path) {
         "[plugins.\"tracedecay@personal\"]\nenabled = true\n",
     )
     .unwrap();
-    let cache_manifest =
-        codex_plugin_current_cached_install_dir(home).join(".codex-plugin/plugin.json");
-    std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
-    std::fs::copy(codex_plugin_manifest_path(home), cache_manifest).unwrap();
+    copy_rendered_bundle_to_native_cache(home, tracedecay_bin);
 }
 
 #[test]
 fn native_activation_binds_enabled_key_to_exact_marketplace_and_cache() {
     let home = tempfile::tempdir().unwrap();
-    write_exact_native_activation(home.path());
-    assert!(codex_plugin_activation_state(home.path()).unwrap());
+    write_exact_native_activation(home.path(), TEST_BIN);
+    assert!(codex_plugin_activation_state(home.path(), Some(TEST_BIN)).unwrap());
 
     std::fs::write(
         codex_config_path(home.path()),
         "[plugins.\"tracedecay@other\"]\nenabled = true\n",
     )
     .unwrap();
-    assert!(!codex_plugin_activation_state(home.path()).unwrap());
+    assert!(!codex_plugin_activation_state(home.path(), Some(TEST_BIN)).unwrap());
 }
 
 #[test]
 fn native_activation_rejects_cache_from_another_marketplace() {
     let home = tempfile::tempdir().unwrap();
-    write_exact_native_activation(home.path());
+    write_exact_native_activation(home.path(), TEST_BIN);
     let exact = codex_plugin_current_cached_install_dir(home.path());
     let other = codex_plugin_cached_root(home.path(), "other").join(crate::PRODUCT_VERSION);
     std::fs::create_dir_all(other.parent().unwrap()).unwrap();
     std::fs::rename(exact, other).unwrap();
 
-    assert!(!codex_plugin_activation_state(home.path()).unwrap());
+    assert!(!codex_plugin_activation_state(home.path(), Some(TEST_BIN)).unwrap());
 }
 
 #[test]
 fn native_activation_rejects_marketplace_source_path_drift() {
     let home = tempfile::tempdir().unwrap();
-    write_exact_native_activation(home.path());
+    write_exact_native_activation(home.path(), TEST_BIN);
     let marketplace_path = codex_personal_marketplace_path(home.path());
     let mut marketplace: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&marketplace_path).unwrap()).unwrap();
@@ -479,7 +486,64 @@ fn native_activation_rejects_marketplace_source_path_drift() {
     )
     .unwrap();
 
-    assert!(!codex_plugin_activation_state(home.path()).unwrap());
+    assert!(!codex_plugin_activation_state(home.path(), Some(TEST_BIN)).unwrap());
+}
+
+#[test]
+fn native_cache_content_drift_and_binary_relocation_require_refresh() {
+    let home = tempfile::tempdir().unwrap();
+    let old_bin = "/old/bin/tracedecay";
+    let new_bin = "/relocated/bin/tracedecay";
+    write_exact_native_activation(home.path(), old_bin);
+    let old_ctx = install_ctx(home.path());
+    let old_ctx = InstallContext {
+        tracedecay_bin: old_bin.to_string(),
+        ..old_ctx
+    };
+    assert!(matches!(
+        CodexIntegration
+            .preflight_non_interactive_install(&old_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::Ready
+    ));
+
+    std::fs::write(
+        codex_plugin_current_cached_install_dir(home.path()).join(".mcp.json"),
+        "{}\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        CodexIntegration
+            .preflight_non_interactive_install(&old_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::DeferredUserAction(_)
+    ));
+    copy_rendered_bundle_to_native_cache(home.path(), old_bin);
+    assert!(matches!(
+        CodexIntegration
+            .preflight_non_interactive_install(&old_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::Ready
+    ));
+
+    install_codex_personal_bootstrap(home.path(), new_bin).unwrap();
+    let relocated_ctx = InstallContext {
+        tracedecay_bin: new_bin.to_string(),
+        ..old_ctx
+    };
+    assert!(matches!(
+        CodexIntegration
+            .preflight_non_interactive_install(&relocated_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::DeferredUserAction(_)
+    ));
+    copy_rendered_bundle_to_native_cache(home.path(), new_bin);
+    assert!(matches!(
+        CodexIntegration
+            .preflight_non_interactive_install(&relocated_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::Ready
+    ));
 }
 
 /// Codex cache activation is intentionally deferred to the host CLI.

@@ -43,7 +43,7 @@ impl AgentIntegration for CodexIntegration {
         &self,
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
-        codex_non_interactive_install_state(&ctx.home, Vec::new())
+        codex_non_interactive_install_state(&ctx.home, &ctx.tracedecay_bin, Vec::new())
     }
 
     fn interactive_activation_guidance(&self) -> Option<String> {
@@ -59,6 +59,7 @@ impl AgentIntegration for CodexIntegration {
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
         codex_non_interactive_install_state(
             &ctx.home,
+            &ctx.tracedecay_bin,
             vec![
                 codex_plugin_manifest_path(&ctx.home),
                 codex_personal_marketplace_path(&ctx.home),
@@ -252,10 +253,30 @@ impl AgentIntegration for CodexIntegration {
         // readback for "this plugin is installed and enabled" is its native
         // cache plus `enabled = true` in `config.toml`; TraceDecay reads this
         // state but leaves cache materialisation to the Codex CLI.
-        match codex_plugin_activation_state(&ctx.home) {
+        match codex_plugin_activation_state(&ctx.home, None) {
             Ok(true) => State::Current,
             Ok(false) => State::Repairable,
             Err(()) => State::Corrupt,
+        }
+    }
+
+    fn host_component_registration_for_lifecycle(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+        install: &InstallContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+        match self.host_component_registration(component, ctx) {
+            State::Current => {
+                match codex_plugin_activation_state(&ctx.home, Some(&install.tracedecay_bin)) {
+                    Ok(true) => State::Current,
+                    Ok(false) => State::Repairable,
+                    Err(()) => State::Corrupt,
+                }
+            }
+            state => state,
         }
     }
 
@@ -301,7 +322,7 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if codex_plugin_is_natively_active(&ctx.home)? {
+        if codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
             return Ok(());
         }
         let marketplace_name = codex_cached_marketplace_name(&ctx.home);
@@ -313,7 +334,7 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if !codex_plugin_is_natively_active(&ctx.home)? {
+        if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
             return Ok(());
         }
         let marketplace_name = codex_cached_marketplace_name(&ctx.home);
@@ -1035,10 +1056,13 @@ fn codex_registration_residue(home: &Path) -> std::result::Result<bool, ()> {
 /// marketplace and current TraceDecay version.
 /// `Err(())` marks a config TraceDecay cannot read, which the caller reports as
 /// a corrupt registration rather than a merely repairable one.
-fn codex_plugin_activation_state(home: &Path) -> std::result::Result<bool, ()> {
+fn codex_plugin_activation_state(
+    home: &Path,
+    tracedecay_bin: Option<&str>,
+) -> std::result::Result<bool, ()> {
     Ok(codex_source_manifest_matches_catalog_version(home)?
         && codex_plugin_enabled(home)?
-        && codex_loaded_cache_matches_catalog_version(home)?)
+        && codex_loaded_cache_matches_rendered_bundle(home, tracedecay_bin)?)
 }
 
 fn codex_plugin_enabled(home: &Path) -> std::result::Result<bool, ()> {
@@ -1063,15 +1087,41 @@ fn codex_plugin_enabled(home: &Path) -> std::result::Result<bool, ()> {
         == Some(true))
 }
 
-fn codex_loaded_cache_matches_catalog_version(home: &Path) -> std::result::Result<bool, ()> {
+fn codex_loaded_cache_matches_rendered_bundle(
+    home: &Path,
+    tracedecay_bin: Option<&str>,
+) -> std::result::Result<bool, ()> {
     let Some(marketplace_name) = codex_exact_personal_marketplace_name(home)? else {
         return Ok(false);
     };
-    codex_plugin_manifest_matches_catalog_version(
-        &codex_plugin_cached_root(home, &marketplace_name)
-            .join(crate::PRODUCT_VERSION)
-            .join(".codex-plugin/plugin.json"),
-    )
+    let cache_root = codex_plugin_cached_root(home, &marketplace_name).join(crate::PRODUCT_VERSION);
+    let source_root = codex_plugin_install_dir(home);
+    let (expected, relatives) = match tracedecay_bin {
+        Some(tracedecay_bin) => {
+            let rendered = rendered_global_plugin_files(tracedecay_bin).map_err(|_| ())?;
+            let (digest, relatives) =
+                super::rendered_bundle_content_digest(&rendered).map_err(|_| ())?;
+            (Some(digest), relatives)
+        }
+        None => (
+            None,
+            codex_embedded_plugin_files()
+                .into_iter()
+                .map(|(relative, _)| relative.to_string())
+                .collect(),
+        ),
+    };
+    let Some(source) =
+        super::observed_bundle_content_digest(&source_root, &relatives).map_err(|_| ())?
+    else {
+        return Ok(false);
+    };
+    let Some(cache) =
+        super::observed_bundle_content_digest(&cache_root, &relatives).map_err(|_| ())?
+    else {
+        return Ok(false);
+    };
+    Ok(source == cache && expected.is_none_or(|expected| source == expected))
 }
 
 fn codex_source_manifest_matches_catalog_version(home: &Path) -> std::result::Result<bool, ()> {
@@ -1123,8 +1173,8 @@ fn codex_exact_personal_marketplace_name(home: &Path) -> std::result::Result<Opt
     Ok(source_matches.then(|| name.to_string()))
 }
 
-fn codex_plugin_is_natively_active(home: &Path) -> Result<bool> {
-    codex_plugin_activation_state(home).map_err(|()| TraceDecayError::Config {
+fn codex_plugin_is_natively_active(home: &Path, tracedecay_bin: Option<&str>) -> Result<bool> {
+    codex_plugin_activation_state(home, tracedecay_bin).map_err(|()| TraceDecayError::Config {
         message: format!(
             "could not read Codex native plugin activation state at {}",
             codex_config_path(home).display()
@@ -1134,9 +1184,10 @@ fn codex_plugin_is_natively_active(home: &Path) -> Result<bool> {
 
 fn codex_non_interactive_install_state(
     home: &Path,
+    tracedecay_bin: &str,
     staged_paths: Vec<PathBuf>,
 ) -> Result<NonInteractiveInstallOutcome> {
-    if codex_plugin_is_natively_active(home)? {
+    if codex_plugin_is_natively_active(home, Some(tracedecay_bin))? {
         return Ok(NonInteractiveInstallOutcome::Ready);
     }
     let exact_marketplace_name =
