@@ -744,12 +744,10 @@ impl SessionSyncProjectContext {
                 let interrupted =
                     outcome.interruption.is_some() || requested_interruption.is_some();
                 if interrupted && !outcome.committed {
-                    let reason_code = match outcome.interruption {
-                        Some(
-                            crate::sessions::git_correlation::BoundedBackfillInterruption::SourceUnavailable,
-                        ) => "git_source_unavailable",
-                        _ => "git_command_timed_out",
-                    };
+                    let reason_code = outcome
+                        .interruption
+                        .map(git_history_interruption_reason)
+                        .unwrap_or("git_sync_interrupted");
                     return requested_interruption.unwrap_or(SessionSyncWorkResult::Finished {
                         committed: false,
                         stats,
@@ -785,14 +783,11 @@ impl SessionSyncProjectContext {
                         Some(SessionSyncWorkResult::Shutdown) => {
                             "git_sync_shutdown_after_commit".to_owned()
                         }
-                        _ if outcome.interruption
-                            == Some(
-                                crate::sessions::git_correlation::BoundedBackfillInterruption::SourceUnavailable,
-                            ) =>
-                        {
-                            "git_source_unavailable".to_owned()
-                        }
-                        _ => "git_command_timed_out".to_owned(),
+                        _ => outcome
+                            .interruption
+                            .map(git_history_interruption_reason)
+                            .unwrap_or("git_sync_interrupted")
+                            .to_owned(),
                     });
                 }
                 if git_errors > 0 {
@@ -827,6 +822,19 @@ impl SessionSyncProjectContext {
                 }
             }
         }
+    }
+}
+
+const fn git_history_interruption_reason(
+    interruption: crate::sessions::git_correlation::BoundedBackfillInterruption,
+) -> &'static str {
+    use crate::sessions::git_correlation::BoundedBackfillInterruption;
+
+    match interruption {
+        BoundedBackfillInterruption::Cancelled => "git_sync_cancelled",
+        BoundedBackfillInterruption::CommandTimedOut => "git_command_timed_out",
+        BoundedBackfillInterruption::HistoryLimitReached => "git_history_limit_reached",
+        BoundedBackfillInterruption::SourceUnavailable => "git_source_unavailable",
     }
 }
 
