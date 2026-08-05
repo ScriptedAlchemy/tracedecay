@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_application::retrieval::PrimitiveFailureKind;
@@ -6,7 +8,7 @@ use tracedecay_application::{
     PageAdmissionPort, PageAdmissionRequest, PageAdmissionSeal, RequestAdmission, RequestContext,
 };
 use tracedecay_domain::{
-    CodeGenerationId, FileOccurrenceId, ManifestDigest, RetrievalGrainV1, SessionId,
+    CodeGenerationId, CommitId, FileOccurrenceId, ManifestDigest, RetrievalGrainV1, SessionId,
     SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_temporal_query::cursor::{StableSortKey, encode_cursor, verify_cursor};
@@ -18,12 +20,48 @@ use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 use tracedecay_tool_catalog::{CatalogContributionV1, SurfaceBindingV1};
 
 use super::symbol_graph::SymbolGraphCursorPort;
-use crate::diagnostics_query::DiagnosticQueryCursor;
+use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use crate::diagnostics_query::{DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery};
+use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
+use crate::operation_stream::{
+    CanonicalManagedTestRunReader, ManagedTestResultPageAdmission, ManagedTestRunCurrentScope,
+};
+use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::db::Database;
 
 #[derive(Clone, Copy)]
 pub(super) enum PrimitivePageOwner {
     SymbolGraph(&'static str),
     Diagnostics,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedTestRunCurrentIdentity {
+    pub head_commit_id: CommitId,
+    pub code_generation_id: CodeGenerationId,
+}
+
+pub type ManagedTestRunCurrentIdentityFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    ManagedTestRunCurrentIdentity,
+                    tracedecay_application::ApplicationContractError,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+pub trait ManagedTestRunCurrentScopePort: Send + Sync {
+    fn current_identity(&self) -> ManagedTestRunCurrentIdentityFuture<'_>;
+}
+
+#[derive(Clone, Debug)]
+pub enum Pr12PrimitivePageOwner {
+    SymbolGraph,
+    Diagnostics(super::runtime::DiagnosticsPrimitiveRequest),
+    TestResults,
 }
 
 pub(super) const fn declared_primitive_page_owner(
@@ -48,6 +86,7 @@ pub(super) const fn declared_primitive_page_owner(
     }
 }
 
+#[derive(Clone)]
 pub struct SymbolGraphPageAdmissionAdapterV1<C> {
     catalog: Arc<[CatalogContributionV1]>,
     cursors: C,
@@ -92,6 +131,64 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn admit_from_owned_primitive_runtime<'a>(
+    symbol: &'a SymbolGraphPageAdmissionAdapterV1<Arc<dyn SymbolGraphCursorPort>>,
+    extended: &'a dyn super::runtime::Pr12ExtendedPrimitivePort,
+    admitted_root_uri: &'a str,
+    test_runs: &'a CanonicalManagedTestRunReader,
+    test_run_scope: &'a dyn ManagedTestRunCurrentScopePort,
+    request: PageAdmissionRequest,
+    owner: Pr12PrimitivePageOwner,
+    seal: PageAdmissionSeal,
+) -> PageAdmissionFuture<'a> {
+    match owner {
+        Pr12PrimitivePageOwner::SymbolGraph => PageAdmissionPort::admit(symbol, request, seal),
+        Pr12PrimitivePageOwner::Diagnostics(diagnostic) => Box::pin(async move {
+            extended
+                .admit_diagnostic_page(request, &diagnostic, seal)
+                .await
+        }),
+        Pr12PrimitivePageOwner::TestResults => admit_test_result_page_from_owned_runtime(
+            admitted_root_uri,
+            test_runs,
+            test_run_scope,
+            request,
+            seal,
+        ),
+    }
+}
+
+pub(super) fn admit_test_result_page_from_owned_runtime<'a>(
+    admitted_root_uri: &'a str,
+    test_runs: &'a CanonicalManagedTestRunReader,
+    test_run_scope: &'a dyn ManagedTestRunCurrentScopePort,
+    request: PageAdmissionRequest,
+    seal: PageAdmissionSeal,
+) -> PageAdmissionFuture<'a> {
+    Box::pin(async move {
+        let identity = test_run_scope
+            .current_identity()
+            .await
+            .map_err(|_| PageAdmissionError::Unavailable)?;
+        let current = ManagedTestRunCurrentScope {
+            root_uri: admitted_root_uri.to_owned(),
+            head_commit_id: Some(identity.head_commit_id),
+            code_generation_id: Some(identity.code_generation_id),
+            document_uri: None,
+            document_content_digest: None,
+        };
+        let owner = ManagedTestResultPageAdmission::new(
+            test_runs.clone(),
+            current,
+            request.binding_id().clone(),
+            request.body_digest().clone(),
+        );
+        PageAdmissionPort::admit(&owner, request, seal).await
+    })
+}
+
+#[derive(Clone)]
 pub(super) struct AuthenticatedDiagnosticCursorAuthorityV1 {
     key: SignedCursorKeyRefV1,
     configuration_digest: ManifestDigest,
@@ -209,6 +306,7 @@ impl AuthenticatedDiagnosticCursorAuthorityV1 {
     }
 }
 
+#[derive(Clone)]
 pub(super) enum DiagnosticPageLaneV1 {
     Workspace,
     File(FileOccurrenceId),
@@ -221,6 +319,63 @@ impl DiagnosticPageLaneV1 {
             Self::File(file) => file.as_str(),
         }
     }
+}
+
+pub(super) async fn resolve_diagnostic_page_owner(
+    graph: &TraceDecay,
+    database: &Database,
+    code_index: &dyn LspCodeIndexProjectionIdentityPort,
+    diagnostic_identity: &dyn CodeIndexPublicationIdentityPortV1,
+    context: &RequestContext,
+    request: &super::runtime::DiagnosticsPrimitiveRequest,
+) -> Result<(CodeGenerationId, DiagnosticPageLaneV1), PageAdmissionError> {
+    let identity = diagnostic_identity
+        .resolve(graph.project_root().to_path_buf())
+        .await
+        .ok_or(PageAdmissionError::Unavailable)?;
+    let scope = context.scope();
+    if identity.repository() != &scope.repository_id
+        || identity.worktree() != Some(&scope.worktree_id)
+        || identity.reference() != scope.reference.as_ref()
+    {
+        return Err(PageAdmissionError::Stale);
+    }
+    let (document_path, lane) = match &request.scope {
+        super::runtime::DiagnosticsPrimitiveScope::Workspace => {
+            (None, DiagnosticPageLaneV1::Workspace)
+        }
+        super::runtime::DiagnosticsPrimitiveScope::File(path) => {
+            let path =
+                crate::diagnostics_publication::code_index_logical_path(graph.project_root(), path)
+                    .ok_or(PageAdmissionError::Unavailable)?;
+            let file = identity
+                .file(&path)
+                .map(|(file, _)| file.clone())
+                .ok_or(PageAdmissionError::Unavailable)?;
+            (Some(path), DiagnosticPageLaneV1::File(file))
+        }
+        super::runtime::DiagnosticsPrimitiveScope::Package(_) => {
+            return Err(PageAdmissionError::Unsupported);
+        }
+    };
+    let current_index = code_index
+        .current_identity(graph.project_root().to_path_buf(), document_path)
+        .await
+        .map_err(|_| PageAdmissionError::Unavailable)?;
+    if current_index.code_generation_id != *identity.generation_id() {
+        return Err(PageAdmissionError::Stale);
+    }
+    let current = DiagnosticsQuery::new(database.conn())
+        .current_generation()
+        .await;
+    let generation = current.generation.ok_or(PageAdmissionError::Unavailable)?;
+    if !matches!(current.coverage, DiagnosticQueryCoverage::Complete) {
+        return Err(PageAdmissionError::Unavailable);
+    }
+    if generation != *identity.generation_id() {
+        return Err(PageAdmissionError::Stale);
+    }
+    Ok((generation, lane))
 }
 
 pub(super) struct DiagnosticPageAdmissionAdapterV1 {

@@ -17,7 +17,10 @@ pub use grep_analysis::{
     TraceDecayComplexityAuthorityV1, TraceDecayDependencyDepthAuthorityV1,
     production_grep_analysis_operations,
 };
-pub use page_admission::SymbolGraphPageAdmissionAdapterV1;
+pub use page_admission::{
+    ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
+    ManagedTestRunCurrentScopePort, Pr12PrimitivePageOwner, SymbolGraphPageAdmissionAdapterV1,
+};
 pub use production::{
     Pr12ProductionPrimitiveOpenRequestV1, TraceDecayAffectedTestsPortV1,
     admitted_root_uri_for_project, locator_digest_for_project,
@@ -27,8 +30,7 @@ pub use runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, DiagnosticsPrimitiveScope,
     FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult, FileMetadataPrimitiveRequest,
-    FileMetadataPrimitiveResult, FileMetadataRecord, ManagedTestRunCurrentIdentity,
-    ManagedTestRunCurrentIdentityFuture, ManagedTestRunCurrentScopePort, ModuleApiPrimitiveRequest,
+    FileMetadataPrimitiveResult, FileMetadataRecord, ModuleApiPrimitiveRequest,
     ModuleApiPrimitiveResult, OwnedPr12PrimitiveRuntime, Pr12ExtendedPrimitiveFuture,
     Pr12ExtendedPrimitivePort, Pr12OperationalPrimitive, Pr12OperationalPrimitiveFuture,
     Pr12OperationalPrimitivePort, Pr12OperationalPrimitiveRequest, Pr12PrimitiveDispatch,

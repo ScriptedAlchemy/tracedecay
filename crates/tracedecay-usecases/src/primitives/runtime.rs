@@ -35,13 +35,12 @@ use tracedecay_application::{
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
     EvidenceCoverage, EvidenceDomain, EvidencePacket, LegalAction, OpaqueCursor,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
-    PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
-    RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageAdmissionFuture,
+    PageAdmissionRequest, PageAdmissionSeal, PageRequest, PageState, PolicyDecisionRef,
+    RequestAdmission, RequestContext, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective,
+    SafeDiagnostic, TemporalState,
 };
-use tracedecay_domain::{
-    CodeGenerationId, CommitId, ComponentVersion, GenerationDiagnosticV1, UtcMicros,
-};
+use tracedecay_domain::{CodeGenerationId, ComponentVersion, GenerationDiagnosticV1, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
@@ -50,6 +49,7 @@ use super::grep_analysis::{
     TraceDecayAstGrepAuthorityV1, TraceDecayComplexityAuthorityV1,
     TraceDecayDependencyDepthAuthorityV1,
 };
+use super::page_admission::{ManagedTestRunCurrentScopePort, Pr12PrimitivePageOwner};
 use super::symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};
 use crate::ProjectSourceAccessSnapshot;
 use crate::operation_stream::{
@@ -84,24 +84,6 @@ pub type Pr12OperationalPrimitiveFuture<'a> =
 
 pub type Pr12ExtendedPrimitiveFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<T>> + Send + 'a>>;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagedTestRunCurrentIdentity {
-    pub head_commit_id: CommitId,
-    pub code_generation_id: CodeGenerationId,
-}
-
-pub type ManagedTestRunCurrentIdentityFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<ManagedTestRunCurrentIdentity, ApplicationContractError>>
-            + Send
-            + 'a,
-    >,
->;
-
-pub trait ManagedTestRunCurrentScopePort: Send + Sync {
-    fn current_identity(&self) -> ManagedTestRunCurrentIdentityFuture<'_>;
-}
 
 /// Closed operational reads whose concrete owner remains Doctor,
 /// configuration, diagnostics, project, or status.
@@ -392,6 +374,13 @@ pub trait Pr12ExtendedPrimitivePort: Send + Sync {
         context: RetrievalPortContext<'a>,
         request: &'a DiagnosticsPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, DiagnosticsPrimitiveResult>;
+
+    fn admit_diagnostic_page<'a>(
+        &'a self,
+        request: PageAdmissionRequest,
+        diagnostic: &'a DiagnosticsPrimitiveRequest,
+        seal: PageAdmissionSeal,
+    ) -> PageAdmissionFuture<'a>;
 }
 
 /// Closed typed request enum accepted by direct daemon invocation.
@@ -457,6 +446,19 @@ pub trait Pr12PrimitiveDispatch: Send + Sync {
         deadline: Deadline,
         cancellation: CancellationContext,
     ) -> Pr12PrimitiveTransportDispatchFuture<'_>;
+
+    fn admit_page(
+        &self,
+        request: PageAdmissionRequest,
+        seal: PageAdmissionSeal,
+    ) -> PageAdmissionFuture<'_>;
+
+    fn admit_primitive_page(
+        &self,
+        request: PageAdmissionRequest,
+        owner: Pr12PrimitivePageOwner,
+        seal: PageAdmissionSeal,
+    ) -> PageAdmissionFuture<'_>;
 }
 
 /// Owned production authorities supplied by the daemon project-open path.
@@ -526,6 +528,8 @@ pub struct OwnedPr12PrimitiveRuntime {
     admitted_root_uri: String,
     test_runs: CanonicalManagedTestRunReader,
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
+    symbol_page_admission:
+        super::page_admission::SymbolGraphPageAdmissionAdapterV1<Arc<dyn SymbolGraphCursorPort>>,
     capacity: Pr12PrimitiveCapacity,
 }
 
@@ -650,6 +654,38 @@ impl Pr12PrimitiveDispatch for OwnedPr12PrimitiveRuntime {
                 .await)
         })
     }
+
+    fn admit_page(
+        &self,
+        request: PageAdmissionRequest,
+        seal: PageAdmissionSeal,
+    ) -> PageAdmissionFuture<'_> {
+        super::page_admission::admit_test_result_page_from_owned_runtime(
+            &self.admitted_root_uri,
+            &self.test_runs,
+            self.test_run_scope.as_ref(),
+            request,
+            seal,
+        )
+    }
+
+    fn admit_primitive_page(
+        &self,
+        request: PageAdmissionRequest,
+        owner: Pr12PrimitivePageOwner,
+        seal: PageAdmissionSeal,
+    ) -> PageAdmissionFuture<'_> {
+        super::page_admission::admit_from_owned_primitive_runtime(
+            &self.symbol_page_admission,
+            self.project_runtime.extended.as_ref(),
+            &self.admitted_root_uri,
+            &self.test_runs,
+            self.test_run_scope.as_ref(),
+            request,
+            owner,
+            seal,
+        )
+    }
 }
 
 impl OwnedPr12PrimitiveRuntime {
@@ -751,6 +787,7 @@ fn transport_context(
 pub fn open_pr12_primitive_project_runtime(
     database: Database,
     graph: Arc<TraceDecay>,
+    page_catalog: Arc<[tracedecay_tool_catalog::CatalogContributionV1]>,
     symbol_graph_cursors: Arc<dyn SymbolGraphCursorPort>,
     tests: Arc<dyn TestPrimitivePort + Send + Sync>,
     lexical_grep: Arc<dyn LexicalGrepAuthorityV1 + Send + Sync>,
@@ -773,6 +810,10 @@ pub fn open_pr12_primitive_project_runtime(
             field: "PR12 primitive admitted project authority",
         });
     }
+    let symbol_page_admission = super::page_admission::SymbolGraphPageAdmissionAdapterV1::new(
+        page_catalog,
+        Arc::clone(&symbol_graph_cursors),
+    );
     let symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync> = Arc::new(
         CanonicalSymbolGraphAdapter::new(Arc::clone(&graph), symbol_graph_cursors),
     );
@@ -803,6 +844,7 @@ pub fn open_pr12_primitive_project_runtime(
         admitted_root_uri,
         test_runs: CanonicalManagedTestRunReader::new(operation_events),
         test_run_scope,
+        symbol_page_admission,
         capacity: Pr12PrimitiveCapacity::new(MAX_CONCURRENT_PR12_PRIMITIVES),
     });
     Ok(Pr12PrimitiveProjectRuntime {

@@ -2,6 +2,46 @@
 
 use super::*;
 
+mod page_admission;
+
+impl DaemonInvocationService {
+    pub(in crate::daemon) async fn admit_test_result_page(
+        &self,
+        project_root: &Path,
+        request: tracedecay_application::PageAdmissionRequest,
+        seal: tracedecay_application::PageAdmissionSeal,
+    ) -> Result<
+        tracedecay_application::AdmittedPageRequest,
+        tracedecay_application::PageAdmissionError,
+    > {
+        let dispatch = self
+            .project_runtimes
+            .read(project_root, Pr12PrimitiveProjectRuntime::dispatch)
+            .await
+            .ok_or(tracedecay_application::PageAdmissionError::Unavailable)?;
+        dispatch.admit_page(request, seal).await
+    }
+}
+
+const fn page_admission_problem(
+    error: tracedecay_application::PageAdmissionError,
+) -> DaemonInvocationProblem {
+    match error {
+        tracedecay_application::PageAdmissionError::Denied
+        | tracedecay_application::PageAdmissionError::BindingMismatch => {
+            DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+        tracedecay_application::PageAdmissionError::Stale
+        | tracedecay_application::PageAdmissionError::Unavailable => {
+            DaemonInvocationProblem::Unavailable
+        }
+        tracedecay_application::PageAdmissionError::InvalidRequest
+        | tracedecay_application::PageAdmissionError::Unsupported => {
+            DaemonInvocationProblem::InvalidRequest
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_primitive(
     service: &DaemonInvocationService,
@@ -69,6 +109,17 @@ pub(super) async fn execute_primitive(
         Ok(admission) => admission,
         Err(problem) => return application_problem(wire_request_id, problem),
     };
+    if let Err(error) = page_admission::admit_primitive_page(
+        Arc::clone(&dispatch),
+        surface_operation,
+        &request,
+        &context,
+        observed_at,
+    )
+    .await
+    {
+        return DaemonInvocationResponse::problem(wire_request_id, page_admission_problem(error));
+    }
     let mut result = dispatch
         .dispatch(
             Pr12PrimitiveInvocation {

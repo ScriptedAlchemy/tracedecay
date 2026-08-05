@@ -23,7 +23,8 @@ use tracedecay_application::retrieval::{
 use tracedecay_application::{
     ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
     EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState, Omission, OmissionReason,
-    OpaqueCursor, OperationBudgetUsage, PageState, RequestContext, ResolvedScope,
+    OpaqueCursor, OperationBudgetUsage, PageAdmissionFuture, PageAdmissionPort,
+    PageAdmissionRequest, PageAdmissionSeal, PageState, RequestContext, ResolvedScope,
     RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
@@ -34,13 +35,16 @@ use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
 use super::concrete::{AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshotAuthority};
-use super::page_admission::AuthenticatedDiagnosticCursorAuthorityV1;
+use super::page_admission::{
+    AuthenticatedDiagnosticCursorAuthorityV1, DiagnosticPageAdmissionAdapterV1,
+    ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
+    ManagedTestRunCurrentScopePort, resolve_diagnostic_page_owner,
+};
 use super::runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest,
     FileDependentsPrimitiveResult, FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult,
-    FileMetadataRecord, ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
-    ManagedTestRunCurrentScopePort, ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult,
+    FileMetadataRecord, ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult,
     Pr12ExtendedPrimitiveFuture, Pr12ExtendedPrimitivePort, Pr12OperationalPrimitive,
     Pr12OperationalPrimitiveFuture, Pr12OperationalPrimitivePort, Pr12OperationalPrimitiveRequest,
     Pr12PrimitiveProjectRuntime, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
@@ -769,6 +773,7 @@ pub struct TraceDecayExtendedPrimitivePortV1 {
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
     diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
+    page_catalog: Arc<[tracedecay_tool_catalog::CatalogContributionV1]>,
 }
 
 impl TraceDecayExtendedPrimitivePortV1 {
@@ -779,6 +784,7 @@ impl TraceDecayExtendedPrimitivePortV1 {
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
         diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
         diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
+        page_catalog: Arc<[tracedecay_tool_catalog::CatalogContributionV1]>,
     ) -> Self {
         Self {
             graph,
@@ -787,6 +793,7 @@ impl TraceDecayExtendedPrimitivePortV1 {
             code_index,
             diagnostic_identity,
             diagnostic_cursors,
+            page_catalog,
         }
     }
 }
@@ -1200,6 +1207,32 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 EvidenceDomain::Operational,
                 now_observed(),
             )
+        })
+    }
+
+    fn admit_diagnostic_page<'a>(
+        &'a self,
+        request: PageAdmissionRequest,
+        diagnostic: &'a DiagnosticsPrimitiveRequest,
+        seal: PageAdmissionSeal,
+    ) -> PageAdmissionFuture<'a> {
+        Box::pin(async move {
+            let (generation, lane) = resolve_diagnostic_page_owner(
+                self.graph.as_ref(),
+                &self.database,
+                self.code_index.as_ref(),
+                self.diagnostic_identity.as_ref(),
+                request.context(),
+                diagnostic,
+            )
+            .await?;
+            let owner = DiagnosticPageAdmissionAdapterV1::new(
+                Arc::clone(&self.page_catalog),
+                self.diagnostic_cursors.clone(),
+                generation,
+                lane,
+            );
+            PageAdmissionPort::admit(&owner, request, seal).await
         })
     }
 
@@ -2125,6 +2158,8 @@ pub async fn open_pr12_production_primitive_runtime(
             scope: scope.clone(),
             code_index: Arc::clone(&code_index),
         });
+    let page_catalog: Arc<[tracedecay_tool_catalog::CatalogContributionV1]> =
+        Arc::from(tracedecay_application::application_catalog_contributions()?.into_boxed_slice());
     let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
         Arc::clone(&graph),
         database.clone(),
@@ -2132,10 +2167,12 @@ pub async fn open_pr12_production_primitive_runtime(
         code_index,
         diagnostic_identity,
         AuthenticatedDiagnosticCursorAuthorityV1::new(key, configuration_digest, authenticator),
+        Arc::clone(&page_catalog),
     ));
     open_pr12_primitive_project_runtime(
         database,
         Arc::clone(&graph),
+        page_catalog,
         cursors,
         Arc::new(TraceDecayTestPrimitivePortV1::new(Arc::clone(&graph))),
         Arc::new(TraceDecayLexicalGrepAuthorityV1::new(Arc::clone(&graph))),
