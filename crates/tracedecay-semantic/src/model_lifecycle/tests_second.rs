@@ -143,6 +143,37 @@
     }
 
     #[test]
+    fn restart_rejects_corrupt_lifecycle_state_instead_of_reconstructing_installation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("lifecycle.json"), b"{not-json").unwrap();
+
+        let result = SemanticModelLifecycleOwnerV1::open_default(root.path());
+
+        assert!(matches!(
+            result,
+            Err(ModelLifecycleErrorV1::VerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn restart_rejects_a_future_lifecycle_schema_instead_of_resetting_state() {
+        let root = tempfile::tempdir().unwrap();
+        drop(SemanticModelLifecycleOwnerV1::open_default(root.path()).unwrap());
+        let path = root.path().join("lifecycle.json");
+        let mut durable: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        durable["schema"] = serde_json::Value::String("tracedecay.fastembed.model-lifecycle.v2".into());
+        std::fs::write(&path, serde_json::to_vec_pretty(&durable).unwrap()).unwrap();
+
+        let result = SemanticModelLifecycleOwnerV1::open_default(root.path());
+
+        assert!(matches!(
+            result,
+            Err(ModelLifecycleErrorV1::VerificationFailed)
+        ));
+    }
+
+    #[test]
     fn daemon_artifact_gc_collects_only_unreferenced_installs_with_a_receipt() {
         const IMPORTED_AT: u64 = 10;
         const COLLECTED_AT: u64 = IMPORTED_AT + 7 * 24 * 60 * 60;

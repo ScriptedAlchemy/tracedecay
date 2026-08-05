@@ -59,11 +59,12 @@ fn load_or_default_durable(
     let path = root.join("lifecycle.json");
     if path.is_file() {
         let bytes = fs::read(&path).map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
-        if let Ok(durable) = serde_json::from_slice::<DurableLifecycleV1>(&bytes)
-            && durable.schema == LIFECYCLE_SCHEMA_V1
-        {
-            return Ok(durable);
+        let durable = serde_json::from_slice::<DurableLifecycleV1>(&bytes)
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        if durable.schema != LIFECYCLE_SCHEMA_V1 {
+            return Err(ModelLifecycleErrorV1::VerificationFailed);
         }
+        return Ok(durable);
     }
     let model = catalog
         .get(DEFAULT_FASTEMBED_MODEL_ID)
