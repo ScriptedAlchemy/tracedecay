@@ -1,9 +1,11 @@
 use crate::{
-    GitOidV1, ManifestDigest, NativeIntegrationJournalPhaseV1, NativeIntegrationJournalV1,
-    NativeIntegrationMechanicalModeV1, NativeIntegrationPreviewDispositionV1,
-    NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationReceiptId,
-    NativeIntegrationReceiptOutcomeV1, NativeIntegrationReceiptV1, NativeIntegrationTransactionId,
-    RepositoryId, UtcMicros, WorktreeId,
+    GitOidV1, ManifestDigest, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationCapabilityV1, NativeIntegrationDelegatedAgentId,
+    NativeIntegrationJournalPhaseV1, NativeIntegrationJournalV1, NativeIntegrationMechanicalModeV1,
+    NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
+    NativeIntegrationPrincipalId, NativeIntegrationReceiptId, NativeIntegrationReceiptOutcomeV1,
+    NativeIntegrationReceiptV1, NativeIntegrationTransactionId, RepositoryId, UtcMicros,
+    WorktreeId,
 };
 
 fn digest(fill: char) -> ManifestDigest {
@@ -260,4 +262,45 @@ fn immutable_preview_binds_ordered_commits_refs_and_all_drift_evidence() {
     let mut unqualified_ref = preview;
     unqualified_ref.source_ref = "source".to_owned();
     assert!(unqualified_ref.validate().is_err());
+}
+
+#[test]
+fn approval_is_exact_one_use_capability_material_for_one_preview() {
+    let preview = preview();
+    let approval = NativeIntegrationApprovalV1 {
+        approval_id: NativeIntegrationApprovalId::new("native-integration.approval.1")
+            .expect("approval"),
+        preview_id: preview.preview_id.clone(),
+        preview_digest: preview.preview_digest.clone(),
+        repository_id: preview.repository_id.clone(),
+        source_worktree_id: preview.source_worktree_id.clone(),
+        destination_worktree_id: preview.destination_worktree_id.clone(),
+        mode: preview.mode,
+        selection_digest: preview.selection_digest.clone(),
+        scope_digest: digest('a'),
+        analysis_digest: digest('b'),
+        principal_id: NativeIntegrationPrincipalId::new("principal.operator").expect("principal"),
+        delegated_agent_id: Some(
+            NativeIntegrationDelegatedAgentId::new("agent.codex").expect("agent"),
+        ),
+        capability: NativeIntegrationCapabilityV1::NativeIntegrationApply,
+        issued_at: UtcMicros(2),
+        expires_at: UtcMicros(90),
+        approval_digest: digest('c'),
+    }
+    .seal()
+    .expect("sealed approval");
+
+    approval
+        .validate_against(&preview, UtcMicros(50))
+        .expect("exact approval");
+
+    let mut changed_selection = approval.clone();
+    changed_selection.selection_digest = digest('d');
+    assert!(
+        changed_selection
+            .validate_against(&preview, UtcMicros(50))
+            .is_err()
+    );
+    assert!(approval.validate_against(&preview, UtcMicros(91)).is_err());
 }

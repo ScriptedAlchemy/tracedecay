@@ -114,6 +114,12 @@ struct NativeIntegrationPreviewDigestMaterial<'a> {
 }
 
 impl NativeIntegrationPreviewV1 {
+    pub fn seal(mut self) -> Result<Self, DomainError> {
+        self.preview_digest = self.compute_preview_digest()?;
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn compute_preview_digest(&self) -> Result<ManifestDigest, DomainError> {
         self.validate_fields()?;
         canonical_sha256(&NativeIntegrationPreviewDigestMaterial {
@@ -841,5 +847,7 @@ crate::canonical_text::validated_string_newtype!(
     NativeIntegrationReceiptId => "native integration receipt id",
     NativeIntegrationRecoveryReceiptId => "native integration recovery receipt id",
     NativeIntegrationApprovalId => "native integration approval id",
+    NativeIntegrationPrincipalId => "native integration principal id",
+    NativeIntegrationDelegatedAgentId => "native integration delegated agent id",
     NativeIntegrationIdempotencyKey => "native integration idempotency key",
 );
