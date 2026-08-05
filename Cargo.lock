@@ -5904,6 +5904,7 @@ dependencies = [
 name = "tracedecay-global-db"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
