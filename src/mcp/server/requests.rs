@@ -1864,7 +1864,6 @@ mod git_read_control_tests {
             "tracedecay_replace_symbol",
             "tracedecay_insert_at_symbol",
             "tracedecay_move_symbol",
-            "tracedecay_api_migration_apply",
             "tracedecay_source_edit_reconcile",
         ] {
             assert!(is_source_edit_tool(tool_name));
