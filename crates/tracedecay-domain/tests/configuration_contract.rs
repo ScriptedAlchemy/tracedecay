@@ -5,10 +5,10 @@ use tracedecay_domain::configuration::{
     ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationMutationEffectV1,
     ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
     ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1, CredentialKindV1,
-    CredentialReferenceId, CredentialReferenceMetadataV1, LEGACY_CONFIG_JSON_SETTING_KEYS_V1,
-    RuleEffect, SEMANTIC_RUNTIME_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1,
-    ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1, UserProfileId,
-    WorktreePlacementModeV1, resolve_restrictive_capabilities, safe_work_topology_policy_v1,
+    CredentialReferenceId, CredentialReferenceMetadataV1, RuleEffect, SEMANTIC_RUNTIME_SETTING_KEY,
+    ScopeAccessRule, ScopeAccessSubjectV1, ScopeSourceBinding, SettingKey, SourceBindingId,
+    SourceKindV1, UserProfileId, WorktreePlacementModeV1, resolve_restrictive_capabilities,
+    safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 use tracedecay_domain::{
@@ -138,9 +138,8 @@ fn credential_metadata_has_no_plaintext_value_surface() {
 }
 
 #[test]
-fn legacy_config_inventory_is_canonical_and_uses_existing_scalar_values() {
+fn final_configuration_inventory_is_canonical_and_uses_typed_scalar_values() {
     assert!(!CONFIGURATION_SETTING_KEYS_V1.is_empty());
-    assert!(!LEGACY_CONFIG_JSON_SETTING_KEYS_V1.is_empty());
     assert!(CONFIGURATION_SETTING_KEYS_V1.contains(&SEMANTIC_RUNTIME_SETTING_KEY));
     assert!(
         CONFIGURATION_SETTING_KEYS_V1.contains(&PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1),
@@ -155,18 +154,6 @@ fn legacy_config_inventory_is_canonical_and_uses_existing_scalar_values() {
         SettingKey::new(*key).expect("configuration key must be canonical");
         assert_ne!(*key, "root_dir", "path metadata is not durable authority");
     }
-    let mut legacy_unique = BTreeSet::new();
-    for key in LEGACY_CONFIG_JSON_SETTING_KEYS_V1 {
-        assert!(
-            CONFIGURATION_SETTING_KEYS_V1.contains(key),
-            "legacy setting key must resolve through the canonical registry: {key}"
-        );
-        assert!(
-            legacy_unique.insert(*key),
-            "duplicate legacy configuration setting key: {key}"
-        );
-    }
-
     for value in [
         ConfigurationValueV1::Boolean(true),
         ConfigurationValueV1::Unsigned(1),
@@ -174,7 +161,7 @@ fn legacy_config_inventory_is_canonical_and_uses_existing_scalar_values() {
     ] {
         value
             .validate()
-            .expect("legacy scalar setting uses an existing canonical value form");
+            .expect("scalar setting uses an existing canonical value form");
     }
 }
 

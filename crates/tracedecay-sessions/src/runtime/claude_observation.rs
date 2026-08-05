@@ -200,16 +200,6 @@ pub fn scanner_cursor(cursor: Option<&ClaudeSourceCursorV1>) -> StoredCursor {
     })
 }
 
-fn authoritative_scanner_cursor(
-    legacy: StoredCursor,
-    observation: Option<&ClaudeSourceCursorV1>,
-) -> StoredCursor {
-    // Existing installs bootstrap observation capture at the legacy V1
-    // frontier once. After the first observation cursor exists, that cursor is
-    // the sole scan authority; the projector is the sole V1 writer.
-    observation.map_or(legacy, |cursor| scanner_cursor(Some(cursor)))
-}
-
 fn cursor_at(
     source: &ClaudeSourceIdentityV1,
     scope: &ObservationScopeV1,
@@ -298,6 +288,11 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
         .map_err(|outcome| host_admission_error("claude", outcome))?
     {
         CaptureClaudeObservationOutcome::Persisted {
+            outcome,
+            sanitized_record,
+            ..
+        }
+        | CaptureClaudeObservationOutcome::AcceptedForReplay {
             outcome,
             sanitized_record,
             ..
@@ -465,26 +460,12 @@ where
         SessionId::new(identity.session_id.clone())?,
         SessionId::new(identity.source_id.clone())?,
     )?;
-    let cursor_path = identity.cursor_key.store_path();
-    let durable_cursor = context
-        .admission
-        .get_parse_offset(context.scope, cursor_path.to_string_lossy().as_ref())
-        .await
-        .map_err(|outcome| host_admission_error("claude", outcome))?
-        .unwrap_or_default();
     let observation_cursor = context
         .admission
         .get_source_cursor(&source, context.scope)
         .await
         .map_err(|outcome| host_admission_error("claude", outcome))?;
-    let previous = authoritative_scanner_cursor(
-        StoredCursor {
-            position: durable_cursor.byte_offset,
-            mtime: durable_cursor.mtime,
-            file_id: durable_cursor.file_id,
-        },
-        observation_cursor.as_ref(),
-    );
+    let previous = scanner_cursor(observation_cursor.as_ref());
     let resume_state = observation_cursor.as_ref().and_then(|cursor| {
         Some(JsonlResumeState {
             generation: cursor.generation().file_id(),
@@ -1200,14 +1181,8 @@ mod tests {
     }
 
     #[test]
-    fn observation_cursor_becomes_the_only_scan_authority_after_bootstrap() {
-        let legacy = StoredCursor {
-            position: 800,
-            mtime: 17,
-            file_id: 41,
-        };
-        assert_eq!(authoritative_scanner_cursor(legacy, None), legacy);
-
+    fn observation_cursor_is_the_only_scan_authority() {
+        assert_eq!(scanner_cursor(None), StoredCursor::default());
         let source =
             ClaudeSourceIdentityV1::new(SessionId::new("cursor-authority").unwrap()).unwrap();
         let observation = ClaudeSourceCursorV1::new(
@@ -1218,7 +1193,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            authoritative_scanner_cursor(legacy, Some(&observation)),
+            scanner_cursor(Some(&observation)),
             StoredCursor {
                 position: 1_200,
                 mtime: 0,

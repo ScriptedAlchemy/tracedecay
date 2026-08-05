@@ -218,6 +218,7 @@ use invocation_executor::{
     frozen_root_generation, invocation_is_git_operation, multi_root_family_allows,
     unavailable_root_generation,
 };
+mod external_acquisition;
 mod invocation_state;
 use invocation_state::DaemonInvocationState;
 mod lsp_sessions;
@@ -318,8 +319,6 @@ pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
 mod store_writer_gate;
 mod wire_io;
-pub(crate) mod work_runtime;
-pub(crate) mod workflow_runtime;
 use wire_io::{
     read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
 };

@@ -17,7 +17,7 @@ so does not overwrite a user's existing custom default-agent choice.
 | `~/.kiro/settings/mcp.json` | Registers the global `tracedecay` MCP server with `command`, `args: ["serve"]`, and `disabled: false`. Approval policy is left to the managed Kiro agent. |
 | `~/.kiro/steering/tracedecay.md` | Adds global Kiro steering that tells normal Kiro sessions to prefer tracedecay MCP tools for codebase research. |
 | `~/.kiro/steering/tracedecay-managed-skills.md` | Adds a tracedecay-managed skill index for approved managed skills. The index points Kiro at `tracedecay_skill_list` and `tracedecay_skill_view`; full skill bodies remain in TraceDecay's managed skill store. |
-| `~/.kiro/agents/tracedecay.json` | Adds the tracedecay-managed Kiro agent with `tools: ["*"]`, `allowedTools: ["@builtin", "@tracedecay"]`, hooks for delegation guardrails, post-write sync, and an absolute `resources` entry for `~/.kiro/steering/tracedecay.md`. The agent leaves `prompt` unset so Kiro's default prompt is used. |
+| `~/.kiro/agents/tracedecay.json` | Adds the tracedecay-managed Kiro agent with `tools: ["*"]`, `allowedTools: ["@builtin", "@tracedecay"]`, one bounded prompt-admission hook, and an absolute `resources` entry for `~/.kiro/steering/tracedecay.md`. The agent leaves `prompt` unset so Kiro's default prompt is used. |
 | `~/.kiro/settings/cli.json` | Sets `chat.defaultAgent` to `tracedecay` when the setting is absent or still points at Kiro's built-in default. |
 
 If a user already has `~/.kiro/agents/tracedecay.json` and it is not the file
@@ -117,29 +117,17 @@ writes them into the tracedecay-owned agent file:
 
 | Kiro hook | Matcher | Command | Purpose |
 |---|---|---|---|
-| `preToolUse` | `delegate` | `tracedecay hook-kiro-pre-tool-use` | Blocks delegation when the delegated task is codebase research that should try tracedecay MCP tools first. |
-| `preToolUse` | `subagent` | `tracedecay hook-kiro-pre-tool-use` | Applies the same guardrail to Kiro subagents. |
-| `userPromptSubmit` | none | `tracedecay hook-kiro-prompt-submit` | Silently resets the project-local per-turn savings counter. |
-| `postToolUse` | `fs_write` | `tracedecay hook-kiro-post-tool-use` | Silently runs an incremental `tracedecay sync` after Kiro writes files, so the graph is re-indexed before later MCP queries. |
+| `userPromptSubmit` | none | `tracedecay hook-kiro-prompt-submit` | Submits a bounded native prompt event to the daemon and returns. Any capture, indexing, or advisory work is daemon-owned. |
 
-Kiro and Claude Code use different hook protocols. Claude's `PreToolUse` hook
-expects a JSON decision on stdout. Kiro passes hook events on stdin and blocks
-`preToolUse` by receiving exit code `2` with the reason on stderr, so Kiro uses
-separate hidden hook subcommands.
-
-The default steering still tells Kiro not to use `delegate` for codebase
-exploration, architecture mapping, call graph work, symbol lookup, or other code
-research until tracedecay MCP tools have been tried. Delegation remains available
-for execution-oriented work such as builds, tests, generated reports, or
-independent implementation tasks.
+Kiro passes the native event on stdin. The adapter is fail-open and does not
+make a guardrail decision, read a TraceDecay store, or run a follow-up command.
 
 ## Deliberate non-defaults
 
 No shell post-hook or `stop` hook is installed. The managed agent's tool
-approval policy is permissive, but default hook execution is still scoped to the
-known tracedecay guardrail and sync events. Shell commands are too broad for
-default sync triggering, and Kiro's stop event should not be used for
-Claude-style accounting until Kiro's persisted session format is verified.
+approval policy is permissive, while hook execution remains limited to one
+bounded daemon-admission path. Kiro's stop event is not enabled until a native
+capture verifies its persisted session format.
 
 Kiro-specific session accounting is also held back. Claude's stop hook parses
 Claude session transcripts; Kiro does not share that transcript format, so

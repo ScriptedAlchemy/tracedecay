@@ -13,6 +13,7 @@ use crate::db::engine::params;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, FactOwnerV1, ProvenanceId,
+    SanitizationReceiptV1,
 };
 use tracedecay_store::{
     CompatibilityFactAddCommandV1, CompatibilityFactIdV1, CompatibilityFactMappingV1,
@@ -107,6 +108,7 @@ pub(super) fn compatibility_proposal_request_value(
         "tags": request.tags(),
         "entities": request.entities(),
         "metadata": compatibility_payload_metadata(request.metadata()),
+        "sanitization_receipt": request.sanitization_receipt(),
         "automation_run_id": request.automation_run_id(),
         "default_trust": request.default_trust().as_f64(),
         "actor": request.actor().map(ActorId::as_str),
@@ -173,6 +175,18 @@ fn compatibility_proposal_request_from_value(
                 "compatibility proposal request metadata is missing",
             )
         })?);
+    let sanitization_receipt = from_json::<SanitizationReceiptV1>(
+        &to_json(
+            object.get("sanitization_receipt").ok_or_else(|| {
+                storage_message(
+                    COMPATIBILITY_READ_OPERATION,
+                    "compatibility proposal request sanitization receipt is missing",
+                )
+            })?,
+            "serialize compatibility proposal sanitization receipt",
+        )?,
+        COMPATIBILITY_READ_OPERATION,
+    )?;
     let automation_run_id = compatibility_proposal_optional_string(object, "automation_run_id")?;
     let trust = Confidence::new(
         object
@@ -199,6 +213,7 @@ fn compatibility_proposal_request_from_value(
         tags,
         entities,
         metadata,
+        sanitization_receipt,
         trust,
         actor,
     )?;

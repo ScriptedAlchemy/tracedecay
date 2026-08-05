@@ -182,53 +182,11 @@ work_operations! {
 }
 
 impl WorkOperation {
-    /// The core operations, in mounted order.
-    pub const CORE: [Self; 9] = [
-        Self::Snapshot,
-        Self::Delta,
-        Self::Create,
-        Self::ReplanDependencies,
-        Self::ReviewProposal,
-        Self::AcceptProposal,
-        Self::AdmitExecution,
-        Self::AttachRuntimeEvidence,
-        Self::AcceptTask,
-    ];
-
-    /// The attempt-runtime operations, in mounted order.
-    pub const ATTEMPT: [Self; 9] = [
-        Self::AttemptAcquireLease,
-        Self::AttemptRenewLease,
-        Self::AttemptStart,
-        Self::AttemptPublishProgress,
-        Self::AttemptPublishArtifact,
-        Self::AttemptCancel,
-        Self::AttemptRecover,
-        Self::AttemptFinish,
-        Self::AttemptTerminalize,
-    ];
-
-    /// Every mounted Work operation.
-    pub const ALL: [Self; 18] = [
-        Self::Snapshot,
-        Self::Delta,
-        Self::Create,
-        Self::ReplanDependencies,
-        Self::ReviewProposal,
-        Self::AcceptProposal,
-        Self::AdmitExecution,
-        Self::AttachRuntimeEvidence,
-        Self::AcceptTask,
-        Self::AttemptAcquireLease,
-        Self::AttemptRenewLease,
-        Self::AttemptStart,
-        Self::AttemptPublishProgress,
-        Self::AttemptPublishArtifact,
-        Self::AttemptCancel,
-        Self::AttemptRecover,
-        Self::AttemptFinish,
-        Self::AttemptTerminalize,
-    ];
+    /// No legacy projection or attempt operation is mounted while the native
+    /// Graph-backed Work authority is unavailable.
+    pub const CORE: [Self; 0] = [];
+    pub const ATTEMPT: [Self; 0] = [];
+    pub const ALL: [Self; 0] = [];
 
     /// The catalog operation id.
     pub fn operation_id(self) -> String {
@@ -544,9 +502,6 @@ mod tests {
             .into_iter()
             .filter(|operation| operation.is_read_only())
             .collect::<Vec<_>>();
-        assert_eq!(
-            read_only,
-            vec![WorkOperation::Snapshot, WorkOperation::Delta]
-        );
+        assert!(read_only.is_empty());
     }
 }

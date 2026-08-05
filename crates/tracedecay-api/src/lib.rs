@@ -14,6 +14,7 @@
 pub mod configuration;
 pub mod doctor;
 pub mod feedback;
+pub mod handoff;
 mod http;
 pub mod multi_root;
 pub mod read_model;
@@ -32,6 +33,10 @@ use tracedecay_application::{
 };
 use tracedecay_tool_catalog::BindingId;
 
+pub use handoff::{
+    HandoffApplicationOwner, HandoffHttpRequest, HandoffInvocationFuture, HandoffOperation,
+    handoff_application_router, handoff_invalid_request_response,
+};
 pub use http::{
     HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOperation,
     HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1,

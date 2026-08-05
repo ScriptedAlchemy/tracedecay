@@ -6,18 +6,12 @@ use tracedecay_domain::{FactEventId, FactId, FactOwnerV1, PayloadAccessState, So
 use crate::db::engine::{self, Executor, params};
 use crate::errors::{Result, TraceDecayError};
 
-mod archive;
-mod cutover;
 mod schema;
 #[cfg(test)]
 mod tests;
 mod types;
 mod writers;
 
-pub use archive::{
-    MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, import_memory_v2_owner_archive,
-    list_memory_v2_archive_owners, plan_memory_v2_owner_archive_import,
-};
 pub(in crate::db) use schema::create_schema;
 pub(super) use schema::{install_v22_fresh_schema, install_v23_fresh_schema};
 use types::{CurrentFactState, OwnerKey};
@@ -73,44 +67,6 @@ async fn current_fact_state(
         access: parse_payload_access(&access)?,
         last_event_id: event_id,
     })
-}
-
-async fn load_legacy_entity_ids(
-    conn: &impl MemoryV2Executor,
-    legacy_fact_id: i64,
-    operation: &str,
-) -> Result<Vec<i64>> {
-    const PAGE_SIZE: i64 = 512;
-
-    let mut entity_ids = Vec::new();
-    let mut cursor: Option<i64> = None;
-    loop {
-        let mut rows = conn
-            .query(
-                "SELECT entity_id FROM memory_fact_entities
-                 WHERE fact_id = ?1 AND (?2 IS NULL OR entity_id > ?2)
-                 ORDER BY entity_id
-                 LIMIT ?3",
-                params![legacy_fact_id, cursor, PAGE_SIZE],
-            )
-            .await
-            .map_err(|error| db_error(operation, error))?;
-        let mut page_count = 0;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| db_error(operation, error))?
-        {
-            let entity_id = row.get(0).map_err(|error| db_error(operation, error))?;
-            cursor = Some(entity_id);
-            entity_ids.push(entity_id);
-            page_count += 1;
-        }
-        if page_count < PAGE_SIZE {
-            break;
-        }
-    }
-    Ok(entity_ids)
 }
 
 fn owner_key(owner: &FactOwnerV1) -> Result<OwnerKey> {
@@ -184,6 +140,7 @@ fn canonical_replay(existing: String, candidate: &str, record: &str) -> Result<(
     }
 }
 
+#[cfg(test)]
 async fn scalar_i64_params(
     conn: &impl MemoryV2Executor,
     sql: &str,
@@ -217,6 +174,7 @@ async fn optional_string(
         .transpose()
 }
 
+#[cfg(test)]
 async fn optional_i64(
     conn: &impl MemoryV2Executor,
     sql: &str,

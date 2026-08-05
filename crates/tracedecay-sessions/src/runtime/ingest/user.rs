@@ -498,7 +498,8 @@ pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
         crate::host_ports::session_review::schedule(
             provider.map_or("all", SessionProvider::id),
             None,
-        );
+        )
+        .await;
     }
 
     if matches!(coverage, IngestPassCoverage::Backpressured { .. })

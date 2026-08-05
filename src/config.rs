@@ -12,34 +12,28 @@ use tracedecay_domain::configuration::{
     DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
-    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
-    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
-    SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
-    SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
-    TELEMETRY_TIMINGS_SETTING_KEY,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+    SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+    SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
+    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
+    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::{ProjectId, UtcMicros};
 
 use crate::application::configuration::ConfigurationControlStore;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
-use crate::global_db::configuration::{
-    CanonicalGenesisConfigurationV1, GlobalDbConfigurationControlStore,
-    migrate_legacy_configuration_inputs_with_genesis,
-};
+use crate::global_db::configuration::GlobalDbConfigurationControlStore;
 
-pub use tracedecay_global_db::configuration::{
-    LegacyConfigurationDecodeTargetV1, decode_legacy_config_json,
-    decode_legacy_configuration_inputs, decode_legacy_environment_overrides, registry,
-    resolve_legacy_configuration_inputs, resolver,
-};
+pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_usecases::config::retrieval;
 pub mod scope_control;
 pub mod topology;
+pub(crate) mod work_executable_binding;
 
 /// Name of the legacy configuration migration input stored inside the data
 /// directory. It is not a runtime authority and production code must never
@@ -1014,7 +1008,7 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
 /// Loads and publishes the durable current configuration for a resolved store
 /// layout.
 ///
-/// A fresh project receives one migration-backed registry-default revision.
+/// A fresh project receives one canonical registry-backed revision.
 /// Once any revision exists, open always reads that durable current revision;
 /// a corrupt or ambiguous history is never replaced with local defaults.
 pub(crate) async fn open_runtime_configuration_for_registered_database(
@@ -1025,7 +1019,7 @@ pub(crate) async fn open_runtime_configuration_for_registered_database(
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     validate_registered_configuration_database(&target, database.as_ref())?;
     let store = GlobalDbConfigurationControlStore::new_registered(database.as_ref());
-    let configuration = open_runtime_configuration_from_store(target, layout, &store).await?;
+    let configuration = open_runtime_configuration_from_store(target, &store).await?;
     Ok(OpenedRuntimeConfiguration {
         configuration,
         registered_database: database,
@@ -1034,7 +1028,6 @@ pub(crate) async fn open_runtime_configuration_for_registered_database(
 
 async fn open_runtime_configuration_from_store(
     target: RuntimeConfigurationTarget,
-    layout: &crate::storage::StoreLayout,
     store: &GlobalDbConfigurationControlStore<'_>,
 ) -> Result<PinnedRuntimeConfiguration> {
     if let Err(error) = store.current().await {
@@ -1052,51 +1045,42 @@ async fn open_runtime_configuration_from_store(
             project_id: target.project_id.clone(),
         };
         let initial_revision_id =
-            ConfigurationRevisionId::new("configuration.initial.migration.v1").map_err(
+            ConfigurationRevisionId::new("configuration.initial.canonical.v1").map_err(
                 |error| config_error(format!("invalid initial configuration revision: {error}")),
             )?;
-        let legacy_target = LegacyConfigurationDecodeTargetV1 {
-            target_layer: target_layer.clone(),
-            target_revision_id: initial_revision_id.clone(),
-        };
-        let environment = std::env::vars().collect::<BTreeMap<_, _>>();
-        let legacy =
-            read_legacy_configuration_inputs(&layout.config_path, &environment, &legacy_target)?;
-        // The project's first durable revision states the one binding the
-        // daemon already owns for the project it just registered. Both
-        // components restate resolved identity the caller holds — the
-        // project's own id and its project-open locator digest — so this
-        // grants no authority that a later protected `BindSource` would be
-        // required to grant. Without it a fresh project has no binding at
-        // all and every source-authorized surface is unreachable.
-        let genesis = CanonicalGenesisConfigurationV1 {
-            target_layer,
-            target_revision_id: initial_revision_id,
-            source_bindings: vec![
-                scope_control::daemon_owned_project_source_binding(
-                    &target.project_id,
-                    &target.project_root,
-                )
-                .map_err(|error| {
-                    config_error(format!(
-                        "daemon project source binding could not be derived: {error}"
-                    ))
-                })?,
-            ],
-        };
-        migrate_legacy_configuration_inputs_with_genesis(
-            &registry,
-            &legacy,
-            &genesis,
-            store,
-            current_utc_micros(),
+        let daemon_binding = scope_control::daemon_owned_project_source_binding(
+            &target.project_id,
+            &target.project_root,
         )
-        .await
         .map_err(|error| {
             config_error(format!(
-                "configuration initial migration could not commit: {error}"
+                "daemon project source binding could not be derived: {error}"
             ))
         })?;
+        let source_bindings_key =
+            SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).map_err(|error| {
+                config_error(format!("invalid source bindings setting key: {error}"))
+            })?;
+        let resolution = resolver::resolve_configuration(
+            &registry,
+            &[resolver::ConfigurationLayerV1 {
+                layer: target_layer,
+                revision_id: initial_revision_id.clone(),
+                entries: BTreeMap::from([(
+                    source_bindings_key,
+                    ConfigurationValueV1::SourceBindings(vec![daemon_binding]),
+                )]),
+            }],
+        )
+        .map_err(|error| {
+            config_error(format!(
+                "canonical configuration initialization could not resolve: {error}"
+            ))
+        })?;
+        store
+            .initialize_canonical(&initial_revision_id, &resolution, current_utc_micros())
+            .await
+            .map_err(map_configuration_error)?;
     }
     let daemon_binding = scope_control::daemon_owned_project_source_binding(
         &target.project_id,
@@ -1107,14 +1091,33 @@ async fn open_runtime_configuration_from_store(
             "daemon project source binding could not be derived: {error}"
         ))
     })?;
-    let current = store
-        .ensure_daemon_source_binding(daemon_binding, current_utc_micros())
-        .await
-        .map_err(|error| {
-            config_error(format!(
-                "daemon project source binding forward repair failed: {error}"
-            ))
-        })?;
+    let current = store.current().await.map_err(map_configuration_error)?;
+    let source_bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
+        .map_err(|error| config_error(format!("invalid source bindings setting key: {error}")))?;
+    let Some(ConfigurationValueV1::SourceBindings(configured_bindings)) =
+        current.snapshot.effective_values.get(&source_bindings_key)
+    else {
+        return Err(TraceDecayError::reset_required(
+            "configuration",
+            "canonical configuration source bindings are missing",
+        ));
+    };
+    let authority_bindings = configured_bindings
+        .iter()
+        .filter(|candidate| {
+            candidate.source_kind == daemon_binding.source_kind
+                && candidate.authority == daemon_binding.authority
+        })
+        .collect::<Vec<_>>();
+    if !matches!(
+        authority_bindings.as_slice(),
+        [candidate] if *candidate == &daemon_binding
+    ) {
+        return Err(TraceDecayError::reset_required(
+            "configuration",
+            "canonical configuration source binding does not match the registered project",
+        ));
+    }
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
     install_pinned_runtime_configuration(configuration.clone())?;
@@ -1138,8 +1141,8 @@ pub(crate) async fn ensure_runtime_configuration_for_registered_database(
     )
 }
 
-/// Loads an already-persisted current configuration without creating a store,
-/// applying a migration, or publishing a fallback revision.
+/// Loads an already-persisted current configuration without creating a store
+/// or publishing a fallback revision.
 pub(crate) async fn open_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
@@ -1164,18 +1167,10 @@ async fn open_runtime_configuration_read_only_from_store(
         .await
         .map_err(map_configuration_error)?
     {
-        // The durable store exists but holds no configuration revision or
-        // migration receipt yet — for example a consolidated destination whose
-        // configuration authority was never migrated in, reopened read-only
-        // after a repository move. Read-only inspection degrades to the
-        // registry-default snapshot exactly as it does for a never-writable
-        // store, rather than hard-erroring on the absent current revision. A
-        // non-empty store with an unreadable current revision is not
-        // uninitialized, so it still surfaces a typed authority error below and
-        // durable authority is never silently replaced.
-        let configuration = read_only_default_runtime_configuration(target)?;
-        install_pinned_runtime_configuration(configuration.clone())?;
-        return Ok(configuration);
+        return Err(TraceDecayError::reset_required(
+            "configuration",
+            "configuration store has no canonical revision",
+        ));
     }
     let current = store.current().await.map_err(map_configuration_error)?;
     let configuration =
@@ -1198,27 +1193,6 @@ fn validate_registered_configuration_database(
             "configuration authority unavailable: registered database is not the exact project session shard",
         )),
     }
-}
-
-/// Builds the registry-default runtime configuration for a read-only open of a
-/// store that has no durable configuration history yet. This mirrors the
-/// snapshot a fresh writable open would migrate in, but stays entirely
-/// in-memory so inspecting a never-opened store never mutates it.
-fn read_only_default_runtime_configuration(
-    target: RuntimeConfigurationTarget,
-) -> Result<PinnedRuntimeConfiguration> {
-    let registry = registry::ConfigurationRegistry::core()
-        .map_err(|error| config_error(format!("configuration registry unavailable: {error}")))?;
-    let resolution = resolver::resolve_configuration(&registry, &[]).map_err(|error| {
-        config_error(format!(
-            "configuration authority unavailable: could not resolve default snapshot: {error}"
-        ))
-    })?;
-    let revision_id =
-        ConfigurationRevisionId::new("configuration.read_only.default.v1").map_err(|error| {
-            config_error(format!("invalid default configuration revision: {error}"))
-        })?;
-    PinnedRuntimeConfiguration::new(target, revision_id, resolution.snapshot)
 }
 
 pub(crate) async fn load_runtime_configuration_for_registered_database_read_only(
@@ -1281,7 +1255,12 @@ fn current_utc_micros() -> UtcMicros {
 fn map_configuration_error(
     error: crate::application::configuration::ConfigurationError,
 ) -> TraceDecayError {
-    config_error(format!("configuration authority unavailable: {error}"))
+    match error {
+        crate::application::configuration::ConfigurationError::ResetRequired { reason } => {
+            TraceDecayError::reset_required("configuration", reason)
+        }
+        error => config_error(format!("configuration authority unavailable: {error}")),
+    }
 }
 
 /// Returns a cached configuration without resolving a layout, opening a
@@ -1291,7 +1270,7 @@ pub fn cached_runtime_configuration(project_root: &Path) -> Result<PinnedRuntime
 }
 
 /// Looks up a daemon-published snapshot by an already-authoritative project
-/// ID. The supplied root is only used to materialize legacy display metadata;
+/// ID. The supplied root is only used to materialize display metadata;
 /// it never participates in authority resolution.
 pub fn cached_runtime_configuration_for_project_id(
     project_root: &Path,
@@ -1313,7 +1292,7 @@ pub fn cached_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
 
 /// Creates the only permitted pre-store runtime snapshot: registry defaults
 /// with a synthetic bootstrap revision. It does not read or write
-/// `config.json`, and a daemon must replace it with its migrated canonical
+/// `config.json`, and a daemon must replace it with its durable canonical
 /// snapshot before a subsequent process can serve the project.
 pub fn bootstrap_runtime_configuration(
     project_root: &Path,
@@ -1403,7 +1382,7 @@ async fn commit_runtime_configuration_mutation(
     }
     // The daemon's target path is non-authoritative routing metadata. Retarget
     // the returned snapshot to the caller's already-authorized route before
-    // publishing it, which also re-materializes the legacy display fields from
+    // publishing it, which also re-materializes the display fields from
     // the validated snapshot rather than trusting an adapter-provided shape.
     let next =
         PinnedRuntimeConfiguration::new(current.target.clone(), next.revision_id, next.snapshot)?;
@@ -1411,29 +1390,7 @@ async fn commit_runtime_configuration_mutation(
     Ok(next)
 }
 
-/// Decodes a legacy file only as migration input. This function never writes
-/// the file and callers must pass the already-authorized target layer/revision
-/// supplied by the control-plane migration.
-pub fn read_legacy_configuration_inputs(
-    config_path: &Path,
-    environment: &BTreeMap<String, String>,
-    target: &LegacyConfigurationDecodeTargetV1,
-) -> Result<crate::global_db::configuration::migration::ReadonlyLegacyConfigurationInputsV1> {
-    let config_json = if config_path.exists() {
-        fs::read_to_string(config_path).map_err(|error| {
-            config_error(format!(
-                "failed to read legacy config input '{}': {error}",
-                config_path.display()
-            ))
-        })?
-    } else {
-        "{}".to_owned()
-    };
-    decode_legacy_configuration_inputs(&config_json, environment, target)
-        .map_err(|error| config_error(format!("legacy configuration input is invalid: {error}")))
-}
-
-/// Converts a complete typed snapshot into the legacy runtime shape without
+/// Converts a complete typed snapshot into the runtime materialization without
 /// defaults, file reads, or environment reads. This is intentionally public so
 /// daemon composition can validate snapshot-to-runtime parity before publish.
 pub fn runtime_config_from_snapshot(

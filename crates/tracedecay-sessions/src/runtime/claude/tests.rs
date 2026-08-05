@@ -286,6 +286,38 @@ fn subagent_provider_metadata_is_sanitized_before_persistence() {
 }
 
 #[test]
+fn subagent_metadata_exceeding_structural_limits_is_denied_as_a_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir
+        .path()
+        .join("parent-session")
+        .join("subagents")
+        .join("agent-deep.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "").unwrap();
+
+    let mut nested = json!(true);
+    for _ in 0..=tracedecay_capture::ParseLimits::default_policy().depth {
+        nested = json!({"next": nested});
+    }
+    std::fs::write(
+        transcript.with_file_name("agent-deep.meta.json"),
+        serde_json::to_vec(&json!({
+            "agentType": "must-not-survive-partial-scan",
+            "nested": nested,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let info = claude_subagent_identity(&transcript).expect("subagent identity");
+
+    assert_eq!(info.agent_type, None);
+    assert_eq!(info.description, None);
+    assert_eq!(info.spawn_depth, None);
+}
+
+#[test]
 fn cursor_key_round_trips_native_bytes_without_collisions() {
     let native_path: Vec<u8> = r"C:\Users\zack\.claude\projects\session.jsonl"
         .encode_utf16()

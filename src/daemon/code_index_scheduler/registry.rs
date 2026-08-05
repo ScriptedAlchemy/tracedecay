@@ -7,10 +7,14 @@
 //! [`CodeIndexWorktreeSchedulerV1`]; this module never runs it while holding the
 //! registry map lock.
 
-use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::{
+    collections::BTreeMap,
+    path::{Component, Path, PathBuf},
+    sync::{
+        Arc, Mutex, RwLock, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
@@ -25,6 +29,8 @@ use super::{
 };
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
+
+mod resident_memory;
 
 /// Bounded daemon-wide concurrency for expensive background reconciles and
 /// mounts. A single global permit serialized EVERY project/worktree cold build
@@ -139,6 +145,7 @@ pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
 #[derive(Clone)]
 pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
+    pub(super) resident_memory: Arc<resident_memory::ProcessResidentMemoryV1>,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
     mount_admission: Arc<tokio::sync::Semaphore>,
@@ -160,26 +167,6 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
-    pub fn new(max_worktrees: usize) -> Self {
-        let (generation_publications, _) =
-            tokio::sync::broadcast::channel(GENERATION_PUBLICATION_CHANNEL_CAPACITY);
-        Self {
-            max_worktrees,
-            byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
-            mounted: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-            mount_admission: Arc::new(tokio::sync::Semaphore::new(
-                bounded_daemon_admission_permits(),
-            )),
-            background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
-                bounded_daemon_admission_permits(),
-            )),
-            generation_publications,
-            cadence_telemetry: Arc::new(Mutex::new(CodeIndexCadenceTelemetryV1::default())),
-            activations: Arc::new(Mutex::new(BTreeMap::new())),
-            test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
-        }
-    }
-
     pub(in crate::daemon) fn register_activation(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -1614,6 +1601,74 @@ impl CodeIndexSchedulerRegistryV1 {
             GenerationDecodeAdmissionV1::AlreadyDecoded,
         )
         .await
+    }
+
+    fn current_ready_decoded_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let (scheduler, serving_generation) = {
+            let mounted = self.mounted.try_lock().ok()?;
+            let worktree = mounted.get(&project_root)?;
+            if worktree.repository_id != scope.repository_id
+                || worktree.worktree_id != scope.worktree_id
+            {
+                return None;
+            }
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.serving_generation),
+            )
+        };
+        let mut scheduler = match scheduler.try_lock() {
+            Ok(scheduler) => scheduler,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        let latest = scheduler
+            .latest_complete_ready_for_exact_source_with(
+                GenerationDecodeAdmissionV1::AlreadyDecoded,
+            )
+            .ok()
+            .flatten()?;
+        if !Self::latest_matches_scope(&latest, scope) {
+            return None;
+        }
+        *serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
+        Some(latest)
+    }
+
+    /// Report an already-decoded current generation for one exact mounted root
+    /// and scope without mounting, decoding, or reconciling.
+    pub(in crate::daemon) fn has_current_ready_decoded_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        self.current_ready_decoded_for_root_scope(project_root, scope)
+            .is_some()
+    }
+
+    /// Return the exact ready generation without blocking the async executor
+    /// on the bounded synchronous freshness probe.
+    pub(in crate::daemon) async fn latest_complete_ready_decoded_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let registry = self.clone();
+        let project_root = project_root.to_path_buf();
+        let scope = scope.clone();
+        tokio::task::spawn_blocking(move || {
+            registry.current_ready_decoded_for_root_scope(&project_root, &scope)
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     async fn latest_complete_ready_for_scope_with(

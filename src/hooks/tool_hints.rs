@@ -887,6 +887,7 @@ fn category_skill(category: HintCategory) -> &'static str {
 }
 
 mod classifiers;
+#[cfg(test)]
 pub(super) use classifiers::is_harness_memory_path;
 use classifiers::{
     asks_for_atomic_edit, asks_for_broad_read, asks_for_build_diagnostics, asks_for_call_graph,

@@ -13,7 +13,7 @@ pub use automation::{
 };
 use help::*;
 pub use package_hook::{PackageHookAction, ScoopPackageHookAction};
-pub use workflow::{WorkflowCliOperationArg, WorkflowInvocationArgs};
+pub use workflow::WorkflowInvocationArgs;
 
 fn agent_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(tracedecay::agents::available_integrations())
@@ -63,6 +63,20 @@ pub enum FeedbackRollbackAction {
         /// Confirm the feedback-route restoration
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum ConfigurationAction {
+    /// Inspect an incompatible project configuration store, or reset it by
+    /// echoing the exact daemon-issued confirmation token.
+    Reset {
+        /// Project path (default: current directory)
+        #[arg(short, long)]
+        path: Option<String>,
+        /// Exact token printed by the preceding reset inspection
+        #[arg(long)]
+        confirmation: Option<String>,
     },
 }
 
@@ -227,6 +241,11 @@ pub enum Commands {
     Workflow {
         #[command(flatten)]
         invocation: WorkflowInvocationArgs,
+    },
+    /// Operate the daemon-owned typed configuration control plane
+    Config {
+        #[command(subcommand)]
+        action: ConfigurationAction,
     },
     /// Inspect language-server support for dashboard code diagnostics
     #[command(long_about = LSP_LONG_ABOUT, after_help = LSP_AFTER_HELP)]
@@ -421,9 +440,6 @@ pub enum Commands {
     /// OpenCode direct tool.execute.after Hook V2 handler.
     #[command(name = "hook-opencode-tool-after", hide = true)]
     HookOpenCodeToolAfter,
-    /// Detached profile user-session automation review.
-    #[command(name = "hook-user-session-review", hide = true)]
-    HookUserSessionReview,
     /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
     #[command(long_about = DASHBOARD_LONG_ABOUT, after_help = DASHBOARD_AFTER_HELP)]
     Dashboard {

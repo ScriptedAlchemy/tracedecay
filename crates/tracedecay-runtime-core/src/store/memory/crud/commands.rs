@@ -19,8 +19,8 @@ use super::{
     compatibility_initial_batch, compatibility_last_insert_rowid_tx,
     compatibility_legacy_mapping_for_new_fact, compatibility_mark_owner_banks_dirty_tx,
     compatibility_mirror_delete_tx, compatibility_mirror_insert_tx, compatibility_mirror_update_tx,
-    compatibility_payload_metadata, compatibility_sanitize_payload, load_current_fact_tx,
-    load_current_projection,
+    compatibility_payload_metadata, compatibility_sanitize_payload, compatibility_verified_payload,
+    load_current_fact_tx, load_current_projection,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
@@ -334,6 +334,7 @@ pub(in crate::store::memory) async fn add_compatibility_fact_tx(
         "tags": request.tags(),
         "entities": request.entities(),
         "metadata": &payload_metadata,
+        "sanitization_receipt": request.sanitization_receipt(),
         "automation_run_id": request.automation_run_id(),
         "default_trust": request.default_trust().as_f64(),
         "actor": request.actor().map(ActorId::as_str),
@@ -350,39 +351,14 @@ pub(in crate::store::memory) async fn add_compatibility_fact_tx(
         return compatibility_replay_add_tx(transaction, request.owner(), &receipt).await;
     }
     let now = compatibility_now()?;
-    let Some(sanitized) = compatibility_sanitize_payload(
+    let sanitized = compatibility_verified_payload(
         request.content(),
         request.category(),
         request.tags(),
         request.entities(),
         &payload_metadata,
-    )?
-    else {
-        let receipt = json!({
-            "outcome": "rejected_secret_like",
-            "reason": "content rejected by privacy sanitizer",
-        });
-        compatibility_record_operation_receipt_tx(
-            transaction,
-            request.owner(),
-            request.operation_id(),
-            "add",
-            &request_digest,
-            None,
-            None,
-            &receipt,
-            now,
-        )
-        .await?;
-        return CompatibilityFactAddOutcomeV1::new(
-            None,
-            CompatibilityFactAddDispositionV1::RejectedSecretLike,
-            None,
-            None,
-            Some("content rejected by privacy sanitizer".to_owned()),
-        )
-        .map_err(Into::into);
-    };
+        request.sanitization_receipt().clone(),
+    )?;
     let source = compatibility_source_label(request.source())?;
     match compatibility_mirror_insert_tx(
         db,

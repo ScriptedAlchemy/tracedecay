@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
@@ -52,14 +53,14 @@ impl ConfigurationMutationAuthority {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SettingSummary {
     pub key: SettingKey,
     pub sensitivity: SettingSensitivityV1,
     pub restart_requirement: RestartRequirementV1,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ResolvedSetting {
     pub key: SettingKey,
     pub effective_value: ConfigurationValueV1,
@@ -189,16 +190,27 @@ pub struct WriteOnlyCredentialMutation {
     pub write_handle: CredentialWriteHandleV1,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationDriftV1 {
+    Current,
+    NeverActivated,
+    PendingRestart,
+    ActivationFailed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ComponentConfigurationState {
     pub component: String,
     pub desired_revision_id: ConfigurationRevisionId,
     pub observed_revision_id: Option<ConfigurationRevisionId>,
+    pub last_working_revision_id: Option<ConfigurationRevisionId>,
     pub restart_required: bool,
     pub activation_error_code: Option<String>,
+    pub drift: ActivationDriftV1,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ConfigurationMutationReceipt {
     pub receipt_id: ConfigurationReceiptId,
     pub base_revision_id: ConfigurationRevisionId,
@@ -214,7 +226,7 @@ pub struct ConfigurationAuditQuery {
     pub limit: usize,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ConfigurationAuditPage {
     pub events: Vec<ConfigurationAuditEvent>,
     pub next_after_event_id: Option<ConfigurationAuditEventId>,
@@ -256,6 +268,8 @@ pub enum ConfigurationError {
     MutationAuthorityRejected,
     #[error("configuration validation failed: {0}")]
     Validation(String),
+    #[error("configuration reset required: {reason}")]
+    ResetRequired { reason: String },
     #[error("configuration authority is unavailable")]
     Unavailable,
 }

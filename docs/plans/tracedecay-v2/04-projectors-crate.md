@@ -132,16 +132,17 @@ these requirements, not future rebuild obligations. Later audits must locate
 the current projection and store owners and direct regressions before declaring
 an old artifact missing.
 
-## Migration and regression evidence
+## Final-shape initialization and regression evidence
 
-The additive migration preserves versioned partition and aggregate frontiers,
-lineage, and commit receipts. It freezes the old scalar checkpoint, replays
-immutable observations into a staged generation with real source partitions,
-validates rows, ordering, anchors, lineage, coverage, and digests, catches up a
-bounded suffix, and atomically publishes the new aggregate frontier. Failed
-validation leaves the old generation active. Old writes stop only at cutover;
-the owning view's Plan 09 behavior alone rebuilds, validates, publishes, rolls
-back, and later retires generations, with idempotent receipts.
+The clean final store initializes versioned partition and aggregate frontiers,
+lineage, and commit receipts from admitted native observations. A bounded
+background rebuild may replay immutable final-shape observations into a staged
+generation, validate rows, ordering, anchors, lineage, coverage, and digests,
+catch up a bounded suffix, and atomically publish the new aggregate frontier.
+This rebuild is same-design recovery, not conversion of older TraceDecay
+stores. Failed validation leaves the current generation active; the owning
+view alone rebuilds, validates, publishes, rolls back, and later retires
+generations with idempotent receipts.
 
 Direct regression evidence covers canonical frontier encoding and
 partition-order-independent digests; every content-state transition plus

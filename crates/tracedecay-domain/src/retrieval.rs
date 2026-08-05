@@ -232,6 +232,9 @@ pub enum RetrieverKind {
     Lexical,
     Semantic,
     Graph,
+    Temporal,
+    TaskSession,
+    Diagnostic,
 }
 
 impl RetrieverKind {
@@ -244,6 +247,9 @@ impl RetrieverKind {
             Self::Lexical => "lexical",
             Self::Semantic => "semantic",
             Self::Graph => "graph",
+            Self::Temporal => "temporal",
+            Self::TaskSession => "task_session",
+            Self::Diagnostic => "diagnostic",
         }
     }
 
@@ -1461,11 +1467,24 @@ mod tests {
     }
 
     #[test]
-    fn retriever_contract_rejects_lanes_without_runtime_adapters() {
-        for unsupported in ["temporal", "task_session", "diagnostic"] {
-            assert!(
-                serde_json::from_str::<RetrieverKind>(&format!("\"{unsupported}\"")).is_err(),
-                "{unsupported} must not be advertised without a runtime adapter"
+    fn retriever_contract_names_every_runtime_lane() {
+        for (wire, expected) in [
+            ("exact_literal", RetrieverKind::ExactLiteral),
+            ("lexical", RetrieverKind::Lexical),
+            ("semantic", RetrieverKind::Semantic),
+            ("graph", RetrieverKind::Graph),
+            ("temporal", RetrieverKind::Temporal),
+            ("task_session", RetrieverKind::TaskSession),
+            ("diagnostic", RetrieverKind::Diagnostic),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<RetrieverKind>(&format!("\"{wire}\""))
+                    .expect("canonical runtime lane"),
+                expected,
+            );
+            assert_eq!(
+                serde_json::to_string(&expected).expect("serialize runtime lane"),
+                format!("\"{wire}\""),
             );
         }
     }

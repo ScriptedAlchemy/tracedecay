@@ -3,9 +3,7 @@
 //! Installs tracedecay's Cursor plugin bundle into Cursor's local plugin
 //! directory. The plugin owns MCP, hooks, and rule configuration.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
 use serde_json::{Value, json};
 
@@ -51,54 +49,8 @@ impl AgentIntegration for CursorIntegration {
         "cursor"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        install_cursor_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Reload Cursor — the tracedecay plugin is now installed");
-        eprintln!(
-            "  3. Optional: Cursor's Auto-review mode reviews every MCP call; to let \
-             tracedecay's read-only tools run without per-call review, copy the \
-             permissions.json mcpAllowlist snippet from the plugin README \
-             ({})",
-            cursor_plugin_install_dir(&ctx.home)
-                .join("README.md")
-                .display()
-        );
-        Ok(())
-    }
-
     fn supports_local_install(&self) -> bool {
         true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_cursor_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        sweep_legacy_project_artifacts(project_path)?;
-
-        eprintln!();
-        eprintln!("Cursor local setup uses the tracedecay Cursor plugin.");
-        eprintln!("Reload Cursor so the plugin loads for this workspace.");
-        Ok(())
-    }
-
-    /// Cursor's project-local install writes nothing project-local itself —
-    /// the shared home plugin owns every surface and the component-set
-    /// transaction owns the project receipt markers. There is nothing to
-    /// remove here, but the operation must succeed so a failed local install
-    /// can roll back instead of stranding the transaction in recovery.
-    fn uninstall_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
-        Ok(())
-    }
-
-    fn post_install<'a>(
-        &'a self,
-        project_path: Option<&'a Path>,
-    ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
-        Box::pin(track_branch_after_install(project_path))
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
@@ -132,26 +84,6 @@ impl AgentIntegration for CursorIntegration {
                 &cursor_plugin_install_dir(home),
             )?,
         ])
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let install_dir = cursor_plugin_install_dir(&ctx.home);
-        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
-        crate::automation::memory_digest::remove_memory_digest_export(
-            &profile_root,
-            crate::automation::skill_targets::SkillInstallTarget::Cursor,
-            &install_dir,
-        )?;
-        remove_cursor_plugin_install(&install_dir)?;
-        remove_cursor_native_extension_registration(&ctx.home)?;
-        let mcp_path = ctx.home.join(".cursor/mcp.json");
-        uninstall_mcp_server(&mcp_path);
-        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
-
-        eprintln!();
-        eprintln!("Uninstall complete. TraceDecay has been removed from Cursor.");
-        eprintln!("Restart Cursor for changes to take effect.");
-        Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -242,130 +174,11 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
-        let mut paths = vec![
-            cursor_plugin_manifest_path(home),
-            home.join(".cursor/mcp.json"),
-        ];
-        if let Some(project_path) = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| cwd_sweep_target(cwd, home))
-        {
-            paths.extend([
-                project_path.join(".cursor/mcp.json"),
-                project_path.join(".cursor/hooks.json"),
-                project_path.join(".cursor/rules/tracedecay.mdc"),
-            ]);
-        }
-        paths
+        vec![cursor_plugin_manifest_path(home)]
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
         cursor_plugin_manifest_path(home).exists()
-            || legacy_mcp_has_tracedecay(&home.join(".cursor/mcp.json"))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Post-install hook
-// ---------------------------------------------------------------------------
-
-const CURSOR_BRANCH_ADD_TOOL: &str = "tracedecay_admin_branch_add";
-
-/// Decoded `tracedecay_admin_branch_add` daemon response.
-///
-/// The root crate's `branch::BranchAddOutcome` is the *producer* side of this
-/// contract and stays above this crate with the branch store it mutates. What
-/// crosses the daemon boundary is the JSON `outcome` string below, so the
-/// install path decodes it into its own value instead of taking a dependency
-/// edge on the producer. The wire strings are the shared contract; the two
-/// enums must keep the same variant set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BranchAddOutcome {
-    /// The project has no `.tracedecay/` index; nothing was done.
-    NotIndexed,
-    /// The branch was already tracked; no copy/sync was performed.
-    AlreadyTracked,
-    /// A new branch DB was created from the nearest ancestor and synced.
-    Added,
-    /// Another process was adding or syncing; catch-up sync was deferred.
-    Deferred,
-}
-
-fn cursor_branch_add_arguments(branch_name: &str) -> Value {
-    json!({ "branch": branch_name })
-}
-
-fn parse_cursor_branch_add_outcome(response: &Value) -> Result<BranchAddOutcome> {
-    match response.get("outcome").and_then(Value::as_str) {
-        Some("not_indexed") => Ok(BranchAddOutcome::NotIndexed),
-        Some("already_tracked") => Ok(BranchAddOutcome::AlreadyTracked),
-        Some("added") => Ok(BranchAddOutcome::Added),
-        Some("deferred") => Ok(BranchAddOutcome::Deferred),
-        Some(outcome) => Err(TraceDecayError::Config {
-            message: format!("daemon Cursor branch add returned unknown outcome: {outcome}"),
-        }),
-        None => Err(TraceDecayError::Config {
-            message: "daemon Cursor branch add response omitted outcome".to_string(),
-        }),
-    }
-}
-
-async fn add_cursor_branch_via_daemon(
-    project_path: &Path,
-    branch_name: &str,
-) -> Result<BranchAddOutcome> {
-    let response = match crate::ports::hook_runtime::daemon_tool_json(
-        Some(project_path),
-        CURSOR_BRANCH_ADD_TOOL,
-        cursor_branch_add_arguments(branch_name),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(err) => {
-            eprintln!(
-                "\x1b[33mwarning:\x1b[0m deferred Cursor branch tracking for '{branch_name}' because the TraceDecay daemon request was unavailable: {err}"
-            );
-            return Ok(BranchAddOutcome::Deferred);
-        }
-    };
-    parse_cursor_branch_add_outcome(&response)
-}
-
-/// Registers the project's current git branch for tracedecay indexing after a
-/// Cursor plugin install, so per-branch graphs stay in sync from the moment
-/// the integration is set up.
-///
-/// No-ops when there is no project path, no branch can be resolved, or the
-/// project has not been indexed yet (so it never bootstraps an index on its
-/// own).
-async fn track_branch_after_install(project_path: Option<&Path>) {
-    let Some(project_path) = project_path else {
-        return;
-    };
-    // Memory materialization belongs to Cursor's session hooks, where the
-    // active user profile is authoritative. Install/update tests inject a
-    // temporary `InstallContext::home`; resolving `dirs::home_dir()` here
-    // would escape that boundary and write into the operator's live profile.
-    let Some(branch_name) = crate::branch::current_branch(project_path) else {
-        return;
-    };
-    match add_cursor_branch_via_daemon(project_path, &branch_name).await {
-        Ok(BranchAddOutcome::Added) => {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Tracked Cursor branch '{branch_name}' for tracedecay indexing"
-            );
-        }
-        Ok(
-            BranchAddOutcome::AlreadyTracked
-            | BranchAddOutcome::Deferred
-            | BranchAddOutcome::NotIndexed,
-        ) => {}
-        Err(err) => {
-            eprintln!(
-                "\x1b[33mwarning:\x1b[0m could not track Cursor branch '{branch_name}' for tracedecay indexing: {err}"
-            );
-        }
     }
 }
 
@@ -420,122 +233,47 @@ fn cursor_native_extension_registration(home: &Path) -> HostBundleRegistrationSt
     }
 }
 
-/// Extension identifier Cursor records in `extensions.json` for the
-/// `TraceDecay` native-diagnostics extension. Version-suffixed install
-/// directories (`tracedecay.cursor-native-0.0.0`) all report this same id.
-const CURSOR_NATIVE_EXTENSION_ID: &str = "tracedecay.cursor-native";
+const RETIRED_CURSOR_MEMORY_RULE_MARKER: &str =
+    "<!-- generated by tracedecay from the project fact store; do not edit by hand -->";
 
-fn cursor_extensions_dir(home: &Path) -> PathBuf {
-    home.join(".cursor/extensions")
-}
-
-fn cursor_extensions_registry_path(home: &Path) -> PathBuf {
-    cursor_extensions_dir(home).join("extensions.json")
-}
-
-/// Whether an `extensions.json` entry is `TraceDecay`'s native extension.
-/// Cursor writes the id under `identifier.id`; older shapes store a bare
-/// string. Matching is case-insensitive because extension ids are.
-fn is_tracedecay_native_extension_entry(entry: &Value) -> bool {
-    let identifier = entry.get("identifier");
-    let id = identifier
-        .and_then(|value| value.get("id"))
-        .or(identifier)
-        .and_then(Value::as_str);
-    id.is_some_and(|id| id.eq_ignore_ascii_case(CURSOR_NATIVE_EXTENSION_ID))
-}
-
-/// Whether a `.cursor/extensions` directory is `TraceDecay`-owned, so removing
-/// it can never delete a third-party extension. An empty directory left behind
-/// by the receipt-backed uninstall counts; anything carrying a foreign
-/// `package.json` does not.
-fn cursor_native_extension_dir_is_tracedecay(dir: &Path) -> bool {
-    let Ok(metadata) = std::fs::symlink_metadata(dir) else {
-        return false;
+fn remove_retired_global_cursor_memory_rule(home: &Path) -> Result<bool> {
+    let rule_path = home.join(".cursor/rules/tracedecay-memory.mdc");
+    let metadata = match std::fs::symlink_metadata(&rule_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect retired Cursor memory rule {}: {error}",
+                    rule_path.display()
+                ),
+            });
+        }
     };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return false;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(false);
     }
-    match std::fs::read(dir.join("package.json")) {
-        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).is_ok_and(|manifest| {
-            manifest.get("publisher").and_then(Value::as_str) == Some("tracedecay")
-                && manifest.get("name").and_then(Value::as_str) == Some("cursor-native")
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
-        }
-        Err(_) => false,
-    }
-}
-
-/// Finish an uninstall of the Cursor native extension.
-///
-/// The receipt-backed transaction removes the deployed artifacts it owns, but
-/// Cursor's own `extensions.json` registry keeps advertising the extension and
-/// the emptied install directory survives — a registered orphan with no owning
-/// receipt. Both are `TraceDecay`-owned state, so uninstall removes them here.
-/// Every third-party entry is retained exactly as read, and a registry with no
-/// `TraceDecay` entry is never rewritten at all.
-fn remove_cursor_native_extension_registration(home: &Path) -> Result<()> {
-    let registry_path = cursor_extensions_registry_path(home);
-    if let Ok(contents) = std::fs::read_to_string(&registry_path)
-        && let Ok(mut registry) = serde_json::from_str::<Value>(&contents)
-        && let Some(entries) = registry.as_array_mut()
-    {
-        let before = entries.len();
-        entries.retain(|entry| !is_tracedecay_native_extension_entry(entry));
-        if entries.len() != before && backup_and_write_json(&registry_path, &registry) {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Removed the tracedecay extension entry from {}",
-                registry_path.display()
-            );
-        }
-    }
-
-    // Sweep the current install directory and any superseded version sibling.
-    // Only directories that still prove tracedecay ownership are removed.
-    let extensions_dir = cursor_extensions_dir(home);
-    let Ok(entries) = std::fs::read_dir(&extensions_dir) else {
-        return Ok(());
-    };
-    let mut stale = entries
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(CURSOR_NATIVE_EXTENSION_ID))
-        })
-        .collect::<Vec<_>>();
-    stale.sort();
-    for path in stale {
-        if !cursor_native_extension_dir_is_tracedecay(&path) {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m leaving {} in place; it no longer proves tracedecay ownership",
-                path.display()
-            );
-            continue;
-        }
-        std::fs::remove_dir_all(&path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", path.display()),
+    let contents =
+        std::fs::read_to_string(&rule_path).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to read retired Cursor memory rule {}: {error}",
+                rule_path.display()
+            ),
         })?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed the tracedecay Cursor extension at {}",
-            path.display()
-        );
+    if !contents.contains(RETIRED_CURSOR_MEMORY_RULE_MARKER) {
+        return Ok(false);
     }
-    Ok(())
-}
-
-/// Path of the materialized always-applied memory rule rendered from the
-/// project fact store (see `hooks::memory_inject::regenerate_cursor_memory_rule`).
-/// Dynamic memory lives outside the receipt-owned plugin bundle so hook
-/// refreshes cannot create component ownership conflicts.
-pub fn cursor_memory_rule_path(home: &Path) -> PathBuf {
-    home.join(".cursor/rules/tracedecay-memory.mdc")
+    std::fs::remove_file(&rule_path).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to remove retired Cursor memory rule {}: {error}",
+            rule_path.display()
+        ),
+    })?;
+    Ok(true)
 }
 
 fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
+    remove_retired_global_cursor_memory_rule(home)?;
     let install_dir = cursor_plugin_install_dir(home);
     if let Some(parent) = install_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
@@ -575,12 +313,8 @@ fn write_embedded_plugin(install_dir: &Path, tracedecay_bin: &str) -> Result<()>
     Ok(())
 }
 
-/// Canonical rendered Cursor plugin inventory. The legacy installer and the
-/// receipt-backed first-party host-bundle catalog must produce byte-identical
-/// files: the component-set transaction verifies installed artifact digests
-/// after the compatibility registration adapter re-runs this installer, so
-/// any rendering drift between the two writers fails installs with
-/// `ArtifactContentMismatch`.
+/// Canonical rendered Cursor plugin inventory shared by explicit artifact
+/// refresh and the receipt-backed first-party catalog.
 pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     embedded_plugin_files()
         .into_iter()
@@ -659,7 +393,7 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     // bundle means a newly retired skill is swept automatically — no
     // hand-maintained legacy list to fall out of date. User-added files
     // outside `skills/` (and any non-tracedecay skill dir) are preserved.
-    sweep_retired_bundle_skill_dirs(install_dir);
+    sweep_retired_bundle_skill_dirs(install_dir)?;
     remove_cursor_managed_skill_overlay(install_dir);
     if cursor_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
@@ -687,10 +421,19 @@ fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
 /// whose `SKILL.md` carries no tracedecay marker is left untouched, so an
 /// upgrade never deletes a user's private workflow that happens to collide with
 /// a retired bundle slug.
-fn sweep_retired_bundle_skill_dirs(install_dir: &Path) {
+fn sweep_retired_bundle_skill_dirs(install_dir: &Path) -> Result<()> {
     let skills_root = install_dir.join("skills");
-    let Ok(entries) = std::fs::read_dir(&skills_root) else {
-        return;
+    let entries = match std::fs::read_dir(&skills_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect retired Cursor plugin skills at {}: {error}",
+                    skills_root.display()
+                ),
+            });
+        }
     };
     let shipped: std::collections::BTreeSet<String> = embedded_plugin_files()
         .into_iter()
@@ -701,8 +444,23 @@ fn sweep_retired_bundle_skill_dirs(install_dir: &Path) {
                 .map(str::to_string)
         })
         .collect();
-    for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+    for entry in entries {
+        let entry = entry.map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to inspect retired Cursor plugin skills at {}: {error}",
+                skills_root.display()
+            ),
+        })?;
+        if !entry
+            .file_type()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect retired Cursor plugin skill at {}: {error}",
+                    entry.path().display()
+                ),
+            })?
+            .is_dir()
+        {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -715,8 +473,14 @@ fn sweep_retired_bundle_skill_dirs(install_dir: &Path) {
         if !skill_file_has_tracedecay_marker(&entry.path().join("SKILL.md")) {
             continue;
         }
-        std::fs::remove_dir_all(entry.path()).ok();
+        std::fs::remove_dir_all(entry.path()).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to remove retired Cursor plugin skill at {}: {error}",
+                entry.path().display()
+            ),
+        })?;
     }
+    Ok(())
 }
 
 /// True when a Cursor `SKILL.md` carries a tracedecay authorship marker, marking
@@ -1239,44 +1003,8 @@ mod tests {
     const RETIRED_CURSOR_MEMORY_RULE_FIXTURE: &str =
         "<!-- generated by tracedecay from the project fact store; do not edit by hand -->";
 
-    struct HomeEnvGuard(Option<std::ffi::OsString>);
-
-    impl HomeEnvGuard {
-        fn set(home: &Path) -> Self {
-            let previous = std::env::var_os("HOME");
-            // SAFETY: Cursor tests that mutate HOME run under the shared hook
-            // environment lock, so no sibling test can observe this override.
-            unsafe { std::env::set_var("HOME", home) };
-            Self(previous)
-        }
-    }
-
-    impl Drop for HomeEnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: See `HomeEnvGuard::set`; the same lock remains held
-            // until this guard restores the process environment.
-            unsafe {
-                if let Some(previous) = self.0.take() {
-                    std::env::set_var("HOME", previous);
-                } else {
-                    std::env::remove_var("HOME");
-                }
-            }
-        }
-    }
-
     fn plugin_source_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
-    }
-
-    fn run_with_test_env_lock<T>(future: impl std::future::Future<Output = T>) -> T {
-        let _lock = crate::config::lock_user_data_dir_test_env();
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("build Cursor test runtime")
-            .block_on(future)
     }
 
     /// Directory names directly under `plugin/skills/` on disk.
@@ -1453,99 +1181,6 @@ mod tests {
         );
     }
 
-    fn cursor_extensions_registry(entries: Value) -> Vec<u8> {
-        serde_json::to_vec_pretty(&entries).unwrap()
-    }
-
-    fn third_party_extension_entries() -> Value {
-        json!([
-            {
-                "identifier": {"id": "anthropic.claude-code", "uuid": "1a2b3c"},
-                "version": "1.4.2",
-                "relativeLocation": "anthropic.claude-code-1.4.2",
-                "metadata": {"installedTimestamp": 1_700_000_000_u64}
-            },
-            {
-                "identifier": {"id": "anysphere.cursorpyright", "uuid": "4d5e6f"},
-                "version": "1.0.9",
-                "relativeLocation": "anysphere.cursorpyright-1.0.9"
-            }
-        ])
-    }
-
-    /// Uninstall must complete the ownership handoff: the receipt-backed
-    /// transaction removes the deployed artifacts, and this removes the two
-    /// pieces of tracedecay-owned state it cannot — Cursor's `extensions.json`
-    /// entry and the emptied install directory. Third-party entries must
-    /// survive with every field intact.
-    #[test]
-    fn uninstall_removes_the_native_extension_entry_and_directory() {
-        let home = TempDir::new().unwrap();
-        let extensions_dir = cursor_extensions_dir(home.path());
-        let install_dir = cursor_native_extension_install_dir(home.path());
-        std::fs::create_dir_all(&install_dir).unwrap();
-        std::fs::write(
-            install_dir.join("package.json"),
-            r#"{"name":"cursor-native","publisher":"tracedecay","main":"./dist/extension.js"}"#,
-        )
-        .unwrap();
-        let mut entries = third_party_extension_entries();
-        entries.as_array_mut().unwrap().insert(
-            1,
-            json!({
-                "identifier": {"id": "tracedecay.cursor-native", "uuid": "7g8h9i"},
-                "version": "0.0.0",
-                "relativeLocation": CURSOR_NATIVE_EXTENSION_DIR
-            }),
-        );
-        let registry_path = cursor_extensions_registry_path(home.path());
-        std::fs::write(&registry_path, cursor_extensions_registry(entries)).unwrap();
-
-        remove_cursor_native_extension_registration(home.path()).unwrap();
-
-        assert!(!install_dir.exists(), "the emptied extension dir is ours");
-        let remaining: Value =
-            serde_json::from_slice(&std::fs::read(&registry_path).unwrap()).unwrap();
-        assert_eq!(remaining, third_party_extension_entries());
-        assert!(
-            extensions_dir.is_dir(),
-            "Cursor owns the extensions directory itself"
-        );
-    }
-
-    /// A registry with no tracedecay entry is never rewritten, so third-party
-    /// state stays byte-identical rather than merely value-equal.
-    #[test]
-    fn uninstall_leaves_a_tracedecay_free_extensions_registry_byte_identical() {
-        let home = TempDir::new().unwrap();
-        std::fs::create_dir_all(cursor_extensions_dir(home.path())).unwrap();
-        let registry_path = cursor_extensions_registry_path(home.path());
-        let original = cursor_extensions_registry(third_party_extension_entries());
-        std::fs::write(&registry_path, &original).unwrap();
-
-        remove_cursor_native_extension_registration(home.path()).unwrap();
-
-        assert_eq!(std::fs::read(&registry_path).unwrap(), original);
-    }
-
-    /// Ownership, not naming, authorises the directory removal: a foreign
-    /// `package.json` under a tracedecay-looking name is left alone.
-    #[test]
-    fn uninstall_refuses_to_remove_an_unowned_extension_directory() {
-        let home = TempDir::new().unwrap();
-        let install_dir = cursor_native_extension_install_dir(home.path());
-        std::fs::create_dir_all(&install_dir).unwrap();
-        let foreign = br#"{"name":"cursor-native","publisher":"someone-else"}"#;
-        std::fs::write(install_dir.join("package.json"), foreign).unwrap();
-
-        remove_cursor_native_extension_registration(home.path()).unwrap();
-
-        assert_eq!(
-            std::fs::read(install_dir.join("package.json")).unwrap(),
-            foreign
-        );
-    }
-
     /// The Cursor deploy set (composed from the shared `plugin/` tree) must
     /// cover every shared *model-invocable* skill (all non-`tracedecay-*`
     /// slugs), every native slash command, and Cursor's manifest/rules/agents —
@@ -1607,11 +1242,6 @@ mod tests {
             !deploy.contains("rules/tracedecay-memory.mdc"),
             "dynamic project memory must not modify receipt-owned plugin files"
         );
-        assert_eq!(
-            cursor_memory_rule_path(Path::new("/home/test")),
-            PathBuf::from("/home/test/.cursor/rules/tracedecay-memory.mdc")
-        );
-
         // Every canonical agent is rendered into Cursor's generated deploy
         // set. Directory discovery prevents a newly added catalog entry from
         // being omitted by adapter generation.
@@ -1829,6 +1459,28 @@ mod tests {
             "install must remove the memory rule retired from the plugin inventory"
         );
         assert!(install_dir.join("rules/tracedecay.mdc").exists());
+    }
+
+    #[test]
+    fn retired_global_memory_rule_is_removed_only_when_tracedecay_managed() {
+        let home = TempDir::new().unwrap();
+        let rule = home.path().join(".cursor/rules/tracedecay-memory.mdc");
+        std::fs::create_dir_all(rule.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rule,
+            format!("{RETIRED_CURSOR_MEMORY_RULE_MARKER}\nmanaged memory"),
+        )
+        .unwrap();
+
+        assert!(remove_retired_global_cursor_memory_rule(home.path()).unwrap());
+        assert!(!rule.exists());
+
+        std::fs::write(&rule, "my own Cursor rule").unwrap();
+        assert!(!remove_retired_global_cursor_memory_rule(home.path()).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&rule).unwrap(),
+            "my own Cursor rule"
+        );
     }
 
     #[test]
@@ -2146,82 +1798,5 @@ mod tests {
 
         assert_eq!(counters.issues, 0);
         assert_eq!(counters.warnings, 1);
-    }
-
-    #[test]
-    fn cursor_branch_add_request_uses_daemon_admin_contract() {
-        assert_eq!(
-            cursor_branch_add_arguments("feature/cursor"),
-            serde_json::json!({ "branch": "feature/cursor" })
-        );
-    }
-
-    #[test]
-    fn cursor_branch_add_outcomes_are_strictly_decoded() {
-        for (name, expected) in [
-            ("not_indexed", BranchAddOutcome::NotIndexed),
-            ("already_tracked", BranchAddOutcome::AlreadyTracked),
-            ("added", BranchAddOutcome::Added),
-            ("deferred", BranchAddOutcome::Deferred),
-        ] {
-            assert_eq!(
-                parse_cursor_branch_add_outcome(&serde_json::json!({ "outcome": name }))
-                    .expect("known daemon outcome"),
-                expected
-            );
-        }
-
-        for response in [
-            serde_json::json!({}),
-            serde_json::json!({ "outcome": "other" }),
-        ] {
-            assert!(parse_cursor_branch_add_outcome(&response).is_err());
-        }
-    }
-
-    /// The Cursor `post_install` hook (the branch-tracking logic that moved
-    /// off `main` and onto the integration) must be safe to run on a project
-    /// tracedecay has not indexed: it must not bootstrap a `.tracedecay/` index
-    /// or panic.
-    #[tokio::test]
-    async fn post_install_does_not_bootstrap_index() {
-        let project = tempfile::tempdir().expect("tempdir");
-        CursorIntegration.post_install(Some(project.path())).await;
-        assert!(
-            !project.path().join(".tracedecay").exists(),
-            "post_install must not create an index on an unindexed project"
-        );
-    }
-
-    /// A `None` project path is a no-op and must not panic.
-    #[tokio::test]
-    async fn post_install_handles_missing_project_path() {
-        CursorIntegration.post_install(None).await;
-    }
-
-    #[test]
-    fn post_install_with_injected_home_never_writes_process_home() {
-        run_with_test_env_lock(async {
-            let process_home = TempDir::new().expect("process home");
-            let injected_home = TempDir::new().expect("install context home");
-            let project = TempDir::new().expect("project");
-            let _home_guard = HomeEnvGuard::set(process_home.path());
-            let process_plugin = cursor_plugin_install_dir(process_home.path());
-            std::fs::create_dir_all(process_plugin.join(".cursor-plugin")).unwrap();
-            std::fs::write(
-                process_plugin.join(".cursor-plugin/plugin.json"),
-                r#"{"name":"tracedecay"}"#,
-            )
-            .unwrap();
-
-            install_cursor_plugin(injected_home.path(), "tracedecay")
-                .expect("injected-home install should succeed");
-            CursorIntegration.post_install(Some(project.path())).await;
-
-            assert!(
-                !cursor_memory_rule_path(process_home.path()).exists(),
-                "an install using an injected home must not materialize memory in process HOME"
-            );
-        });
     }
 }

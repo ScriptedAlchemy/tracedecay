@@ -2,8 +2,9 @@
 //!
 //! These values define typed settings, deterministic resolution inputs,
 //! protected-change plans, and opaque credential references. They deliberately
-//! contain no file paths, secret values, database handles, authorization
-//! decisions, or transport-specific payloads.
+//! contain no secret values, database handles, authorization decisions, or
+//! ambient executable lookup rules. Canonical executable paths are permitted
+//! only as digest-pinned provider bindings.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -18,8 +19,10 @@ use crate::research::{
 };
 
 pub mod topology;
+mod work_executable_bindings;
 
 pub use topology::*;
+pub use work_executable_bindings::*;
 
 const CONFIGURATION_SNAPSHOT_ID_DOMAIN: &str = "tracedecay.configuration.snapshot.v1";
 const PROTECTED_CHANGE_DIGEST_DOMAIN: &str = "tracedecay.configuration.protected-change.v1";
@@ -30,12 +33,10 @@ pub const ACCESS_RULES_SETTING_KEY: &str = "scope.access_rules.v1";
 pub const DEFAULT_COLLECTION_SETTING_KEY: &str = "query.default_collection.v1";
 pub const ANALYZER_SETTINGS_SETTING_KEY: &str = "analyzer.settings.v1";
 pub const WORK_TOPOLOGY_POLICY_SETTING_KEY: &str = "work.topology_policy.v1";
+pub const WORK_EXECUTABLE_BINDINGS_SETTING_KEY: &str = "work.executable_bindings.v1";
 pub const CONTEXT_SCOUT_SETTINGS_SETTING_KEY: &str = "context_scout.settings.v1";
 
-/// Canonical project-scoped settings imported from the legacy `config.json`
-/// surface. These names deliberately describe behavior rather than a legacy
-/// file layout, so a later control-plane writer can use them without retaining
-/// `config.json` as authority.
+/// Canonical project-scoped runtime settings.
 pub const INDEX_EXCLUDE_SETTING_KEY: &str = "index.exclude.v1";
 pub const INDEX_INCLUDE_SETTING_KEY: &str = "index.include.v1";
 pub const INDEX_MAX_FILE_SIZE_SETTING_KEY: &str = "index.max_file_size.v1";
@@ -71,6 +72,7 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     DEFAULT_COLLECTION_SETTING_KEY,
     ANALYZER_SETTINGS_SETTING_KEY,
     WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     crate::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1,
     INDEX_EXCLUDE_SETTING_KEY,
@@ -81,36 +83,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     INDEX_GIT_IGNORE_SETTING_KEY,
     DIAGNOSTICS_PREWARM_SETTING_KEY,
     SEMANTIC_RUNTIME_SETTING_KEY,
-    SYNC_AUTO_WATCH_SETTING_KEY,
-    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY,
-    SYNC_READ_REFRESH_SETTING_KEY,
-    SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
-    SYNC_SESSION_START_SYNC_SETTING_KEY,
-    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
-    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
-    SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-    SYNC_AUTO_INIT_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-    TELEMETRY_TIMINGS_SETTING_KEY,
-];
-
-/// Complete inventory of scalar settings that have a legacy `config.json`
-/// counterpart. It excludes path-derived metadata such as `root_dir`, which
-/// cannot become durable configuration authority.
-pub const LEGACY_CONFIG_JSON_SETTING_KEYS_V1: &[&str] = &[
-    INDEX_EXCLUDE_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY,
-    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    INDEX_GIT_IGNORE_SETTING_KEY,
-    DIAGNOSTICS_PREWARM_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
     SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
@@ -335,7 +307,7 @@ fn validate_setting_key(value: &str) -> Result<(), DomainError> {
 
 /// Typed configuration key. Keys are lowercase, dotted product identifiers;
 /// untyped host/adapter keys are not representable.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct SettingKey(String);
 
@@ -402,7 +374,9 @@ impl ConfigurationLayerKindV1 {
 
 /// A typed configuration layer identity. The default layer intentionally has
 /// no caller-controlled identifier.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConfigurationLayerIdV1 {
     Default,
@@ -431,7 +405,9 @@ impl ConfigurationLayerIdV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SettingSensitivityV1 {
     Public,
@@ -447,7 +423,9 @@ pub enum SettingScopeV1 {
     Collection,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RestartRequirementV1 {
     None,
@@ -473,7 +451,9 @@ impl DeprecationStateV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationValueKindV1 {
     Boolean,
@@ -485,11 +465,12 @@ pub enum ConfigurationValueKindV1 {
     DefaultCollection,
     AnalyzerSettings,
     WorkTopologyPolicy,
+    WorkExecutableBindings,
     ContextScoutSettings,
     CredentialReference,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutConfigurationStateV1 {
     Active,
@@ -497,20 +478,20 @@ pub enum ContextScoutConfigurationStateV1 {
     Disabled,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutConfigurationModeV1 {
     Deterministic,
     ConfiguredModel,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutConfiguredModelPathV1 {
     CodexAppServer,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutConfigurationLimitsV1 {
     pub max_candidates: u32,
@@ -555,7 +536,7 @@ impl ContextScoutConfigurationLimitsV1 {
 /// Canonical Context Scout control-plane value. Disabled is the only stock
 /// state; deterministic or configured-model execution requires an explicit
 /// configuration revision.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutSettingsV1 {
     pub schema_version: u16,
@@ -596,7 +577,7 @@ impl ContextScoutSettingsV1 {
 
 /// A reference-only selector. It is convenience input, never collection
 /// authority or membership evidence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum CollectionSelectorV1 {
     Query(QueryCollectionId),
@@ -614,7 +595,7 @@ impl CollectionSelectorV1 {
 
 /// A structured analyzer option value. This deliberately excludes raw
 /// environment values, commands, credential material, and transport blobs.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum AnalyzerStructuredValueV1 {
     Boolean(bool),
@@ -646,7 +627,7 @@ impl AnalyzerStructuredValueV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AnalyzerExecutableReferenceV1 {
     BuiltIn { executable_id: AnalyzerExecutableId },
@@ -662,7 +643,9 @@ impl AnalyzerExecutableReferenceV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalyzerPrivacyClassV1 {
     NonSensitive,
@@ -670,7 +653,7 @@ pub enum AnalyzerPrivacyClassV1 {
     Restricted,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyzerResourceLimitsV1 {
     pub maximum_memory_mib: u32,
@@ -692,7 +675,9 @@ impl AnalyzerResourceLimitsV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalyzerRestartPolicyV1 {
     RestartOnConfigurationChange,
@@ -702,7 +687,7 @@ pub enum AnalyzerRestartPolicyV1 {
 /// One language's analyzer selection. Host registration may project only the
 /// non-sensitive `language_id`/`enabled` pair; all other fields remain in the
 /// configuration authority.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyzerLanguageSelectionV1 {
     pub language_id: AnalyzerLanguageId,
@@ -750,7 +735,7 @@ impl AnalyzerLanguageSelectionV1 {
 
 /// Canonical analyzer settings. A changed selection produces a new
 /// configuration revision/digest; cache invalidation remains owned elsewhere.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyzerSettingsV1 {
     pub schema_version: u16,
@@ -797,7 +782,7 @@ impl AnalyzerSettingsV1 {
 /// Credential metadata contains only a reference and an integrity digest. No
 /// constructor, field, serializer, audit record, or error type accepts a
 /// plaintext credential.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialKindV1 {
     ApiToken,
@@ -806,7 +791,7 @@ pub enum CredentialKindV1 {
     Other,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialReferenceMetadataV1 {
     pub reference_id: CredentialReferenceId,
@@ -842,7 +827,7 @@ impl CredentialReferenceMetadataV1 {
 }
 
 /// Values that the typed registry can accept. Credentials are references only.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum ConfigurationValueV1 {
     Boolean(bool),
@@ -854,6 +839,7 @@ pub enum ConfigurationValueV1 {
     DefaultCollection(Option<CollectionSelectorV1>),
     AnalyzerSettings(AnalyzerSettingsV1),
     WorkTopologyPolicy(Box<WorkTopologyPolicyV1>),
+    WorkExecutableBindings(Vec<WorkExecutableBindingV1>),
     ContextScoutSettings(ContextScoutSettingsV1),
     CredentialReference(CredentialReferenceMetadataV1),
 }
@@ -870,6 +856,7 @@ impl ConfigurationValueV1 {
             Self::DefaultCollection(_) => ConfigurationValueKindV1::DefaultCollection,
             Self::AnalyzerSettings(_) => ConfigurationValueKindV1::AnalyzerSettings,
             Self::WorkTopologyPolicy(_) => ConfigurationValueKindV1::WorkTopologyPolicy,
+            Self::WorkExecutableBindings(_) => ConfigurationValueKindV1::WorkExecutableBindings,
             Self::ContextScoutSettings(_) => ConfigurationValueKindV1::ContextScoutSettings,
             Self::CredentialReference(_) => ConfigurationValueKindV1::CredentialReference,
         }
@@ -907,6 +894,7 @@ impl ConfigurationValueV1 {
                 .map_or(Ok(()), CollectionSelectorV1::validate),
             Self::AnalyzerSettings(settings) => settings.validate(),
             Self::WorkTopologyPolicy(policy) => policy.validate(),
+            Self::WorkExecutableBindings(bindings) => validate_work_executable_bindings(bindings),
             Self::ContextScoutSettings(settings) => settings.validate(),
             Self::CredentialReference(metadata) => metadata.validate(),
         }
@@ -1268,7 +1256,7 @@ pub enum ProtectedChangeSnapshotError {
     IncompatibleValue(&'static str),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RedactedConfigurationChangeV1 {
     pub setting_key: SettingKey,
@@ -1297,7 +1285,7 @@ impl RedactedConfigurationChangeV1 {
 
 /// Immutable dry-run result. It contains no raw locator, secret, target
 /// identity, or plaintext configuration value.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProtectedChangePlan {
     pub plan_id: ChangePlanId,
@@ -1378,14 +1366,18 @@ impl ProtectedApplyRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RollbackModeV1 {
     AllOrNothing,
     Partial,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationAuditEventKindV1 {
     DryRunCreated,
@@ -1401,7 +1393,7 @@ pub enum ConfigurationAuditEventKindV1 {
 /// Append-only audit record. `target_commitment` is event-scoped and cannot be
 /// joined across audit events; a caller must be separately authorized before
 /// any canonical target is resolved by the store/application layer.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationAuditEvent {
     pub event_id: ConfigurationAuditEventId,
@@ -1439,7 +1431,9 @@ impl ConfigurationAuditEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateDispositionV1 {
     Winning,
@@ -1451,7 +1445,7 @@ pub enum CandidateDispositionV1 {
 /// Resolution provenance is intentionally distinct from behavior. Moving the
 /// same winner between layers can change this material without changing the
 /// effective behavior digest.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationCandidateV1 {
     pub layer: ConfigurationLayerIdV1,

@@ -2,14 +2,15 @@ use super::{
     AdmittedRoot, AnalyzerCancellationPort, Arc, AuthorizedLspWorkspace, BTreeMap,
     CancellationOutcome, CapabilityAvailability, CapabilityParseError, ClientCapabilities,
     ContextController, ContextProjectionPort, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspGateway,
-    DaemonLspProtocolSession, DiagnosticSnapshotPort, DiagnosticsController, EffectiveCapabilities,
-    FeedbackCyclePort, GatewayCapabilities, GatewayMethod, LifecycleError, LspRequestFailure,
-    LspRequestId, LspSessionControl, MAX_CONTEXT_PROJECTION_KINDS, Map, MethodUnavailableReason,
-    OutboundController, OverlayError, OverlayStore, RpcFailure, SemanticController,
-    SemanticProviderPort, SessionLifecycle, TRACEDECAY_CONTEXT_EXPAND_METHOD,
-    TRACEDECAY_CONTEXT_METHOD, UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, Value,
-    error_response, initialized_workspace_uris, is_supported_context_projection, json,
-    negotiate_capabilities, overlay_failure, request_id, request_id_value, success_response,
+    DaemonLspProtocolSession, DiagnosticSnapshotPort, DiagnosticsController,
+    DynamicDiagnosticsController, EffectiveCapabilities, FeedbackCyclePort, GatewayCapabilities,
+    GatewayMethod, LifecycleError, LspRequestFailure, LspRequestId, LspSessionControl,
+    MAX_CONTEXT_PROJECTION_KINDS, Map, MethodUnavailableReason, OutboundController, OverlayError,
+    OverlayStore, RpcFailure, SemanticController, SemanticProviderPort, SessionLifecycle,
+    TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD,
+    UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, Value, error_response,
+    initialized_workspace_uris, is_supported_context_projection, json, negotiate_capabilities,
+    overlay_failure, request_id, request_id_value, success_response,
 };
 
 pub(super) struct LifecycleController<P, S>
@@ -133,6 +134,7 @@ where
             ),
             outbound: OutboundController::default(),
             diagnostics: DiagnosticsController::new(diagnostics),
+            dynamic_diagnostics: DynamicDiagnosticsController::default(),
             context: ContextController::default(),
             semantic: SemanticController::default(),
         }
@@ -205,6 +207,7 @@ where
             self.diagnostics.refresh_request = None;
             self.queue_diagnostic_refresh();
         }
+        self.reset_dynamic_diagnostics_after_reconnect();
         Ok(())
     }
 
@@ -253,6 +256,9 @@ where
         self.diagnostics.refresh_request = None;
         self.diagnostics.refresh_needed = false;
         self.diagnostics.active_refreshes.clear();
+        self.diagnostics.workspace_results.clear();
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         self.context.subscriptions.clear();
         self.context.currentness.clear();
         self.context.pending_requests.clear();
@@ -382,7 +388,10 @@ where
         ));
     }
 
-    pub(crate) fn handle_client_response(&mut self, id: LspRequestId) {
+    pub(crate) fn handle_client_response(&mut self, id: LspRequestId, succeeded: bool) {
+        if self.handle_dynamic_diagnostic_response(&id, succeeded) {
+            return;
+        }
         if self.diagnostics.refresh_request.as_ref() == Some(&id) {
             self.diagnostics.refresh_request = None;
         }
@@ -484,6 +493,16 @@ where
             })
             .unwrap_or_default();
         let mut gateway_capabilities = self.lifecycle.gateway_capabilities.clone();
+        let dynamic_workspace_diagnostics = client.diagnostic_dynamic_registration
+            && client.supports_document_diagnostics
+            && gateway_capabilities.supports_document_diagnostics
+            && gateway_capabilities.supports_workspace_diagnostics;
+        if !dynamic_workspace_diagnostics {
+            gateway_capabilities.supports_workspace_diagnostics &=
+                self.diagnostics.provider.supports_workspace_diagnostics();
+        }
+        let upstream_capabilities = self.lifecycle.upstream_capabilities.clone();
+        self.configure_dynamic_diagnostics(&client, &gateway_capabilities, &upstream_capabilities);
         gateway_capabilities
             .context_projections
             .retain(|kind, revision| mounted_context.get(kind) == Some(revision));

@@ -12,8 +12,9 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
-    CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, RetrievalAnchorId, SourceSpan,
-    canonical_sha256,
+    CommitId, ComponentVersion, ContentDigest, FileOccurrenceId, ManifestDigest,
+    PayloadReferenceV1, RetrievalAnchorId, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SourceSpan, canonical_sha256,
 };
 
 use super::{
@@ -34,6 +35,8 @@ const FILE_ID_DOMAIN_V1: &str = "tracedecay.pr13.github.file-occurrence.v1";
 const RELATED_ANCHOR_DOMAIN_V1: &str = "tracedecay.pr13.github.related-anchor.v1";
 const BODY_KEY_PREFIX_V1: &str = "feedback.github-review.body.v1.";
 const BODY_DIGEST_DOMAIN_V1: &str = "tracedecay.pr13.github.retained-body.v1";
+const BODY_SANITIZER_VERSION_V1: &str = "sanitizer.github-review.provider-metadata.v1";
+const BODY_RECEIPT_DOMAIN_V1: &str = "tracedecay.pr13.github.retained-body-receipt.v1";
 const MAX_GIT_BLOB_BYTES_V1: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -122,6 +125,7 @@ pub struct GitHubReviewBodyEvidenceV1 {
     pub body_anchor: RetrievalAnchorId,
     pub provider_body_digest: ManifestDigest,
     pub retained_body_digest: ManifestDigest,
+    pub sanitization_receipt: SanitizationReceiptV1,
     retained_body: String,
 }
 
@@ -549,10 +553,18 @@ impl ProjectGitHubAnchorAuthorityV1 {
                     return GitHubReviewBodyReadOutcomeV1::Unavailable;
                 }
             }
+            let Some(sanitization_receipt) = body_sanitization_receipt(
+                &body.body_anchor,
+                &body.provider_body_digest,
+                &body.retained_body,
+            ) else {
+                return GitHubReviewBodyReadOutcomeV1::Unavailable;
+            };
             GitHubReviewBodyReadOutcomeV1::Current(Box::new(GitHubReviewBodyEvidenceV1 {
                 body_anchor: body.body_anchor,
                 provider_body_digest: body.provider_body_digest,
                 retained_body_digest: body.retained_body_digest,
+                sanitization_receipt,
                 retained_body: body.retained_body,
             }))
         })
@@ -810,6 +822,7 @@ fn stored_body(
     seed: &GitHubReviewAnchorSeedV1,
     anchors: &GitHubCanonicalReviewAnchorsV1,
 ) -> Option<StoredGitHubReviewBodyV1> {
+    body_sanitization_receipt(&anchors.body_anchor, &seed.body_digest, &seed.retained_body)?;
     let body = StoredGitHubReviewBodyV1 {
         scope: request.scope.clone(),
         pull_request_id: request.pull_request_id.clone(),
@@ -835,6 +848,12 @@ fn valid_stored_body(body: &StoredGitHubReviewBodyV1) -> bool {
         && body.retained_body_digest.validate().is_ok()
         && !body.retained_body.is_empty()
         && body.retained_body.len() <= super::MAX_GITHUB_REVIEW_BODY_BYTES_V1
+        && body_sanitization_receipt(
+            &body.body_anchor,
+            &body.provider_body_digest,
+            &body.retained_body,
+        )
+        .is_some()
         && canonical_sha256(&(BODY_DIGEST_DOMAIN_V1, body.retained_body.as_str()))
             .is_ok_and(|digest| digest == body.retained_body_digest)
         && related_anchor_from_comment(
@@ -845,6 +864,54 @@ fn valid_stored_body(body: &StoredGitHubReviewBodyV1) -> bool {
         )
         .as_ref()
             == Some(&body.body_anchor)
+}
+
+fn body_sanitization_receipt(
+    body_anchor: &RetrievalAnchorId,
+    provider_body_digest: &ManifestDigest,
+    retained_body: &str,
+) -> Option<SanitizationReceiptV1> {
+    let payload =
+        PayloadReferenceV1::for_payload(&serde_json::Value::String(retained_body.to_owned()))
+            .ok()?;
+    let sanitizer_version = ComponentVersion::new(BODY_SANITIZER_VERSION_V1).ok()?;
+    let retained_matches_provider = ManifestDigest::new(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(retained_body.as_bytes()))
+    ))
+    .ok()
+    .as_ref()
+        == Some(provider_body_digest);
+    let (disposition, sensitivity) = if retained_matches_provider {
+        (
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+        )
+    } else {
+        (SanitizerDispositionV1::Redacted, SensitivityV1::Secret)
+    };
+    let receipt_digest = canonical_sha256(&(
+        BODY_RECEIPT_DOMAIN_V1,
+        body_anchor,
+        provider_body_digest,
+        &payload,
+        &sanitizer_version,
+        disposition,
+        sensitivity,
+    ))
+    .ok()?;
+    let receipt_id = SanitizationReceiptId::new(format!(
+        "receipt.github-review.{}",
+        digest_suffix(&receipt_digest)?
+    ))
+    .ok()?;
+    SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(receipt_id, sanitizer_version).ok()?,
+        disposition,
+        sensitivity,
+        Some(payload),
+    )
+    .ok()
 }
 
 fn same_original_locator(
@@ -936,4 +1003,38 @@ fn anchor_key(anchor_id: &RetrievalAnchorId) -> String {
 
 fn body_key(anchor_id: &RetrievalAnchorId) -> String {
     format!("{BODY_KEY_PREFIX_V1}{}", anchor_id.as_str())
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    fn provider_digest(body: &str) -> ManifestDigest {
+        ManifestDigest::new(format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(body.as_bytes()))
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn retained_body_receipt_is_deterministic_and_classifies_redaction() {
+        let anchor = RetrievalAnchorId::new("anchor.github-body.fixture").unwrap();
+        let safe = "review looks good";
+        let first = body_sanitization_receipt(&anchor, &provider_digest(safe), safe).unwrap();
+        let second = body_sanitization_receipt(&anchor, &provider_digest(safe), safe).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.disposition(), SanitizerDispositionV1::Accepted);
+        assert_eq!(first.sensitivity(), SensitivityV1::NonSensitive);
+        assert!(first.payload().is_some());
+
+        let redacted =
+            body_sanitization_receipt(&anchor, &provider_digest("token=secret"), "[REDACTED]")
+                .unwrap();
+        assert_eq!(redacted.disposition(), SanitizerDispositionV1::Redacted);
+        assert_eq!(redacted.sensitivity(), SensitivityV1::Secret);
+        assert!(redacted.payload().is_some());
+        assert_ne!(redacted.receipt(), first.receipt());
+    }
 }

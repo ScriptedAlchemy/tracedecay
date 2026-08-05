@@ -80,7 +80,8 @@ pub(super) async fn admitted_lsp_workspace_for_request(
     let single_root = requested_uris.len() == 1;
     let active_project_path = project_path.canonicalize().ok()?;
     let graphs = store_administration.mounted_project_graphs().await;
-    let mut resolved_roots = Vec::with_capacity(requested_uris.len());
+    let mut selectors = Vec::with_capacity(requested_uris.len());
+    let mut canonical_uris = BTreeMap::new();
     let mut admits_active_project = false;
     for requested_uri in requested_uris {
         let uri = url::Url::parse(&requested_uri).ok()?;
@@ -94,9 +95,11 @@ pub(super) async fn admitted_lsp_workspace_for_request(
         if requested_path == active_project_path {
             admits_active_project = true;
         }
-        let canonical_uri = url::Url::from_file_path(&requested_path).ok()?.to_string();
         let mut candidates = Vec::new();
         for graph in &graphs {
+            if graph.project_root() != requested_path {
+                continue;
+            }
             let Some(raw_project_id) = graph.store_layout().identity.project_id.as_deref() else {
                 continue;
             };
@@ -104,32 +107,40 @@ pub(super) async fn admitted_lsp_workspace_for_request(
             else {
                 continue;
             };
-            #[allow(deprecated)]
-            let Ok(scope) = crate::application::context::resolve_registered_root_scope(
-                graph.project_root(),
-                &requested_path,
-                &project_id,
-            ) else {
-                continue;
-            };
-            if !service
-                .lsp_owner_matches_scope(graph.project_root(), &scope)
-                .await
-            {
-                continue;
-            }
-            candidates.push((graph.project_root().to_path_buf(), scope));
+            candidates.push(project_id);
         }
-        candidates.sort_by(|left, right| left.1.scope_digest.cmp(&right.1.scope_digest));
-        candidates.dedup_by(|left, right| left.1.scope_digest == right.1.scope_digest);
-        let [(registered_root, scope)] = candidates.as_slice() else {
+        candidates.sort();
+        candidates.dedup();
+        let [project_id] = candidates.as_slice() else {
             return None;
         };
-        resolved_roots.push((registered_root.clone(), canonical_uri, scope.clone()));
+        selectors.push(
+            tracedecay_application::RegisteredRootSelectorV1::new(
+                project_id.clone(),
+                requested_path.clone(),
+            )
+            .ok()?,
+        );
+        let canonical_uri = url::Url::from_file_path(&requested_path).ok()?.to_string();
+        canonical_uris.insert(requested_path, canonical_uri);
     }
     if !admits_active_project {
         return None;
     }
+    let resolved = super::invocation_dispatch::resolve_multi_root_projects(
+        store_administration,
+        service,
+        &selectors,
+    )
+    .await
+    .ok()?;
+    let resolved_roots = resolved
+        .into_iter()
+        .map(|(root, scope, locator)| {
+            let uri = canonical_uris.get(&root)?.clone();
+            Some((root, uri, scope, locator))
+        })
+        .collect::<Option<Vec<_>>>()?;
     service
         .authorize_lsp_workspace(resolved_roots, tracedecay_application::clock::now_micros())
         .await

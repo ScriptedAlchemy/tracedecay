@@ -3,7 +3,7 @@ use super::{
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
     Commands, DaemonAction, FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction,
     MigrateAction, PackageHookAction, ScoopPackageHookAction, SessionsAction,
-    SessionsRefreshAction, WorkflowCliOperationArg,
+    SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
@@ -222,7 +222,10 @@ fn workflow_command_binds_one_closed_typed_operation() {
     let Some(Commands::Workflow { invocation }) = cli.command else {
         panic!("unexpected Workflow command");
     };
-    assert_eq!(invocation.operation, WorkflowCliOperationArg::ExecuteFanOut);
+    assert_eq!(
+        invocation.operation,
+        tracedecay_api::WorkflowOperation::ExecuteFanOut
+    );
     assert_eq!(
         invocation.request_file,
         std::path::Path::new("workflow.json")

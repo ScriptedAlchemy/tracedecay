@@ -14,7 +14,10 @@ use tracedecay_runtime_core::db::engine::{
     Connection, Executor, QueryExecutor, TransactionBehavior, params,
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
-use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1;
+use tracedecay_rusqlite_runtime::workflow::{
+    WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_SCHEMA_VERSION_V1,
+    WORKFLOW_TABLE_CONTRACTS_V1,
+};
 
 const REGISTRY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS projects (
@@ -245,6 +248,7 @@ pub async fn ensure_registered_schema_for_admission(
     conn: &Connection,
 ) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
     const OPERATION: &str = "initialize registered global database schema";
+    let workflow_admission = inspect_workflow_schema_for_admission(conn).await?;
     let is_fresh = !table_exists(conn, "sessions").await?
         && !table_exists(conn, "observations").await?
         && !table_exists(conn, "code_projects").await?;
@@ -278,17 +282,37 @@ pub async fn ensure_registered_schema_for_admission(
 
         configuration::ensure_configuration_schema(&transaction)
             .await
-            .map_err(|error| global_db_operation_error("initialize configuration schema", error))?;
+            .map_err(|error| match error {
+                configuration::ConfigurationSchemaError::ResetRequired { reason } => {
+                    tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                        "configuration",
+                        reason,
+                    )
+                }
+                configuration::ConfigurationSchemaError::Storage(error) => {
+                    global_db_operation_error("initialize configuration schema", error)
+                }
+            })?;
         git_index_transactions::ensure_git_index_transaction_schema(&transaction).await?;
 
         transaction
             .execute_batch(TRANSCRIPT_SCHEMA)
             .await
             .map_err(|error| global_db_operation_error("initialize transcript schema", error))?;
-        transaction
-            .execute_batch(WORK_SCHEMA_V1)
-            .await
-            .map_err(|error| global_db_operation_error("initialize Work schema", error))?;
+        if workflow_admission == WorkflowSchemaAdmission::Create {
+            for table in WORKFLOW_TABLE_CONTRACTS_V1 {
+                transaction
+                    .execute_batch(table.sql)
+                    .await
+                    .map_err(|error| {
+                        global_db_operation_error("initialize workflow schema", error)
+                    })?;
+            }
+            transaction
+                .execute_batch(WORKFLOW_SCHEMA_IDENTITY_V1)
+                .await
+                .map_err(|error| global_db_operation_error("initialize workflow schema", error))?;
+        }
         transaction
             .execute_batch(AUTHORIZED_SCOPE_SET_SCHEMA_V1)
             .await
@@ -320,7 +344,17 @@ pub async fn ensure_registered_schema_for_admission(
 
         tracedecay_sessions::runtime::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
             .await
-            .map_err(|error| global_db_operation_error("initialize LCM schema", error))?;
+            .map_err(|error| match error {
+                tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
+                    found_version,
+                    required_version,
+                } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
+                    component: "LCM",
+                    found_version,
+                    required_version,
+                },
+                error => global_db_operation_error("initialize LCM schema", error),
+            })?;
         tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_schema_in_transaction(
             &transaction,
         )
@@ -401,6 +435,159 @@ async fn table_exists(
         .await
         .map(|row| row.is_some())
         .map_err(|error| global_db_operation_error("inspect registered global schema", error))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkflowSchemaAdmission {
+    Create,
+    Complete,
+}
+
+async fn inspect_workflow_schema_for_admission(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<WorkflowSchemaAdmission> {
+    let mut rows = conn
+        .query(
+            "SELECT type, name, sql FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error("inspect workflow schema tables", error))?;
+    let mut tables = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error("read workflow schema tables", error))?
+    {
+        tables.push((
+            row.get::<String>(0).map_err(|error| {
+                global_db_operation_error("decode workflow schema object type", error)
+            })?,
+            row.get::<String>(1).map_err(|error| {
+                global_db_operation_error("decode workflow schema object name", error)
+            })?,
+            row.get::<Option<String>>(2).map_err(|error| {
+                global_db_operation_error("decode workflow schema object SQL", error)
+            })?,
+        ));
+    }
+    if tables.is_empty() {
+        return Ok(WorkflowSchemaAdmission::Create);
+    }
+
+    let actual_workflow_tables = tables
+        .iter()
+        .filter(|(object_type, name, _)| {
+            object_type == "table"
+                && WORKFLOW_TABLE_CONTRACTS_V1
+                    .iter()
+                    .any(|contract| contract.name == name.as_str())
+        })
+        .map(|(_, name, sql)| (name.as_str(), sql.as_deref()))
+        .collect::<Vec<_>>();
+    let expected_workflow_tables = WORKFLOW_TABLE_CONTRACTS_V1
+        .iter()
+        .map(|contract| (contract.name, Some(contract.sql)))
+        .collect::<Vec<_>>();
+    if actual_workflow_tables != expected_workflow_tables {
+        return Err(workflow_schema_reset_required(
+            "workflow tables are absent, incomplete, or not exact",
+        ));
+    }
+
+    let mut schema = conn
+        .query(
+            "SELECT singleton, schema_version, definition_digest FROM workflow_schema
+             ORDER BY singleton",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error("inspect workflow schema identity", error))?;
+    let Some(identity) = schema
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error("read workflow schema identity", error))?
+    else {
+        return Err(workflow_schema_reset_required(
+            "workflow schema identity is missing",
+        ));
+    };
+    let singleton = identity
+        .get::<i64>(0)
+        .map_err(|error| global_db_operation_error("decode workflow schema singleton", error))?;
+    let schema_version = identity
+        .get::<i64>(1)
+        .map_err(|error| global_db_operation_error("decode workflow schema version", error))?;
+    let definition_digest = identity
+        .get::<String>(2)
+        .map_err(|error| global_db_operation_error("decode workflow schema digest", error))?;
+    let extra_identity = schema
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error("read workflow schema identity", error))?
+        .is_some();
+    if singleton != 1
+        || schema_version != WORKFLOW_SCHEMA_VERSION_V1
+        || definition_digest != WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1
+        || extra_identity
+    {
+        return Err(workflow_schema_reset_required(
+            "workflow schema identity does not match the final contract",
+        ));
+    }
+
+    for table in WORKFLOW_TABLE_CONTRACTS_V1 {
+        let mut columns = conn
+            .query(&format!("PRAGMA table_info({})", table.name), ())
+            .await
+            .map_err(|error| global_db_operation_error("inspect workflow table columns", error))?;
+        let mut actual_columns = Vec::new();
+        while let Some(row) = columns
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error("read workflow table columns", error))?
+        {
+            actual_columns.push((
+                row.get::<String>(1).map_err(|error| {
+                    global_db_operation_error("decode workflow column name", error)
+                })?,
+                row.get::<String>(2).map_err(|error| {
+                    global_db_operation_error("decode workflow column type", error)
+                })?,
+                row.get::<i64>(3).map_err(|error| {
+                    global_db_operation_error("decode workflow column nullability", error)
+                })?,
+                row.get::<i64>(5).map_err(|error| {
+                    global_db_operation_error("decode workflow column key", error)
+                })?,
+            ));
+        }
+        let exact = actual_columns.len() == table.columns.len()
+            && actual_columns
+                .iter()
+                .zip(table.columns)
+                .all(|(actual, expected)| {
+                    actual.0 == expected.name
+                        && actual.1 == expected.sql_type
+                        && actual.2 == expected.not_null
+                        && actual.3 == expected.primary_key
+                });
+        if !exact {
+            return Err(workflow_schema_reset_required(
+                "workflow table columns do not match the final contract",
+            ));
+        }
+    }
+
+    Ok(WorkflowSchemaAdmission::Complete)
+}
+
+fn workflow_schema_reset_required(
+    reason: &str,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::reset_required("workflow", reason)
 }
 
 pub async fn validate_observation_authority_connection(

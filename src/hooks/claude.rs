@@ -3,26 +3,15 @@
 //! Claude and Codex share the common hook JSON shape.
 
 use serde_json::Value;
-use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::codex::codex_additional_context_json;
-use super::memory_inject;
-use super::post_tool_use::{
-    CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, captured_tool_output,
-    is_claude_edit_tool, is_claude_hint_tool, is_post_tool_use_failure_event,
-    notify_post_tool_use_with_telemetry, tool_input_command_str, tool_input_edit_text,
-    tool_input_file_path_str, trusted_tool_failure,
-};
-use super::steering::{
-    append_context_block, append_context_recovery_hint, append_tracedecay_bootstrap_context,
-    cursor_index_signals_for_root, index_status_line, session_start_from_compaction,
-};
-use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint, is_harness_memory_path};
+use super::post_tool_use::is_post_tool_use_failure_event;
+use super::steering::{cursor_index_signals_for_root, index_status_line};
+use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
-    deduped_project_hint, event_cwd_from_parsed, event_project_root,
-    event_project_root_with_identity, event_session_id, format_tool_hint,
-    is_project_like_workspace, process_cwd_project_root, prompt_like_text, read_hook_event,
-    record_hook_analytics, record_hook_invoked_parsed, research_block_reason,
+    event_project_root, event_project_root_with_identity, event_session_id,
+    process_cwd_project_root, prompt_like_text, read_hook_event, record_hook_analytics,
+    record_hook_invoked_parsed, research_block_reason,
 };
 
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
@@ -145,7 +134,12 @@ pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
 /// Claude Code `SessionStart` hook handler.
 pub async fn hook_claude_session_start() -> i32 {
     let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    println!("{}", claude_session_start_response(&event).await);
+    0
+}
+
+async fn claude_session_start_response(event: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     // Resolve the project root the same identity-aware way the printed context
     // does, including global-only stores and fresh harness-created worktrees.
     let root = event_project_root_with_identity(&parsed).await;
@@ -153,47 +147,22 @@ pub async fn hook_claude_session_start() -> i32 {
         root.as_deref(),
         HintAgent::Claude,
         "SessionStart",
-        &event,
+        event,
         &parsed,
     );
-    let mut context = claude_session_context_for_event(&event).await;
-    let session_id = event_session_id(&parsed);
-    if root.is_none() && ingest_user_claude_session(session_id.clone()).await {
-        super::schedule_user_session_review("claude", session_id.as_deref());
-    }
-    let digest = match root.as_deref() {
-        Some(root) => {
-            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
-        }
-        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
-    };
-    if let Some(digest) = digest {
-        append_context_block(&mut context, &digest);
-    }
-    // Fire-and-forget: nudge the daemon to refresh the index (and, when this
-    // session runs in a harness-created linked worktree, auto-track its branch
-    // store) before we print the staleness hint. `notify_hook_event` is
-    // timeout-guarded and a no-op when the daemon socket is missing, so it is
-    // safe on every session start and never blocks it. Gated on a resolved
-    // project root and the real session cwd so the linked-worktree detection in
-    // `plan_hook_event` sees the session tree rather than the daemon's cwd.
-    if let Some(root) = root.as_ref()
-        && let Some(event) = claude_session_start_hook_event(&parsed)
-    {
-        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
-    }
-    if session_start_from_compaction(&event) {
-        append_context_recovery_hint(&mut context);
-    }
-    if context.is_empty() {
-        println!("{}", serde_json::json!({}));
-    } else {
-        println!(
-            "{}",
-            codex_additional_context_json("SessionStart", &context)
-        );
-    }
-    0
+    super::v2::dispatch_for_scope(
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        event,
+        root.as_deref(),
+        Some(&hook_telemetry),
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    .flatten()
+    .map_or_else(
+        || serde_json::json!({}).to_string(),
+        |guidance| codex_additional_context_json("SessionStart", &guidance),
+    )
 }
 
 /// Compact routing guidance emitted to a Claude subagent at start. Kept short
@@ -246,48 +215,17 @@ async fn claude_subagent_start_context(parsed: &Value) -> Option<String> {
     Some(context)
 }
 
-fn claude_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
-    event_cwd_from_parsed(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Claude, cwd))
-}
-
-/// Builds the Claude `SessionStart` context for code workspaces.
-pub async fn claude_session_context_for_event(event_json: &str) -> String {
-    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    match event_project_root_with_identity(&parsed).await {
-        Some(root) => {
-            let (staleness, _) = cursor_index_signals_for_root(&root).await;
-            let mut context = index_status_line(true, staleness.as_deref());
-            append_tracedecay_bootstrap_context(&mut context);
-            context
-        }
-        None if event_cwd_from_parsed(&parsed)
-            .as_deref()
-            .is_some_and(is_project_like_workspace) =>
-        {
-            index_status_line(false, None)
-        }
-        None => String::new(),
-    }
-}
-
-/// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler used to keep
-/// the graph fresh and surface outcome-aware `TraceDecay` hints.
-///
-/// Two independent outputs: the daemon notification (targeted sync / branch
-/// tracking, via stderr/IPC only) and, for the native `Grep`/`Glob`/`Read`
-/// tools plus recursive shell searches or compiler failures, an event-matched
-/// `additionalContext` hint printed to stdout. The daemon path never writes
-/// stdout, so the two do not interfere. Fail-open: no surviving hint leaves
-/// prior behavior unchanged.
+/// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler.
 pub async fn hook_claude_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    // One parse for the whole hook: the failure classification, the project
-    // root, the analytics row, the hint surface, and the daemon notification
-    // all read this value. `PostToolUse` fires on every tool call, so each
-    // re-parse of the payload was pure per-event latency. Hook V2 still runs
-    // its own typed native decode; that one is the host contract, not a repeat
-    // of this parse.
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    if let Some(response) = claude_post_tool_use_response(&event).await {
+        println!("{response}");
+    }
+    0
+}
+
+async fn claude_post_tool_use_response(event: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let hook_event_name = if is_post_tool_use_failure_event(&parsed) {
         "PostToolUseFailure"
     } else {
@@ -298,94 +236,19 @@ pub async fn hook_claude_post_tool_use() -> i32 {
         root.as_deref(),
         HintAgent::Claude,
         hook_event_name,
-        &event,
+        event,
         &parsed,
     );
-    if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
-            tracedecay_hooks::HookHostV1::ClaudeCode,
-            &event,
-            root,
-            Some(&hook_telemetry),
-        )
-        .await
-        .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance {
-            println!(
-                "{}",
-                codex_additional_context_json(hook_event_name, &guidance)
-            );
-        }
-        return 0;
-    }
-    if let Some(context) = claude_post_tool_use_hint_context(&parsed) {
-        println!(
-            "{}",
-            codex_additional_context_json(hook_event_name, &context)
-        );
-    }
-    notify_post_tool_use_with_telemetry(&CLAUDE_POST_TOOL_USE_SPEC, &parsed, &hook_telemetry).await;
-    0
-}
-
-/// Builds the `PostToolUse` `additionalContext` string for a native
-/// search/read tool event (or a recursive shell search), or `None` when no
-/// hint survives dedupe. Decides the raw hint with [`decide_post_tool_use_hint`],
-/// then dedupes per (session, category) via [`deduped_project_hint`] exactly
-/// like the pre-tool-use surface.
-fn claude_post_tool_use_hint_context(parsed: &Value) -> Option<String> {
-    let hint = decide_post_tool_use_hint(parsed)?;
-    // `deduped_project_hint` mints its own candidate id and records the
-    // terminal analytics row; the Claude post-tool-use surface does not emit a
-    // separate `hint_candidate`, per its documented contract.
-    let root = event_project_root(parsed);
-    let session_id = event_session_id(parsed);
-    let hint = deduped_project_hint(root.as_deref(), HintAgent::Claude, session_id, hint)?;
-    Some(format_tool_hint(&hint))
-}
-
-/// Pure hint decision for a Claude post-tool event: shapes a [`ToolHintInput`]
-/// from the event's tool name, input, and host-owned outcome fields, then runs
-/// [`decide_hint`]. Returns `None` for non-candidate
-/// tools (the edit/write tools that drive daemon sync only) and when no hint
-/// applies. No I/O, so it is unit-testable without a profile store.
-fn decide_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
-    let tool_name = parsed.get("tool_name").and_then(Value::as_str)?;
-    let file_path = tool_input_file_path_str(parsed);
-    // Candidates: the native hint tools (Grep/Glob/Read), Bash, edit/write tools
-    // targeting a harness-memory file (so the memory_store hint can route
-    // durable facts to tracedecay_fact_store), and edit/write tools that add a
-    // new function-sized body (so the edit_redundancy hint can nudge a
-    // duplicate-logic probe). `edit_text` is read only for edit tools and only
-    // to feed those two edit branches; every other edit/write drives daemon sync
-    // only and gets no hint.
-    let is_shell = CLAUDE_POST_TOOL_USE_SHELL_TOOLS
-        .iter()
-        .any(|tool| tool.eq_ignore_ascii_case(tool_name));
-    let is_edit = is_claude_edit_tool(tool_name);
-    let is_memory_edit = is_edit && file_path.as_deref().is_some_and(is_harness_memory_path);
-    // Only pay the string scan for non-memory edits (memory edits route to their
-    // own branch and never carry a code body worth probing).
-    let edit_text = (is_edit && !is_memory_edit)
-        .then(|| tool_input_edit_text(parsed))
-        .flatten();
-    if !is_claude_hint_tool(tool_name) && !is_shell && !is_memory_edit && edit_text.is_none() {
-        return None;
-    }
-    decide_hint(&ToolHintInput {
-        agent: HintAgent::Claude,
-        session_id: event_session_id(parsed),
-        tool_name: Some(tool_name.to_string()),
-        command: tool_input_command_str(parsed),
-        prompt: None,
-        subagent_type: None,
-        file_path,
-        captured_output: captured_tool_output(parsed),
-        trusted_failure: trusted_tool_failure(parsed),
-        edit_text,
-        hints_enabled: true,
-    })
+    super::v2::dispatch_for_scope(
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        event,
+        root.as_deref(),
+        Some(&hook_telemetry),
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    .flatten()
+    .map(|guidance| codex_additional_context_json(hook_event_name, &guidance))
 }
 
 /// `UserPromptSubmit` hook handler: resets the project counter and injects
@@ -419,7 +282,7 @@ pub async fn hook_prompt_submit() {
         && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
             .await
     {
-        super::schedule_user_session_review("claude", session_id.as_deref());
+        super::schedule_user_session_review("claude", session_id.as_deref()).await;
     }
     if let Some(root) = root.as_deref()
         && let Err(error) = super::daemon_hook_action(
@@ -431,32 +294,10 @@ pub async fn hook_prompt_submit() {
     {
         eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
     }
-    let recall = prompt_like_text(&parsed);
-    let recall = match (root.as_deref(), recall.as_deref()) {
-        (Some(root), Some(prompt)) => {
-            Box::pin(memory_inject::combined_prompt_memory_recall(
-                root,
-                session_id.as_deref(),
-                prompt,
-            ))
-            .await
-        }
-        (None, Some(prompt)) => {
-            memory_inject::user_prompt_memory_recall(session_id.as_deref(), prompt).await
-        }
-        (_, None) => None,
-    };
-    if let Some(recall) = recall {
-        println!(
-            "{}",
-            codex_additional_context_json("UserPromptSubmit", &recall)
-        );
-    } else {
-        println!("{}", serde_json::json!({}));
-    }
+    println!("{}", serde_json::json!({}));
 }
 
-/// `Stop` hook handler: ingests new session data and prints a cost receipt.
+/// `Stop` hook handler: submits the native turn boundary to daemon-owned V2.
 pub async fn hook_stop() {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
@@ -469,36 +310,32 @@ pub async fn hook_stop() {
         }
         Err(_) => String::new(),
     };
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    println!("{}", claude_stop_response_for_event(&event).await);
+}
+
+async fn claude_stop_response_for_event(event: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry =
-        record_hook_invoked_parsed(root.as_deref(), HintAgent::Claude, "Stop", &event, &parsed);
-    if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
-            tracedecay_hooks::HookHostV1::ClaudeCode,
-            &event,
-            root,
-            Some(&hook_telemetry),
-        )
-        .await
-        .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance {
-            println!("{}", codex_additional_context_json("Stop", &guidance));
-        }
-        return;
-    }
-    let session_id = event_session_id(&parsed);
-    if root.is_none()
-        && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
-            .await
-    {
-        super::schedule_user_session_review("claude", session_id.as_deref());
-    }
+        record_hook_invoked_parsed(root.as_deref(), HintAgent::Claude, "Stop", event, &parsed);
+    super::v2::dispatch_for_scope(
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        event,
+        root.as_deref(),
+        Some(&hook_telemetry),
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    .flatten()
+    .map_or_else(
+        || serde_json::json!({}).to_string(),
+        |guidance| codex_additional_context_json("Stop", &guidance),
+    )
 }
 
 /// Incrementally ingests one live projectless Claude session into the profile
 /// session store. `false` means no new transcript evidence was written.
+#[cfg(test)]
 pub async fn ingest_user_claude_session(session_id: Option<String>) -> bool {
     ingest_user_claude_session_with_telemetry(session_id, None).await
 }
@@ -513,21 +350,88 @@ async fn ingest_user_claude_session_with_telemetry(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use super::super::format_tool_hint;
+    use super::super::post_tool_use::{
+        captured_tool_output, tool_input_command_str, trusted_tool_failure,
+    };
+    use super::super::tool_hints::{ToolHint, is_harness_memory_path};
     use super::*;
 
-    #[test]
-    fn claude_session_start_event_signals_daemon_with_real_cwd() {
-        let event = claude_session_start_hook_event(&serde_json::json!({
-            "cwd": "/workspace/claude-session"
-        }))
-        .unwrap();
+    fn decide_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
+        let tool_name = parsed.get("tool_name").and_then(Value::as_str)?;
+        let null = Value::Null;
+        let tool_input = parsed.get("tool_input").unwrap_or(&null);
+        let file_path = tool_input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned);
+        let is_edit = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+            .iter()
+            .any(|tool| tool.eq_ignore_ascii_case(tool_name));
+        let is_memory_edit = is_edit && file_path.as_deref().is_some_and(is_harness_memory_path);
+        let edit_text = (is_edit && !is_memory_edit)
+            .then(|| {
+                ["content", "new_string", "new_source"]
+                    .iter()
+                    .find_map(|key| tool_input.get(*key).and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        tool_input
+                            .get("edits")
+                            .and_then(Value::as_array)
+                            .map(|edits| {
+                                edits
+                                    .iter()
+                                    .filter_map(|edit| {
+                                        edit.get("new_string").and_then(Value::as_str)
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                            .filter(|text| !text.is_empty())
+                    })
+            })
+            .flatten();
+        let is_hint_tool = ["Grep", "Glob", "Read"]
+            .iter()
+            .any(|tool| tool.eq_ignore_ascii_case(tool_name));
+        let is_shell = tool_name.eq_ignore_ascii_case("Bash");
+        if !is_hint_tool && !is_shell && !is_memory_edit && edit_text.is_none() {
+            return None;
+        }
+        decide_hint(&ToolHintInput {
+            agent: HintAgent::Claude,
+            session_id: event_session_id(parsed),
+            tool_name: Some(tool_name.to_owned()),
+            command: tool_input_command_str(parsed),
+            prompt: None,
+            subagent_type: None,
+            file_path,
+            captured_output: captured_tool_output(parsed),
+            trusted_failure: trusted_tool_failure(parsed),
+            edit_text,
+            hints_enabled: true,
+        })
+    }
 
-        assert_eq!(event.agent, HookAgent::Claude.as_wire());
-        assert_eq!(event.event, "sessionStart");
-        assert_eq!(
-            event.cwd.as_deref(),
-            Some(std::path::Path::new("/workspace/claude-session"))
-        );
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn terminal_claude_capture_uses_the_profile_daemon_route() {
+        let _lock = crate::hooks::lock_test_env();
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([
+            serde_json::json!({ "messages_upserted": 1 }),
+        ]);
+
+        assert!(ingest_user_claude_session(Some("claude-stop".to_owned())).await);
+
+        let calls = daemon.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+        assert_eq!(calls[0].1["action"], "ingest_transcript");
+        assert_eq!(calls[0].1["provider"], "claude");
+        assert_eq!(calls[0].1["user_scope"], true);
+        assert_eq!(calls[0].1["session_id"], "claude-stop");
     }
 
     fn post_event(tool_name: &str, tool_input: &Value) -> Value {
@@ -803,21 +707,6 @@ mod tests {
         assert!(CLAUDE_SUBAGENT_START_CONTEXT.contains("concept->context"));
     }
 
-    fn touch_marker_graph_db(project_root: &std::path::Path) -> std::path::PathBuf {
-        crate::storage::write_enrollment_marker(
-            project_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_global_only".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
-        let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
-        std::fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
-        std::fs::write(&layout.graph_db_path, b"").unwrap();
-        layout.graph_db_path
-    }
-
     #[tokio::test]
     async fn session_root_uses_shared_identity_resolver_for_global_only_project() {
         let _profile = crate::config::PinnedUserDataDir::new();
@@ -877,52 +766,6 @@ mod tests {
         assert!(
             event_project_root_with_identity(&event).await.is_none(),
             "a registered project without a real graph db must not resolve"
-        );
-    }
-
-    #[tokio::test]
-    async fn session_context_reports_initialized_and_preserves_nudge() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-
-        let profile_root = crate::storage::default_profile_root().unwrap();
-        let gdb =
-            crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-                .await
-                .unwrap();
-        let project_dir = tempfile::tempdir().unwrap();
-        let project_root = project_dir.path().canonicalize().unwrap();
-        gdb.upsert(&project_root, 0).await;
-        touch_marker_graph_db(&project_root);
-
-        let event = serde_json::json!({
-            "hook_event_name": "SessionStart",
-            "cwd": project_root.to_string_lossy(),
-            "source": "startup",
-        })
-        .to_string();
-        let context = claude_session_context_for_event(&event).await;
-        assert!(
-            !context.contains("no project index found"),
-            "a registered, graph-db-backed project must not emit the init nudge: {context}"
-        );
-        assert!(
-            context.contains("tracedecay index status:"),
-            "context must report the index status line: {context}"
-        );
-
-        let unindexed = tempfile::tempdir().unwrap();
-        let unindexed_root = unindexed.path().canonicalize().unwrap();
-        std::fs::write(unindexed_root.join("Cargo.toml"), b"[package]\n").unwrap();
-        let bogus_event = serde_json::json!({
-            "hook_event_name": "SessionStart",
-            "cwd": unindexed_root.to_string_lossy(),
-            "source": "startup",
-        })
-        .to_string();
-        let bogus_context = claude_session_context_for_event(&bogus_event).await;
-        assert!(
-            bogus_context.contains("no project index found"),
-            "an unindexed project-like cwd must still emit the real nudge: {bogus_context}"
         );
     }
 }

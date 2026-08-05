@@ -135,7 +135,7 @@ fn request(
         .roots()
         .iter()
         .enumerate()
-        .map(|(index, scope)| generation(scope, if index == 0 { 'b' } else { 'c' }))
+        .map(|(index, root)| generation(root.scope(), if index == 0 { 'b' } else { 'c' }))
         .collect();
     MultiRootQueryRequestV1 {
         scope_set,
@@ -218,9 +218,9 @@ fn denied_generation_does_not_require_a_current_root_context() {
     let denied_index = set
         .roots()
         .iter()
-        .position(|scope| scope.worktree_id.as_str() == "worktree.linked")
+        .position(|root| root.scope().worktree_id.as_str() == "worktree.linked")
         .unwrap();
-    let denied_scope = set.roots()[denied_index].scope_digest.clone();
+    let denied_scope = set.roots()[denied_index].scope().scope_digest.clone();
     contexts.retain(|context| context.scope().scope_digest != denied_scope);
     let mut request = request(set, contexts, digest('d'), 0, None);
     request.root_generations[denied_index] =

@@ -274,18 +274,6 @@ impl HostAdmissionTestRuntimeV1 {
         store.replay_observations(request).await
     }
 
-    #[cfg(test)]
-    pub(crate) fn project_observation_database_arc_for_test(
-        &self,
-    ) -> Result<Arc<RegisteredGlobalDb>> {
-        self.project_registered
-            .clone()
-            .ok_or_else(|| TraceDecayError::Database {
-                operation: "bind registered project Work test runtime".to_owned(),
-                message: "registered ProjectSessions mount is unavailable".to_owned(),
-            })
-    }
-
     #[doc(hidden)]
     pub fn session_temporal_store_for_test(
         &self,
@@ -457,9 +445,13 @@ impl HostAdmissionTestRuntimeV1 {
         }
         let mut store_ids = Vec::with_capacity(messages.len());
         for message in messages {
-            let raw = database
-                .lcm_load_raw_message(&message.provider, &message.message_id)
+            let store_id = database
+                .lcm_raw_message_store_id(&message.provider, &message.message_id)
                 .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "read registered transcript fixture store id".to_owned(),
+                    message: error.to_string(),
+                })?
                 .ok_or_else(|| TraceDecayError::Database {
                     operation: "read registered transcript fixture store id".to_owned(),
                     message: format!(
@@ -467,7 +459,7 @@ impl HostAdmissionTestRuntimeV1 {
                         message.provider, message.message_id
                     ),
                 })?;
-            store_ids.push(raw.store_id);
+            store_ids.push(store_id);
         }
         Ok(store_ids)
     }
@@ -546,8 +538,12 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> Result<bool> {
         Ok(self
             .project_database_for_test()?
-            .lcm_load_raw_message(provider, message_id)
+            .lcm_raw_message_store_id(provider, message_id)
             .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "check registered project LCM raw message".to_owned(),
+                message: error.to_string(),
+            })?
             .is_some())
     }
 

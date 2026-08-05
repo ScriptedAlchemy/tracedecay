@@ -2,7 +2,7 @@
 
 ## Status / role
 
-Normative PR19 plan. Every TraceDecay database, store, spool, file, journal,
+Normative final-shape plan. Every TraceDecay database, store, spool, file, journal,
 checkpoint, receipt, and projection admits only its exact final V2 shape. Any
 other shape returns typed `ResetRequired` and requires an explicit reset or
 recreation before use.
@@ -31,11 +31,11 @@ Earlier fixture names, family inventories, packet layouts, and transition
 scaffolding are historical evidence only. Do not recreate them as product
 requirements or runtime machinery.
 
-## Future package-boundary seam
+## Optional measured package-boundary candidates
 
 Plan 12 does not prescribe crate-breakup sequencing, source moves, package
-counts, worktrees, commits, or delivery gates. Plans 05, 19, 25, and 33 own
-future query, code-index, convergence, or build-performance boundaries.
+counts, worktrees, commits, or delivery gates. Query, code-index, convergence,
+and build-performance boundaries remain independently measured capabilities.
 
 A package boundary is retained only when a direct same-host developer journey
 improves and production callers preserve public contracts, generated schemas,
@@ -46,9 +46,11 @@ diagnostic observations, not acceptance.
 ## User outcome
 
 An exact-final V2 store opens through one daemon authority. Any other persisted
-shape is refused before interpretation with `ResetRequired`; the operator
-explicitly resets or recreates that target to obtain a clean final store. No
-older data is read or carried forward.
+TraceDecay store shape is refused before interpretation with `ResetRequired`;
+the operator explicitly resets or recreates that target to obtain a clean final
+store. No older TraceDecay store bytes are read or carried forward. Historical
+provider transcripts remain supported native acquisition inputs and are
+sanitized into the clean final store.
 
 ## End-to-end production path
 
@@ -66,7 +68,7 @@ older data is read or carried forward.
    independent release proves its contract. It delegates to the canonical
    operation and owns no storage or lifecycle logic.
 
-Before PR16, one local daemon owns the live store. With remote shared Brain,
+In local mode, one daemon owns the live store. With remote shared Brain,
 exactly one fenced daemon owns each mutable shard. Reset/recreation never
 creates another writer.
 
@@ -109,7 +111,7 @@ creates another writer.
   errors, redaction, effects, pagination, streaming, cancellation, and retry
   behavior without opening storage.
 
-## Not in PR19
+## Explicit non-goals
 
 - Persisted-data conversion, rollback, or compatibility retention.
 - Memory special handling.

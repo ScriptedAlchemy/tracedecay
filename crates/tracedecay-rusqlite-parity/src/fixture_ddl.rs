@@ -148,6 +148,7 @@ pub const SESSION_STORE_FIXTURE_TABLES_DDL: &str = "
                 generation INTEGER NOT NULL,
                 occurrence_id TEXT NOT NULL,
                 source_observation_id TEXT NOT NULL,
+                source_provider TEXT NOT NULL,
                 projection_output_ordinal INTEGER NOT NULL,
                 retrieval_anchor_id TEXT NOT NULL,
                 thread_id TEXT,
@@ -160,6 +161,8 @@ pub const SESSION_STORE_FIXTURE_TABLES_DDL: &str = "
                 knowledge_at INTEGER NOT NULL,
                 valid_time_json TEXT NOT NULL,
                 evidence_json TEXT NOT NULL,
+                sanitized_content_digest TEXT NOT NULL,
+                sanitized_content_bytes INTEGER NOT NULL,
                 snippet_text TEXT NOT NULL,
                 index_text TEXT NOT NULL,
                 PRIMARY KEY(session_id, generation, occurrence_id)

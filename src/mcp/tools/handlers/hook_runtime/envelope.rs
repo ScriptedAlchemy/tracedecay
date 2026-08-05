@@ -90,6 +90,16 @@ fn daemon_mint_hook_v2_id(
     canonical_id
 }
 
+/// Derive a daemon-owned saved-file identity from the opaque native material.
+/// This is shared with the feedback owner so it can resolve an indexed file
+/// without retaining the provider path in a hook envelope.
+pub(crate) fn daemon_mint_hook_v2_file_id(
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    native_file_id: [u8; 16],
+) -> [u8; 16] {
+    daemon_mint_hook_v2_id(envelope, b"file", native_file_id)
+}
+
 fn hook_v2_event_identity_domain(event: &tracedecay_hooks::HookEventV2) -> &'static [u8] {
     use tracedecay_hooks::{HookBoundaryV1, HookEventV2, HookLifecyclePhaseV1};
 
@@ -143,7 +153,7 @@ fn hook_v2_event_identity_domain(event: &tracedecay_hooks::HookEventV2) -> &'sta
 /// Mint canonical daemon-owned identities only after binding validation.
 /// Hook-provided fixed-size values are typed native identity material, never
 /// canonical ledger or orchestration identities.
-pub(super) fn daemon_mint_hook_v2_envelope(
+pub(crate) fn daemon_mint_hook_v2_envelope(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
 ) -> tracedecay_hooks::HookEventEnvelopeV2 {
     let mut canonical = envelope.clone();
@@ -175,7 +185,7 @@ pub(super) fn daemon_mint_hook_v2_envelope(
             file_id,
             changed_range_count,
         } => tracedecay_hooks::HookEventV2::SavedEdit {
-            file_id: daemon_mint_hook_v2_id(envelope, b"file", *file_id),
+            file_id: daemon_mint_hook_v2_file_id(envelope, *file_id),
             changed_range_count: *changed_range_count,
         },
         tracedecay_hooks::HookEventV2::TestLifecycle {

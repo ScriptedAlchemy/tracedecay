@@ -10,6 +10,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tracedecay_lsp::LspSessionRegistry;
+use tracedecay_runtime_core::resident_memory::{
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -20,8 +23,8 @@ use super::*;
 /// The Unix and portable brokers share this state so an authenticated LSP
 /// session remains daemon-owned across client connections until it is detached
 /// or expires.
-#[derive(Clone)]
 pub(super) struct DaemonInvocationState {
+    pub(super) resident_memory: Arc<ProcessResidentMemoryV1>,
     pub(super) lsp_session_registry: Arc<tokio::sync::Mutex<LspSessionRegistry>>,
     pub(super) service: DaemonInvocationService,
     pub(super) github_credential_lifecycle:
@@ -32,13 +35,34 @@ pub(super) struct DaemonInvocationState {
         crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
 }
 
+impl Clone for DaemonInvocationState {
+    fn clone(&self) -> Self {
+        Self {
+            resident_memory: Arc::clone(&self.resident_memory),
+            lsp_session_registry: Arc::clone(&self.lsp_session_registry),
+            service: self.service.clone(),
+            github_credential_lifecycle: self.github_credential_lifecycle.clone(),
+            code_index_schedulers: self.code_index_schedulers.clone(),
+            query_authority_provider: self.query_authority_provider.clone(),
+            semantic_projection_scheduler: self.semantic_projection_scheduler.clone(),
+        }
+    }
+}
+
 impl Default for DaemonInvocationState {
     fn default() -> Self {
+        let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
+            DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        ));
         let code_index_schedulers =
-            code_index_scheduler::CodeIndexSchedulerRegistryV1::new(MAX_CACHED_PROJECT_SERVERS);
+            code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(
+                MAX_CACHED_PROJECT_SERVERS,
+                Arc::clone(&resident_memory),
+            );
         let service =
             DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone());
         Self {
+            resident_memory,
             lsp_session_registry: Arc::new(tokio::sync::Mutex::new(
                 LspSessionRegistry::default(),
             )),
@@ -116,6 +140,22 @@ impl DaemonInvocationState {
             project_root,
             scope,
             &self.query_authority_provider,
+        )
+        .await
+    }
+
+    pub(super) async fn mount_core_query_authority_for_project(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        cursor_keys: &crate::global_db::session_temporal::GlobalDbCursorKeyProvider,
+    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
+    {
+        code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
+            &self.code_index_schedulers,
+            project_root,
+            scope,
+            cursor_keys,
         )
         .await
     }
@@ -276,7 +316,7 @@ impl DaemonInvocationState {
             scope_set
                 .roots()
                 .iter()
-                .map(|scope| &scope.scope_digest)
+                .map(|root| &root.scope().scope_digest)
                 .collect::<Vec<_>>(),
         )) else {
             return DaemonInvocationResponse::problem(
@@ -296,7 +336,8 @@ impl DaemonInvocationState {
         let mut contexts = Vec::new();
         let mut generations = Vec::with_capacity(scope_set.roots().len());
         let mut outcomes = BTreeMap::new();
-        for (ordinal, scope) in scope_set.roots().iter().enumerate() {
+        for (ordinal, root) in scope_set.roots().iter().enumerate() {
+            let scope = root.scope();
             let registry_context = match database
                 .project_registry_context_by_id(scope.project_id.as_str())
                 .await
@@ -599,6 +640,63 @@ impl DaemonInvocationState {
         if let Some(response) = invalid_multi_root_invocation_response(&request) {
             return response;
         }
+        if request.is_configuration_reset() {
+            if let Err(problem) = request.validate() {
+                return DaemonInvocationResponse::problem(request.request_id, problem);
+            }
+            let Some(project_path) = project_path else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let service::invocation::DaemonInvocationPayload::Configuration {
+                request:
+                    crate::application_surface::ConfigurationSurfaceRequest::Reset(reset_request),
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } = request.payload
+            else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            };
+            if cancellation.is_cancelled()
+                || deadline.is_elapsed_at(observed_at)
+                || deadline.is_elapsed_at(crate::daemon_client::invocation_now_micros())
+            {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::Unavailable,
+                );
+            }
+            return match store_administration
+                .reset_project_configuration(project_path, reset_request)
+                .await
+            {
+                Ok(outcome) => DaemonInvocationResponse::with_outcome(
+                    request.request_id,
+                    service::invocation::DaemonInvocationOutcome::ConfigurationReset { outcome },
+                ),
+                Err(error) => {
+                    crate::daemon::log_daemon_event(
+                        "configuration_reset",
+                        &[
+                            ("outcome", "refused".to_owned()),
+                            ("project", project_path.display().to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    DaemonInvocationResponse::problem(
+                        request.request_id,
+                        service::invocation::DaemonInvocationProblem::Unavailable,
+                    )
+                }
+            };
+        }
         let request_project_path = request.requires_project().then_some(project_path).flatten();
         if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead {
             request: scope_set_request,
@@ -667,7 +765,7 @@ impl DaemonInvocationState {
             let roots = match resolve_multi_root_projects(
                 store_administration,
                 &self.service,
-                &scope_set_request.project_ids,
+                &scope_set_request.roots,
             )
             .await
             {
@@ -783,5 +881,27 @@ impl DaemonInvocationState {
                 request,
             )
             .await
+    }
+}
+
+#[cfg(test)]
+mod resident_memory_tests {
+    use super::*;
+
+    #[test]
+    fn invocation_state_and_code_index_registry_share_one_process_resident_authority() {
+        let state = DaemonInvocationState::default();
+        let cloned = state.clone();
+
+        assert!(Arc::ptr_eq(
+            &state.resident_memory,
+            state.code_index_schedulers.resident_memory(),
+        ));
+        assert!(Arc::ptr_eq(&state.resident_memory, &cloned.resident_memory));
+        assert_eq!(
+            state.resident_memory.snapshot().limit_bytes,
+            tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
+                .get(),
+        );
     }
 }

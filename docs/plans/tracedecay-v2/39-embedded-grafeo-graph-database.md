@@ -1,21 +1,26 @@
 # Embedded Grafeo Graph Database Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Replace custom adjacency structures and graph-shaped SQLite storage with one embedded Grafeo runtime boundary while retaining SQLite only for genuinely relational, transactional, and content-bearing records.
 
-**Architecture:** Task 1 retains PR487's temporary direct Grafeo dependency in `tracedecay-query`; Task 2 creates the opaque `tracedecay-graph-db` boundary without prematurely deleting that seed; Task 3 moves every PR487 caller behind the boundary and makes `tracedecay-graph-db` the only workspace crate allowed to depend on Grafeo. Domain crates keep typed TraceDecay identities and contracts; storage adapters translate those contracts into labels, typed edges, properties, vectors, traversals, and snapshots without exposing Grafeo types. Each migrated datum has exactly one authority: durable graph-shaped state lives in Grafeo, rebuildable projections are recreated from their canonical manifests/events, and SQLite does not dual-write or shadow the same graph.
+**Architecture:** `tracedecay-graph-db` is the only workspace crate allowed
+to depend directly on Grafeo. Domain crates keep typed TraceDecay identities
+and contracts; storage adapters translate those contracts into labels, typed
+edges, properties, vectors, traversals, and snapshots without exposing Grafeo
+types. Each datum has exactly one authority: durable graph-shaped state lives
+in Grafeo, rebuildable projections are recreated from canonical
+manifests/events, and SQLite does not dual-write or shadow the same graph.
 
-**Tech Stack:** Rust 2024, embedded in-process Grafeo `0.5.42`, TraceDecay domain/store ports, Tokio cancellation, Criterion, cargo-nextest.
+**Tech Stack:** Rust 2024, one exact reviewed embedded Grafeo revision derived
+from `0.5.42`, TraceDecay domain/store ports, Tokio cancellation, Criterion,
+and cargo-nextest.
 
 ## Global Constraints
 
 - Use Grafeo embedded in-process. No server, sidecar, network transport, or separately managed database process.
-- Task 3 completes the sole-dependency cutover: until then, only
-  `tracedecay-graph-db` and Task 1's unchanged `tracedecay-query` seed may have
-  direct `grafeo-*` dependencies. Do not delete or disguise the Task 1
-  dependency during Task 2.
-- Do not introduce `petgraph` or another overlapping graph/vector database.
+- `tracedecay-graph-db` is the sole production direct `grafeo-*` dependency.
+- Do not introduce another persisted/query graph or vector database. A bounded
+  in-memory algorithm is not a storage authority, but should use the standard
+  library when it does not need graph persistence or traversal.
 - V2 is a breaking fresh-profile cutover: no V1 reader, migration, backfill, compatibility table, dual-write, fallback, or cutover receipt.
 - One datum has one authority. A rebuildable Grafeo projection records its source generation/watermark and never becomes a second canonical copy.
 - Event-sourced domains use one crash-safe publication protocol: commit the canonical event and an idempotent graph outbox record in SQLite, apply the graph batch, then advance the graph watermark. No caller reads past the acknowledged watermark, and replay never invents a second event.
@@ -25,7 +30,6 @@
 - Validation and pre-commit mutation failures leave the prior graph readable. A Grafeo post-commit WAL/checkpoint failure is reported as typed `DurabilityUncertain`, permanently closes that handle, and permits no further reads until exact reopen/recovery validates the store.
 - Preserve deterministic ordering, pagination, authorization, coverage, and exact source hydration above the storage layer.
 - Never install, run, restart, or test V2 against the operator's live TraceDecay profile. All runtime tests use isolated temporary home/profile/socket paths.
-- Each implementation lane uses its own recognized worktree, merges the current integration floor before review, and is parent-reviewed before merge.
 
 Official implementation references:
 
@@ -56,7 +60,7 @@ Official implementation references:
 | `tracedecay-lsp` | Consume application query ports only. |
 | `tracedecay-migrate` | Delete graph/memory migration and consolidation residue; V2 creates final stores only. |
 | `tracedecay-policy` | Remain pure over typed inputs. |
-| `tracedecay-query` | Consume graph-db-backed ports; remove direct Grafeo dependencies after PR487 lands. |
+| `tracedecay-query` | Consume graph-db-backed ports; never depend directly on Grafeo. |
 | `tracedecay-runtime-core` | Compose graph-db, code-index, memory, and SQLite authorities; stop owning graph SQL. |
 | `tracedecay-sdk` | Public host-neutral contracts only. |
 | `tracedecay-search-eval` | Exercise public query behavior and quality; no direct store access. |
@@ -91,60 +95,23 @@ Keep in SQLite:
 - embedding model manifests, acquisition/install state, generation publication state, and exact source manifests; and
 - telemetry/event accounting and other relational aggregates that do not need graph traversal or vector similarity.
 
-## Task 1: Integrate PR487 as the reviewed seed
+## Task 1: Preserve the reviewed code-graph behavior
 
 **Files:**
-- Merge: branch `codex/grafeo-code-graph` / PR487 into `codex/tracedecay-total-redesign-plan`
-- Verify: `crates/tracedecay-query/src/retrieval/graph/projection.rs`
-- Verify: `crates/tracedecay-query/src/retrieval/graph/tests.rs`
-- Verify: `crates/tracedecay-query/src/retrieval/graph/tests/measurement.rs`
-- Verify: `crates/tracedecay-query/src/retrieval/graph/tests/scale.rs`
+- `crates/tracedecay-query/src/retrieval/graph/projection.rs`
+- `crates/tracedecay-query/src/retrieval/graph/tests.rs`
+- `crates/tracedecay-query/src/retrieval/graph/tests/measurement.rs`
+- `crates/tracedecay-query/src/retrieval/graph/tests/scale.rs`
 
 **Interfaces:**
 - Consumes: `CanonicalRelationEdgeV1`, `CodeSearchChunkV1`, `GraphLaneRequest`.
 - Produces: behavior-preserving Grafeo traversal through the `tracedecay-code-index` graph reader.
 
-- [ ] **Step 1: Merge the current integration floor into PR487's worktree**
-
-Run:
-
-```bash
-git -C /home/zack/.codex/worktrees/7e48/tracedecay fetch origin
-git -C /home/zack/.codex/worktrees/7e48/tracedecay merge --no-edit codex/tracedecay-total-redesign-plan
-```
-
-Resolve only real overlapping production intent. Regenerate `Cargo.lock`; do not choose a side wholesale.
-
-- [ ] **Step 2: Prove PR-specific behavior**
-
-Run:
-
-```bash
-cargo nextest run -p tracedecay-query graph --no-fail-fast
-cargo clippy -p tracedecay-query --all-targets --all-features -- -D warnings
-```
-
-Expected: non-zero graph test count, deterministic traversal, bounded depth and candidate budgets, no PR487-introduced Clippy failures.
-
-- [ ] **Step 3: Parent-review the complete diff**
-
-Review:
-
-```bash
-git -C /home/zack/.codex/worktrees/7e48/tracedecay diff --check codex/tracedecay-total-redesign-plan...HEAD
-git -C /home/zack/.codex/worktrees/7e48/tracedecay diff --stat codex/tracedecay-total-redesign-plan...HEAD
-```
-
-Reject unbounded path growth, hidden panics, nondeterministic ordering, duplicate graph authority, or failures unique to PR487. Inherited PR421 failures remain tracked by their owning lanes.
-
-- [ ] **Step 4: Merge the reviewed PR branch**
-
-Run from the integration worktree:
-
-```bash
-git merge --no-ff codex/grafeo-code-graph -m "merge: seed embedded Grafeo code graph"
-git push origin codex/tracedecay-total-redesign-plan
-```
+- [ ] Prove deterministic traversal, bounded depth and candidate budgets,
+  cancellation, exact authority weakening, stable ordering, and reopen
+  equivalence through the production graph reader. Reject unbounded path
+  growth, hidden panics, nondeterministic ordering, and duplicate graph
+  authority.
 
 ## Task 2: Create the `tracedecay-graph-db` boundary
 
@@ -225,11 +192,10 @@ Expected: fail because the crate and interfaces do not exist.
 
 - [ ] **Step 2: Add the workspace crate and centralize Grafeo dependencies**
 
-Use the exact PR487-compatible Grafeo `0.5.42` dependency set in the new crate.
+Use one exact reviewed Grafeo revision in the new crate.
 Add `tracedecay-graph-db` to `[workspace].members` and centralize the exact
-versions in `[workspace.dependencies]`. Preserve Task 1's direct
-`tracedecay-query` dependencies unchanged until its production callers move in
-Task 3; Task 2 adds no other direct Grafeo consumer.
+versions in `[workspace.dependencies]`. No other workspace crate directly
+depends on Grafeo.
 
 - [ ] **Step 3: Implement typed open, snapshot, batch, traversal, and vector adapters**
 
@@ -263,11 +229,8 @@ cargo nextest run -p tracedecay-graph-db --no-fail-fast
 cargo clippy -p tracedecay-graph-db --all-targets --all-features -- -D warnings
 ```
 
-Expected: direct Grafeo consumers are limited to
-`crates/tracedecay-graph-db/Cargo.toml` and the unchanged Task 1
-`crates/tracedecay-query/Cargo.toml` seed; the graph-db API exposes no Grafeo
-types; all tests and Clippy pass. Sole-manifest ownership is Task 3 acceptance,
-not Task 2 acceptance.
+Expected: the graph-db API exposes no Grafeo types, direct behavior passes, and
+ordinary workspace diagnostics show no second production Grafeo dependency.
 
 - [ ] **Step 5: Commit**
 
@@ -276,7 +239,7 @@ git add Cargo.toml Cargo.lock crates/tracedecay-graph-db
 git commit -m "feat(graph-db): add embedded Grafeo runtime boundary"
 ```
 
-## Task 3: Refactor PR487 behind graph-db and cut over code graph
+## Task 3: Cut the code graph over to graph-db
 
 **Files:**
 - Modify: `crates/tracedecay-query/Cargo.toml`
@@ -312,7 +275,10 @@ pub trait CodeGraphProjectionPublisher {
 
 - [ ] **Step 1: Add failing reopen, generation-isolation, and traversal-equivalence tests**
 
-Test the PR487 fixture through a graph-db-backed production adapter. Assert exact path segments, authority weakening, coverage, unknown targets, max depth, cancellation, and identical ordered output before/after reopen.
+Test the canonical code-graph fixture through a graph-db-backed production
+adapter. Assert exact path segments, authority weakening, coverage, unknown
+targets, max depth, cancellation, and identical ordered output before/after
+reopen.
 
 - [ ] **Step 2: Publish code generations atomically**
 
@@ -718,7 +684,7 @@ cargo nextest run --workspace --all-features --no-fail-fast
 git commit -am "feat(graph-db): wire embedded graph journeys"
 ```
 
-## Task 11: Delete superseded SQL, migrations, parity, and sidecar residue
+## Task 11: Delete superseded SQL, compatibility, parity, and sidecar residue
 
 **Files:**
 - Delete/modify: `crates/tracedecay-runtime-core/src/db/migrations.rs`
@@ -741,17 +707,17 @@ git commit -am "feat(graph-db): wire embedded graph journeys"
 
 - [ ] **Step 1: Prove every old caller moved**
 
-Run:
-
-```bash
-rg -n 'CREATE TABLE.*(nodes|edges|vectors)|WITH RECURSIVE|memory_facts|branch_only_fact|petgraph|graph sidecar|graph migration' src crates docs scripts tests
-```
-
-Classify every hit. Retained hits must be relational fixtures/docs that describe the final design; all superseded production hits are deleted.
+Exercise every retained code, Git, Work/workflow, LCM, memory, and semantic
+graph journey through the daemon-owned graph registry. Ordinary diagnostics may
+help locate residue, but source-shape scans are not acceptance evidence.
 
 - [ ] **Step 2: Delete complete obsolete boundaries**
 
-Delete SQLite graph/vector fixtures and protocols, graph branch cloning, V1/V2 graph and memory migrations, backfills, compatibility readers, feature flags, aliases, and unused dependencies. Remove a dependency with its last production caller.
+Delete SQLite graph/vector fixtures and protocols, graph branch cloning,
+old-store graph and memory conversion/backfill readers, compatibility writers,
+feature flags, aliases, and unused dependencies. Remove a dependency with its
+last production caller. Preserve native historical host-data acquisition,
+same-final-format recovery, and bounded derivative rebuilds.
 
 - [x] **Step 3: Verify documentation authority**
 
@@ -760,16 +726,15 @@ authority. It contains no instruction to introduce a second graph library,
 sidecar, branch-fact store, dual-write, old graph-SQL authority, or data-format
 migration path.
 
-- [ ] **Step 4: Verify and commit**
+- [ ] **Step 4: Verify**
 
 ```bash
 cargo machete
 cargo check --workspace --all-features
 git diff --check
-git commit -am "refactor(storage): delete superseded graph SQL"
 ```
 
-## Task 12: Performance, durability, and CI acceptance
+## Task 12: Performance, durability, and CI evidence
 
 **Files:**
 - Create: `crates/tracedecay-graph-db/benches/code_traversal.rs`
@@ -792,7 +757,7 @@ Measure cold/open and warm traversal, 1/2/4-hop bounded code graphs, Git ancestr
 
 Cover interrupted projection replacement, corrupt persistent store, partial vector batch, writer cancellation, reader snapshot during publication, daemon shutdown, foreign final-shape rejection, and explicit fresh-profile recreation.
 
-- [ ] **Step 3: Run the full product gate in an isolated profile**
+- [ ] **Step 3: Run ordinary product verification in an isolated profile**
 
 ```bash
 cargo nextest run --workspace --all-features --no-fail-fast
@@ -802,12 +767,15 @@ cargo fmt --all -- --check
 bash scripts/tool-sweep.sh
 ```
 
-Expected: all tests execute non-vacuously; any inherited failure remains named with owning lane and exact evidence. Graph-tool deadlines are not raised to hide regressions.
+Expected: all tests execute non-vacuously; any failure remains named with its
+exact evidence. Graph-tool deadlines are not raised to hide regressions.
 
 - [ ] **Step 4: Compare against the pre-Grafeo baseline**
 
 Record p50/p95/p99 latency, peak RSS, store bytes, write amplification, and reopen time for the same fixtures. Reject the cutover if a retained production journey regresses materially without a documented product reason.
 
-- [ ] **Step 5: Final parent review, merge, push, and worktree cleanup**
+- [ ] **Step 5: Review the complete production journey**
 
-Review every task commit and full branch diff against the current integration floor. Merge only coherent passing lanes. Remove only recognized team-owned worktrees after their commits are merged and reachable from `codex/tracedecay-total-redesign-plan`.
+Review the complete behavior and diff against the active final-V2 authority.
+Accept only coherent, directly verified graph journeys with no duplicate
+storage authority.

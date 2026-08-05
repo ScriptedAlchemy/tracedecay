@@ -599,8 +599,7 @@ impl CommandFamily {
             | Commands::HookHermesTerminalReceipt
             | Commands::HookKimiEvent
             | Commands::HookOpenCodeEvent
-            | Commands::HookOpenCodeToolAfter
-            | Commands::HookUserSessionReview => Self::Hook,
+            | Commands::HookOpenCodeToolAfter => Self::Hook,
             Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }
@@ -610,7 +609,8 @@ impl CommandFamily {
             | Commands::ResetCounter { .. }
             | Commands::DisableUploadCounter
             | Commands::EnableUploadCounter
-            | Commands::Gitignore { .. } => Self::Configuration,
+            | Commands::Gitignore { .. }
+            | Commands::Config { .. } => Self::Configuration,
             Commands::Doctor { .. }
             | Commands::Cost { .. }
             | Commands::Bench { .. }
@@ -1137,8 +1137,7 @@ async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<
         | Commands::HookHermesTerminalReceipt
         | Commands::HookKimiEvent
         | Commands::HookOpenCodeEvent
-        | Commands::HookOpenCodeToolAfter
-        | Commands::HookUserSessionReview) => {
+        | Commands::HookOpenCodeToolAfter) => {
             hook_cmd::handle_hook_command(hook_command).await?;
         }
         _ => unreachable!("non-hook command passed to hook dispatcher"),
@@ -1248,6 +1247,45 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors
         Commands::Gitignore { path, action } => {
             commands::handle_gitignore(path, action).await?;
         }
+        Commands::Config {
+            action: ConfigurationAction::Reset { path, confirmation },
+        } => {
+            let project_path = tracedecay::config::resolve_path(path);
+            let (outcome, token) =
+                tracedecay::daemon_client::DaemonInvocationClient::reset_configuration(
+                    project_path,
+                    confirmation.as_deref(),
+                )
+                .await?;
+            match outcome {
+                tracedecay_application::ConfigurationResetOutcomeV1::ConfirmationRequired {
+                    confirmation,
+                } => {
+                    let token =
+                        token.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                            message: "daemon omitted the configuration reset confirmation token"
+                                .to_owned(),
+                        })?;
+                    eprintln!(
+                        "Configuration reset required for project {} (profile {}, store {}).",
+                        confirmation.project_id,
+                        confirmation.profile_id,
+                        confirmation.runtime_binding_digest
+                    );
+                    println!("{token}");
+                }
+                tracedecay_application::ConfigurationResetOutcomeV1::Completed {
+                    project_id,
+                    profile_id,
+                    runtime_binding_digest,
+                    ..
+                } => {
+                    eprintln!(
+                        "Reset configuration for project {project_id} (profile {profile_id}, store {runtime_binding_digest})."
+                    );
+                }
+            }
+        }
         _ => unreachable!("non-configuration command passed to configuration dispatcher"),
     }
     Ok(())
@@ -1330,7 +1368,9 @@ impl CommandStartupPolicy {
             // Tool calls are the documented MCP fallback and must remain a local,
             // latency-bounded protocol path. Unrelated counter uploads or agent
             // maintenance belong on interactive commands and daemon background work.
-            Commands::Tool { .. } | Commands::Workflow { .. } => Self::SkipAll,
+            Commands::Tool { .. } | Commands::Workflow { .. } | Commands::Config { .. } => {
+                Self::SkipAll
+            }
             // Explicit lifecycle/maintenance commands manage their own work.
             // Serve is also latency-sensitive: clients impose a 30 s MCP
             // initialize timeout, so no implicit startup work belongs there.

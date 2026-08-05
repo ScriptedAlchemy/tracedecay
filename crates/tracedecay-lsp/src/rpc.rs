@@ -166,13 +166,21 @@ impl DiagnosticSerializationCapabilities {
         }
     }
 
-    #[cfg(test)]
-    const fn all() -> Self {
+    pub(crate) const fn full_identity() -> Self {
         Self {
             related_information: true,
             code_description: true,
             data: true,
         }
+    }
+
+    pub(crate) const fn identity(self) -> (bool, bool, bool) {
+        (self.related_information, self.code_description, self.data)
+    }
+
+    #[cfg(test)]
+    const fn all() -> Self {
+        Self::full_identity()
     }
 }
 

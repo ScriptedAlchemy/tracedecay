@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use tracedecay_application::{
     CancellationContext, Deadline, MultiRootExecuteRequestV1, MultiRootOperationV1,
     MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
+    RegisteredRootSelectorV1,
 };
 use tracedecay_domain::{ScopeSetId, UtcMicros};
 
@@ -326,7 +327,18 @@ async fn run_authenticated_multi_root_journey() {
             MultiRootScopeSetCasRequestV1::new(
                 scope_set_id.clone(),
                 None,
-                vec![second_project.clone(), first_project.clone()],
+                vec![
+                    RegisteredRootSelectorV1::new(
+                        second_project.clone(),
+                        second.path().canonicalize().expect("canonical second root"),
+                    )
+                    .expect("second registered root selector"),
+                    RegisteredRootSelectorV1::new(
+                        first_project.clone(),
+                        first.path().canonicalize().expect("canonical first root"),
+                    )
+                    .expect("first registered root selector"),
+                ],
             )
             .expect("CAS request"),
             observed_at,

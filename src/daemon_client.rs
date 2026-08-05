@@ -469,6 +469,106 @@ impl DaemonInvocationClient {
         })
     }
 
+    /// Runs the CLI-only configuration reset journey through the authenticated
+    /// daemon. An omitted token inspects the exact refused store and returns
+    /// the token that must be echoed by a later invocation.
+    pub async fn reset_configuration(
+        project_root: std::path::PathBuf,
+        confirmation_token: Option<&str>,
+    ) -> crate::errors::Result<(
+        tracedecay_application::ConfigurationResetOutcomeV1,
+        Option<String>,
+    )> {
+        let confirmation = confirmation_token
+            .map(
+                |token| -> crate::errors::Result<
+                    tracedecay_application::ConfigurationResetConfirmationV1,
+                > {
+                    let bytes =
+                        hex::decode(token).map_err(|_| crate::errors::TraceDecayError::Config {
+                            message: "configuration reset confirmation is not a valid token"
+                                .to_owned(),
+                        })?;
+                    let confirmation = serde_json::from_slice::<
+                        tracedecay_application::ConfigurationResetConfirmationV1,
+                    >(&bytes)
+                    .map_err(|_| crate::errors::TraceDecayError::Config {
+                        message: "configuration reset confirmation is not a valid token".to_owned(),
+                    })?;
+                    confirmation.validate().map_err(|error| {
+                        crate::errors::TraceDecayError::Config {
+                            message: format!(
+                                "configuration reset confirmation is invalid: {error}"
+                            ),
+                        }
+                    })?;
+                    Ok(confirmation)
+                },
+            )
+            .transpose()?;
+        let handshake = crate::daemon::DaemonHandshake::for_current_client(
+            Some(project_root),
+            None,
+            false,
+            false,
+        )?;
+        let client = Self::for_current(handshake)?;
+        let request_id = mint_global_request_id(GlobalRequestSurface::Cli).map_err(|error| {
+            crate::errors::TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })?;
+        let observed_at = invocation_now_micros();
+        let deadline = Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000))).map_err(
+            |error| crate::errors::TraceDecayError::Config {
+                message: error.to_string(),
+            },
+        )?;
+        let cancellation = CancellationSignal::active(format!(
+            "cancel.configuration-reset.{}",
+            request_id.as_str()
+        ))
+        .map_err(|error| crate::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+        let request = crate::daemon_contract::DaemonInvocationRequest::configuration(
+            request_id.as_str(),
+            crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset,
+            crate::application_surface::ConfigurationSurfaceRequest::Reset(
+                tracedecay_application::ConfigurationResetRequestV1 { confirmation },
+            ),
+            observed_at,
+            deadline.clone(),
+            cancellation.context(),
+        )
+        .with_delivery_route(Plan26DeliveryRouteV1::Cli);
+        let response = client
+            .invoke_controlled(
+                request,
+                deadline,
+                cancellation,
+                InvocationCancellationPolicy::AuthoritativeEffect,
+            )
+            .await
+            .map_err(|error| crate::errors::TraceDecayError::Config {
+                message: format!("configuration reset daemon invocation failed: {error:?}"),
+            })?;
+        let crate::daemon_contract::DaemonInvocationOutcome::ConfigurationReset { outcome } =
+            response.outcome
+        else {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "daemon refused the configuration reset request".to_owned(),
+            });
+        };
+        let token = match &outcome {
+            tracedecay_application::ConfigurationResetOutcomeV1::ConfirmationRequired {
+                confirmation,
+            } => Some(hex::encode(serde_json::to_vec(confirmation)?)),
+            tracedecay_application::ConfigurationResetOutcomeV1::Completed { .. } => None,
+        };
+        Ok((outcome, token))
+    }
+
     #[cfg(test)]
     pub(crate) fn for_connection_for_test(
         connection: crate::daemon::DaemonConnection,
@@ -866,6 +966,9 @@ pub(crate) fn application_response(
                 crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                     InvocationError::Denied
                 }
+                crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+                    InvocationError::Unavailable
+                }
                 crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                     InvocationError::Unavailable
                 }
@@ -1163,6 +1266,9 @@ fn invocation_outcome_error(
             crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                 InvocationError::Denied
             }
+            crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+                InvocationError::Unavailable
+            }
             crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                 InvocationError::Unavailable
             }
@@ -1245,6 +1351,27 @@ mod tests {
                 corpus_digest: format!("sha256:{}", "4".repeat(64)),
                 fixture_source_repository_commit: "fixture-commit".to_owned(),
                 fixture_source_repository_tree: "fixture-tree".to_owned(),
+                execution_contract: crate::search_eval::EvaluationExecutionContractV1 {
+                    exact_file_count: 0,
+                    exact_corpus_bytes: 0,
+                    exact_eligible_chunks_current: 0,
+                    exact_eligible_chunks_10x: 0,
+                    exact_query_count: 0,
+                    model_revision: "model.serialization-test.v1".to_owned(),
+                    projection_revision: "projection.serialization-test.v1".to_owned(),
+                    fusion_revision: "fusion.serialization-test.v1".to_owned(),
+                    runtime_revision: "runtime.serialization-test.v1".to_owned(),
+                    cache_state: "empty".to_owned(),
+                    concurrency:
+                        crate::search_eval::candidate_output::EvaluationConcurrencyContractV1 {
+                            query_workers: 1,
+                            projection_workers: 1,
+                            query_execution: "serial".to_owned(),
+                        },
+                },
+                profile_material_digests: std::collections::BTreeMap::new(),
+                raw_output_digest: format!("sha256:{}", "6".repeat(64)),
+                raw_outputs: Vec::new(),
                 profiles: Vec::new(),
             },
             source_generation: "generation-1".to_owned(),

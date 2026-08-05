@@ -1,24 +1,28 @@
-//! Durable workflow authority over the registered Work exact-SQL channel.
+//! Durable workflow authority over the registered Work writer.
+
+use std::sync::{Arc, Barrier};
 
 use tracedecay_application::{
-    TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowChildReceiptV1, WorkflowChildRecordV1,
-    WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
-    WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError, WorkflowExecutionAuthorityPort,
-    WorkflowExecutionFenceV1, WorkflowExecutionIdentityV1, WorkflowExecutionTruthV1,
-    WorkflowFanOutCheckpointV1,
+    AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, EffectId, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
+    ResolvedScope, TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
+    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowDefinitionAuthorityError,
+    WorkflowDefinitionAuthorityPort, WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1,
+    WorkflowEffectJournalStateV1, WorkflowEffectOperationV1, WorkflowEffectOutcomeV1,
+    WorkflowEffectPreparedV1, WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId,
-    UtcMicros, WorkAttemptIdentityV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
-    WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowStepId, WorkflowStepV1, WorktreeId, canonical_sha256,
+    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId,
+    UtcMicros, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
+    WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
 };
-use tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority;
+use tracedecay_rusqlite_runtime::workflow::{
+    WorkflowSqliteAuthority, WorkflowSqliteAuthorityBuildError,
+};
 
-mod work_registered_store;
+mod registered_workflow_store;
 
-use work_registered_store::RegisteredWorkStore;
+use registered_workflow_store::RegisteredWorkflowStore;
 
 fn id<T>(value: &str) -> T
 where
@@ -38,12 +42,12 @@ fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", hex_byte.repeat(32))).unwrap()
 }
 
-fn definition(version: u64, operation: &str) -> WorkflowDefinitionV1 {
-    WorkflowDefinitionV1::new(
+fn definition(version: u64, operation: &str) -> WorkflowDefinition {
+    WorkflowDefinition::new(
         id("workflow.definition.runtime-store"),
         version,
         id::<ProjectId>("project.workflow.runtime-store"),
-        vec![WorkflowStepV1 {
+        vec![WorkflowStep {
             step_id: id::<WorkflowStepId>("prepare"),
             operation: id::<WorkflowOperationRef>(operation),
             predecessors: Default::default(),
@@ -58,8 +62,8 @@ fn definition(version: u64, operation: &str) -> WorkflowDefinitionV1 {
     .unwrap()
 }
 
-fn handoff_scope() -> TaskHandoffScopeV1 {
-    TaskHandoffScopeV1::new(
+fn handoff_scope() -> TaskHandoffScope {
+    TaskHandoffScope::new(
         id::<ProjectId>("project.workflow.runtime-store"),
         id::<RepositoryId>("repository.workflow.runtime-store"),
         id::<WorktreeId>("worktree.workflow.runtime-store"),
@@ -79,242 +83,205 @@ fn token_digest(secret: &str) -> ManifestDigest {
     canonical_sha256(&("tracedecay.application.task-handoff.v1", secret)).unwrap()
 }
 
-fn execution_identity() -> WorkflowExecutionIdentityV1 {
-    WorkflowExecutionIdentityV1 {
-        definition_id: id("workflow.definition.runtime-store"),
-        definition_version: 1,
-        run_id: id::<RunId>("run.workflow.runtime-store"),
-        step_id: id::<WorkflowStepId>("prepare"),
-    }
+fn authority(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
+    WorkflowSqliteAuthority::from_registered(store.storage().clone()).unwrap()
 }
 
-fn fence(epoch: u64, attempt: &str) -> WorkflowExecutionFenceV1 {
-    WorkflowExecutionFenceV1 {
-        attempt_id: id::<AttemptId>(attempt),
-        lease: WorkLeaseFenceV1::new(
-            id::<WorkLeaseId>("lease.workflow.runtime-store"),
-            WorkFenceEpochV1::new(epoch).unwrap(),
-        )
-        .unwrap(),
-    }
+#[derive(Clone, Copy)]
+struct EffectAuthorityBinding {
+    grant_revision: u64,
+    grant_digest: char,
+    policy_revision: u64,
+    policy_digest: char,
+    configuration_digest: char,
+    catalog_digest: char,
+    privacy_digest: char,
 }
 
-fn plan_digest(byte: char) -> ManifestDigest {
-    digest(byte)
-}
-
-fn checkpoint(plan: ManifestDigest) -> WorkflowFanOutCheckpointV1 {
-    WorkflowFanOutCheckpointV1 {
-        plan_digest: plan,
-        children: vec![WorkflowChildRecordV1 {
-            task_id: id::<TaskId>("task.workflow.runtime-store.child"),
-            attempt_identity: WorkAttemptIdentityV1::new(
-                id::<TaskId>("task.workflow.runtime-store.child"),
-                id::<RunId>("run.workflow.runtime-store"),
-                id::<AttemptId>("attempt.workflow.runtime-store.child"),
-            )
-            .unwrap(),
-            lease: WorkLeaseFenceV1::new(
-                id::<WorkLeaseId>("lease.workflow.runtime-store.child"),
-                WorkFenceEpochV1::new(1).unwrap(),
-            )
-            .unwrap(),
-            receipt: Some(WorkflowChildReceiptV1 {
-                observation_digest: digest('8'),
-                terminal_receipt_digest: digest('9'),
-            }),
-        }],
-    }
-}
-
-fn terminal_truth() -> WorkflowExecutionTruthV1 {
-    WorkflowExecutionTruthV1::Completed {
-        checkpoint: checkpoint(plan_digest('5')),
-    }
-}
-
-#[test]
-fn execution_lease_renewal_rejects_replacement_outer_attempt() {
-    let store = RegisteredWorkStore::start("workflow-outer-attempt-cas");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
-    let identity = execution_identity();
-    let plan = plan_digest('5');
-    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
-    let replacement_attempt = fence(2, "attempt.workflow.runtime-store.replacement");
-
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::Execute
-    );
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &replacement_attempt, &plan,)
-            .unwrap(),
-        WorkflowExecutionAdmissionV1::StaleLease
-    );
-}
-
-#[test]
-fn execution_terminal_replay_rejects_replacement_outer_attempt() {
-    let store = RegisteredWorkStore::start("workflow-terminal-replay-fence");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
-    let identity = execution_identity();
-    let plan = plan_digest('5');
-    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
-    let replacement_attempt = fence(2, "attempt.workflow.runtime-store.replacement");
-    let checkpoint = checkpoint(plan.clone());
-    let truth = WorkflowExecutionTruthV1::Completed {
-        checkpoint: checkpoint.clone(),
+impl EffectAuthorityBinding {
+    const BASE: Self = Self {
+        grant_revision: 1,
+        grant_digest: '1',
+        policy_revision: 1,
+        policy_digest: '6',
+        configuration_digest: '8',
+        catalog_digest: '9',
+        privacy_digest: 'a',
     };
-
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::Execute
-    );
-    WorkflowExecutionAuthorityPort::checkpoint(&authority, &identity, &first_fence, &checkpoint)
-        .unwrap();
-    WorkflowExecutionAuthorityPort::complete(&authority, &identity, &first_fence, &truth).unwrap();
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &replacement_attempt, &plan,)
-            .unwrap(),
-        WorkflowExecutionAdmissionV1::StaleLease
-    );
 }
 
-#[test]
-fn execution_checkpoint_cas_rejects_child_regression() {
-    let store = RegisteredWorkStore::start("workflow-checkpoint-cas");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
-    let identity = execution_identity();
-    let plan = plan_digest('5');
-    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
-
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::Execute
-    );
-    let mut checkpoint = checkpoint(plan.clone());
-    checkpoint.children[0].receipt = None;
-    WorkflowExecutionAuthorityPort::checkpoint(&authority, &identity, &first_fence, &checkpoint)
-        .unwrap();
-    let regressed = WorkflowFanOutCheckpointV1 {
-        plan_digest: plan,
-        children: Vec::new(),
-    };
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::checkpoint(
-            &authority,
-            &identity,
-            &first_fence,
-            &regressed,
-        )
-        .unwrap_err(),
-        WorkflowExecutionAuthorityError::Conflict
-    );
-}
-
-#[test]
-fn execution_checkpoint_rejects_unjoined_child_identity_and_lease() {
-    let store = RegisteredWorkStore::start("workflow-checkpoint-child-fence");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
-    let identity = execution_identity();
-    let plan = plan_digest('5');
-    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
-
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::Execute
-    );
-
-    let mut mismatched = checkpoint(plan.clone());
-    mismatched.children[0].task_id = id::<TaskId>("task.workflow.runtime-store.child-mismatch");
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::checkpoint(
-            &authority,
-            &identity,
-            &first_fence,
-            &mismatched,
-        )
-        .unwrap_err(),
-        WorkflowExecutionAuthorityError::Conflict
-    );
-
-    let mut colliding = checkpoint(plan);
-    let mut second = colliding.children[0].clone();
-    second.task_id = id::<TaskId>("task.workflow.runtime-store.child-second");
-    second.attempt_identity = WorkAttemptIdentityV1::new(
-        second.task_id.clone(),
-        id::<RunId>("run.workflow.runtime-store"),
-        id::<AttemptId>("attempt.workflow.runtime-store.child-second"),
+fn effect_context(actor: &str, grant_revision: u64, grant_digest: char) -> RequestContext {
+    let scope = ResolvedScope::new(
+        id("project.workflow.runtime-store"),
+        id("repository.workflow.runtime-store"),
+        id("worktree.workflow.runtime-store"),
+        None,
     )
     .unwrap();
-    colliding.children.push(second);
+    let actor: ActorId = id(actor);
+    let grant = CapabilityGrantSnapshot::new(
+        id::<CapabilityGrantId>("grant.workflow.runtime-store"),
+        grant_revision,
+        digest(grant_digest),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(90_000_000),
+        scope.clone(),
+        [id("capability.workflow.handoff_issue")]
+            .into_iter()
+            .collect(),
+        [id("use-case.workflow.handoff_issue")]
+            .into_iter()
+            .collect(),
+        DisclosureClass::Metadata,
+    )
+    .unwrap();
+    RequestContext::new(
+        actor,
+        scope,
+        grant,
+        id::<RequestId>("request.workflow.runtime-store"),
+        Deadline::new(UtcMicros(80_000_000)).unwrap(),
+        CancellationContext::active("cancel.workflow.runtime-store").unwrap(),
+    )
+    .unwrap()
+}
+
+fn effect_identity(
+    operation: WorkflowEffectOperationV1,
+    actor: &str,
+    input: char,
+) -> WorkflowEffectIdentityV1 {
+    effect_identity_at(
+        operation,
+        actor,
+        input,
+        EffectAuthorityBinding::BASE,
+        UtcMicros(10),
+    )
+}
+
+fn effect_identity_at(
+    operation: WorkflowEffectOperationV1,
+    actor: &str,
+    input: char,
+    binding: EffectAuthorityBinding,
+    started_at: UtcMicros,
+) -> WorkflowEffectIdentityV1 {
+    let context = effect_context(actor, binding.grant_revision, binding.grant_digest);
+    let policy = PolicyDecisionRef::new(
+        "policy.workflow.runtime-store.v1",
+        binding.policy_revision,
+        digest(binding.policy_digest),
+        ComponentVersion::new("workflow-runtime-store.v1").unwrap(),
+    )
+    .unwrap();
+    let authority = AuthorityReceipt::from_context(&context, policy, started_at).unwrap();
+    let receipt_context = WorkflowEffectReceiptContextV1::new(
+        id(&format!("use-case.workflow.{}", operation.as_str())),
+        id::<EffectId>(&format!("effect.workflow.runtime-store.{input}")),
+        authority,
+        digest('7'),
+        digest(binding.configuration_digest),
+        digest(binding.catalog_digest),
+        digest(binding.privacy_digest),
+    );
+    WorkflowEffectIdentityV1::new(
+        operation,
+        id::<IdempotencyKey>(&format!("workflow.effect.{input}")),
+        context.request_id().clone(),
+        context.actor().clone(),
+        context.scope().clone(),
+        digest(input),
+        started_at,
+        context.deadline().clone(),
+        receipt_context,
+    )
+    .unwrap()
+}
+
+#[test]
+fn non_final_store_requires_reset_without_runtime_schema_mutation() {
+    let store =
+        RegisteredWorkflowStore::start_with_setup("workflow-reset-required", |connection| {
+            connection
+                .execute_batch(
+                    "DROP TABLE workflow_handoffs;
+                 DROP TABLE workflow_definitions;
+                 DROP TABLE workflow_effect_journal;
+                 DROP TABLE workflow_schema;",
+                )
+                .unwrap();
+        });
+
+    assert!(matches!(
+        WorkflowSqliteAuthority::from_registered(store.storage().clone()),
+        Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
+    ));
     assert_eq!(
-        WorkflowExecutionAuthorityPort::checkpoint(
-            &authority,
-            &identity,
-            &first_fence,
-            &colliding,
-        )
-        .unwrap_err(),
-        WorkflowExecutionAuthorityError::Conflict
+        store.inspect(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema
+                     WHERE type = 'table' AND name LIKE 'workflow_%'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        }),
+        0,
+        "runtime attachment must not mutate a non-final store"
     );
 }
 
 #[test]
-fn execution_completion_rejects_truth_for_another_plan() {
-    let store = RegisteredWorkStore::start("workflow-completion-cas");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
-    let identity = execution_identity();
-    let plan = plan_digest('5');
-    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
-
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::Execute
-    );
-    let wrong_truth = WorkflowExecutionTruthV1::Completed {
-        checkpoint: checkpoint(plan_digest('6')),
-    };
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::complete(
-            &authority,
-            &identity,
-            &first_fence,
-            &wrong_truth,
-        )
-        .unwrap_err(),
-        WorkflowExecutionAuthorityError::Conflict
-    );
+fn attachment_rejects_wrong_schema_version_digest_and_definition() {
+    for (name, mutation) in [
+        (
+            "workflow-wrong-version",
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE workflow_schema SET schema_version = 2;",
+        ),
+        (
+            "workflow-wrong-digest",
+            "UPDATE workflow_schema SET definition_digest = 'sha256:wrong';",
+        ),
+        (
+            "workflow-extra-schema-identity",
+            "PRAGMA ignore_check_constraints = ON;
+             INSERT INTO workflow_schema (
+                 singleton,
+                 schema_version,
+                 definition_digest
+             ) VALUES (
+                 2,
+                 1,
+                 'sha256:ef3f0fdc0760f91f64f8cc567cee1174dbd94fec69c9de2a39f9683fd8b780da'
+             );",
+        ),
+        (
+            "workflow-wrong-definition",
+            "DROP TABLE workflow_handoffs;
+             CREATE TABLE workflow_handoffs (
+                 token_digest TEXT NOT NULL PRIMARY KEY,
+                 scope_payload TEXT NOT NULL
+             ) STRICT;",
+        ),
+    ] {
+        let store = RegisteredWorkflowStore::start_with_setup(name, |connection| {
+            connection.execute_batch(mutation).unwrap();
+        });
+        assert!(matches!(
+            WorkflowSqliteAuthority::from_registered(store.storage().clone()),
+            Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
+        ));
+    }
 }
 
 #[test]
-fn execution_completion_rejects_child_without_terminal_receipt() {
-    let store = RegisteredWorkStore::start("workflow-completion-receipt");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
-    let identity = execution_identity();
-    let plan = plan_digest('5');
-    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
-    let mut checkpoint = checkpoint(plan.clone());
-    checkpoint.children[0].receipt = None;
-
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::Execute
-    );
-    WorkflowExecutionAuthorityPort::checkpoint(&authority, &identity, &first_fence, &checkpoint)
-        .unwrap();
-    let truth = WorkflowExecutionTruthV1::Completed { checkpoint };
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::complete(&authority, &identity, &first_fence, &truth)
-            .unwrap_err(),
-        WorkflowExecutionAuthorityError::Conflict
-    );
-}
-
-#[test]
-fn definitions_activate_and_reject_conflicting_payloads() {
-    let store = RegisteredWorkStore::start("workflow-definitions");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+fn definitions_preserve_history_and_reject_conflicting_payloads() {
+    let store = RegisteredWorkflowStore::start("workflow-definitions");
+    let authority = authority(&store);
     let first = definition(1, "operation.prepare.v1");
     let second = definition(2, "operation.prepare.v1");
     let conflicting = definition(1, "operation.prepare.v2");
@@ -337,58 +304,33 @@ fn definitions_activate_and_reject_conflicting_payloads() {
         Some(&first)
     );
     assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
-        None
+        WorkflowDefinitionAuthorityPort::list(&authority, Some(first.definition_id()))
+            .unwrap()
+            .iter()
+            .map(WorkflowDefinition::definition_version)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        WorkflowDefinitionAuthorityPort::list(&authority, None).unwrap(),
+        vec![first, second],
+        "definition reads must preserve immutable history"
     );
 
-    WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
-        &authority,
-        first.definition_id(),
-        None,
-        1,
-    )
-    .unwrap();
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
-        Some(1)
-    );
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
-            &authority,
-            first.definition_id(),
-            None,
-            2,
-        )
-        .unwrap_err(),
-        WorkflowDefinitionAuthorityError::Conflict
-    );
-    WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
-        &authority,
-        first.definition_id(),
-        Some(1),
-        2,
-    )
-    .unwrap();
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
-        Some(2)
-    );
-
-    assert_eq!(store.count("workflow_definitions_v1"), 2);
-    assert_eq!(store.count("workflow_activations_v1"), 1);
+    assert_eq!(store.count("workflow_definitions"), 2);
 }
 
 #[test]
 fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
-    let store = RegisteredWorkStore::start("workflow-handoff");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let store = RegisteredWorkflowStore::start("workflow-handoff");
+    let authority = authority(&store);
     let scope = handoff_scope();
     let secret = "s".repeat(48);
-    let grant = TaskHandoffGrantV1::new(
+    let grant = TaskHandoffGrant::new(
         scope.clone(),
         token_digest(&secret),
         UtcMicros(10),
-        UtcMicros(20),
+        UtcMicros(60_000_010),
     )
     .unwrap();
 
@@ -401,13 +343,13 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
     store.inspect(|connection| {
         let payload: String = connection
             .query_row(
-                "SELECT scope_payload FROM workflow_handoffs_v1 WHERE token_digest = ?1",
+                "SELECT scope_payload FROM workflow_handoffs WHERE token_digest = ?1",
                 [grant.token_digest().as_str()],
                 |row| row.get(0),
             )
             .unwrap();
         assert!(!payload.contains(&secret));
-        let persisted: TaskHandoffScopeV1 = serde_json::from_str(&payload).unwrap();
+        let persisted: TaskHandoffScope = serde_json::from_str(&payload).unwrap();
         assert_eq!(persisted, scope);
         assert_eq!(
             persisted.thread_id().as_str(),
@@ -415,7 +357,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         );
         let count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM workflow_handoffs_v1 WHERE scope_payload LIKE ?1",
+                "SELECT COUNT(*) FROM workflow_handoffs WHERE scope_payload LIKE ?1",
                 [format!("%{secret}%")],
                 |row| row.get(0),
             )
@@ -423,7 +365,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         assert_eq!(count, 0);
     });
 
-    let wrong_scope = TaskHandoffScopeV1::new(
+    let wrong_scope = TaskHandoffScope::new(
         scope.project_id().clone(),
         scope.repository_id().clone(),
         scope.worktree_id().clone(),
@@ -453,11 +395,11 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         TaskHandoffConsumeOutcome::Missing
     );
 
-    let expired = TaskHandoffGrantV1::new(
+    let expired = TaskHandoffGrant::new(
         scope.clone(),
         token_digest(&"e".repeat(48)),
         UtcMicros(10),
-        UtcMicros(20),
+        UtcMicros(60_000_010),
     )
     .unwrap();
     TaskHandoffAuthorityPort::issue(&authority, &expired).unwrap();
@@ -466,7 +408,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
             &authority,
             expired.token_digest(),
             &scope,
-            UtcMicros(20),
+            UtcMicros(60_000_010),
         )
         .unwrap(),
         TaskHandoffConsumeOutcome::Expired
@@ -485,138 +427,18 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
 }
 
 #[test]
-fn execution_checkpoints_recover_replay_and_survive_restart() {
-    let store = RegisteredWorkStore::start("workflow-execution");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
-    let identity = execution_identity();
-    let plan = plan_digest('5');
-    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
-    let newer_fence = fence(2, "attempt.workflow.runtime-store.1");
-    let stale_fence = fence(1, "attempt.workflow.runtime-store.stale");
-    let other_lease = WorkflowExecutionFenceV1 {
-        attempt_id: id::<AttemptId>("attempt.workflow.runtime-store.other-lease"),
-        lease: WorkLeaseFenceV1::new(
-            id::<WorkLeaseId>("lease.workflow.runtime-store.other"),
-            WorkFenceEpochV1::new(3).unwrap(),
-        )
-        .unwrap(),
-    };
-
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::Execute
-    );
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &stale_fence, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::StaleLease
-    );
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &other_lease, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::StaleLease
-    );
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &newer_fence, &digest('6'))
-            .unwrap(),
-        WorkflowExecutionAdmissionV1::PlanConflict
-    );
-
-    let checkpoint = checkpoint(plan.clone());
-    WorkflowExecutionAuthorityPort::checkpoint(&authority, &identity, &first_fence, &checkpoint)
-        .unwrap();
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::checkpoint(
-            &authority,
-            &identity,
-            &newer_fence,
-            &checkpoint,
-        )
-        .unwrap_err(),
-        WorkflowExecutionAuthorityError::Conflict
-    );
-
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &newer_fence, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::Recover {
-            checkpoint: checkpoint.clone(),
-        }
-    );
-
-    let truth = terminal_truth();
-    WorkflowExecutionAuthorityPort::complete(&authority, &identity, &newer_fence, &truth).unwrap();
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(
-            &authority,
-            &identity,
-            &fence(3, "attempt.workflow.runtime-store.1"),
-            &plan,
-        )
-        .unwrap(),
-        WorkflowExecutionAdmissionV1::Replay(truth.clone())
-    );
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(
-            &authority,
-            &identity,
-            &fence(2, "attempt.workflow.runtime-store.1"),
-            &plan,
-        )
-        .unwrap(),
-        WorkflowExecutionAdmissionV1::StaleLease
-    );
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(
-            &authority,
-            &identity,
-            &fence(3, "attempt.workflow.runtime-store.1"),
-            &digest('7'),
-        )
-        .unwrap(),
-        WorkflowExecutionAdmissionV1::PlanConflict
-    );
-
-    let store = store.restart("workflow-execution");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(
-            &authority,
-            &id::<WorkflowDefinitionId>("workflow.definition.runtime-store"),
-        )
-        .unwrap(),
-        None
-    );
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(
-            &authority,
-            &identity,
-            &fence(4, "attempt.workflow.runtime-store.1"),
-            &plan,
-        )
-        .unwrap(),
-        WorkflowExecutionAdmissionV1::Replay(truth)
-    );
-    assert_eq!(store.count("workflow_executions_v1"), 1);
-}
-
-#[test]
 fn definition_and_handoff_survive_registered_store_restart() {
-    let store = RegisteredWorkStore::start("workflow-restart");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let store = RegisteredWorkflowStore::start("workflow-restart");
+    let authority = authority(&store);
     let first = definition(1, "operation.prepare.v1");
     WorkflowDefinitionAuthorityPort::insert(&authority, &first).unwrap();
-    WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
-        &authority,
-        first.definition_id(),
-        None,
-        1,
-    )
-    .unwrap();
 
     let scope = handoff_scope();
-    let grant = TaskHandoffGrantV1::new(
+    let grant = TaskHandoffGrant::new(
         scope.clone(),
         token_digest(&"r".repeat(48)),
         UtcMicros(10),
-        UtcMicros(50),
+        UtcMicros(60_000_010),
     )
     .unwrap();
     TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
@@ -627,7 +449,7 @@ fn definition_and_handoff_survive_registered_store_restart() {
     );
 
     let store = store.restart("workflow-restart");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let authority = WorkflowSqliteAuthority::from_registered(store.storage().clone()).unwrap();
     assert_eq!(
         WorkflowDefinitionAuthorityPort::load(&authority, first.definition_id(), 1)
             .unwrap()
@@ -635,12 +457,397 @@ fn definition_and_handoff_survive_registered_store_restart() {
         Some(&first)
     );
     assert_eq!(
-        WorkflowDefinitionAuthorityPort::active_version(&authority, first.definition_id()).unwrap(),
-        Some(1)
-    );
-    assert_eq!(
         TaskHandoffAuthorityPort::consume(&authority, grant.token_digest(), &scope, UtcMicros(12),)
             .unwrap(),
         TaskHandoffConsumeOutcome::Replay
     );
+}
+
+#[test]
+fn lost_issue_response_replays_the_exact_committed_terminal() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-issue-replay");
+    let authority = authority(&store);
+    let scope = handoff_scope();
+    let grant = TaskHandoffGrant::new(
+        scope,
+        token_digest(&"i".repeat(48)),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+    )
+    .unwrap();
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::HandoffIssue,
+        "actor.workflow.source",
+        '2',
+    );
+    let prepared =
+        WorkflowEffectPreparedV1::handoff_issue(identity.input_digest().clone(), grant.clone());
+
+    let first = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(20),
+    )
+    .unwrap();
+    let retry = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(30),
+    )
+    .unwrap();
+
+    assert_eq!(retry, first);
+    assert_eq!(first.state(), WorkflowEffectJournalStateV1::Reconciled);
+    assert_eq!(
+        first.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(grant))
+    );
+    assert_eq!(store.count("workflow_handoffs"), 1);
+}
+
+#[test]
+fn lost_redeem_response_replays_success_instead_of_token_replay() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-redeem-replay");
+    let workflow_authority = authority(&store);
+    let scope = handoff_scope();
+    let secret = "r".repeat(48);
+    let grant = TaskHandoffGrant::new(
+        scope.clone(),
+        token_digest(&secret),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+    )
+    .unwrap();
+    TaskHandoffAuthorityPort::issue(&workflow_authority, &grant).unwrap();
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::HandoffRedeem,
+        "actor.workflow.target",
+        '3',
+    );
+    let prepared = WorkflowEffectPreparedV1::handoff_redeem(
+        identity.input_digest().clone(),
+        token_digest(&secret),
+        scope.clone(),
+        UtcMicros(20),
+    );
+
+    let first = WorkflowEffectAuthorityPortV1::execute_effect(
+        &workflow_authority,
+        &identity,
+        &prepared,
+        UtcMicros(21),
+    )
+    .unwrap();
+    let restarted = store.restart("workflow-effect-redeem-replay");
+    let restarted_authority = authority(&restarted);
+    let retry = WorkflowEffectAuthorityPortV1::execute_effect(
+        &restarted_authority,
+        &identity,
+        &prepared,
+        UtcMicros(40),
+    )
+    .unwrap();
+
+    assert_eq!(retry, first);
+    assert_eq!(
+        retry.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffRedeemed(
+            TaskHandoffRedeemed { scope }
+        ))
+    );
+}
+
+#[test]
+fn rejected_effect_replays_the_exact_problem_without_reapplying() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-problem-replay");
+    let authority = authority(&store);
+    let scope = handoff_scope();
+    let grant = TaskHandoffGrant::new(
+        scope,
+        token_digest(&"p".repeat(48)),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+    )
+    .unwrap();
+    TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::HandoffIssue,
+        "actor.workflow.source",
+        '5',
+    );
+    let prepared = WorkflowEffectPreparedV1::handoff_issue(identity.input_digest().clone(), grant);
+
+    let first = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(20),
+    )
+    .unwrap();
+    let retry = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(30),
+    )
+    .unwrap();
+
+    assert_eq!(retry, first);
+    assert_eq!(
+        retry.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Problem(
+            tracedecay_application::WorkflowEffectProblemV1::InvalidRequest
+        )
+    );
+    assert_eq!(store.count("workflow_handoffs"), 1);
+}
+
+#[test]
+fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-in-flight");
+    let workflow_authority = authority(&store);
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        '4',
+    );
+    let prepared = WorkflowEffectPreparedV1::register_definition(
+        identity.input_digest().clone(),
+        definition(1, "operation.prepare.v1"),
+    );
+    let reserved =
+        WorkflowEffectAuthorityPortV1::reserve_effect(&workflow_authority, &identity, &prepared)
+            .unwrap();
+    assert_eq!(reserved.state(), WorkflowEffectJournalStateV1::BeforeEffect);
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE workflow_effect_journal
+                 SET state = 'in_flight'
+                 WHERE idempotency_key = ?1",
+                [identity.idempotency_key().as_str()],
+            )
+            .unwrap();
+    });
+    let restarted = store.restart("workflow-effect-in-flight");
+    let restarted_authority = authority(&restarted);
+    let reconciled = WorkflowEffectAuthorityPortV1::execute_effect(
+        &restarted_authority,
+        &identity,
+        &prepared,
+        UtcMicros(20),
+    )
+    .unwrap();
+
+    assert_eq!(reconciled.state(), WorkflowEffectJournalStateV1::Reconciled);
+    assert_eq!(restarted.count("workflow_definitions"), 1);
+}
+
+#[test]
+fn authority_drift_cannot_alias_an_existing_effect_reservation() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-authority-drift");
+    let authority = authority(&store);
+    let original = effect_identity_at(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'b',
+        EffectAuthorityBinding::BASE,
+        UtcMicros(10),
+    );
+    let prepared = WorkflowEffectPreparedV1::register_definition(
+        original.input_digest().clone(),
+        definition(1, "operation.prepare.v1"),
+    );
+    WorkflowEffectAuthorityPortV1::reserve_effect(&authority, &original, &prepared).unwrap();
+
+    let base = EffectAuthorityBinding::BASE;
+    for drifted_binding in [
+        EffectAuthorityBinding {
+            grant_revision: 2,
+            ..base
+        },
+        EffectAuthorityBinding {
+            grant_digest: '2',
+            ..base
+        },
+        EffectAuthorityBinding {
+            policy_revision: 2,
+            ..base
+        },
+        EffectAuthorityBinding {
+            policy_digest: '3',
+            ..base
+        },
+        EffectAuthorityBinding {
+            configuration_digest: '4',
+            ..base
+        },
+        EffectAuthorityBinding {
+            catalog_digest: '5',
+            ..base
+        },
+        EffectAuthorityBinding {
+            privacy_digest: 'b',
+            ..base
+        },
+    ] {
+        let drifted = effect_identity_at(
+            WorkflowEffectOperationV1::RegisterDefinition,
+            "actor.workflow.source",
+            'b',
+            drifted_binding,
+            UtcMicros(20),
+        );
+        assert_eq!(
+            WorkflowEffectAuthorityPortV1::execute_effect(
+                &authority,
+                &drifted,
+                &prepared,
+                UtcMicros(30),
+            )
+            .unwrap_err(),
+            tracedecay_application::WorkflowEffectAuthorityErrorV1::IdentityConflict
+        );
+    }
+    assert_eq!(store.count("workflow_definitions"), 0);
+}
+
+#[test]
+fn prepared_input_cannot_mutate_under_another_inputs_receipt() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-input-swap");
+    let authority = authority(&store);
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'c',
+    );
+    let prepared = WorkflowEffectPreparedV1::register_definition(
+        digest('d'),
+        definition(1, "operation.wrong-input.v1"),
+    );
+
+    assert_eq!(
+        WorkflowEffectAuthorityPortV1::execute_effect(
+            &authority,
+            &identity,
+            &prepared,
+            UtcMicros(20),
+        )
+        .unwrap_err(),
+        tracedecay_application::WorkflowEffectAuthorityErrorV1::IdentityConflict
+    );
+    assert_eq!(store.count("workflow_definitions"), 0);
+}
+
+#[test]
+fn restart_uses_the_reserved_preparation_and_timestamps() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-reserved-preparation");
+    let workflow_authority = authority(&store);
+    let identity = effect_identity_at(
+        WorkflowEffectOperationV1::HandoffIssue,
+        "actor.workflow.source",
+        'd',
+        EffectAuthorityBinding::BASE,
+        UtcMicros(10),
+    );
+    let original_grant = TaskHandoffGrant::new(
+        handoff_scope(),
+        token_digest(&"t".repeat(48)),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+    )
+    .unwrap();
+    let original = WorkflowEffectPreparedV1::handoff_issue(
+        identity.input_digest().clone(),
+        original_grant.clone(),
+    );
+    WorkflowEffectAuthorityPortV1::reserve_effect(&workflow_authority, &identity, &original)
+        .unwrap();
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE workflow_effect_journal SET state = 'in_flight'
+                 WHERE idempotency_key = ?1",
+                [identity.idempotency_key().as_str()],
+            )
+            .unwrap();
+    });
+    let store = store.restart("workflow-effect-reserved-preparation");
+    let restarted_authority = authority(&store);
+    let retry_identity = effect_identity_at(
+        WorkflowEffectOperationV1::HandoffIssue,
+        "actor.workflow.source",
+        'd',
+        EffectAuthorityBinding::BASE,
+        UtcMicros(40),
+    );
+    let recomputed = WorkflowEffectPreparedV1::handoff_issue(
+        retry_identity.input_digest().clone(),
+        TaskHandoffGrant::new(
+            handoff_scope(),
+            token_digest(&"t".repeat(48)),
+            UtcMicros(40),
+            UtcMicros(60_000_040),
+        )
+        .unwrap(),
+    );
+
+    let record = WorkflowEffectAuthorityPortV1::execute_effect(
+        &restarted_authority,
+        &retry_identity,
+        &recomputed,
+        UtcMicros(50),
+    )
+    .unwrap();
+
+    assert_eq!(
+        record.terminal().unwrap().identity().started_at(),
+        UtcMicros(10)
+    );
+    assert_eq!(
+        record.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(original_grant))
+    );
+}
+
+#[test]
+fn concurrent_exact_replays_all_return_the_committed_terminal() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-concurrent-replay");
+    let authority = authority(&store);
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'e',
+    );
+    let prepared = WorkflowEffectPreparedV1::register_definition(
+        identity.input_digest().clone(),
+        definition(1, "operation.prepare.v1"),
+    );
+    let barrier = Arc::new(Barrier::new(8));
+    let handles = (0..8)
+        .map(|_| {
+            let authority = authority.clone();
+            let identity = identity.clone();
+            let prepared = prepared.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                WorkflowEffectAuthorityPortV1::execute_effect(
+                    &authority,
+                    &identity,
+                    &prepared,
+                    UtcMicros(20),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let records = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(records.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(store.count("workflow_definitions"), 1);
 }
