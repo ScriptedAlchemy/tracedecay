@@ -2949,9 +2949,8 @@ pub(crate) async fn handle_install_command(
     })?;
     let tracedecay_bin = tracedecay::agents::which_tracedecay().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
-            message: "tracedecay not found on PATH. Install it from this repo first:\n  \
-                          cargo binstall --git https://github.com/ScriptedAlchemy/tracedecay tracedecay\n  \
-                          cargo install --git https://github.com/ScriptedAlchemy/tracedecay tracedecay"
+            message: "tracedecay not found on PATH. Install the checksummed GitHub release:\n  \
+                          https://github.com/ScriptedAlchemy/tracedecay/releases/latest"
                 .to_string(),
         }
     })?;

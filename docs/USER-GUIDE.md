@@ -34,31 +34,17 @@ deployment.
 
 Pick whichever method suits your platform.
 
-**Homebrew (macOS):**
+**Linux and Apple silicon macOS:**
 
 ```bash
-brew install ScriptedAlchemy/tap/tracedecay
+curl -fsSL https://github.com/ScriptedAlchemy/tracedecay/releases/latest/download/install.sh | bash
 ```
 
-**Scoop (Windows):**
+**Windows:**
 
-```powershell
-scoop bucket add tracedecay https://github.com/ScriptedAlchemy/scoop-bucket
-scoop install tracedecay
-```
-
-**Cargo (any platform):**
-
-```bash
-cargo install tracedecay
-```
-
-If you only work with a subset of languages, you can install a smaller binary:
-
-```bash
-cargo install tracedecay --features medium        # 20 languages
-cargo install tracedecay --no-default-features    # 11 languages (lite)
-```
+Download the x86_64 Windows archive from the
+[latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest),
+extract `tracedecay.exe`, and place it on `PATH`.
 
 **Prebuilt binaries:**
 
@@ -791,10 +777,10 @@ Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, 
 
 ### Mixing individual languages
 
-You can also cherry-pick individual languages without taking a full tier:
+Source builds can cherry-pick individual languages without taking a full tier:
 
 ```bash
-cargo install tracedecay --no-default-features --features lang-nix,lang-bash
+cargo build --release --no-default-features --features lang-nix,lang-bash
 ```
 
 ### What gets extracted
@@ -908,14 +894,6 @@ tracedecay upgrade
 ```
 
 Beta and stable are separate update channels — a beta build only sees beta releases and vice versa. Any attached MCP servers will continue running with the previous binary until you restart your agent.
-
-You can also update through your package manager:
-
-```bash
-brew upgrade tracedecay          # Homebrew
-scoop update tracedecay          # Scoop
-cargo install tracedecay         # Cargo
-```
 
 After upgrading, re-run install if the host integration reports a missing
 capability, then inspect the daemon-owned status/coverage:
