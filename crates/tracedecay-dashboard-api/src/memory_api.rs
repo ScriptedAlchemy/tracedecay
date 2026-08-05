@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -23,6 +23,10 @@ use serde_json::{Map, Value, json};
 use super::DashboardState;
 use super::memory_analysis::{SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP};
 use super::memory_service;
+use super::read_model::{
+    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
+    scope_from_state,
+};
 use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail};
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_runtime_core::memory::types::{
@@ -400,7 +404,7 @@ async fn fact_trust_history_payload(
 pub async fn overview(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<OverviewParams>,
-) -> Response {
+) -> Json<DashboardEnvelopeV1<Option<MemoryOverviewPayloadV1>>> {
     let limit = coerce_limit(params.limit, 25, 100);
     let graph_limit = coerce_limit(params.graph_limit, limit, 1000);
 
@@ -472,30 +476,38 @@ pub async fn overview(
         "holographic": holographic,
     });
     match serde_json::from_value::<MemoryOverviewPayloadV1>(payload) {
-        Ok(payload) => Json(payload).into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&format!(
-                "Failed to encode memory overview contract: {error}"
-            ))),
-        )
-            .into_response(),
+        Ok(payload) => Json(DashboardEnvelopeV1::new(
+            scope_from_state(&state),
+            DashboardDomainStateV1::Partial,
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1::fresh_now(),
+            Some(payload),
+        )),
+        Err(error) => Json(DashboardEnvelopeV1::error(
+            scope_from_state(&state),
+            None,
+            format!("Failed to encode memory overview contract: {error}"),
+        )),
     }
 }
 
 /// `GET /api/plugins/holographic/status` — rich holographic-memory health
 /// derived from the memory application authority plus the largest-bank
 /// utilization that operators need for the dashboard health card.
-pub async fn status(State(state): State<DashboardState>) -> Response {
+pub async fn status(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<MemoryStatusPayloadV1>>> {
     match memory_status_payload(&state).await {
-        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&format!(
-                "Failed to compute memory status: {e}"
-            ))),
-        )
-            .into_response(),
+        Ok(payload) => Json(DashboardEnvelopeV1::ready(
+            scope_from_state(&state),
+            DashboardCoverageV1::complete(1, "memory_stores"),
+            Some(payload),
+        )),
+        Err(error) => Json(DashboardEnvelopeV1::error(
+            scope_from_state(&state),
+            None,
+            format!("Failed to compute memory status: {error}"),
+        )),
     }
 }
 
@@ -507,24 +519,30 @@ pub async fn status(State(state): State<DashboardState>) -> Response {
 pub async fn fact_detail(
     State(state): State<DashboardState>,
     JsonPath(fact_id): JsonPath<i64>,
-) -> Response {
+) -> Json<DashboardEnvelopeV1<Option<MemoryFactDetailPayloadV1>>> {
     match memory_service::fact_detail_payload(&state, fact_id).await {
         Ok(Some(payload)) => match serde_json::from_value::<MemoryFactDetailPayloadV1>(payload) {
-            Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(http_detail(&format!(
-                    "Failed to encode memory fact detail contract: {error}"
-                ))),
-            )
-                .into_response(),
+            Ok(payload) => Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(1, "facts"),
+                Some(payload),
+            )),
+            Err(error) => Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                format!("Failed to encode memory fact detail contract: {error}"),
+            )),
         },
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(http_detail(&format!("fact not found: {fact_id}"))),
-        )
-            .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(http_detail(&e))).into_response(),
+        Ok(None) => Json(DashboardEnvelopeV1::complete_zero_findings(
+            scope_from_state(&state),
+            DashboardCoverageV1::complete(1, "facts"),
+            None,
+        )),
+        Err(error) => Json(DashboardEnvelopeV1::error(
+            scope_from_state(&state),
+            None,
+            error,
+        )),
     }
 }
 

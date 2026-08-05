@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::response::{IntoResponse, Response};
 use axum::{Json, extract::State, http::StatusCode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -27,6 +26,7 @@ use serde_json::{Map, Value, json};
 
 use super::DashboardState;
 use super::lcm_service;
+use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
 use super::util::{JsonPath, JsonQuery, coerce_limit};
 use crate::request_identity::{
     GlobalOpaqueIdentityKind, RequestIdentityError, mint_global_opaque_id,
@@ -295,18 +295,43 @@ pub async fn session(
     State(state): State<DashboardState>,
     JsonPath(session_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<SessionParams>,
-) -> Response {
+) -> Json<DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>> {
     let limit = coerce_limit(params.limit, 200, 1000);
     let offset = params.offset.unwrap_or(0).max(0);
     let descending = params.order.eq_ignore_ascii_case("desc");
     let payload =
         match lcm_service::session_payload(&state, &session_id, limit, offset, descending).await {
             Ok(payload) => payload,
-            Err(error) => return error.into_response(),
+            Err(error) => return lcm_read_error(&state, error, "sessions"),
         };
     match decode_lcm_contract::<LcmSessionPayloadV1>(payload, "LCM session") {
-        Ok(payload) => Json(payload).into_response(),
-        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+        Ok(payload) if !payload.exists => Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            Some(payload),
+            "lcm_store_unavailable",
+        )),
+        Ok(payload) if payload.has_more => Json(DashboardEnvelopeV1::partial(
+            scope_from_state(&state),
+            payload.counts.message_count.max(0) as u64
+                + payload.counts.summary_node_count.max(0) as u64,
+            payload.messages.len() as u64 + payload.summary_nodes.len() as u64,
+            "session_items",
+            vec!["page_limit".to_owned()],
+            Some(payload),
+        )),
+        Ok(payload) => Json(DashboardEnvelopeV1::ready(
+            scope_from_state(&state),
+            DashboardCoverageV1::complete(
+                payload.messages.len() as u64 + payload.summary_nodes.len() as u64,
+                "session_items",
+            ),
+            Some(payload),
+        )),
+        Err(error) => Json(DashboardEnvelopeV1::error(
+            scope_from_state(&state),
+            None,
+            error,
+        )),
     }
 }
 
@@ -333,18 +358,76 @@ pub struct TimelineParams {
 pub async fn timeline(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<TimelineParams>,
-) -> Response {
+) -> Json<DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>> {
     let limit = coerce_limit(params.limit, 400, 2000);
     let by_hour = params.bucket.eq_ignore_ascii_case("hour");
     let payload =
         match lcm_service::timeline_payload(&state, by_hour, &params.session_id, limit).await {
             Ok(payload) => payload,
-            Err(error) => return error.into_response(),
+            Err(error) => return lcm_read_error(&state, error, "timeline_buckets"),
         };
     match decode_lcm_contract::<LcmTimelinePayloadV1>(payload, "LCM timeline") {
-        Ok(payload) => Json(payload).into_response(),
-        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+        Ok(payload) => {
+            if !payload.exists {
+                return Json(DashboardEnvelopeV1::unavailable(
+                    scope_from_state(&state),
+                    Some(payload),
+                    "lcm_store_unavailable",
+                ));
+            }
+            if let Some(coverage) = payload
+                .coverage
+                .as_ref()
+                .filter(|coverage| coverage.truncated)
+            {
+                let eligible = coverage.total_dated_buckets.max(0) as u64;
+                let examined = coverage.returned_buckets.max(0) as u64;
+                return Json(DashboardEnvelopeV1::partial(
+                    scope_from_state(&state),
+                    eligible,
+                    examined,
+                    "timeline_buckets",
+                    vec!["page_limit".to_owned()],
+                    Some(payload),
+                ));
+            }
+            Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(payload.buckets.len() as u64, "timeline_buckets"),
+                Some(payload),
+            ))
+        }
+        Err(error) => Json(DashboardEnvelopeV1::error(
+            scope_from_state(&state),
+            None,
+            error,
+        )),
     }
+}
+
+fn lcm_read_error<T>(
+    state: &DashboardState,
+    (status, Json(body)): LcmResponse,
+    unit: &'static str,
+) -> Json<DashboardEnvelopeV1<Option<T>>> {
+    let reason = body
+        .get("detail")
+        .or_else(|| body.get("error"))
+        .and_then(Value::as_str)
+        .unwrap_or("LCM read failed")
+        .to_owned();
+    let scope = scope_from_state(state);
+    let envelope = match status {
+        StatusCode::NOT_FOUND => DashboardEnvelopeV1::complete_zero_findings(
+            scope,
+            DashboardCoverageV1::complete(1, unit),
+            None,
+        ),
+        StatusCode::UNAUTHORIZED => DashboardEnvelopeV1::unauthorized(scope, None),
+        StatusCode::FORBIDDEN => DashboardEnvelopeV1::denied(scope, None),
+        _ => DashboardEnvelopeV1::error(scope, None, reason),
+    };
+    Json(envelope)
 }
 
 #[derive(Deserialize)]
