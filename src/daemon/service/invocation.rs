@@ -8,8 +8,6 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -176,11 +174,7 @@ use crate::request_identity::{
 };
 use crate::tracedecay::TraceDecay;
 #[cfg(test)]
-use tracedecay_application::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
-    CreateWorkCommand, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
-    ReviewProposalRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-};
+use tracedecay_application::{MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1};
 use tracedecay_hooks::{
     HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookFeedbackDeliveryPortV1,
     HookScopeBindingV1,
