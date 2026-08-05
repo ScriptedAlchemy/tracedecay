@@ -47,10 +47,15 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
 
     let store_administration =
         StoreAdministration::default().with_profile_identity(authority.profile_identity().clone());
+    let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
+    let invocation = DaemonInvocationState::default();
+    invocation.configure_github_read_only_credentials(authority.profile_identity());
     let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
     install_http_application_cold_resolver(
         &http_application_registry,
         store_administration.clone(),
+        invocation.clone(),
+        Arc::clone(&project_open_gates),
     )?;
     let http_application_service = http_application::DaemonHttpApplicationService::bind(
         http_application_registry.clone(),
@@ -74,9 +79,6 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         sync_config.retention,
     )
     .await;
-    let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
-    let invocation = DaemonInvocationState::default();
-    invocation.configure_github_read_only_credentials(authority.profile_identity());
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
@@ -221,6 +223,8 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     install_http_application_cold_resolver(
         &http_application_registry,
         engine.store_administration.clone(),
+        engine.invocation.clone(),
+        Arc::clone(&engine.project_open_gates),
     )?;
     let http_application_service = http_application::DaemonHttpApplicationService::bind(
         http_application_registry.clone(),

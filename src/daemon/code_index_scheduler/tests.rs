@@ -2979,6 +2979,66 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn busy() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let wake = {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(&scheduler.wake)
+    };
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal scheduler lock held");
+        release_rx.recv().expect("release scheduler lock");
+    });
+    held_rx.recv().expect("scheduler lock acquired");
+    fixture.edit("src/lib.rs", "pub fn busy() -> u32 { 2 }\n");
+    wake.notify_one();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let roots = [fixture.path().canonicalize().expect("canonical root")]
+        .into_iter()
+        .collect();
+
+    assert!(
+        !registry
+            .retire_project_roots_with_deadline(&roots, Duration::from_millis(25))
+            .await,
+        "blocked writer must report settling"
+    );
+    assert_eq!(registry.retiring_owner_count().await, 1);
+    release_tx.send(()).expect("release writer");
+    lock_thread.join().expect("writer joins");
+    assert!(
+        registry
+            .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
+            .await,
+        "retry must join the retained owner"
+    );
+    assert_eq!(registry.retiring_owner_count().await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_reconciles_respect_a_single_admission_permit() {
     // A bound of ONE serializes all worktrees: while the first worker holds the
     // sole permit (blocked on its scheduler lock), the second cannot start.

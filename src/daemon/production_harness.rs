@@ -158,11 +158,13 @@ impl ProductionProjectCompositionHarnessV1 {
         let invocation = DaemonInvocationState::default();
         invocation.configure_github_read_only_credentials(&profile_identity);
         let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
+        let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
         install_http_application_cold_resolver(
             &http_application_registry,
             store_administration.clone(),
+            invocation.clone(),
+            Arc::clone(&project_open_gates),
         )?;
-        let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
         let client_identity = DaemonClientIdentity {
             profile_root: profile_root.clone(),
             global_db_path: profile_root.join("global.db"),

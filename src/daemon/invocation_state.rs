@@ -55,6 +55,41 @@ impl Default for DaemonInvocationState {
 }
 
 impl DaemonInvocationState {
+    pub(super) async fn retire_remote_deleted_project(
+        &self,
+        project_id: &tracedecay_domain::ProjectId,
+        project_roots: &std::collections::BTreeSet<std::path::PathBuf>,
+    ) -> Result<()> {
+        self.query_authority_provider.retire_project(project_id);
+        if !self
+            .code_index_schedulers
+            .retire_project_roots(project_roots)
+            .await
+        {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "code-index workers for remote-deleted project '{}' did not drain",
+                    project_id.as_str()
+                ),
+            });
+        }
+        if !self.service.expire_project(project_id, project_roots).await {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "invocation runtime owners for remote-deleted project '{}' did not drain",
+                    project_id.as_str()
+                ),
+            });
+        }
+        for root in project_roots {
+            crate::application::semantic_runtime::unregister_project_semantic_runtime(root);
+            crate::application::semantic_runtime::unregister_project_semantic_redundancy_authority(
+                root,
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn configure_github_read_only_credentials(
         &self,
         identity: &profile_identity::LocalProfileIdentityAuthorityV1,

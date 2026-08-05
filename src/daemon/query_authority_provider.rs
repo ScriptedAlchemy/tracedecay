@@ -204,6 +204,14 @@ impl fmt::Debug for DaemonQueryAuthorityProviderV1 {
 }
 
 impl DaemonQueryAuthorityProviderV1 {
+    pub(crate) fn retire_project(&self, project_id: &tracedecay_domain::ProjectId) {
+        let mut activated = match self.activated.write() {
+            Ok(activated) => activated,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        activated.retain(|_, activated| &activated.scope.project_id != project_id);
+    }
+
     /// Restore the evaluated fallback installed as the configuration store's
     /// initial state. Initial installation has no mutation audit event, so it
     /// is admitted only while the exact query profile is active with no rollback

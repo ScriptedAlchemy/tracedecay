@@ -8,6 +8,51 @@ pub(super) enum ShutdownState {
 }
 
 impl ProjectRuntimeRegistryV1 {
+    pub(crate) async fn retire_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
+        {
+            let mut retired = self.lock_retired_roots();
+            retired.extend(roots.iter().cloned());
+        }
+        let retired =
+            tokio::time::timeout(super::super::super::DAEMON_TASK_ABORT_DEADLINE, async {
+                loop {
+                    let mut changed = self.reservation_changed.subscribe();
+                    let retired = {
+                        let mut current = self.lock_runtimes();
+                        roots
+                            .iter()
+                            .all(|root| {
+                                current
+                                    .get(root)
+                                    .is_none_or(|runtime| runtime.reservations.is_empty())
+                            })
+                            .then(|| {
+                                roots
+                                    .iter()
+                                    .filter_map(|root| {
+                                        current.remove(root).map(|runtime| (root.clone(), runtime))
+                                    })
+                                    .collect::<BTreeMap<_, _>>()
+                            })
+                    };
+                    if let Some(retired) = retired {
+                        break retired;
+                    }
+                    if changed.changed().await.is_err() {
+                        break BTreeMap::new();
+                    }
+                }
+            })
+            .await;
+        match retired {
+            Ok(runtimes) => {
+                shut_down_runtimes(runtimes);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     pub(crate) fn begin_shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         self.signal_reservation_changed();
@@ -84,27 +129,31 @@ impl ProjectRuntimeRegistryV1 {
             }
         };
 
-        for runtime in runtimes.values() {
-            let (Some(router), Some(feedback)) = (&runtime.feedback_cycle_input, &runtime.feedback)
-            else {
-                continue;
-            };
-            let _ = router.replace(Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
-                feedback.project_id().clone(),
-                feedback.source_observation_port(),
-            )));
-        }
+        shut_down_runtimes(runtimes);
+    }
+}
 
-        for (project_root, runtime) in runtimes {
-            if let Some(work) = runtime.work {
-                let _ = work.into_runtime().shutdown();
-            }
-            if let Some(semantic) = runtime.semantic {
-                crate::application::semantic_runtime::unregister_project_semantic_runtime(
-                    &project_root,
-                );
-                semantic.cancel();
-            }
+fn shut_down_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
+    for runtime in runtimes.values() {
+        let (Some(router), Some(feedback)) = (&runtime.feedback_cycle_input, &runtime.feedback)
+        else {
+            continue;
+        };
+        let _ = router.replace(Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
+            feedback.project_id().clone(),
+            feedback.source_observation_port(),
+        )));
+    }
+
+    for (project_root, runtime) in runtimes {
+        if let Some(work) = runtime.work {
+            let _ = work.into_runtime().shutdown();
+        }
+        if let Some(semantic) = runtime.semantic {
+            crate::application::semantic_runtime::unregister_project_semantic_runtime(
+                &project_root,
+            );
+            semantic.cancel();
         }
     }
 }

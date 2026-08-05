@@ -6,10 +6,19 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::ProjectId;
 
-use super::http_application::DaemonHttpApplicationRegistry;
+use super::{StoreAdministration, http_application::DaemonHttpApplicationRegistry};
+pub(super) use crate::global_db::{RemoteDeletionFailureCode, RemoteDeletionPhase};
 
 const MAX_REMOTE_DELETION_BODY_BYTES: usize = 16 * 1024;
+
+#[derive(Clone)]
+pub(super) struct RemoteDeletionRuntimeOwners {
+    pub(super) administration: StoreAdministration,
+    pub(super) invocation: super::DaemonInvocationState,
+    pub(super) project_open_gates: std::sync::Arc<tokio::sync::Mutex<super::ProjectOpenGates>>,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "target", rename_all = "snake_case", deny_unknown_fields)]
@@ -42,31 +51,6 @@ pub(super) enum RemoteDeletionStatus {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum RemoteDeletionPhase {
-    ValidateRequest,
-    ResolveAuthority,
-    ResolveTarget,
-    PersistTombstone,
-    CancelRuntimeOwners,
-    RemoveShard,
-    RemoveRegistryEntry,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum RemoteDeletionFailureCode {
-    InvalidRequest,
-    AuthorityUnavailable,
-    TargetNotFound,
-    TombstoneConflict,
-    TombstoneUnavailable,
-    RuntimeOwnersSettling,
-    ShardCleanupFailed,
-    RegistryCleanupFailed,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(super) struct RemoteDeletionFailure {
     pub(super) code: RemoteDeletionFailureCode,
@@ -88,6 +72,33 @@ pub(super) struct RemoteDeletionReceipt {
 }
 
 impl RemoteDeletionReceipt {
+    pub(super) fn pending(
+        target: RemoteDeletionReceiptTarget,
+        profile_id: Option<String>,
+        tombstone_id: String,
+        project_id: Option<String>,
+    ) -> Self {
+        let pending_project_ids = project_id.iter().cloned().collect();
+        Self {
+            status: RemoteDeletionStatus::Failed,
+            target: Some(target),
+            profile_id,
+            tombstone_id: Some(tombstone_id),
+            project_id,
+            tombstone_recorded: false,
+            removed_project_ids: Vec::new(),
+            pending_project_ids,
+            failure: None,
+        }
+    }
+
+    pub(super) fn complete(mut self) -> Self {
+        self.status = RemoteDeletionStatus::Deleted;
+        self.pending_project_ids.clear();
+        self.failure = None;
+        self
+    }
+
     fn invalid_request() -> Self {
         Self {
             status: RemoteDeletionStatus::Failed,
@@ -150,13 +161,96 @@ pub(super) async fn dispatch_remote_deletion(
     request: Request<Body>,
 ) -> Response {
     let receipt = match parse_remote_deletion_request(request).await {
-        Ok(request) => match registry.remote_deletion_executor() {
-            Ok(Some(executor)) => executor(request).await,
+        Ok(request) => match registry.remote_deletion_runtime_owners() {
+            Ok(Some(owners)) => match execute_remote_deletion(&owners, request).await {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    tracing::warn!(error = %error.source, "remote deletion request failed");
+                    error.receipt
+                }
+            },
             Ok(None) | Err(_) => RemoteDeletionReceipt::authority_unavailable(request),
         },
         Err(receipt) => receipt,
     };
+    if receipt.tombstone_recorded
+        && let Some(target) = receipt.target
+    {
+        registry
+            .forget_remote_deleted_routes(target, receipt.project_id.as_deref())
+            .await;
+    }
     (receipt.http_status(), axum::Json(receipt)).into_response()
+}
+
+#[derive(Debug)]
+pub(super) struct RemoteDeletionExecutionError {
+    pub(super) receipt: RemoteDeletionReceipt,
+    pub(super) source: crate::errors::TraceDecayError,
+}
+
+impl RemoteDeletionExecutionError {
+    pub(super) fn new(
+        mut receipt: RemoteDeletionReceipt,
+        code: RemoteDeletionFailureCode,
+        phase: RemoteDeletionPhase,
+        retryable: bool,
+        source: crate::errors::TraceDecayError,
+    ) -> Self {
+        receipt.status = if receipt.tombstone_recorded {
+            if matches!(
+                code,
+                RemoteDeletionFailureCode::RuntimeOwnersSettling
+                    | RemoteDeletionFailureCode::RuntimeRetirementIncomplete
+            ) {
+                RemoteDeletionStatus::Settling
+            } else {
+                RemoteDeletionStatus::Partial
+            }
+        } else if code == RemoteDeletionFailureCode::TargetNotFound {
+            RemoteDeletionStatus::Denied
+        } else {
+            RemoteDeletionStatus::Failed
+        };
+        receipt.failure = Some(RemoteDeletionFailure {
+            code,
+            phase,
+            retryable,
+        });
+        Self { receipt, source }
+    }
+}
+
+async fn execute_remote_deletion(
+    owners: &RemoteDeletionRuntimeOwners,
+    request: RemoteDeletionHttpRequest,
+) -> Result<RemoteDeletionReceipt, RemoteDeletionExecutionError> {
+    let (target, project_id) = match request.target {
+        RemoteDeletionHttpTarget::Account => (RemoteDeletionReceiptTarget::Account, None),
+        RemoteDeletionHttpTarget::Project { project_id } => {
+            ProjectId::new(project_id.clone()).map_err(|error| {
+                RemoteDeletionExecutionError::new(
+                    RemoteDeletionReceipt::pending(
+                        RemoteDeletionReceiptTarget::Project,
+                        None,
+                        request.tombstone_id.clone(),
+                        Some(project_id.clone()),
+                    ),
+                    RemoteDeletionFailureCode::InvalidRequest,
+                    RemoteDeletionPhase::ValidateRequest,
+                    false,
+                    crate::errors::TraceDecayError::Config {
+                        message: format!("remote deletion project identity is invalid: {error}"),
+                    },
+                )
+            })?;
+            (RemoteDeletionReceiptTarget::Project, Some(project_id))
+        }
+    };
+    owners
+        .administration
+        .execute_remote_deletion(owners, target, project_id, request.tombstone_id)
+        .await
 }
 
 async fn parse_remote_deletion_request(

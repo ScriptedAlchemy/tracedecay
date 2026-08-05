@@ -40,7 +40,9 @@ pub enum RemoteDeletionFailureCode {
     TargetNotFound,
     TombstoneConflict,
     TombstoneUnavailable,
+    ProjectEnumerationUnavailable,
     RuntimeOwnersSettling,
+    RuntimeRetirementIncomplete,
     ShardCleanupFailed,
     RegistryCleanupFailed,
 }
@@ -53,7 +55,9 @@ impl RemoteDeletionFailureCode {
             Self::TargetNotFound => "target_not_found",
             Self::TombstoneConflict => "tombstone_conflict",
             Self::TombstoneUnavailable => "tombstone_unavailable",
+            Self::ProjectEnumerationUnavailable => "project_enumeration_unavailable",
             Self::RuntimeOwnersSettling => "runtime_owners_settling",
+            Self::RuntimeRetirementIncomplete => "runtime_retirement_incomplete",
             Self::ShardCleanupFailed => "shard_cleanup_failed",
             Self::RegistryCleanupFailed => "registry_cleanup_failed",
         }
@@ -66,7 +70,9 @@ impl RemoteDeletionFailureCode {
             "target_not_found" => Some(Self::TargetNotFound),
             "tombstone_conflict" => Some(Self::TombstoneConflict),
             "tombstone_unavailable" => Some(Self::TombstoneUnavailable),
+            "project_enumeration_unavailable" => Some(Self::ProjectEnumerationUnavailable),
             "runtime_owners_settling" => Some(Self::RuntimeOwnersSettling),
+            "runtime_retirement_incomplete" => Some(Self::RuntimeRetirementIncomplete),
             "shard_cleanup_failed" => Some(Self::ShardCleanupFailed),
             "registry_cleanup_failed" => Some(Self::RegistryCleanupFailed),
             _ => None,
@@ -81,6 +87,7 @@ pub enum RemoteDeletionPhase {
     ResolveAuthority,
     ResolveTarget,
     PersistTombstone,
+    EnumerateProjects,
     CancelRuntimeOwners,
     RemoveShard,
     RemoveRegistryEntry,
@@ -93,6 +100,7 @@ impl RemoteDeletionPhase {
             Self::ResolveAuthority => "resolve_authority",
             Self::ResolveTarget => "resolve_target",
             Self::PersistTombstone => "persist_tombstone",
+            Self::EnumerateProjects => "enumerate_projects",
             Self::CancelRuntimeOwners => "cancel_runtime_owners",
             Self::RemoveShard => "remove_shard",
             Self::RemoveRegistryEntry => "remove_registry_entry",
@@ -105,6 +113,7 @@ impl RemoteDeletionPhase {
             "resolve_authority" => Some(Self::ResolveAuthority),
             "resolve_target" => Some(Self::ResolveTarget),
             "persist_tombstone" => Some(Self::PersistTombstone),
+            "enumerate_projects" => Some(Self::EnumerateProjects),
             "cancel_runtime_owners" => Some(Self::CancelRuntimeOwners),
             "remove_shard" => Some(Self::RemoveShard),
             "remove_registry_entry" => Some(Self::RemoveRegistryEntry),
@@ -283,6 +292,27 @@ pub enum RemoteDeletionTombstoneTransitionOutcome {
 }
 
 impl RegisteredGlobalDb {
+    pub async fn remote_deletion_tombstone(
+        &self,
+        profile_id: &str,
+        target: RemoteDeletionTarget,
+        project_id: Option<&str>,
+    ) -> Result<Option<RemoteDeletionTombstone>> {
+        validate_identifier("profile id", profile_id)?;
+        let project_key = match target {
+            RemoteDeletionTarget::Account => "",
+            RemoteDeletionTarget::Project => {
+                let project_id = project_id.ok_or_else(|| {
+                    remote_deletion_error("read remote deletion tombstone", "missing project id")
+                })?;
+                validate_identifier("project id", project_id)?;
+                project_id
+            }
+        };
+        let snapshot = self.read_snapshot().await?;
+        read_tombstone(&snapshot, profile_id, target, project_key).await
+    }
+
     pub async fn record_remote_deletion_tombstone(
         &self,
         tombstone: RemoteDeletionTombstone,
@@ -431,6 +461,23 @@ impl RegisteredGlobalDb {
         validate_identifier("profile id", profile_id)?;
         let snapshot = self.read_snapshot().await?;
         read_tombstone(&snapshot, profile_id, RemoteDeletionTarget::Account, "").await
+    }
+
+    pub async fn delete_remote_deleted_project_registry_row(&self, project_id: &str) -> Result<()> {
+        validate_identifier("remote deletion project id", project_id)?;
+        let transaction = self.begin_write_transaction().await?;
+        transaction
+            .execute(
+                "DELETE FROM code_projects WHERE project_id = ?1",
+                params![project_id],
+            )
+            .await
+            .map_err(|error| {
+                remote_deletion_error("remove remote-deleted project registry row", error)
+            })?;
+        transaction.commit().await.map_err(|error| {
+            remote_deletion_error("commit remote-deleted project registry row", error)
+        })
     }
 }
 
