@@ -287,7 +287,7 @@ pub(super) async fn execute_workflow_application(
         ),
         WorkflowApplicationInvocation::ExecuteFanOut(request) => {
             let request = *request;
-            if request.provider.deadline > deadline.expires_at {
+            if request.provider.execution_snapshot.deadline() > deadline.expires_at {
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,

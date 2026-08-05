@@ -10,10 +10,13 @@ use tracedecay_application::{
     ReviewProposalCommand, WorkService,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
-    RepositoryId, RunId, TaskId, WorkCancellationRequestId, WorkEffectStateV1,
-    WorkExecutionBudgetV1, WorkExecutionEnvelopeV1, WorkFenceEpochV1, WorkLeaseId,
-    WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkProviderBackendV1, WorkVersion,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
+    ProjectId, ProjectionGenerationId, ProposalId, RepositoryId, RunId, TaskId, UtcMicros,
+    WorkApprovalPolicy, WorkCancellationRequestId, WorkEffectStateV1, WorkEgressPolicy,
+    WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
+    WorkLeaseId, WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkProviderBackendV1,
+    WorkProviderProtocol, WorkProviderRouteV1, WorkSandboxPolicy, WorkVersion,
     WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
@@ -33,6 +36,39 @@ where
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+}
+
+fn execution_snapshot(route: WorkProviderRouteV1) -> WorkExecutionSnapshot {
+    WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
+        configuration_revision_id: id::<ConfigurationRevisionId>(
+            "configuration-revision.work.daemon",
+        ),
+        configuration_snapshot_id: id::<ConfigurationSnapshotId>(
+            "configuration-snapshot.work.daemon",
+        ),
+        effective_behavior_digest: digest('c'),
+        resolution_provenance_digest: digest('d'),
+        route,
+        backend: WorkProviderBackendV1::CodexAppServer,
+        protocol: WorkProviderProtocol::CodexAppServerJsonRpc,
+        model: "codex-work-fixture".to_owned(),
+        executable: WorkExecutableReference::new(
+            "executable.codex.app-server".to_owned(),
+            digest('e'),
+        )
+        .unwrap(),
+        sandbox: WorkSandboxPolicy::Required,
+        approval: WorkApprovalPolicy::Never,
+        filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+        egress: WorkEgressPolicy::Deny,
+        environment_allowlist: BTreeSet::new(),
+        credential_references: BTreeSet::new(),
+        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
+        deadline: UtcMicros(i64::MAX),
+        fallback: WorkFallbackTopology::Disabled,
+        topology_policy_digest: digest('f'),
+    })
+    .unwrap()
 }
 
 fn context(project_id: ProjectId) -> RequestContext {
@@ -317,19 +353,16 @@ impl Harness {
             )
             .unwrap(),
             id::<WorkflowOperationRef>("operation.work.attempt_start"),
-            NativeWorkProviderV1::<WorkSqliteStorage>::codex_app_server_route().unwrap(),
-            WorkProviderBackendV1::CodexAppServer,
-            "codex-work-fixture".to_owned(),
-            digest('c'),
+            execution_snapshot(
+                NativeWorkProviderV1::<WorkSqliteStorage>::codex_app_server_route().unwrap(),
+            ),
             self.authority.project_id().clone(),
             self.authority.repository_id().clone(),
             self.authority.worktree_id().clone(),
             self.project_root.to_string_lossy().into_owned(),
             None,
             id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
-            UtcMicros(i64::MAX),
             1,
-            WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
             WorkEffectStateV1::Observational,
         )
         .unwrap()
