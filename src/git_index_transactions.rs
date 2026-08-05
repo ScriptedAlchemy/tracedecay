@@ -1,7 +1,7 @@
 //! Fixed native Git mechanics for PR11 index transactions.
 //!
-//! The native surface only stages, unstages, and commits preview-bound index
-//! changes. It never accepts a generic Git subcommand, flags, ref, or
+//! The native surface only stages and unstages preview-bound index changes. It
+//! never accepts a generic Git subcommand, flags, ref, or
 //! working-tree path from a caller. Daemon code supplies already validated,
 //! preview-bound patch material and performs the journaled recovery protocol.
 
@@ -13,10 +13,9 @@ use std::process::{Command, Output, Stdio};
 
 use thiserror::Error;
 use tracedecay_domain::{
-    DomainError, GitBlobExpectationV1, GitFileModeV1, GitHeadStateV1, GitIndexCommitIntentV1,
-    GitIndexEntryExpectationV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1,
-    GitIndexSigningPolicyV1, GitIndexTransactionOperationV1, GitOidV1, HunkDirectionV1, HunkRefV1,
-    ManifestDigest, canonical_sha256,
+    DomainError, GitBlobExpectationV1, GitFileModeV1, GitHeadStateV1, GitIndexEntryExpectationV1,
+    GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitIndexTransactionOperationV1, GitOidV1,
+    HunkDirectionV1, HunkRefV1, ManifestDigest, canonical_sha256,
 };
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentity, GitRepositoryIdentityOutcome, discover_repository_identity_bounded,
@@ -26,14 +25,13 @@ pub(crate) const GIT_INDEX_ADAPTER_REVISION: &str = "tracedecay.git-index-adapte
 
 mod patch;
 mod process;
-mod ref_transaction;
 mod safety;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use patch::ValidatedIndexPatch;
 use process::{
-    current_operation_state, git_command, git_timestamp, joined_patch_bytes, parse_git_oid,
+    current_operation_state, git_command, joined_patch_bytes, parse_git_oid,
     run_command_with_stdin, sync_parent_directory, worktree_mode,
 };
 
@@ -54,18 +52,10 @@ pub enum NativeGitIndexError {
     PatchDoesNotMatchHunk,
     #[error("partial hunk selection has no proven round-trip adapter")]
     PartialHunkSelectionUnsupported,
-    #[error("native commit is unavailable for the previewed repository state")]
-    CommitStateUnsupported,
-    #[error("configured Git hooks make commit_index preview-only")]
-    UnsupportedHookPolicy,
     #[error("native write-tree differs from the preview candidate tree")]
     CandidateTreeMismatch,
-    #[error("the full commit intent does not match the preview commitment")]
-    CommitIntentMismatch,
     #[error("native repository state no longer matches the preview")]
     StaleRepositoryState,
-    #[error("the previewed index tree is identical to the current HEAD tree")]
-    EmptyIndexCommit,
     #[error("native Git I/O failed: {0}")]
     Io(String),
     #[error("native Git {operation} crossed a commit boundary with an unknown result: {detail}")]
@@ -393,113 +383,6 @@ impl FixedGitIndexRunner {
         }
     }
 
-    /// Create exactly one ordinary commit from the previewed index tree and
-    /// advance only the previewed attached ref with an old-value CAS.
-    pub(crate) fn commit_index(
-        &self,
-        lock: &NativeIndexLock,
-        preview: &GitIndexPreviewV1,
-        intent: &GitIndexCommitIntentV1,
-    ) -> Result<GitOidV1, NativeGitIndexError> {
-        preview.validate()?;
-        intent.validate()?;
-        if preview.commit_intent_digest.as_ref() != Some(&intent.compute_digest()?) {
-            return Err(NativeGitIndexError::CommitIntentMismatch);
-        }
-        if preview.operation != GitIndexTransactionOperationV1::CommitIndex
-            || !matches!(
-                preview.disposition,
-                GitIndexPreviewDispositionV1::Applicable
-            )
-        {
-            return Err(NativeGitIndexError::CommitStateUnsupported);
-        }
-        let GitHeadStateV1::Attached { branch, commit } = &preview.repository_snapshot.head else {
-            return Err(NativeGitIndexError::CommitStateUnsupported);
-        };
-        self.require_lock(lock)?;
-        self.verify_native_preconditions(lock, preview)?;
-        self.ensure_no_applicable_hooks()?;
-        let current_ref = self.run_git("symbolic-ref", &["symbolic-ref", "-q", "HEAD"])?;
-        let current_ref = String::from_utf8(current_ref.stdout)
-            .map_err(|_| NativeGitIndexError::MalformedOutput {
-                operation: "symbolic-ref",
-            })?
-            .trim()
-            .to_owned();
-        if current_ref.is_empty()
-            || (current_ref != branch.as_str()
-                && current_ref
-                    .strip_prefix("refs/heads/")
-                    .is_none_or(|short| short != branch.as_str()))
-        {
-            return Err(NativeGitIndexError::CommitStateUnsupported);
-        }
-        self.require_ref_value(&current_ref, commit)?;
-
-        let tree = self.index_tree_under_lock(lock)?;
-        if preview.candidate_index_tree.as_ref() != Some(&tree) {
-            return Err(NativeGitIndexError::CandidateTreeMismatch);
-        }
-        let parent_tree_expression = format!("{}^{{tree}}", commit.as_str());
-        let parent_tree = self.run_git(
-            "rev-parse",
-            &["rev-parse", "--verify", &parent_tree_expression],
-        )?;
-        if parse_git_oid("rev-parse", &parent_tree.stdout)? == tree {
-            return Err(NativeGitIndexError::EmptyIndexCommit);
-        }
-
-        // `commit-tree` cannot participate in the ref transaction. Reject a
-        // ref that was already stale before creating any durable commit
-        // object, then rely on update-ref's old-value CAS for the remaining
-        // unavoidable race.
-        self.require_ref_value(&current_ref, commit)?;
-        let durable_tree = self.write_tree_durable_under_lock(lock)?;
-        if durable_tree != tree {
-            return Err(NativeGitIndexError::CandidateTreeMismatch);
-        }
-        self.require_ref_value(&current_ref, commit)?;
-        let expected_refs = self.ref_snapshot()?;
-
-        let mut command = self.command();
-        command
-            .arg("commit-tree")
-            .arg(tree.as_str())
-            .arg("-p")
-            .arg(commit.as_str())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .env("GIT_AUTHOR_NAME", &intent.author.name)
-            .env("GIT_AUTHOR_EMAIL", &intent.author.email)
-            .env("GIT_AUTHOR_DATE", git_timestamp(intent.author.at.0))
-            .env("GIT_COMMITTER_NAME", &intent.committer.name)
-            .env("GIT_COMMITTER_EMAIL", &intent.committer.email)
-            .env("GIT_COMMITTER_DATE", git_timestamp(intent.committer.at.0));
-        if let GitIndexSigningPolicyV1::SignatureRequired { key_reference } = &intent.signing_policy
-        {
-            command.arg(format!("-S{key_reference}"));
-        }
-        // `commit-tree` may write an unreachable object, but it cannot publish
-        // an index or ref mutation. Hook/signing/process failures here are
-        // therefore proven no-change at the PR11 repository-state boundary.
-        let output = run_command_with_stdin(command, "commit-tree", intent.message.as_bytes())?;
-        let created_commit = parse_git_oid("commit-tree", &output.stdout)?;
-        self.verify_native_preconditions(lock, preview)?;
-        if let GitIndexSigningPolicyV1::SignatureRequired { key_reference } = &intent.signing_policy
-        {
-            self.verify_created_commit_signature(&created_commit, key_reference)?;
-        }
-
-        self.update_ref_with_namespace_cas(&current_ref, &created_commit, commit, &expected_refs)?;
-        if !self.ref_namespace_matches_excluding(&expected_refs, &current_ref)? {
-            return Err(NativeGitIndexError::StaleRepositoryState
-                .into_commit_boundary_unknown("update-ref verification"));
-        }
-        Ok(created_commit)
-    }
-
     fn apply_hunks(
         &self,
         lock: &mut NativeIndexLock,
@@ -640,37 +523,6 @@ impl FixedGitIndexRunner {
             return Err(NativeGitIndexError::StaleRepositoryState);
         }
         Ok(())
-    }
-
-    fn write_tree_durable_under_lock(
-        &self,
-        lock: &NativeIndexLock,
-    ) -> Result<GitOidV1, NativeGitIndexError> {
-        self.require_lock(lock)?;
-        let transaction =
-            tempfile::tempdir().map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-        let index = transaction.path().join("index");
-        if self.index_path.exists() {
-            std::fs::copy(&self.index_path, &index)
-                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-        } else {
-            File::create(&index).map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-        }
-        let output = self
-            .command()
-            .env("GIT_INDEX_FILE", &index)
-            .arg("write-tree")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-        if !output.status.success() {
-            return Err(NativeGitIndexError::GitFailed {
-                operation: "write-tree",
-                status: output.status.to_string(),
-            });
-        }
-        parse_git_oid("write-tree", &output.stdout)
     }
 
     fn verify_hunk_preconditions(&self, hunk: &HunkRefV1) -> Result<(), NativeGitIndexError> {
