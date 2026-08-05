@@ -102,7 +102,6 @@ mod lcm_api;
 #[path = "../../tracedecay-sessions/src/runtime/lcm/dashboard_fixes_tests.rs"]
 mod lcm_dashboard_fixes_tests;
 mod lcm_queries;
-mod lcm_service;
 mod loom_api;
 mod memory_analysis;
 mod memory_api;
@@ -1310,24 +1309,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/plugins/hermes-lcm/session/{session_id}",
             get(lcm_api::session),
         )
-        .route(
-            "/api/plugins/hermes-lcm/session/{session_id}/messages",
-            get(lcm_api::messages),
-        )
-        .route("/api/plugins/hermes-lcm/node/{node_id}", get(lcm_api::node))
         .route("/api/plugins/hermes-lcm/timeline", get(lcm_api::timeline))
-        .route(
-            "/api/plugins/hermes-lcm/compression",
-            get(lcm_api::compression),
-        )
-        .route(
-            "/api/plugins/hermes-lcm/payloads/health",
-            get(lcm_api::payloads_health),
-        )
-        .route(
-            "/api/plugins/hermes-lcm/payloads/gc",
-            get(lcm_api::payloads_gc_preview).post(lcm_api::payloads_gc_apply),
-        )
         // Code graph explorer API (project-local nodes / edges / files tables)
         .route("/api/plugins/graph/overview", get(graph_api::overview))
         .route("/api/plugins/graph/search", get(graph_api::search))
@@ -1708,8 +1690,6 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "features": {
             "memory": true,
             "lcm": has_lcm,
-            "lcm_gc": has_lcm,
-            "lcm_payload_health": has_lcm,
             "graph": true,
             "analytics": true,
             "feedback": state.feedback_status_reader.is_some(),
@@ -2277,43 +2257,15 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn unavailable_lcm_session_is_an_enveloped_unknown_read() {
+    async fn lcm_browse_reads_are_typed_unavailable_until_temporal_hydration_mounts() {
         let fixture = DashboardStateFixture::open("project.dashboard-lcm-envelope").await;
-        let app = router_with_active_application(fixture.state, None, Router::new());
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/plugins/hermes-lcm/session/session-missing")
-                    .body(Body::empty())
-                    .expect("LCM session request"),
-            )
-            .await
-            .expect("LCM session response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
-            .await
-            .expect("LCM session body");
-        let value: Value = serde_json::from_slice(&body).expect("LCM session json");
-
-        assert_eq!(value["schema_revision"], 1);
-        assert_eq!(value["domain_state"], "unknown");
-        assert_eq!(value["payload"]["exists"], false);
-        assert_eq!(
-            value["coverage"]["omission_reasons"],
-            serde_json::json!(["lcm_store_unavailable"])
-        );
-    }
-
-    #[tokio::test]
-    async fn unavailable_lcm_browse_reads_are_enveloped_unknown_states() {
-        let fixture = DashboardStateFixture::open("project.dashboard-lcm-browse-envelope").await;
         let app = router_with_active_application(fixture.state, None, Router::new());
 
         for uri in [
             "/api/plugins/hermes-lcm/overview",
             "/api/plugins/hermes-lcm/search?q=needle",
-            "/api/plugins/hermes-lcm/session/session-missing/messages",
+            "/api/plugins/hermes-lcm/session/session-missing",
+            "/api/plugins/hermes-lcm/timeline",
         ] {
             let response = app
                 .clone()
@@ -2333,7 +2285,12 @@ mod authority_tests {
 
             assert_eq!(value["schema_revision"], 1, "{uri}");
             assert_eq!(value["domain_state"], "unknown", "{uri}");
-            assert_eq!(value["payload"]["exists"], false, "{uri}");
+            assert!(value["payload"].is_null(), "{uri}");
+            assert_eq!(
+                value["coverage"]["omission_reasons"],
+                serde_json::json!(["lcm_temporal_retrieval_not_mounted"]),
+                "{uri}",
+            );
         }
     }
 
@@ -2364,6 +2321,39 @@ mod authority_tests {
             value["coverage"]["omission_reasons"],
             serde_json::json!(["analytics_sources_unavailable"])
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_analytics_detail_reads_are_enveloped_unknown_states() {
+        let fixture = DashboardStateFixture::open("project.dashboard-analytics-detail").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        for uri in [
+            "/api/plugins/analytics/hints",
+            "/api/plugins/analytics/usage",
+            "/api/plugins/analytics/underused",
+            "/api/plugins/analytics/diagnostics",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("analytics detail request"),
+                )
+                .await
+                .expect("analytics detail response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("analytics detail body");
+            let value: Value = serde_json::from_slice(&body).expect("analytics detail json");
+
+            assert_eq!(value["schema_revision"], 1, "{uri}");
+            assert_eq!(value["domain_state"], "unknown", "{uri}");
+            assert_eq!(value["payload"]["available"], false, "{uri}");
+        }
     }
 
     #[tokio::test]
