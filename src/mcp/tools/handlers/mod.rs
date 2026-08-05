@@ -204,6 +204,8 @@ pub struct ToolCallRegistryOptions<'a> {
     pub doctor_remediation_dispatcher: Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     pub(crate) code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub(crate) git_health_projection_reader:
+        Option<tracedecay_application::GitHealthProjectionReadServiceV1>,
     pub feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
@@ -246,6 +248,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             doctor_report_reader: None,
             doctor_remediation_dispatcher: None,
             code_index_freshness_reader: None,
+            git_health_projection_reader: None,
             feedback_status_reader: None,
             diagnostics_cache: None,
             diagnostics_lsp: None,

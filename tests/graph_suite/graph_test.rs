@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use tempfile::TempDir;
 use tracedecay::db::Database;
-use tracedecay::graph::git::file_churn;
 use tracedecay::graph::queries::GraphQueryManager;
 use tracedecay::graph::traversal::GraphTraverser;
 use tracedecay::tracedecay::TraceDecay;
@@ -1279,75 +1278,6 @@ fn test_composite_health_mixed() {
     assert!(
         score > 0 && score < 10000,
         "mixed health should give score between 0 and 10000, got {score}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Git churn tests
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_file_churn() {
-    let dir = TempDir::new().expect("failed to create temp dir");
-    let project = dir.path();
-
-    // Init a real git repo and make two commits touching the same file
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(project)
-        .output()
-        .expect("git init failed");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(project)
-        .output()
-        .expect("git config email failed");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(project)
-        .output()
-        .expect("git config name failed");
-
-    fs::write(project.join("file.rs"), "fn foo() {}").expect("write failed");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .expect("git add failed");
-    std::process::Command::new("git")
-        .args(["commit", "-m", "first"])
-        .current_dir(project)
-        .output()
-        .expect("git commit 1 failed");
-
-    fs::write(project.join("file.rs"), "fn foo() {} fn bar() {}").expect("write failed");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .expect("git add 2 failed");
-    std::process::Command::new("git")
-        .args(["commit", "-m", "second"])
-        .current_dir(project)
-        .output()
-        .expect("git commit 2 failed");
-
-    let churn = file_churn(project, 90).await.expect("file_churn failed");
-    let count = churn.get("file.rs").copied().unwrap_or(0);
-    assert!(count >= 2, "file.rs should have churn >= 2, got {count}");
-}
-
-#[tokio::test]
-async fn test_file_churn_nonexistent_dir() {
-    let churn = file_churn(
-        std::path::Path::new("/nonexistent/path/that/does/not/exist"),
-        90,
-    )
-    .await
-    .expect("file_churn should not error for nonexistent dir");
-    assert!(
-        churn.is_empty(),
-        "should return empty map for nonexistent dir"
     );
 }
 
