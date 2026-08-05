@@ -561,7 +561,11 @@ impl DaemonEngine {
     ) -> Arc<crate::mcp::McpServer> {
         // A freshly-handshaken project should be watched even on a cache hit
         // (the watcher may have started after this server was cached).
-        match self.git_watcher.ensure_watching(&project_path).await {
+        match self
+            .git_watcher
+            .ensure_watching_with_config(&project_path, server.watcher_sync_config())
+            .await
+        {
             git_watch::GitWatcherAdmission::Ready | git_watch::GitWatcherAdmission::Disabled => {}
             git_watch::GitWatcherAdmission::ShuttingDown => {
                 log_daemon_event(

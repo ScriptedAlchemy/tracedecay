@@ -172,7 +172,7 @@ fn dirty_set_coalesces_and_takes_once() {
 }
 
 #[test]
-fn metadata_event_marks_repository_dirty() {
+fn shared_ref_event_marks_repository_reconciliation() {
     let state = Arc::new(WatchState::new(
         PathBuf::from("/repo/.git"),
         PathBuf::from("/repo"),
@@ -188,7 +188,10 @@ fn metadata_event_marks_repository_dirty() {
 
     let dirty = state.dirty.blocking_lock();
     assert!(dirty.dirty);
-    assert!(!dirty.reconcile_metadata);
+    assert!(
+        dirty.reconcile_metadata,
+        "a shared ref can affect every mounted worktree"
+    );
     assert!(!state.reconciliation_pending.load(Ordering::Acquire));
 }
 
@@ -388,24 +391,29 @@ fn max_files_watch_is_recognized_as_the_watch_limit() {
 /// the real watch task has already failed to become ready) that the OS is
 /// presently out of watches, by making the exact same `install_watches` call
 /// the production task makes.
-fn currently_watch_limited(repo: &Path) -> bool {
+async fn currently_watch_limited(repo: &Path) -> bool {
     let Some(common) = crate::worktree::git_common_dir(repo) else {
         return false;
     };
     let Some(git_dir) = worktree_git_dir(repo) else {
         return false;
     };
-    let state = WatchState::new(
+    let state = Arc::new(WatchState::new(
         common,
         repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf()),
         git_dir,
         MaintenanceCoordinator::default(),
-    );
+    ));
     let Ok(mut probe) = notify::recommended_watcher(|_res: notify::Result<notify::Event>| {})
     else {
         return false;
     };
-    matches!(install_watches(&mut probe, &state), Err(e) if is_watch_limit_error(&e))
+    let daemon_cancellation = crate::application::context::CancellationToken::new();
+    let cancellation = state.cancellation(&daemon_cancellation);
+    matches!(
+        install_watches(&mut probe, state, cancellation).await,
+        Err(WatchInstallFailure::Notify(error)) if is_watch_limit_error(&error)
+    )
 }
 
 /// Registers `repo` with `watcher` and waits for its watch task to reach
@@ -463,7 +471,7 @@ async fn ensure_watching_or_skip(watcher: &GitWatcher, repo: &Path) -> Option<Ar
 
     match outcome {
         Ok(Ready::Debounce) => Some(state),
-        Ok(Ready::Degraded) if currently_watch_limited(repo) => {
+        Ok(Ready::Degraded) if currently_watch_limited(repo).await => {
             eprintln!(
                 "SKIP: OS inotify watch limit reached (fs.inotify.max_user_watches \
                  exhausted); raise it to exercise the real git_watch debounce path"
@@ -557,13 +565,13 @@ async fn linked_worktrees_share_one_repository_watcher() {
 }
 
 #[test]
-fn linked_worktree_operation_marker_holds_repository_debounce() {
+fn unmounted_linked_worktree_operation_does_not_block_mounted_sibling() {
     let (_container, primary, linked) = linked_worktree_fixture();
     let common = crate::worktree::git_common_dir(&primary).expect("git common dir");
     let primary_git_dir = worktree_git_dir(&primary).expect("primary git dir");
     let linked_git_dir = worktree_git_dir(&linked).expect("linked git dir");
     let state = WatchState::new(
-        common,
+        common.clone(),
         primary.canonicalize().unwrap(),
         primary_git_dir,
         MaintenanceCoordinator::default(),
@@ -571,9 +579,10 @@ fn linked_worktree_operation_marker_holds_repository_debounce() {
     let marker = linked_git_dir.join("rebase-merge");
     std::fs::create_dir(&marker).expect("create linked-worktree operation marker");
 
-    assert!(
-        operation_state(&state, 8) == OperationState::InFlight,
-        "even an unmounted linked-worktree operation must hold the shared debounce"
+    assert_eq!(
+        operation_state(&state, 8),
+        OperationState::Idle,
+        "an unmounted linked-worktree marker cannot starve an active sibling"
     );
 
     std::fs::remove_dir(&marker).expect("remove linked-worktree operation marker");
@@ -581,7 +590,7 @@ fn linked_worktree_operation_marker_holds_repository_debounce() {
 }
 
 #[test]
-fn incomplete_worktree_registry_fails_closed_during_operation_hold() {
+fn registered_worktree_operation_scan_fails_closed_at_its_cap() {
     let tmp = tempfile::tempdir().expect("metadata root");
     let common = tmp.path().join("git");
     let registered = common.join("registered");
@@ -589,16 +598,20 @@ fn incomplete_worktree_registry_fails_closed_during_operation_hold() {
     std::fs::create_dir(common.join("worktrees/two")).expect("second linked git directory");
     std::fs::create_dir(&registered).expect("registered git directory");
     let state = WatchState::new(
-        common,
+        common.clone(),
         tmp.path().join("worktree"),
         registered,
         MaintenanceCoordinator::default(),
     );
 
-    assert!(
-        state.operation_git_dirs(1, || false).is_none(),
-        "enumeration over the hard bound must not publish partial metadata"
-    );
+    let second_root = tmp.path().join("worktree-two");
+    let second_git_dir = common.join("registered-two");
+    std::fs::create_dir_all(&second_root).expect("second worktree root");
+    std::fs::create_dir(&second_git_dir).expect("second registered git directory");
+    assert!(matches!(
+        state.register_worktree(second_root, second_git_dir, 2),
+        WorktreeRegistration::Ready
+    ));
     assert!(
         operation_state(&state, 1) == OperationState::Incomplete,
         "incomplete operation evidence must not be mistaken for an idle repository"
@@ -914,19 +927,17 @@ async fn source_file_edit_triggers_no_freshness_request() {
 }
 
 /// The real debounce path (`repository_task` → `debounce_loop`) coalesces a
-/// burst of metadata events into a single drained pass: after events stop,
-/// the dirty set is taken exactly once and returns to clean. This drives the
+/// burst of metadata events into a single drained pass. This drives the
 /// live task (not a reimplemented helper) and injects events through the real
-/// notify-callback body (`classify_and_mark`), then asserts the debounce loop
-/// drains them.
+/// notify-callback body (`classify_and_mark`), then asserts one debounce drain
+/// and a truthful accepted-or-bounded-retry handoff.
 ///
 /// Deterministic under `start_paused = true`: there is no wall-clock guess.
 /// Readiness is a state signal (`entered_debounce`), and the coalesce sleep
 /// is driven by `tokio::time::advance` PAST the hard cap, so the drain is
 /// forced to fire regardless of scheduler latency. The coalescing guarantee
-/// is still fully asserted: the set is dirty before time advances and clean
-/// after exactly one drain (a per-event re-fire would either not reach clean
-/// or would leave residue across the burst).
+/// is still fully asserted: the set is dirty before time advances and exactly
+/// one plan drains; the separate lifecycle test fixes the retry bound.
 #[tokio::test(start_paused = true)]
 async fn debounce_loop_coalesces_and_drains_events() {
     let repo = temp_repo();
@@ -970,8 +981,9 @@ async fn debounce_loop_coalesces_and_drains_events() {
         1,
         "one event burst must produce exactly one coalesced plan"
     );
+    let clean = state.dirty.lock().await.is_clean();
     assert!(
-        state.dirty.lock().await.is_clean(),
-        "draining the coalesced plan must clear the dirty set"
+        clean || state.retry_not_before().is_some(),
+        "drained work is either accepted or retained behind a bounded retry"
     );
 }
