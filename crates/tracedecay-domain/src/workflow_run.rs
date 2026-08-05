@@ -8,9 +8,8 @@ use thiserror::Error;
 
 use crate::{
     ManifestDigest, RunId, UtcMicros, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId,
-    WorkflowDefinition, WorkflowOutputName, WorkflowOutputReference,
-    WorkflowPlacementReceipt, WorkflowStepEffectOutcome, WorkflowStepEffectReceipt,
-    WorkflowStepId,
+    WorkflowDefinition, WorkflowOutputName, WorkflowOutputReference, WorkflowPlacementReceipt,
+    WorkflowStepEffectOutcome, WorkflowStepEffectReceipt, WorkflowStepId,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

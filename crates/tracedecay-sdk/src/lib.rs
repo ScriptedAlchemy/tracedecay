@@ -36,9 +36,9 @@ pub mod work {
 /// commands, plus their executable capability inventory.
 pub mod workflow {
     pub use tracedecay_application::{
-        TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed,
-        WorkflowActivation, WorkflowDefinitionActivateRequest,
-        WorkflowDefinitionRegisterRequest, WorkflowPlacementRequest,
+        TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed, WorkflowActivation,
+        WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest,
+        WorkflowPlacementRequest,
         workflow_executable_binding_registry as executable_binding_registry,
     };
     pub use tracedecay_domain::{WorkflowDefinition, WorkflowStep};

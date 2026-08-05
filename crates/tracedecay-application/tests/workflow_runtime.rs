@@ -7,7 +7,7 @@ use tracedecay_domain::{
     AttemptId, CommitId, ManifestDigest, ProjectId, ProviderId, RunId, UtcMicros,
     WorkEffectStateV1, WorkExecutionBudgetV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
     WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinition,
-    WorkflowFanOut, WorkflowOperationRef, WorkflowOutputName, WorkflowStepId, WorkflowStep,
+    WorkflowFanOut, WorkflowOperationRef, WorkflowOutputName, WorkflowStep, WorkflowStepId,
 };
 
 fn id<T>(value: &str) -> T

@@ -13,7 +13,7 @@ use tracedecay_domain::configuration::WorktreePlacementModeV1;
 use tracedecay_domain::{
     AttemptId, CommitId, ManifestDigest, RefId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1,
     WorkCommandId, WorkEffectStateV1, WorkExecutionBudgetV1, WorkLeaseFenceV1,
-    WorkProviderBackendV1, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinition,
+    WorkProviderBackendV1, WorkProviderRouteV1, WorkflowDefinition, WorkflowDefinitionId,
     WorkflowOperationRef, WorkflowPlacementReceipt, WorkflowStepId, canonical_sha256,
 };
 

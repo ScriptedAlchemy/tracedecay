@@ -15,8 +15,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkflowDefinitionId, WorkflowDefinition, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowStepId, WorkflowStep, WorktreeId, canonical_sha256,
+    WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
+    WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
 };
 
 fn id<T>(value: &str) -> T

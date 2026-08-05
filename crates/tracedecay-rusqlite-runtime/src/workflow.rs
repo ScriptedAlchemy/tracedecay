@@ -12,12 +12,14 @@ use tracedecay_application::{
     WorkflowDefinitionAuthorityPort,
 };
 use tracedecay_domain::{
-    ManifestDigest, UtcMicros, WorkflowDefinitionId, WorkflowDefinition, canonical_sha256,
+    ManifestDigest, UtcMicros, WorkflowDefinition, WorkflowDefinitionId, canonical_sha256,
 };
 
-use crate::migration_sql::{
-    MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, MigrationSqlTransaction,
-    MigrationSqlValue,
+use crate::exact_sql::{
+    ExactSqlError, ExactSqlError as MigrationSqlError, ExactSqlHandle, ExactSqlRows,
+    ExactSqlRows as MigrationSqlRows, ExactSqlStatement,
+    ExactSqlStatement as MigrationSqlStatement, ExactSqlTransaction, ExactSqlValue,
+    ExactSqlValue as MigrationSqlValue,
 };
 use crate::work::WorkSqliteStorage;
 
@@ -35,9 +37,7 @@ impl WorkflowSqliteAuthority {
     pub fn from_work_storage(
         storage: &WorkSqliteStorage,
     ) -> Result<Self, WorkflowSqliteAuthorityBuildError> {
-        storage
-            .require_exact_schema()
-            .map_err(|_| WorkflowSqliteAuthorityBuildError::ResetRequired)?;
+        require_workflow_schema(&storage.handle)?;
         Ok(Self {
             storage: storage.clone(),
         })
@@ -49,6 +49,90 @@ impl WorkflowSqliteAuthority {
 pub enum WorkflowSqliteAuthorityBuildError {
     ResetRequired,
     Unavailable,
+}
+
+fn require_workflow_schema(
+    handle: &ExactSqlHandle,
+) -> Result<(), WorkflowSqliteAuthorityBuildError> {
+    let rows = handle
+        .query(
+            ExactSqlStatement::new(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN (
+                       'workflow_definitions',
+                       'workflow_activations',
+                       'workflow_handoffs',
+                       'workflow_run_events',
+                       'workflow_run_heads',
+                       'workflow_schema'
+                   )
+                 ORDER BY name"
+                    .to_owned(),
+                Vec::new(),
+            )
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
+            Duration::from_secs(5),
+        )
+        .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
+    let actual = rows
+        .rows
+        .iter()
+        .filter_map(|row| match row.values.first() {
+            Some(ExactSqlValue::Text(value)) => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if actual
+        != [
+            "workflow_activations",
+            "workflow_definitions",
+            "workflow_handoffs",
+            "workflow_run_events",
+            "workflow_run_heads",
+            "workflow_schema",
+        ]
+    {
+        return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
+    }
+    let schema = handle
+        .query(
+            ExactSqlStatement::new(
+                "SELECT schema_version, definition_digest FROM workflow_schema
+                 WHERE singleton = 1"
+                    .to_owned(),
+                Vec::new(),
+            )
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
+            Duration::from_secs(5),
+        )
+        .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
+    let valid_schema = schema.rows.first().is_some_and(|row| {
+        matches!(row.values.first(), Some(ExactSqlValue::Integer(1)))
+            && matches!(
+                row.values.get(1),
+                Some(ExactSqlValue::Text(digest))
+                    if digest
+                        == "sha256:8e61c252fbcb854975c11b29b52d04a1d9209a16e036237c21a54d3b21ad5190"
+            )
+    });
+    if !valid_schema {
+        return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
+    }
+    let head_columns = handle
+        .query(
+            ExactSqlStatement::new(
+                "PRAGMA table_info(workflow_run_heads)".to_owned(),
+                Vec::new(),
+            )
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
+            Duration::from_secs(5),
+        )
+        .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
+    if head_columns.rows.len() != 5 {
+        return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
+    }
+    Ok(())
 }
 
 fn definition_unavailable(_: ExactSqlError) -> WorkflowDefinitionAuthorityError {
