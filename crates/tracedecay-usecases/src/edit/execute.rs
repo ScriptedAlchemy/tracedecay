@@ -1,7 +1,7 @@
 use tracedecay_application::{
     ApplicationOperation, CancellationObservation, CancellationStage, EffectTermination,
     ReconciliationState, SourceEditAuthorizationPort, SourceEditEffectRequestV1, SourceEditRequest,
-    SourceEditVerificationStateV1, SourceEditVerificationV1, now_micros, source_edit_operation,
+    SourceEditVerificationV1, now_micros, source_edit_operation,
 };
 use tracedecay_domain::ManifestDigest;
 
@@ -519,7 +519,7 @@ where
         run_source_edit(graph, request.edit.clone().with_dry_run(false), control),
     )
     .await;
-    let mut outcome = match effect_result {
+    let outcome = match effect_result {
         Ok(outcome) => outcome,
         Err(error) => {
             // The edit primitive may have crossed its atomic rename boundary.
@@ -536,8 +536,7 @@ where
     let mut control_observation = control
         .and_then(|control| control.checkpoint(CancellationStage::EffectInFlight))
         .map(|stop| stop.observation);
-    let mut committed_state =
-        source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
+    let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if outcome.success() && (!plan_complete || committed_state != predicted_state) {
         let live_outcome = SourceEditOutcome::EffectUnknown {
             message: "source edit effect is unknown and requires reconciliation: the observed committed state did not match the exact preview".to_owned(),
@@ -554,51 +553,12 @@ where
         let files = outcome.candidate_files();
         if files.is_empty() {
             None
-        } else if matches!(
-            &request.edit,
-            SourceEditRequest::RenameSymbol { .. } | SourceEditRequest::ApiMigrationApply { .. }
-        ) {
-            Some(SourceEditVerificationV1 {
-                state: SourceEditVerificationStateV1::Clean,
-                verdict: "diagnostic_delta_clean".to_owned(),
-                error_count: 0,
-                warning_count: 0,
-                first_errors: Vec::new(),
-                message: Some(
-                    "migration-owned verification found no introduced diagnostics".to_owned(),
-                ),
-            })
         } else {
             Some(run_edit_verifications(graph, &files).await)
         }
     } else {
         None
     };
-    if verification
-        .as_ref()
-        .is_some_and(|result| !matches!(result.state, SourceEditVerificationStateV1::Clean))
-        && let (
-            SourceEditRequest::RenameSymbol { plan, .. }
-            | SourceEditRequest::ApiMigrationApply { plan, .. },
-            SourceEditOutcome::ApiMigration(result),
-        ) = (&request.edit, &mut outcome)
-    {
-        graph.rollback_api_migration_plan(plan).await?;
-        result.success = false;
-        result.rolled_back = true;
-        result.changed_files.clear();
-        "API migration verification did not pass; every changed file was restored"
-            .clone_into(&mut result.message);
-        committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
-        if committed_state != journal.expected_state {
-            let live_outcome = SourceEditOutcome::EffectUnknown {
-                message: "API migration verification rollback did not restore the previewed state"
-                    .to_owned(),
-            };
-            return persist_unknown(&durability, &journal, live_outcome, verification);
-        }
-    }
-
     let ended_at = now_micros();
     journal.state = SourceEditJournalStateV1::Applied {
         outcome: SourceEditDurableOutcomeV1::from_live(&journal.request.operation, &outcome),

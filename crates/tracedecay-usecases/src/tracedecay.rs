@@ -19,7 +19,6 @@ use tracedecay_application::retrieval::grep_analysis::{RedundancyRequestV1, Redu
 use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult,
 };
-use tracedecay_application::{ApiMigrationApplyResultV1, ApiMigrationPlanV1};
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::{Database, DependencyImportUse};
@@ -229,16 +228,6 @@ pub trait GraphRuntimePort: Send + Sync {
         dry_run: bool,
         update_references: bool,
     ) -> GraphFuture<'a, MoveResult>;
-    fn apply_api_migration_plan<'a>(
-        &'a self,
-        plan: &'a ApiMigrationPlanV1,
-        dry_run: bool,
-        is_cancelled: &'a mut (dyn FnMut() -> bool + Send),
-    ) -> GraphFuture<'a, ApiMigrationApplyResultV1>;
-    fn rollback_api_migration_plan<'a>(
-        &'a self,
-        plan: &'a ApiMigrationPlanV1,
-    ) -> GraphFuture<'a, ()>;
     fn recover_source_edit_preimages<'a>(
         &'a self,
         files: &'a [PlannedSourceEditFile],
