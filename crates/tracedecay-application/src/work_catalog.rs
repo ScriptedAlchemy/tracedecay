@@ -1,5 +1,8 @@
 use schemars::JsonSchema;
-use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
+use tracedecay_domain::{
+    ManifestDigest, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
+    canonical_sha256,
+};
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, CancellationContract, CancellationPoint,
     CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1, CatalogValidationError,
@@ -207,6 +210,18 @@ pub fn work_executable_binding_registry()
         )?,
     ]);
     ExecutableBindingRegistryV1::new(bindings)
+}
+
+pub fn work_executable_catalog_digest() -> Result<ManifestDigest, CatalogValidationError> {
+    let registry = work_executable_binding_registry()?;
+    canonical_sha256(&(
+        "tracedecay.application.work-executable-catalog.v1",
+        registry.iter().collect::<Vec<_>>(),
+    ))
+    .map_err(|_| CatalogValidationError::InvalidValue {
+        field: "work executable catalog digest",
+        reason: "canonical Work executable catalog could not be encoded",
+    })
 }
 
 pub(crate) fn available<Request, Output>(

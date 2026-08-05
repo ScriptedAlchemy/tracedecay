@@ -116,6 +116,7 @@ pub enum WorkflowCoordinationError {
     ImmutableDefinitionConflict,
     DefinitionNotFound,
     UnsupportedOperation,
+    CatalogDigestMismatch,
     StaleActivation,
     AuthorityUnavailable(String),
 }
@@ -130,6 +131,9 @@ impl Display for WorkflowCoordinationError {
             Self::DefinitionNotFound => formatter.write_str("workflow definition was not found"),
             Self::UnsupportedOperation => {
                 formatter.write_str("workflow definition references an unavailable operation")
+            }
+            Self::CatalogDigestMismatch => {
+                formatter.write_str("workflow definition catalog digest is stale")
             }
             Self::StaleActivation => {
                 formatter.write_str("workflow activation changed concurrently")
@@ -275,6 +279,14 @@ where
                 "canonical operation catalog is unavailable".to_owned(),
             )
         })?;
+        let catalog_digest = crate::work_executable_catalog_digest().map_err(|_| {
+            WorkflowCoordinationError::AuthorityUnavailable(
+                "canonical operation catalog digest is unavailable".to_owned(),
+            )
+        })?;
+        if definition.pinned_catalog_digest() != &catalog_digest {
+            return Err(WorkflowCoordinationError::CatalogDigestMismatch);
+        }
         if definition.steps().iter().any(|step| {
             step.operation.as_str() != WORKFLOW_CANONICAL_WORK_OPERATION
                 || OperationId::new(step.operation.as_str())

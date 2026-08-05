@@ -866,6 +866,9 @@ pub(crate) fn application_response(
                 crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                     InvocationError::Denied
                 }
+                crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+                    InvocationError::Unavailable
+                }
                 crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                     InvocationError::Unavailable
                 }
@@ -1118,6 +1121,9 @@ fn invocation_outcome_error(
             }
             crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                 "daemon invocation was not found or is not authorized"
+            }
+            crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+                "daemon invocation store requires an explicit reset"
             }
             crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                 "daemon invocation authority is unavailable"

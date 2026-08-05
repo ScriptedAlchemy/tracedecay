@@ -216,7 +216,6 @@ pub(crate) async fn execute_canonical_workflow(
         }
 
         for running in active {
-            let child = running.child.clone();
             let attempt = if fail_fast {
                 cancel_child(runtime, &running).await?
             } else {
