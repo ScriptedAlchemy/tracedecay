@@ -7,8 +7,8 @@ the current product outcomes and blockers.
 
 [00-plan-set-index.md](00-plan-set-index.md) is the sole precedence, rejection,
 delivery, and acceptance authority. [NEXT.md](NEXT.md) tracks current outcomes
-and blockers only; the gap ledger and PR9 contract spine are historical.
-These are contributor documents only and never product runtime input.
+and blockers only. These are contributor documents only and never product
+runtime input.
 Numbered plans define component behavior and boundaries, not separate
 crate-first work queues.
 

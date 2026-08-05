@@ -2,7 +2,7 @@
 
 ## Status / Role
 
-PR5 sanitized Claude capture and PR6 expansion through the shared
+Sanitized Claude capture and the subsequent expansion through the shared
 session-observation admission/sanitizer/store path are complete for Claude,
 Codex, Cursor, Hermes, Kiro, Cline, Roo Code, and Kilo. External-source
 convergence is split (status corrected again 2026-07-26): the host-observation
@@ -11,10 +11,10 @@ passes every persisted observation receipt through
 `RuntimeExternalSourceStore::capture_host_observation`; that path authorizes
 and invokes `SourceCaptureApplicationV1`, then commits through the retained
 external-source reducer and SQLite adapter. The earlier claim that
-`SourceCaptureApplicationV1` had no production caller, adapter, or migration
+`SourceCaptureApplicationV1` had no production caller, adapter, or store path
 was wrong for this specialization. Broader acquisition, scheduled refresh, and
-canonical-refetch adapters remain dormant and are not certified as delivered
-PR5/PR6 behavior or PR8–PR14 work to rebuild.
+canonical-refetch adapters are required only where a current production
+journey mounts them; dormant scaffolding is deleted rather than rebuilt.
 
 This boundary records the deterministic privacy and admission behavior retained
 by current product ingestion; it is not a crate-first framework project. Shared
@@ -36,7 +36,7 @@ never skip a suffix.
 - The one runtime classification, redaction, rejection, and receipt-producing
   path before durable persistence.
 - Provider-specific coverage and malformed/unknown-version outcomes.
-- PR6 adapter additions that reuse the PR5 contracts and authoritative sink.
+- Provider adapters that reuse the canonical contracts and authoritative sink.
 
 ## Does not own
 
@@ -51,7 +51,7 @@ never skip a suffix.
 
 ## Required behavior
 
-- PR5 routed one existing provider from its current parser through
+- The initial provider is routed from its current parser through
   classification, sanitization, receipt creation, atomic persistence, and replay.
 - Raw content remains transient until sanitized. Logs and errors contain only
   safe reason codes, counts, and identifiers.
@@ -65,9 +65,9 @@ never skip a suffix.
 - Linked worktrees resolve to the canonical project store. Missing, ambiguous,
   stale, or unauthorized project/user authority fails closed without another
   writer.
-- PR6 adds each provider through the same sanitizer and sink and retains its
+- Every provider uses the same sanitizer and sink and retains its
   current ordering, origin, usage, tool, reasoning-visibility, and cursor
-  behavior unless the PR records an intentional compatibility change.
+  behavior unless the active product contract records an intentional change.
 - Provider-exposed reasoning follows its explicit retention and search policy;
   capture never infers hidden reasoning.
 
@@ -168,15 +168,15 @@ does not require reconstruction.
 
 ## Acceptance
 
-- PR5: an end-to-end test proves one real provider yields a sanitized immutable
+- An end-to-end test proves one real provider yields a sanitized immutable
   observation, matching receipt, searchable product row, and committed offset.
-- PR5: replay/restart and duplicate tests prove no duplicate observation and no
+- Replay/restart and duplicate tests prove no duplicate observation and no
   skipped suffix.
-- PR5: fault tests before and after each transaction boundary prove complete
+- Fault tests before and after each transaction boundary prove complete
   commit or safe retry, with no fallback writer.
-- PR5: negative tests cover malformed, partial, conflicting, secret-bearing,
+- Negative tests cover malformed, partial, conflicting, secret-bearing,
   redacted, stale-owner, ambiguous-worktree, and unavailable-daemon inputs.
-- PR6: every added provider has direct golden and incremental/restart tests over
+- Every added provider has direct golden and incremental/restart tests over
   the shared contracts; adding an adapter creates no database or sanitizer path.
 - Focused Linux and Windows-capable regressions preserve the same capture
   behavior.
