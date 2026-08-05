@@ -50,7 +50,10 @@ pub use connection::{
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use connection::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
 pub use external_source::install_external_source_schema;
-pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
+pub use file_identity::{
+    SqliteFileIdentityError, file_generation_identity, resume_fingerprint_from_capture,
+    resume_fingerprint_from_windows, sqlite_generation_identity,
+};
 pub use fingerprints::StoredFingerprint;
 pub use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;

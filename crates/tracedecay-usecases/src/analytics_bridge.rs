@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use tracedecay_global_db::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
 
@@ -111,15 +112,41 @@ pub async fn import_source(
         skipped: 0,
         error: None,
     };
-    let Ok(metadata) = std::fs::metadata(&source.path) else {
-        return result;
+    let file = match tokio::fs::File::open(&source.path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return result,
+        Err(error) => {
+            result.error = Some(format!("open {}: {error}", source.path.display()));
+            return result;
+        }
     };
+    let file = file.into_std().await;
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            result.error = Some(format!("inspect {}: {error}", source.path.display()));
+            return result;
+        }
+    };
+    let file_id = match tracedecay_runtime_core::db::file_generation_identity(&file, &source.path) {
+        Ok(file_id) => file_id,
+        Err(error) => {
+            result.error = Some(format!(
+                "identify {} for durable import: {error:?}",
+                source.path.display()
+            ));
+            return result;
+        }
+    };
+    let mut file = tokio::fs::File::from_std(file);
     let file_len = metadata.len();
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |duration| duration.as_secs());
+    let leading = match read_exact_window(&mut file, &source.path, 0, file_len.min(4096)).await {
+        Ok(leading) => leading,
+        Err(error) => {
+            result.error = Some(error);
+            return result;
+        }
+    };
 
     let cursor_key = import_cursor_key(&source.path);
     let expected_cursor = match gdb.get_parse_offset_result(&cursor_key).await {
@@ -130,10 +157,59 @@ pub async fn import_source(
             return result;
         }
     };
-    // Truncated/rotated files restart from the top while retaining the exact
-    // durable cursor as the compare-and-swap precondition.
-    let start = if expected_cursor.byte_offset <= file_len {
-        expected_cursor.byte_offset
+    // Replacement and truncation restart from the top while retaining the
+    // exact durable cursor as the compare-and-swap precondition.
+    let start = if expected_cursor.file_id == file_id && expected_cursor.byte_offset <= file_len {
+        let trailing = if expected_cursor.byte_offset > 4096 {
+            match read_exact_window(
+                &mut file,
+                &source.path,
+                expected_cursor.byte_offset - 4096,
+                4096,
+            )
+            .await
+            {
+                Ok(trailing) => trailing,
+                Err(error) => {
+                    result.error = Some(error);
+                    return result;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let expected_leading_len = match usize::try_from(expected_cursor.byte_offset.min(4096)) {
+            Ok(length) => length,
+            Err(error) => {
+                result.error = Some(format!(
+                    "verify {} durable cursor window: {error}",
+                    source.path.display()
+                ));
+                return result;
+            }
+        };
+        let Some(expected_leading) = leading.get(..expected_leading_len) else {
+            result.error = Some(format!(
+                "verify {} durable cursor leading window",
+                source.path.display()
+            ));
+            return result;
+        };
+        match tracedecay_runtime_core::db::resume_fingerprint_from_windows(
+            expected_cursor.byte_offset,
+            expected_leading,
+            &trailing,
+        ) {
+            Ok(fingerprint) if fingerprint == expected_cursor.mtime => expected_cursor.byte_offset,
+            Ok(_) => 0,
+            Err(error) => {
+                result.error = Some(format!(
+                    "verify {} durable cursor: {error:?}",
+                    source.path.display()
+                ));
+                return result;
+            }
+        }
     } else {
         0
     };
@@ -141,10 +217,31 @@ pub async fn import_source(
         return result;
     }
 
-    let text = match read_from_offset(&source.path, start) {
-        Ok(text) => text,
+    let read_start = start.saturating_sub(4096);
+    let captured = match read_from_offset(&mut file, &source.path, read_start).await {
+        Ok(captured) => captured,
         Err(err) => {
             result.error = Some(err);
+            return result;
+        }
+    };
+    let parse_start = match usize::try_from(start.saturating_sub(read_start)) {
+        Ok(parse_start) if parse_start <= captured.len() => parse_start,
+        _ => {
+            result.error = Some(format!(
+                "captured {} durable import bytes do not contain the admitted frontier",
+                source.path.display()
+            ));
+            return result;
+        }
+    };
+    let text = match std::str::from_utf8(&captured[parse_start..]) {
+        Ok(text) => text,
+        Err(error) => {
+            result.error = Some(format!(
+                "decode {} analytics import bytes: {error}",
+                source.path.display()
+            ));
             return result;
         }
     };
@@ -157,11 +254,14 @@ pub async fn import_source(
 
     let mut batch = Vec::new();
     let mut relative_offset = 0u64;
-    for line in text[..consumed].split_inclusive('\n') {
+    for (index, line) in text[..consumed].split_inclusive('\n').enumerate() {
         relative_offset = relative_offset.saturating_add(line.len() as u64);
         match hook_row_to_analytics_event(line.trim_end(), source.default_project_root.as_deref()) {
             Some(event) => batch.push((event, relative_offset)),
             None => result.skipped += 1,
+        }
+        if index % 256 == 255 {
+            tokio::task::yield_now().await;
         }
     }
     let mut acknowledged = 0u64;
@@ -172,15 +272,31 @@ pub async fn import_source(
             .map(|(event, _)| event.clone())
             .collect::<Vec<_>>();
         let frontier = chunk.last().map_or(acknowledged, |(_, offset)| *offset);
+        let absolute_frontier = start + frontier;
+        let fingerprint = match tracedecay_runtime_core::db::resume_fingerprint_from_capture(
+            absolute_frontier,
+            &leading,
+            read_start,
+            &captured,
+        ) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                result.error = Some(format!(
+                    "anchor {} durable cursor: {error:?}",
+                    source.path.display()
+                ));
+                return result;
+            }
+        };
         if let Err(err) = gdb
             .append_analytics_events_with_cursor(
                 &events,
                 &cursor_key,
                 claimed_cursor,
                 ParseOffset {
-                    byte_offset: start + frontier,
-                    mtime,
-                    file_id: 0,
+                    byte_offset: absolute_frontier,
+                    mtime: fingerprint,
+                    file_id,
                 },
             )
             .await
@@ -190,27 +306,44 @@ pub async fn import_source(
         }
         acknowledged = frontier;
         claimed_cursor = ParseOffset {
-            byte_offset: start + frontier,
-            mtime,
-            file_id: 0,
+            byte_offset: absolute_frontier,
+            mtime: fingerprint,
+            file_id,
         };
         result.imported = result.imported.saturating_add(events.len() as u64);
     }
-    if acknowledged < consumed as u64
-        && let Err(err) = gdb
+    if acknowledged < consumed as u64 {
+        let absolute_frontier = start + consumed as u64;
+        let fingerprint = match tracedecay_runtime_core::db::resume_fingerprint_from_capture(
+            absolute_frontier,
+            &leading,
+            read_start,
+            &captured,
+        ) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                result.error = Some(format!(
+                    "anchor {} durable cursor: {error:?}",
+                    source.path.display()
+                ));
+                return result;
+            }
+        };
+        if let Err(err) = gdb
             .append_analytics_events_with_cursor(
                 &[],
                 &cursor_key,
                 claimed_cursor,
                 ParseOffset {
-                    byte_offset: start + consumed as u64,
-                    mtime,
-                    file_id: 0,
+                    byte_offset: absolute_frontier,
+                    mtime: fingerprint,
+                    file_id,
                 },
             )
             .await
-    {
-        result.error = Some(err);
+        {
+            result.error = Some(err);
+        }
     }
     result
 }
@@ -221,16 +354,37 @@ fn import_cursor_key(path: &Path) -> String {
     format!("hook_analytics:{}", path.display())
 }
 
-fn read_from_offset(path: &Path, offset: u64) -> Result<String, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file =
-        std::fs::File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
-    file.seek(SeekFrom::Start(offset))
+async fn read_from_offset(
+    file: &mut tokio::fs::File,
+    path: &Path,
+    offset: u64,
+) -> Result<Vec<u8>, String> {
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
         .map_err(|err| format!("seek {}: {err}", path.display()))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .await
         .map_err(|err| format!("read {}: {err}", path.display()))?;
-    Ok(text)
+    Ok(bytes)
+}
+
+async fn read_exact_window(
+    file: &mut tokio::fs::File,
+    path: &Path,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>, String> {
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|err| format!("seek {}: {err}", path.display()))?;
+    let length = usize::try_from(length)
+        .map_err(|_| format!("read window for {} is too large", path.display()))?;
+    let mut bytes = vec![0_u8; length];
+    file.read_exact(&mut bytes)
+        .await
+        .map_err(|err| format!("read {} cursor window: {err}", path.display()))?;
+    Ok(bytes)
 }
 
 pub fn hook_row_to_analytics_event(
@@ -275,6 +429,81 @@ fn text_field(row: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Seek, Write};
+
+    use super::*;
+    use tracedecay_global_db::AnalyticsEventQuery;
+
+    #[tokio::test]
+    async fn hook_import_restarts_after_same_file_rewrite_past_old_frontier() {
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "hook-import-same-file-rewrite",
+        )
+        .await;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("hook_analytics.jsonl");
+        let initial = json!({
+            "event": "initial_event",
+            "agent": "claude",
+            "session_id": "initial",
+            "padding": "x".repeat(128),
+        })
+        .to_string()
+            + "\n";
+        std::fs::write(&path, &initial).expect("initial hook source");
+        let source = HookImportSource {
+            path: path.clone(),
+            default_project_root: None,
+        };
+
+        let first = import_source(&harness.registered, &source).await;
+        assert_eq!(first.imported, 1);
+        assert!(first.error.is_none());
+
+        let replacement = json!({
+            "event": "replacement_event",
+            "agent": "claude",
+            "session_id": "replacement",
+            "padding": "y".repeat(initial.len() + 128),
+        })
+        .to_string()
+            + "\n";
+        assert!(replacement.len() >= initial.len());
+        let mut retained = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("retain hook source");
+        retained.set_len(0).expect("truncate in place");
+        retained
+            .seek(std::io::SeekFrom::Start(0))
+            .expect("rewind replacement");
+        retained
+            .write_all(replacement.as_bytes())
+            .expect("write replacement");
+        retained.flush().expect("flush replacement");
+
+        let second = import_source(&harness.registered, &source).await;
+        assert_eq!(second.imported, 1);
+        assert!(second.error.is_none());
+        let replacement_rows = harness
+            .registered
+            .query_analytics_events(&AnalyticsEventQuery {
+                event_kind: Some("replacement_event".to_owned()),
+                limit: 10,
+                ..AnalyticsEventQuery::default()
+            })
+            .await
+            .expect("query replacement event");
+        assert_eq!(replacement_rows.len(), 1);
+        assert_eq!(
+            replacement_rows[0].session_id.as_deref(),
+            Some("replacement")
+        );
+    }
 }
 
 // The CLI entry points that used to close this file (`run_analytics_sync`,
