@@ -54,6 +54,24 @@
     }
 
     #[test]
+    fn isolated_evaluation_import_rejects_an_incomplete_catalog_package() {
+        let lifecycle_root = tempfile::tempdir().unwrap();
+        let package = tempfile::tempdir().unwrap();
+
+        let result = open_local_semantic_evaluation_lifecycle(
+            lifecycle_root.path(),
+            package.path(),
+            SemanticResourceCeilings::default(),
+            10,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ModelLifecycleErrorV1::VerificationFailed)
+        ));
+    }
+
+    #[test]
     fn restart_re_admits_explicit_import_without_legacy_acquisition() {
         let fixture = tempfile::tempdir().unwrap();
         let (catalog, model_id) = tiny_catalog(fixture.path());

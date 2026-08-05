@@ -28,7 +28,7 @@ use super::manifest::{ArtifactMemberRoleV1, ModelArtifactManifestV1};
 use super::model_catalog::{
     CatalogErrorV1, CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1, catalog_package_digest,
 };
-use crate::{DEFAULT_FASTEMBED_MODEL_ID, RerankCompatibilityPinsV1};
+use crate::{DEFAULT_FASTEMBED_MODEL_ID, RerankCompatibilityPinsV1, SemanticResourceCeilings};
 
 const LIFECYCLE_SCHEMA_V1: &str = "tracedecay.fastembed.model-lifecycle.v1";
 const INSTALL_META_SCHEMA_V1: &str = "tracedecay.fastembed.model-install.v1";
@@ -482,6 +482,7 @@ fn fetch_hf_hub_member(
 include!("model_lifecycle/owner.rs");
 include!("model_lifecycle/acquisition.rs");
 include!("model_lifecycle/persistence.rs");
+include!("model_lifecycle/local_evaluation.rs");
 include!("model_lifecycle/shared.rs");
 
 #[cfg(all(test, feature = "semantic-fastembed"))]
