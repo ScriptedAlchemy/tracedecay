@@ -631,6 +631,52 @@ async fn restart_replays_exact_refresh_and_commits_sanitized_provenance() {
 }
 
 #[tokio::test]
+async fn invalid_durable_request_maps_to_typed_acquisition_state_error() {
+    let state = Arc::new(MemoryStatePort::default());
+    let (definition, binding, request) = source();
+    let seed = ExternalSourceAcquisitionOwnerV1::new(
+        state.clone(),
+        Arc::new(NeverPort),
+        Arc::new(NeverPort),
+        Arc::new(NeverPort),
+        SourceAcquisitionPolicyV1::new(
+            3,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    seed.admit_event(
+        &definition,
+        &binding,
+        &request,
+        SourceEventV1::new(binding.immutable_identity().unwrap(), digest('b')).unwrap(),
+        UtcMicros(10),
+    )
+    .await
+    .unwrap();
+    let task = pending_task(&state, &binding).await;
+    let mut encoded = serde_json::to_value(&task).unwrap();
+    encoded["request"]["request_digest"] =
+        serde_json::Value::String(digest('f').as_str().to_owned());
+    let malformed: SourceScheduledRefetchV1 = serde_json::from_value(encoded).unwrap();
+    let grant = grant('7');
+    let fetched = page(
+        &malformed,
+        &grant,
+        malformed.refresh().refresh_id().clone(),
+        SourceCoverageV1::Complete,
+    );
+
+    assert_eq!(
+        fetched.validate(&malformed, &grant),
+        Err(ExternalSourceAcquisitionErrorV1::InvalidState)
+    );
+}
+
+#[tokio::test]
 async fn background_owner_drains_persisted_ready_work_on_start_and_stops_on_cancel() {
     let state = Arc::new(MemoryStatePort::default());
     let (definition, binding, request) = source();
