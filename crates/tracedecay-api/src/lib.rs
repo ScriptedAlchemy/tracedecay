@@ -17,6 +17,7 @@ pub mod doctor;
 pub mod feedback;
 mod http;
 pub mod multi_root;
+mod openapi;
 pub mod operation;
 pub mod read_model;
 pub mod remediation;
@@ -45,6 +46,7 @@ pub use multi_root::{
     MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,
     MultiRootInvocationFuture, multi_root_application_router,
 };
+pub use openapi::{OpenApiDocumentError, OpenApiDocumentV1, openapi_document};
 pub use sse::sse_response;
 pub use work::{
     WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,

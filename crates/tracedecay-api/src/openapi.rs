@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
+use tracedecay_application::ApplicationWireSchemaRegistryV1;
 
 use crate::HttpRouteDocumentV1;
 
@@ -65,6 +66,10 @@ pub enum OpenApiDocumentError {
         field: &'static str,
         message: String,
     },
+    #[error("HTTP binding {binding_id} has no canonical wire schema")]
+    MissingWireSchema { binding_id: String },
+    #[error("HTTP binding {binding_id} does not match its canonical wire schema")]
+    MismatchedWireSchema { binding_id: String },
 }
 
 /// Project the supplied authorized route documents into OpenAPI 3.1.
@@ -74,6 +79,41 @@ pub enum OpenApiDocumentError {
 /// from the executable catalog.
 pub fn openapi_document(
     route_documents: &[HttpRouteDocumentV1],
+    wire_schemas: &ApplicationWireSchemaRegistryV1,
+) -> Result<OpenApiDocumentV1, OpenApiDocumentError> {
+    let mut schema_bodies = BTreeMap::new();
+    for route in route_documents {
+        let schema = wire_schemas
+            .iter()
+            .find(|schema| schema.binding_id().as_str() == route.binding_id)
+            .ok_or_else(|| OpenApiDocumentError::MissingWireSchema {
+                binding_id: route.binding_id.clone(),
+            })?;
+        if schema.operation().as_str() != route.operation
+            || schema.capability_id().as_str() != route.capability_id
+            || schema.request().schema_ref().schema_id().as_str() != route.request_schema
+            || schema.request().schema_ref().revision() != route.request_schema_revision
+            || schema.result().schema_ref().schema_id().as_str() != route.result_schema
+            || schema.result().schema_ref().revision() != route.result_schema_revision
+        {
+            return Err(OpenApiDocumentError::MismatchedWireSchema {
+                binding_id: route.binding_id.clone(),
+            });
+        }
+        schema_bodies.insert(
+            route.binding_id.clone(),
+            (
+                schema.request().body().clone(),
+                schema.result().body().clone(),
+            ),
+        );
+    }
+    openapi_document_from_schema_bodies(route_documents, &schema_bodies)
+}
+
+fn openapi_document_from_schema_bodies(
+    route_documents: &[HttpRouteDocumentV1],
+    schema_bodies: &BTreeMap<String, (Value, Value)>,
 ) -> Result<OpenApiDocumentV1, OpenApiDocumentError> {
     let mut ordered_routes = route_documents.iter().collect::<Vec<_>>();
     ordered_routes.sort_by(|left, right| {
@@ -116,7 +156,13 @@ pub fn openapi_document(
             (route.method.to_owned(), route.path.clone()),
         );
 
-        let operation = operation_document(route)?;
+        let (request_schema, result_schema) =
+            schema_bodies.get(&route.binding_id).ok_or_else(|| {
+                OpenApiDocumentError::MissingWireSchema {
+                    binding_id: route.binding_id.clone(),
+                }
+            })?;
+        let operation = operation_document(route, request_schema, result_schema)?;
         paths
             .entry(route.path.clone())
             .or_default()
@@ -131,7 +177,7 @@ pub fn openapi_document(
             version: "1",
         },
         paths,
-        components: components(),
+        components: components(schema_bodies),
     })
 }
 
@@ -157,9 +203,11 @@ fn openapi_method(method: &str) -> Option<&'static str> {
     }
 }
 
-fn operation_document(route: &HttpRouteDocumentV1) -> Result<Value, OpenApiDocumentError> {
-    let request_schema_ref = schema_urn(&route.request_schema, route.request_schema_revision);
-    let result_schema_ref = schema_urn(&route.result_schema, route.result_schema_revision);
+fn operation_document(
+    route: &HttpRouteDocumentV1,
+    _request_schema_body: &Value,
+    _result_schema_body: &Value,
+) -> Result<Value, OpenApiDocumentError> {
     let lifecycle = object([
         (
             "cancellation",
@@ -184,7 +232,13 @@ fn operation_document(route: &HttpRouteDocumentV1) -> Result<Value, OpenApiDocum
     ]);
 
     let request_schema = object([
-        ("$ref", string(request_schema_ref)),
+        (
+            "allOf",
+            Value::Array(vec![reference(&wire_component_ref(
+                &route.binding_id,
+                "request",
+            ))]),
+        ),
         ("x-tracedecay-schema-id", string(&route.request_schema)),
         (
             "x-tracedecay-schema-revision",
@@ -202,7 +256,13 @@ fn operation_document(route: &HttpRouteDocumentV1) -> Result<Value, OpenApiDocum
         (
             "x-tracedecay-result-schema",
             object([
-                ("$ref", string(result_schema_ref)),
+                (
+                    "allOf",
+                    Value::Array(vec![reference(&wire_component_ref(
+                        &route.binding_id,
+                        "result",
+                    ))]),
+                ),
                 ("schema_id", string(&route.result_schema)),
                 ("revision", number(route.result_schema_revision)),
             ]),
@@ -261,7 +321,61 @@ fn operation_document(route: &HttpRouteDocumentV1) -> Result<Value, OpenApiDocum
     ]))
 }
 
-fn components() -> Value {
+fn wire_component_name(binding_id: &str, direction: &str) -> String {
+    format!("{binding_id}.{direction}")
+}
+
+fn wire_component_ref(binding_id: &str, direction: &str) -> String {
+    format!(
+        "#/components/schemas/{}",
+        wire_component_name(binding_id, direction)
+    )
+}
+
+fn components(schema_bodies: &BTreeMap<String, (Value, Value)>) -> Value {
+    let mut schemas = Map::from_iter([
+        (
+            "HttpJsonEnvelope".to_owned(),
+            object([
+                (
+                    "oneOf",
+                    Value::Array(vec![
+                        reference(HTTP_JSON_SUCCESS_REF),
+                        reference(HTTP_JSON_PROBLEM_REF),
+                    ]),
+                ),
+                (
+                    "discriminator",
+                    object([
+                        ("propertyName", string("kind")),
+                        (
+                            "mapping",
+                            object([
+                                ("problem", string(HTTP_JSON_PROBLEM_REF)),
+                                ("success", string(HTTP_JSON_SUCCESS_REF)),
+                            ]),
+                        ),
+                    ]),
+                ),
+            ]),
+        ),
+        (
+            "HttpJsonProblemEnvelope".to_owned(),
+            reference("urn:tracedecay:schema:http-json-problem-envelope:revision:1"),
+        ),
+        (
+            "HttpJsonSuccessEnvelope".to_owned(),
+            reference("urn:tracedecay:schema:http-json-success-envelope:revision:1"),
+        ),
+        (
+            "RequestId".to_owned(),
+            reference("urn:tracedecay:schema:request-id:revision:1"),
+        ),
+    ]);
+    for (binding_id, (request, result)) in schema_bodies {
+        schemas.insert(wire_component_name(binding_id, "request"), request.clone());
+        schemas.insert(wire_component_name(binding_id, "result"), result.clone());
+    }
     object([
         (
             "responses",
@@ -288,53 +402,8 @@ fn components() -> Value {
                 ]),
             )]),
         ),
-        (
-            "schemas",
-            object([
-                (
-                    "HttpJsonEnvelope",
-                    object([
-                        (
-                            "oneOf",
-                            Value::Array(vec![
-                                reference(HTTP_JSON_SUCCESS_REF),
-                                reference(HTTP_JSON_PROBLEM_REF),
-                            ]),
-                        ),
-                        (
-                            "discriminator",
-                            object([
-                                ("propertyName", string("kind")),
-                                (
-                                    "mapping",
-                                    object([
-                                        ("problem", string(HTTP_JSON_PROBLEM_REF)),
-                                        ("success", string(HTTP_JSON_SUCCESS_REF)),
-                                    ]),
-                                ),
-                            ]),
-                        ),
-                    ]),
-                ),
-                (
-                    "HttpJsonProblemEnvelope",
-                    reference("urn:tracedecay:schema:http-json-problem-envelope:revision:1"),
-                ),
-                (
-                    "HttpJsonSuccessEnvelope",
-                    reference("urn:tracedecay:schema:http-json-success-envelope:revision:1"),
-                ),
-                (
-                    "RequestId",
-                    reference("urn:tracedecay:schema:request-id:revision:1"),
-                ),
-            ]),
-        ),
+        ("schemas", Value::Object(schemas)),
     ])
-}
-
-fn schema_urn(schema_id: &str, revision: u32) -> String {
-    format!("urn:tracedecay:schema:{schema_id}:revision:{revision}")
 }
 
 fn contract_value<T: Serialize>(
@@ -370,7 +439,7 @@ fn number(value: u32) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use serde_json::{Value, json};
     use tracedecay_tool_catalog::{
@@ -378,7 +447,7 @@ mod tests {
         PaginationContract, ReceiptContract, TerminalState, TerminalStateContract,
     };
 
-    use super::{OpenApiDocumentError, openapi_document};
+    use super::{OpenApiDocumentError, openapi_document_from_schema_bodies};
     use crate::HttpRouteDocumentV1;
 
     fn route(
@@ -422,9 +491,33 @@ mod tests {
         }
     }
 
+    fn schema_bodies(routes: &[HttpRouteDocumentV1]) -> BTreeMap<String, (Value, Value)> {
+        routes
+            .iter()
+            .map(|route| {
+                (
+                    route.binding_id.clone(),
+                    (
+                        json!({
+                            "type": "object",
+                            "title": format!("{} request", route.operation),
+                        }),
+                        json!({
+                            "type": "object",
+                            "title": format!("{} result", route.operation),
+                        }),
+                    ),
+                )
+            })
+            .collect()
+    }
+
     fn document_value(routes: &[HttpRouteDocumentV1]) -> Value {
-        serde_json::to_value(openapi_document(routes).expect("valid route documents"))
-            .expect("serializable OpenAPI document")
+        let schemas = schema_bodies(routes);
+        serde_json::to_value(
+            openapi_document_from_schema_bodies(routes, &schemas).expect("valid route documents"),
+        )
+        .expect("serializable OpenAPI document")
     }
 
     #[test]
@@ -476,7 +569,9 @@ mod tests {
         assert_eq!(
             paths["/context-scout/inspect"]["post"]["requestBody"]["content"]["application/json"]["schema"],
             json!({
-                "$ref": "urn:tracedecay:schema:request.inspect:revision:3",
+                "allOf": [{
+                    "$ref": "#/components/schemas/binding.inspect.http.request"
+                }],
                 "x-tracedecay-schema-id": "request.inspect",
                 "x-tracedecay-schema-revision": 3
             })
@@ -485,9 +580,25 @@ mod tests {
             paths["/context-scout/inspect"]["post"]["responses"]["200"]["content"]["application/json"]
                 ["schema"]["x-tracedecay-result-schema"],
             json!({
-                "$ref": "urn:tracedecay:schema:result.inspect:revision:5",
+                "allOf": [{
+                    "$ref": "#/components/schemas/binding.inspect.http.result"
+                }],
                 "schema_id": "result.inspect",
                 "revision": 5
+            })
+        );
+        assert_eq!(
+            document["components"]["schemas"]["binding.inspect.http.request"],
+            json!({
+                "type": "object",
+                "title": "inspect request"
+            })
+        );
+        assert_eq!(
+            document["components"]["schemas"]["binding.inspect.http.result"],
+            json!({
+                "type": "object",
+                "title": "inspect result"
             })
         );
     }
@@ -583,8 +694,12 @@ mod tests {
         );
         let mut duplicate_route = first.clone();
         duplicate_route.operation = "inspect_duplicate".to_owned();
+        let duplicate_schemas = schema_bodies(&[first.clone(), duplicate_route.clone()]);
         assert_eq!(
-            openapi_document(&[first.clone(), duplicate_route]),
+            openapi_document_from_schema_bodies(
+                &[first.clone(), duplicate_route],
+                &duplicate_schemas
+            ),
             Err(OpenApiDocumentError::DuplicateRoute {
                 method: "POST".to_owned(),
                 path: "/context-scout/inspect".to_owned(),
@@ -600,8 +715,9 @@ mod tests {
             "result.inspect",
             5,
         );
+        let conflict_schemas = schema_bodies(&[first.clone(), conflicting_operation.clone()]);
         assert_eq!(
-            openapi_document(&[first, conflicting_operation]),
+            openapi_document_from_schema_bodies(&[first, conflicting_operation], &conflict_schemas),
             Err(OpenApiDocumentError::ConflictingOperationId {
                 operation_id: "inspect".to_owned(),
                 first_method: "POST".to_owned(),
@@ -633,11 +749,13 @@ mod tests {
             4,
         );
 
-        let forward = openapi_document(&[first.clone(), second.clone()])
-            .expect("valid forward document")
-            .to_json_bytes()
-            .expect("serializable forward document");
-        let reverse = openapi_document(&[second, first])
+        let schemas = schema_bodies(&[first.clone(), second.clone()]);
+        let forward =
+            openapi_document_from_schema_bodies(&[first.clone(), second.clone()], &schemas)
+                .expect("valid forward document")
+                .to_json_bytes()
+                .expect("serializable forward document");
+        let reverse = openapi_document_from_schema_bodies(&[second, first], &schemas)
             .expect("valid reverse document")
             .to_json_bytes()
             .expect("serializable reverse document");

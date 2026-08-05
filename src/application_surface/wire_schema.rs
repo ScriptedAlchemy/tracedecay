@@ -582,7 +582,11 @@ pub(super) fn validate_application_outcome(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use tracedecay_api::{http_route_documents, openapi_document};
     use tracedecay_application::ApplicationWireOperation;
+    use tracedecay_tool_catalog::{ProfileId, ScopeDimension};
 
     use super::{SettingSummary, build_application_wire_schema_registry, payload_decodes};
 
@@ -621,5 +625,34 @@ mod tests {
                 assert_eq!(schema.result().schema_ref(), manifest.result_schema());
             }
         }
+    }
+
+    #[test]
+    fn authorized_http_openapi_uses_the_binding_keyed_wire_registry() {
+        let catalog = super::super::application_surface_catalog_ref().unwrap();
+        let registry = build_application_wire_schema_registry(catalog).unwrap();
+        let authorized = catalog
+            .capabilities()
+            .map(|capability| capability.capability_id().clone())
+            .collect();
+        let scope = BTreeSet::from([
+            ScopeDimension::Project,
+            ScopeDimension::Repository,
+            ScopeDimension::Worktree,
+            ScopeDimension::Branch,
+            ScopeDimension::Session,
+            ScopeDimension::Resource,
+        ]);
+        let routes = http_route_documents(
+            catalog,
+            &ProfileId::new("profile.default").unwrap(),
+            &authorized,
+            &scope,
+            &BTreeSet::new(),
+            1,
+        );
+
+        assert!(!routes.is_empty());
+        assert!(openapi_document(&routes, &registry).is_ok());
     }
 }
