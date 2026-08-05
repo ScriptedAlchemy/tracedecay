@@ -3,6 +3,8 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use sha2::Digest;
+
 #[cfg(windows)]
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 #[cfg(windows)]
@@ -171,12 +173,27 @@ fn read_payload_file_for_verify_bounded(
     path: &Path,
     max_bytes: u64,
 ) -> Result<Option<(Vec<u8>, VerifiedPayloadAuthority)>, LcmError> {
+    read_payload_file_for_verify_bounded_with_checkpoint(path, max_bytes, &mut || Ok(()))
+}
+
+fn read_payload_file_for_verify_bounded_with_checkpoint(
+    path: &Path,
+    max_bytes: u64,
+    checkpoint: &mut impl FnMut() -> Result<(), LcmError>,
+) -> Result<Option<(Vec<u8>, VerifiedPayloadAuthority)>, LcmError> {
+    checkpoint()?;
     let Some((mut file, _opened, _lstat, identity)) = open_verified_payload_file(path)? else {
         return Ok(None);
     };
-    let content =
-        read_stable_payload_bytes_bounded_with(&mut file, path, &identity, max_bytes, || Ok(()))?;
-    let authority = authority_for_content(path, identity, &content)?;
+    let content = read_stable_payload_bytes_bounded_with_checkpoint(
+        &mut file,
+        path,
+        &identity,
+        max_bytes,
+        || Ok(()),
+        checkpoint,
+    )?;
+    let authority = authority_for_content_with_checkpoint(path, identity, &content, checkpoint)?;
     Ok(Some((content, authority)))
 }
 
@@ -198,13 +215,32 @@ pub(super) fn read_verified_payload_file(
     expected_bytes: u64,
     expected_chars: u64,
 ) -> Result<Option<(Vec<u8>, VerifiedPayloadAuthority)>, LcmError> {
+    read_verified_payload_file_with_checkpoint(
+        path,
+        expected_hash,
+        expected_bytes,
+        expected_chars,
+        &mut || Ok(()),
+    )
+}
+
+pub(super) fn read_verified_payload_file_with_checkpoint(
+    path: &Path,
+    expected_hash: &str,
+    expected_bytes: u64,
+    expected_chars: u64,
+    checkpoint: &mut impl FnMut() -> Result<(), LcmError>,
+) -> Result<Option<(Vec<u8>, VerifiedPayloadAuthority)>, LcmError> {
+    checkpoint()?;
     if expected_bytes > MAX_VERIFIED_PAYLOAD_FILE_BYTES {
         return Err(LcmError::PayloadIntegrityMismatch);
     }
-    let Some((content, authority)) = read_payload_file_for_verify_bounded(path, expected_bytes)?
+    let Some((content, authority)) =
+        read_payload_file_for_verify_bounded_with_checkpoint(path, expected_bytes, checkpoint)?
     else {
         return Ok(None);
     };
+    checkpoint()?;
     if authority.content_hash != expected_hash
         || authority.byte_count != expected_bytes
         || authority.char_count != expected_chars
@@ -281,6 +317,28 @@ fn read_stable_payload_bytes_bounded_with<F>(
 where
     F: FnOnce() -> Result<(), LcmError>,
 {
+    read_stable_payload_bytes_bounded_with_checkpoint(
+        file,
+        path,
+        expected_identity,
+        max_bytes,
+        after_read,
+        &mut || Ok(()),
+    )
+}
+
+fn read_stable_payload_bytes_bounded_with_checkpoint<F>(
+    file: &mut fs::File,
+    path: &Path,
+    expected_identity: &PayloadFileIdentity,
+    max_bytes: u64,
+    after_read: F,
+    checkpoint: &mut impl FnMut() -> Result<(), LcmError>,
+) -> Result<Vec<u8>, LcmError>
+where
+    F: FnOnce() -> Result<(), LcmError>,
+{
+    checkpoint()?;
     let max_bytes = max_bytes.min(MAX_VERIFIED_PAYLOAD_FILE_BYTES);
     let before = file
         .metadata()
@@ -298,16 +356,23 @@ where
     let mut content = Vec::with_capacity(initial_capacity);
     file.seek(SeekFrom::Start(0))
         .map_err(|error| LcmError::Io(error.to_string()))?;
-    {
-        let mut bounded = file.take(max_bytes.saturating_add(1));
-        bounded
-            .read_to_end(&mut content)
+    let mut bounded = file.take(max_bytes.saturating_add(1));
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        checkpoint()?;
+        let count = bounded
+            .read(&mut chunk)
             .map_err(|error| LcmError::Io(error.to_string()))?;
+        if count == 0 {
+            break;
+        }
+        content.extend_from_slice(&chunk[..count]);
     }
     if u64::try_from(content.len()).map_or(true, |length| length > max_bytes) {
         return Err(LcmError::PayloadIntegrityMismatch);
     }
     after_read()?;
+    checkpoint()?;
 
     let (after, _lstat, after_identity) = verify_opened_payload_file(file, path)?;
     same_payload_file_identity(&after_identity, expected_identity)?;
@@ -322,13 +387,38 @@ fn authority_for_content(
     identity: PayloadFileIdentity,
     content: &[u8],
 ) -> Result<VerifiedPayloadAuthority, LcmError> {
+    authority_for_content_with_checkpoint(path, identity, content, &mut || Ok(()))
+}
+
+fn authority_for_content_with_checkpoint(
+    path: &Path,
+    identity: PayloadFileIdentity,
+    content: &[u8],
+    checkpoint: &mut impl FnMut() -> Result<(), LcmError>,
+) -> Result<VerifiedPayloadAuthority, LcmError> {
+    checkpoint()?;
     let text = std::str::from_utf8(content).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    let mut hasher = sha2::Sha256::new();
+    for chunk in content.chunks(64 * 1024) {
+        checkpoint()?;
+        hasher.update(chunk);
+    }
+    let mut char_count = 0_u64;
+    let mut next_checkpoint = 0_usize;
+    for (index, _) in text.char_indices() {
+        if index >= next_checkpoint {
+            checkpoint()?;
+            next_checkpoint = next_checkpoint.saturating_add(64 * 1024);
+        }
+        char_count = char_count.saturating_add(1);
+    }
+    checkpoint()?;
     Ok(VerifiedPayloadAuthority {
         locator: path.to_path_buf(),
         identity,
-        content_hash: super::util::sha256_hex(content),
+        content_hash: hex::encode(hasher.finalize()),
         byte_count: content.len() as u64,
-        char_count: text.chars().count() as u64,
+        char_count,
     })
 }
 
@@ -1521,6 +1611,62 @@ mod authority_tests {
             Err(LcmError::PayloadIntegrityMismatch)
         ));
         assert!(path.exists());
+    }
+
+    #[test]
+    fn verified_read_checks_control_during_whole_file_io() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload.payload");
+        let content = vec![b'x'; 512 * 1024];
+        fs::write(&path, &content).unwrap();
+        let hash = super::super::util::sha256_hex(&content);
+        let mut checkpoints = 0;
+        let error = read_verified_payload_file_with_checkpoint(
+            &path,
+            &hash,
+            content.len() as u64,
+            content.len() as u64,
+            &mut || {
+                checkpoints += 1;
+                if checkpoints >= 5 {
+                    Err(LcmError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("control must interrupt a multi-chunk verified read");
+        assert_eq!(error, LcmError::Cancelled);
+        assert!(
+            checkpoints >= 5,
+            "verification did not reach an in-file checkpoint"
+        );
+    }
+
+    #[test]
+    fn verified_read_preserves_deadline_interruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload.payload");
+        let content = vec![b'x'; 256 * 1024];
+        fs::write(&path, &content).unwrap();
+        let hash = super::super::util::sha256_hex(&content);
+        let mut checkpoints = 0;
+        let error = read_verified_payload_file_with_checkpoint(
+            &path,
+            &hash,
+            content.len() as u64,
+            content.len() as u64,
+            &mut || {
+                checkpoints += 1;
+                if checkpoints >= 4 {
+                    Err(LcmError::DeadlineExceeded)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("deadline must interrupt a multi-chunk verified read");
+        assert_eq!(error, LcmError::DeadlineExceeded);
     }
 
     #[test]

@@ -1005,6 +1005,7 @@ mod tests {
             content_range: None,
             content_truncated: false,
             raw_message: None,
+            raw_message_metadata: None,
             summary_node: None,
         }
     }

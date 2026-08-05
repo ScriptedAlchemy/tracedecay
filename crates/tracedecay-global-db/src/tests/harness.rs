@@ -600,17 +600,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[cfg(test)]
-    pub(crate) async fn lcm_expand_for_test(
-        &self,
-        request: tracedecay_sessions::runtime::lcm::LcmExpandRequest,
-    ) -> Result<
-        tracedecay_sessions::runtime::lcm::LcmExpandResponse,
-        tracedecay_sessions::runtime::lcm::LcmError,
-    > {
-        self.profile_registered.lcm_expand(request).await
-    }
-
-    #[cfg(test)]
     pub(crate) async fn seed_lcm_render_fixture_for_test(
         &self,
         scope: HostAdmissionScope,

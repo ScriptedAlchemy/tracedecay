@@ -27,6 +27,27 @@ pub struct LcmRawMessage {
     pub metadata_json: Option<String>,
 }
 
+/// Identity and storage facts for an unhydrated raw message.
+///
+/// This deliberately excludes both `content` and provider `metadata_json`:
+/// metadata may contain active replay fields and is therefore content, not
+/// safe row metadata.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmRawMessageMetadata {
+    pub provider: String,
+    pub message_id: String,
+    pub session_id: String,
+    pub store_id: i64,
+    pub role: String,
+    pub ordinal: i64,
+    pub timestamp: Option<i64>,
+    pub content_hash: String,
+    pub storage_kind: LcmStorageKind,
+    pub payload_ref: Option<String>,
+    pub legacy_source: bool,
+    pub legacy_truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmPayloadRef {
     pub payload_ref: String,
@@ -196,6 +217,8 @@ pub struct LcmExpandResponse {
     pub content: String,
     pub content_range: LcmContentRange,
     pub raw_message: Option<LcmRawMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_message_metadata: Option<LcmRawMessageMetadata>,
     pub summary_node: Option<LcmSummaryNode>,
     pub summary_sources: Vec<LcmExpandedSummarySource>,
     pub payload_ref: Option<String>,
@@ -223,6 +246,8 @@ pub struct LcmExpandedSummarySource {
     #[serde(default)]
     pub content_truncated: bool,
     pub raw_message: Option<LcmRawMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_message_metadata: Option<LcmRawMessageMetadata>,
     pub summary_node: Option<Box<LcmSummaryNode>>,
 }
 
@@ -409,6 +434,10 @@ pub enum LcmError {
         actual: i64,
     },
     LifecycleStateNotFound,
+    Sanitization(String),
+    Cancelled,
+    DeadlineExceeded,
+    BudgetExhausted,
     Db(String),
     Io(String),
 }
@@ -468,6 +497,14 @@ impl std::fmt::Display for LcmError {
             }
             Self::LifecycleStateNotFound => {
                 write!(f, "payload database error: lifecycle state not found")
+            }
+            Self::Sanitization(message) => write!(f, "LCM sanitization failed: {message}"),
+            Self::Cancelled => write!(f, "LCM payload verification was cancelled"),
+            Self::DeadlineExceeded => {
+                write!(f, "LCM payload verification deadline was exceeded")
+            }
+            Self::BudgetExhausted => {
+                write!(f, "LCM payload verification budget was exhausted")
             }
             Self::Db(message) => write!(f, "payload database error: {message}"),
             Self::Io(message) => write!(f, "payload IO error: {message}"),

@@ -267,6 +267,9 @@ pub fn classify_transcript_ingest_failure(
         source::TranscriptIngestError::Store(TranscriptStoreError::Storage { .. }) => {
             ("transcript_storage_failed", true)
         }
+        source::TranscriptIngestError::Store(TranscriptStoreError::Sanitization { .. }) => {
+            ("transcript_sanitization_failed", false)
+        }
         source::TranscriptIngestError::Store(TranscriptStoreError::InvalidCursorPath) => {
             ("transcript_cursor_path_invalid", false)
         }

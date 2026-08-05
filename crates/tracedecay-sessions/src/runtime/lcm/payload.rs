@@ -283,15 +283,40 @@ pub fn read_verified_payload_content(
     byte_count: usize,
     char_count: usize,
 ) -> Result<String, LcmError> {
+    read_verified_payload_content_with_checkpoint(
+        storage_root,
+        payload_ref,
+        content_hash,
+        byte_count,
+        char_count,
+        &mut || Ok(()),
+    )
+}
+
+pub fn read_verified_payload_content_with_checkpoint(
+    storage_root: &Path,
+    payload_ref: &str,
+    content_hash: &str,
+    byte_count: usize,
+    char_count: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), LcmError>,
+) -> Result<String, LcmError> {
+    checkpoint()?;
     validate_payload_ref(payload_ref)?;
     let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
     let byte_count = u64::try_from(byte_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     let char_count = u64::try_from(char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
-    let (content, _authority) =
-        read_verified_payload_file(&path, content_hash, byte_count, char_count)?
-            .ok_or(LcmError::PayloadMissing)?;
+    let (content, _authority) = filesystem_authority::read_verified_payload_file_with_checkpoint(
+        &path,
+        content_hash,
+        byte_count,
+        char_count,
+        checkpoint,
+    )?
+    .ok_or(LcmError::PayloadMissing)?;
+    checkpoint()?;
     String::from_utf8(content).map_err(|_| LcmError::PayloadIntegrityMismatch)
 }
 

@@ -3389,6 +3389,11 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         })
         .await
         .expect("register test graph scope");
+    let payload_storage_root = cg
+        .db_path()
+        .parent()
+        .expect("project database storage root")
+        .join("lcm-payloads");
     let server = real_mcp_server(cg).await;
 
     let raw_result = handle_real_server_tool_call(
@@ -3409,10 +3414,31 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         .as_str()
         .expect("cross-session external row should surface payload_ref")
         .to_string();
-    let owner_session = raw_payload["expansion"]["raw_message"]["session_id"]
+    assert!(raw_payload["expansion"]["raw_message"].is_null());
+    assert!(
+        raw_payload["expansion"]["raw_message_metadata"]
+            .get("content")
+            .is_none()
+    );
+    assert!(
+        raw_payload["expansion"]["raw_message_metadata"]
+            .get("metadata_json")
+            .is_none()
+    );
+    let owner_session = raw_payload["expansion"]["raw_message_metadata"]["session_id"]
         .as_str()
         .expect("owner session id should be surfaced")
         .to_string();
+    let original_manifest = db
+        .lcm_external_payload_manifest_for_test(&payload_ref)
+        .await
+        .expect("read external payload manifest")
+        .expect("external payload manifest");
+    let payload_path = payload_storage_root.join(&payload_ref);
+    assert!(
+        payload_path.is_file(),
+        "external payload fixture is missing"
+    );
 
     let denied_payload = handle_real_server_tool_call(
         &server,
@@ -3435,7 +3461,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         json!({
             "provider": "cursor",
             "session_id": owner_session,
-            "target": {"kind": "external_payload", "payload_ref": payload_ref},
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()},
             "content_limit": 80
         }),
     )
@@ -3449,6 +3475,43 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
             .expect("external payload content")
             .starts_with("data:image/png;base64,")
     );
+
+    let mut tampered_manifest = original_manifest.clone();
+    tampered_manifest.payload_digest = "tampered-publication-digest".to_string();
+    db.replace_lcm_external_payload_manifest_for_test(&payload_ref, &tampered_manifest)
+        .await
+        .expect("tamper external payload manifest");
+    let tampered_result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()},
+            "content_limit": 80
+        }),
+    )
+    .await;
+    let tampered: Value = serde_json::from_str(extract_real_server_text(&tampered_result)).unwrap();
+    assert_eq!(tampered["status"], "unavailable", "{tampered}");
+
+    db.replace_lcm_external_payload_manifest_for_test(&payload_ref, &original_manifest)
+        .await
+        .expect("restore external payload manifest");
+    std::fs::remove_file(&payload_path).expect("remove external payload fixture");
+    let missing_result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref},
+            "content_limit": 80
+        }),
+    )
+    .await;
+    let missing: Value = serde_json::from_str(extract_real_server_text(&missing_result)).unwrap();
+    assert_eq!(missing["status"], "deleted", "{missing}");
     server.shutdown().await;
 }
 

@@ -765,6 +765,51 @@ async fn private_key_redaction_is_lossy_and_not_indexed_when_enabled() {
 }
 
 #[tokio::test]
+async fn unterminated_private_key_redaction_fails_closed_when_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tracedecay");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let private_key_body = "UNTERMINATEDPRIVATEKEYCANARY";
+    let mut message = raw_message(
+        "cursor",
+        "unterminated-private-key",
+        "session-1",
+        "user",
+        &format!("before\n-----BEGIN PRIVATE KEY-----\n{private_key_body}"),
+    );
+    message.metadata_json = Some(
+        json!({
+            "lcm_ingest": {
+                "sensitive_patterns_enabled": true,
+                "sensitive_patterns": ["private_key"]
+            }
+        })
+        .to_string(),
+    );
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("unterminated private key should be safely redacted");
+    let raw = db
+        .lcm_load_raw_message("cursor", "unterminated-private-key")
+        .await
+        .expect("redacted raw message");
+    assert!(!raw.content.contains("BEGIN PRIVATE KEY"));
+    assert!(!raw.content.contains(private_key_body));
+    assert!(
+        raw.content
+            .contains("[LCM sensitive redaction: name=private_key")
+    );
+    assert_eq!(lcm_fts_count(&db, private_key_body).await, 0);
+}
+
+#[tokio::test]
 async fn private_key_redaction_disabled_preserves_lossless_content() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");

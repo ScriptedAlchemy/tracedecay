@@ -17,11 +17,6 @@ pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, content, content_hash, storage_kind, payload_ref,
                     snippet_text, legacy_source, legacy_truncated, metadata_json";
-pub const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
-    "provider, message_id, session_id, store_id, role, ordinal,
-                    timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
-                    '' AS snippet_text, legacy_source, legacy_truncated, metadata_json";
-
 pub fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
     let storage_kind_text: String = row.get(9)?;
     let content: Option<String> = row.get(7)?;
@@ -334,7 +329,7 @@ pub async fn protect_replay_field_value_tracked(
     let config = ingest_config(
         message.metadata_json.as_deref(),
         &IngestProtectionDefaults::from_profile(),
-    );
+    )?;
     let mut protected = value.clone();
 
     if config.sensitive_patterns_enabled {
@@ -373,7 +368,7 @@ async fn prepare_message(
     externalizer: &mut PayloadExternalizer<'_>,
     defaults: &IngestProtectionDefaults,
 ) -> Result<PreparedMessage, LcmError> {
-    let config = ingest_config(message.metadata_json.as_deref(), defaults);
+    let config = ingest_config(message.metadata_json.as_deref(), defaults)?;
     let mut protection = IngestProtection::default();
     let redacted = redact_sensitive_text(&message.text, &config);
     let mut text = redacted.text;
@@ -456,7 +451,7 @@ async fn prepare_message(
     }
 
     let external_kind = protection.quarantine_kind.clone();
-    let metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &protection);
+    let metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &protection)?;
     Ok(PreparedMessage {
         text,
         metadata_json,
@@ -769,7 +764,10 @@ impl IngestProtectionDefaults {
     }
 }
 
-fn ingest_config(metadata_json: Option<&str>, defaults: &IngestProtectionDefaults) -> IngestConfig {
+fn ingest_config(
+    metadata_json: Option<&str>,
+    defaults: &IngestProtectionDefaults,
+) -> Result<IngestConfig, LcmError> {
     let mut config = IngestConfig {
         sensitive_patterns_enabled: defaults.sensitive_patterns_enabled,
         sensitive_patterns: defaults.sensitive_patterns.clone().unwrap_or_else(|| {
@@ -780,15 +778,20 @@ fn ingest_config(metadata_json: Option<&str>, defaults: &IngestProtectionDefault
         }),
     };
     let Some(metadata_json) = metadata_json else {
-        return config;
+        validate_sensitive_patterns(&config.sensitive_patterns)?;
+        return Ok(config);
     };
-    let Ok(value) = serde_json::from_str::<JsonValue>(metadata_json) else {
-        return config;
-    };
+    let value = serde_json::from_str::<JsonValue>(metadata_json)
+        .map_err(|error| LcmError::Sanitization(format!("invalid metadata JSON: {error}")))?;
     let ingest = value
         .get("lcm_ingest")
         .or_else(|| value.get("ingest_protection"))
         .unwrap_or(&value);
+    if !ingest.is_object() {
+        return Err(LcmError::Sanitization(
+            "LCM ingest protection metadata must be a JSON object".to_string(),
+        ));
+    }
     // A per-message key still overrides the profile default in either
     // direction; its absence leaves the owner's configured default in place.
     if let Some(enabled) = ingest
@@ -796,18 +799,45 @@ fn ingest_config(metadata_json: Option<&str>, defaults: &IngestProtectionDefault
         .and_then(JsonValue::as_bool)
     {
         config.sensitive_patterns_enabled = enabled;
+    } else if ingest.get("sensitive_patterns_enabled").is_some() {
+        return Err(LcmError::Sanitization(
+            "sensitive_patterns_enabled must be boolean".to_string(),
+        ));
     }
-    if let Some(patterns) = ingest
-        .get("sensitive_patterns")
-        .and_then(JsonValue::as_array)
-    {
-        config.sensitive_patterns = patterns
+    if let Some(configured_patterns) = ingest.get("sensitive_patterns") {
+        let patterns = configured_patterns.as_array().ok_or_else(|| {
+            LcmError::Sanitization("sensitive_patterns must be an array".to_string())
+        })?;
+        let configured = patterns
             .iter()
-            .filter_map(JsonValue::as_str)
+            .map(|pattern| {
+                pattern.as_str().ok_or_else(|| {
+                    LcmError::Sanitization(
+                        "sensitive redaction patterns must be strings".to_string(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .map(str::to_ascii_lowercase)
-            .collect();
+            .collect::<Vec<_>>();
+        config.sensitive_patterns = configured;
     }
-    config
+    validate_sensitive_patterns(&config.sensitive_patterns)?;
+    Ok(config)
+}
+
+fn validate_sensitive_patterns(patterns: &[String]) -> Result<(), LcmError> {
+    if let Some(pattern) = patterns.iter().find(|pattern| {
+        !BUILT_IN_SENSITIVE_PATTERNS.contains(&pattern.as_str())
+            && pattern.as_str() != "all"
+            && pattern.as_str() != "default"
+    }) {
+        return Err(LcmError::Sanitization(format!(
+            "unsupported sensitive redaction pattern: {pattern}"
+        )));
+    }
+    Ok(())
 }
 
 fn redact_api_keys(text: &str) -> String {
@@ -1020,7 +1050,7 @@ fn find_next_private_key_block(
             }
             end_search = footer_name_start.min(text.len());
         }
-        return None;
+        return Some((block_start, text.len()));
     }
     None
 }
@@ -1065,16 +1095,22 @@ fn sensitive_placeholder(pattern_name: &str, secret: &str) -> String {
 fn protected_metadata_json(
     original: Option<&str>,
     protection: &IngestProtection,
-) -> Option<String> {
+) -> Result<Option<String>, LcmError> {
     if !has_ingest_protection_metadata(protection) {
-        return original.map(str::to_string);
+        return Ok(original.map(str::to_string));
     }
-    let mut metadata = original
-        .and_then(|text| serde_json::from_str::<JsonValue>(text).ok())
-        .filter(JsonValue::is_object)
-        .unwrap_or_else(|| JsonValue::Object(Map::new()));
+    let mut metadata = match original {
+        Some(text) => serde_json::from_str::<JsonValue>(text)
+            .map_err(|error| LcmError::Sanitization(format!("invalid metadata JSON: {error}")))?,
+        None => JsonValue::Object(Map::new()),
+    };
+    if !metadata.is_object() {
+        return Err(LcmError::Sanitization(
+            "message metadata must be a JSON object".to_string(),
+        ));
+    }
     add_ingest_protection_metadata(&mut metadata, protection);
-    Some(metadata.to_string())
+    Ok(Some(metadata.to_string()))
 }
 
 fn payload_metadata_json(protection: &IngestProtection) -> Option<String> {
@@ -1126,62 +1162,5 @@ fn add_ingest_protection_metadata(metadata: &mut JsonValue, protection: &IngestP
 }
 
 #[cfg(test)]
-mod ingest_protection_defaults_tests {
-    use super::{BUILT_IN_SENSITIVE_PATTERNS, IngestProtectionDefaults, ingest_config};
-    use crate::host_ports::LcmRedactionPolicy;
-
-    fn profile(enabled: bool, patterns: &[&str]) -> IngestProtectionDefaults {
-        IngestProtectionDefaults::from_policy(&LcmRedactionPolicy {
-            enabled,
-            patterns: patterns
-                .iter()
-                .map(|pattern| (*pattern).to_string())
-                .collect(),
-        })
-    }
-
-    #[test]
-    fn default_profile_leaves_redaction_off() {
-        let config = ingest_config(None, &IngestProtectionDefaults::default());
-        assert!(!config.sensitive_patterns_enabled);
-    }
-
-    #[test]
-    fn profile_setting_enables_redaction_without_a_metadata_key() {
-        let config = ingest_config(None, &profile(true, &[]));
-        assert!(config.sensitive_patterns_enabled);
-        assert_eq!(config.sensitive_patterns, BUILT_IN_SENSITIVE_PATTERNS);
-    }
-
-    #[test]
-    fn profile_patterns_restrict_the_redactor_set() {
-        let config = ingest_config(None, &profile(true, &["API_KEY"]));
-        assert_eq!(config.sensitive_patterns, vec!["api_key".to_string()]);
-    }
-
-    #[test]
-    fn message_metadata_still_overrides_the_profile_in_both_directions() {
-        let off = ingest_config(
-            Some(r#"{"lcm_ingest":{"sensitive_patterns_enabled":false}}"#),
-            &profile(true, &[]),
-        );
-        assert!(!off.sensitive_patterns_enabled);
-        let on = ingest_config(
-            Some(r#"{"lcm_ingest":{"sensitive_patterns_enabled":true}}"#),
-            &profile(false, &[]),
-        );
-        assert!(on.sensitive_patterns_enabled);
-    }
-
-    #[test]
-    fn enabled_profile_redacts_an_api_key_assignment() {
-        let config = ingest_config(None, &profile(true, &[]));
-        let outcome = super::redact_sensitive_text("api_key=sk-liveSECRETVALUE123", &config);
-        assert!(outcome.redacted, "profile-enabled redaction must fire");
-        assert!(
-            !outcome.text.contains("sk-liveSECRETVALUE123"),
-            "secret survived redaction: {}",
-            outcome.text
-        );
-    }
-}
+#[path = "raw/ingest_protection_defaults_tests.rs"]
+mod ingest_protection_defaults_tests;

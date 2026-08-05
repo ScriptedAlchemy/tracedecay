@@ -68,6 +68,12 @@ where
             TranscriptPersistenceError::Storage { operation, source } => {
                 TranscriptStoreError::Storage { operation, source }
             }
+            TranscriptPersistenceError::Sanitization { operation, source } => {
+                TranscriptStoreError::Sanitization {
+                    operation,
+                    source: Box::new(source),
+                }
+            }
         }
     }
 
@@ -221,6 +227,12 @@ where
             .map_err(|error| match error {
                 TranscriptPersistenceError::Storage { operation, source } => {
                     TranscriptStoreError::Storage { operation, source }
+                }
+                TranscriptPersistenceError::Sanitization { operation, source } => {
+                    TranscriptStoreError::Sanitization {
+                        operation,
+                        source: Box::new(source),
+                    }
                 }
                 TranscriptPersistenceError::Conflict { .. } => Self::storage_error(
                     "load transcript session",

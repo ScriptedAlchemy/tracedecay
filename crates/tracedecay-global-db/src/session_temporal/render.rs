@@ -149,6 +149,7 @@ mod tests {
                 legacy_truncated: false,
                 metadata_json: None,
             }),
+            raw_message_metadata: None,
             summary_node: None,
         }
     }
@@ -166,6 +167,7 @@ mod tests {
                 truncated: false,
             },
             raw_message: None,
+            raw_message_metadata: None,
             summary_node: None,
             summary_sources: vec![source(1), source(2), source(3), source(4)],
             payload_ref: None,

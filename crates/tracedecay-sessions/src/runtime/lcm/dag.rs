@@ -81,9 +81,13 @@ async fn expand_summary_node_with_content(
                     .get(store_id)
                     .cloned()
                     .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-                if raw.provider != provider || raw.session_id != session_id {
+                if raw.provider() != provider || raw.session_id() != session_id {
                     return Err(LcmError::SummarySourceNotOwnedBySession);
                 }
+                let (content, raw_message) = match raw {
+                    RawMessageRow::Hydrated(raw) => (raw.content.clone(), Some(raw)),
+                    RawMessageRow::Metadata(_) => (String::new(), None),
+                };
                 sources.push(LcmExpandedSummarySource {
                     source_ref: source_ref.clone(),
                     state: if include_content {
@@ -91,10 +95,11 @@ async fn expand_summary_node_with_content(
                     } else {
                         HydrationStateV1::RetainedButUnavailable
                     },
-                    content: raw.content.clone(),
+                    content,
                     content_range: None,
                     content_truncated: false,
-                    raw_message: Some(raw),
+                    raw_message,
+                    raw_message_metadata: None,
                     summary_node: None,
                 });
             }
@@ -119,6 +124,7 @@ async fn expand_summary_node_with_content(
                     content_range: None,
                     content_truncated: false,
                     raw_message: None,
+                    raw_message_metadata: None,
                     summary_node: Some(Box::new(child)),
                 });
             }
@@ -334,7 +340,7 @@ async fn load_raw_messages_by_store_ids(
     conn: &(impl QueryExecutor + ?Sized),
     store_ids: &[i64],
     include_content: bool,
-) -> Result<BTreeMap<i64, LcmRawMessage>, LcmError> {
+) -> Result<BTreeMap<i64, RawMessageRow>, LcmError> {
     let unique_store_ids = store_ids
         .iter()
         .copied()
@@ -350,7 +356,7 @@ async fn load_raw_messages_by_store_ids(
     let select_columns = if include_content {
         raw::RAW_MESSAGE_SELECT_COLUMNS
     } else {
-        raw::RAW_MESSAGE_METADATA_SELECT_COLUMNS
+        "provider, session_id, store_id"
     };
     let sql = format!(
         "SELECT {select_columns}
@@ -368,10 +374,54 @@ async fn load_raw_messages_by_store_ids(
         .await?;
     let mut out = BTreeMap::new();
     while let Some(row) = rows.next().await? {
-        let raw = raw::raw_message_from_row(&row)?;
-        out.insert(raw.store_id, raw);
+        let raw = if include_content {
+            RawMessageRow::Hydrated(raw::raw_message_from_row(&row)?)
+        } else {
+            RawMessageRow::Metadata(RawMessageMetadata {
+                provider: row.get(0)?,
+                session_id: row.get(1)?,
+                store_id: row.get(2)?,
+            })
+        };
+        out.insert(raw.store_id(), raw);
     }
     Ok(out)
+}
+
+#[derive(Clone)]
+enum RawMessageRow {
+    Hydrated(LcmRawMessage),
+    Metadata(RawMessageMetadata),
+}
+
+impl RawMessageRow {
+    fn provider(&self) -> &str {
+        match self {
+            Self::Hydrated(raw) => &raw.provider,
+            Self::Metadata(raw) => &raw.provider,
+        }
+    }
+
+    fn session_id(&self) -> &str {
+        match self {
+            Self::Hydrated(raw) => &raw.session_id,
+            Self::Metadata(raw) => &raw.session_id,
+        }
+    }
+
+    fn store_id(&self) -> i64 {
+        match self {
+            Self::Hydrated(raw) => raw.store_id,
+            Self::Metadata(raw) => raw.store_id,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RawMessageMetadata {
+    provider: String,
+    session_id: String,
+    store_id: i64,
 }
 
 async fn load_summary_nodes_by_ids(

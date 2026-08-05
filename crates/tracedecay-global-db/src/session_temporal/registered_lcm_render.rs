@@ -11,8 +11,8 @@ use tracedecay_sessions::lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
     LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget,
-    LcmExpandedSummarySource, LcmPayloadRef, LcmRawMessage, LcmRawMessageOverview, LcmSourceRef,
-    LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
+    LcmExpandedSummarySource, LcmPayloadRef, LcmRawMessageMetadata, LcmRawMessageOverview,
+    LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
 
 macro_rules! field {
@@ -97,7 +97,8 @@ pub(super) async fn expand(
                 kind: "raw_message".to_string(),
                 content: String::new(),
                 content_range: empty_content_range(slice),
-                raw_message: Some(raw),
+                raw_message: None,
+                raw_message_metadata: Some(raw),
                 summary_node: None,
                 summary_sources: Vec::new(),
                 payload_ref,
@@ -135,6 +136,7 @@ pub(super) async fn expand(
                 content: String::new(),
                 content_range: empty_content_range(slice),
                 raw_message: None,
+                raw_message_metadata: None,
                 summary_node: Some(summary),
                 summary_sources,
                 payload_ref: None,
@@ -156,6 +158,7 @@ pub(super) async fn expand(
                 content: String::new(),
                 content_range: empty_content_range(slice),
                 raw_message: None,
+                raw_message_metadata: None,
                 summary_node: None,
                 summary_sources: Vec::new(),
                 payload_ref: Some(payload_ref),
@@ -475,12 +478,12 @@ async fn describe_external_payload(
 async fn load_raw_message(
     snapshot: &ReadSnapshot,
     store_id: i64,
-) -> Result<LcmRawMessage, LcmError> {
+) -> Result<LcmRawMessageMetadata, LcmError> {
     let mut rows = query(
         snapshot,
         "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
-                '' AS snippet_text, legacy_source, legacy_truncated, metadata_json
+                timestamp, content_hash, storage_kind, payload_ref,
+                legacy_source, legacy_truncated
          FROM lcm_raw_messages
          WHERE store_id = ?1",
         params![store_id],
@@ -489,15 +492,13 @@ async fn load_raw_message(
     let row = next_row(&mut rows)
         .await?
         .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-    raw_message_from_row(&row)
+    raw_message_metadata_from_row(&row)
 }
 
-fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
-    let storage_kind_text: String = field!(row, 9)?;
+fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata, LcmError> {
+    let storage_kind_text: String = field!(row, 8)?;
     let storage_kind = storage_kind(&storage_kind_text)?;
-    let content: Option<String> = field!(row, 7)?;
-    let snippet: String = field!(row, 11)?;
-    Ok(LcmRawMessage {
+    Ok(LcmRawMessageMetadata {
         provider: field!(row, 0)?,
         message_id: field!(row, 1)?,
         session_id: field!(row, 2)?,
@@ -505,16 +506,11 @@ fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
         role: field!(row, 4)?,
         ordinal: field!(row, 5)?,
         timestamp: field!(row, 6)?,
-        content: match storage_kind {
-            LcmStorageKind::Inline => content.unwrap_or_default(),
-            LcmStorageKind::External => content.unwrap_or(snippet),
-        },
-        content_hash: field!(row, 8)?,
+        content_hash: field!(row, 7)?,
         storage_kind,
-        payload_ref: field!(row, 10)?,
-        legacy_source: field!(row, 12, i64).unwrap_or(0) != 0,
-        legacy_truncated: field!(row, 13, i64).unwrap_or(0) != 0,
-        metadata_json: field!(row, 14)?,
+        payload_ref: field!(row, 9)?,
+        legacy_source: field!(row, 10, i64).unwrap_or(0) != 0,
+        legacy_truncated: field!(row, 11, i64).unwrap_or(0) != 0,
     })
 }
 
@@ -623,7 +619,8 @@ async fn load_summary_sources(
                     content: String::new(),
                     content_range: None,
                     content_truncated: false,
-                    raw_message: Some(raw),
+                    raw_message: None,
+                    raw_message_metadata: Some(raw),
                     summary_node: None,
                 });
             }
@@ -642,6 +639,7 @@ async fn load_summary_sources(
                     content_range: None,
                     content_truncated: false,
                     raw_message: None,
+                    raw_message_metadata: None,
                     summary_node: Some(Box::new(child)),
                 });
             }
@@ -653,15 +651,15 @@ async fn load_summary_sources(
 async fn load_raw_messages(
     snapshot: &ReadSnapshot,
     store_ids: &BTreeSet<i64>,
-) -> Result<BTreeMap<i64, LcmRawMessage>, LcmError> {
+) -> Result<BTreeMap<i64, LcmRawMessageMetadata>, LcmError> {
     if store_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
     let placeholders = build_qmark_placeholders(store_ids.len());
     let sql = format!(
         "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
-                '' AS snippet_text, legacy_source, legacy_truncated, metadata_json
+                timestamp, content_hash, storage_kind, payload_ref,
+                legacy_source, legacy_truncated
          FROM lcm_raw_messages
          WHERE store_id IN ({placeholders})"
     );
@@ -673,7 +671,7 @@ async fn load_raw_messages(
     let mut rows = query(snapshot, &sql, params_from_iter(values)).await?;
     let mut out = BTreeMap::new();
     while let Some(row) = next_row(&mut rows).await? {
-        let raw = raw_message_from_row(&row)?;
+        let raw = raw_message_metadata_from_row(&row)?;
         out.insert(raw.store_id, raw);
     }
     Ok(out)
@@ -1003,14 +1001,26 @@ mod tests {
             ("summary_node", "anonical ", 2usize),
             ("external_payload", "onical e", 0usize),
         ];
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let snapshot = database.read_snapshot().await.expect("read snapshot");
         for (request, (kind, content, source_count)) in expand_requests.into_iter().zip(expected) {
-            let expansion = runtime
-                .lcm_expand_for_test(request)
+            let expansion = expand(&snapshot, request, "canonical external payload")
                 .await
                 .expect("registered expansion");
             assert_eq!(expansion.kind, kind);
             assert_eq!(expansion.content, content);
             assert_eq!(expansion.summary_sources.len(), source_count);
+            if kind == "raw_message" {
+                assert!(expansion.raw_message.is_none());
+                let metadata = expansion
+                    .raw_message_metadata
+                    .expect("safe unhydrated message metadata");
+                let encoded = serde_json::to_value(metadata).expect("metadata JSON");
+                assert!(encoded.get("content").is_none());
+                assert!(encoded.get("metadata_json").is_none());
+            }
         }
     }
 }

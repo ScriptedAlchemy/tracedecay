@@ -48,6 +48,66 @@ async fn row_count(db: &RegisteredGlobalDb, table: &str) -> i64 {
 }
 
 #[tokio::test]
+async fn transcript_persistence_preserves_typed_sanitization_failure() {
+    let harness = RegisteredGlobalDbHarness::open("typed-transcript-sanitization").await;
+    let session = tracedecay_sessions::runtime::SessionRecord {
+        provider: "cursor".to_string(),
+        session_id: "sanitization-session".to_string(),
+        project_key: "user".to_string(),
+        project_path: "/tmp/sanitization".to_string(),
+        title: None,
+        started_at: Some(1),
+        ended_at: None,
+        transcript_path: None,
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    let message = tracedecay_sessions::runtime::SessionMessageRecord {
+        provider: "cursor".to_string(),
+        message_id: "malformed-metadata".to_string(),
+        session_id: session.session_id.clone(),
+        role: "user".to_string(),
+        timestamp: Some(1),
+        ordinal: 1,
+        text: "content that must not persist".to_string(),
+        kind: Some("message".to_string()),
+        model: None,
+        tool_names: None,
+        source_path: None,
+        source_offset: None,
+        metadata_json: Some("{not-json".to_string()),
+    };
+
+    let error = harness
+        .registered
+        .persist_transcript_batch_result(
+            &session,
+            &[message],
+            "/tmp/sanitization.jsonl",
+            ParseOffset::default(),
+            ParseOffset {
+                byte_offset: 10,
+                mtime: 1,
+                file_id: 1,
+            },
+        )
+        .await
+        .expect_err("malformed metadata must fail closed");
+    assert!(
+        matches!(
+            error,
+            super::TranscriptPersistenceError::Sanitization { .. }
+        ),
+        "{error}"
+    );
+    assert_eq!(row_count(&harness.registered, "session_messages").await, 0);
+    assert_eq!(row_count(&harness.registered, "lcm_raw_messages").await, 0);
+}
+
+#[tokio::test]
 async fn git_common_dir_aliases_share_one_project_and_store_authority() {
     let harness = RegisteredGlobalDbHarness::open("common-dir-single-authority").await;
     let root = harness.storage_root().join("repository");

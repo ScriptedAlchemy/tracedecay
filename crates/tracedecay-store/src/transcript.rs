@@ -217,6 +217,12 @@ pub enum TranscriptStoreError {
         #[source]
         source: Box<dyn Error + Send + Sync>,
     },
+    #[error("transcript sanitization operation {operation} failed")]
+    Sanitization {
+        operation: &'static str,
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
 }
 
 pub type TranscriptStoreResult<T> = Result<T, TranscriptStoreError>;

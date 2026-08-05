@@ -39,9 +39,9 @@ pub enum HydrationResolution {
 
 #[derive(Clone)]
 pub struct PayloadDescriptor {
-    source: PayloadSource,
-    byte_count: usize,
-    content_hash: String,
+    pub(super) source: PayloadSource,
+    pub(super) byte_count: usize,
+    pub(super) content_hash: String,
 }
 
 impl fmt::Debug for PayloadDescriptor {
@@ -56,7 +56,7 @@ impl fmt::Debug for PayloadDescriptor {
 }
 
 #[derive(Clone)]
-enum PayloadSource {
+pub(super) enum PayloadSource {
     Occurrence {
         content: Zeroizing<Vec<u8>>,
     },
@@ -973,20 +973,27 @@ async fn resolve_external_manifest(
     let mut rows = conn
         .query(
             "SELECT external.content_hash, external.byte_count, external.char_count,
-                    manifest.payload_digest, manifest.manifest_json
+                    manifest.payload_digest, manifest.manifest_json,
+                    EXISTS (
+                        SELECT 1
+                        FROM session_summary_nodes summary
+                        JOIN json_each(summary.publication_json, '$.payloads') payload
+                          ON json_extract(payload.value, '$.payload_ref') =
+                             manifest.payload_ref
+                         AND json_extract(payload.value, '$.digest') =
+                             manifest.payload_digest
+                         AND json_extract(payload.value, '$.manifest_json') =
+                             manifest.manifest_json
+                        JOIN sanitization_receipts receipt
+                          ON receipt.receipt_id = manifest.receipt_id
+                         AND receipt.receipt_id =
+                             json_extract(summary.publication_json, '$.receipt_id')
+                        WHERE summary.session_id = manifest.session_id
+                    ) AS has_publication_attestation
              FROM lcm_external_payloads external
-             JOIN session_external_payload_manifests manifest
+             LEFT JOIN session_external_payload_manifests manifest
                ON manifest.payload_ref = external.payload_ref
               AND manifest.session_id = external.session_id
-             JOIN session_summary_nodes summary
-               ON summary.session_id = manifest.session_id
-             JOIN json_each(summary.publication_json, '$.payloads') payload
-               ON json_extract(payload.value, '$.payload_ref') = manifest.payload_ref
-              AND json_extract(payload.value, '$.digest') = manifest.payload_digest
-              AND json_extract(payload.value, '$.manifest_json') = manifest.manifest_json
-             JOIN sanitization_receipts receipt
-               ON receipt.receipt_id = manifest.receipt_id
-              AND receipt.receipt_id = json_extract(summary.publication_json, '$.receipt_id')
              WHERE external.payload_ref = ?1
                AND external.provider = ?2
                AND external.session_id = ?3
@@ -1003,11 +1010,22 @@ async fn resolve_external_manifest(
     let stored_hash: String = row.get(0).map_err(|_| ())?;
     let byte_count = nonnegative_usize(row.get::<Option<i64>>(1).map_err(|_| ())?)?;
     let char_count = nonnegative_usize(row.get::<Option<i64>>(2).map_err(|_| ())?)?;
-    let manifest_digest: String = row.get(3).map_err(|_| ())?;
-    let manifest_json: String = row.get(4).map_err(|_| ())?;
+    let manifest_digest: Option<String> = row.get(3).map_err(|_| ())?;
+    let manifest_json: Option<String> = row.get(4).map_err(|_| ())?;
+    let has_publication_attestation: i64 = row.get(5).map_err(|_| ())?;
     if rows.next().await.map_err(|_| ())?.is_some() {
         return Ok(HydrationResolution::Unavailable(
             HydrationStateV1::RetainedButUnavailable,
+        ));
+    }
+    let (Some(manifest_digest), Some(manifest_json)) = (manifest_digest, manifest_json) else {
+        return Ok(HydrationResolution::Unavailable(
+            HydrationStateV1::UnverifiableLegacy,
+        ));
+    };
+    if has_publication_attestation != 1 {
+        return Ok(HydrationResolution::Unavailable(
+            HydrationStateV1::UnverifiableLegacy,
         ));
     }
     let manifest: ExternalManifest = match serde_json::from_str(&manifest_json) {
@@ -1040,6 +1058,81 @@ async fn resolve_external_manifest(
         byte_count,
         content_hash: stored_hash,
     }))
+}
+
+pub(super) async fn resolve_external_target(
+    conn: &TemporalSqlRead<'_>,
+    snapshot: &TemporalExecutionSnapshot,
+    anchor_id: &RetrievalAnchorId,
+    provider: &str,
+    session_id: &str,
+    payload_ref: &str,
+) -> Result<HydrationResolution, HydrationError> {
+    match resolve_current(conn, snapshot, anchor_id)
+        .await
+        .map_err(|_| HydrationError::Unavailable)?
+    {
+        HydrationResolution::Unavailable(state) => {
+            return Ok(HydrationResolution::Unavailable(state));
+        }
+        HydrationResolution::Available(_) => {}
+    }
+
+    let generation =
+        i64::try_from(snapshot.watermarks().generation).map_err(|_| HydrationError::Unavailable)?;
+    let mut rows = conn
+        .query(
+            "SELECT raw.message_id, raw.content_hash, raw.storage_kind
+             FROM lcm_raw_messages raw
+             JOIN session_occurrences occurrence
+               ON occurrence.session_id = raw.session_id
+              AND occurrence.generation = ?4
+              AND occurrence.message_id = raw.message_id
+              AND occurrence.retrieval_anchor_id = ?5
+             WHERE raw.provider = ?1
+               AND raw.session_id = ?2
+               AND raw.payload_ref = ?3
+             ORDER BY raw.store_id, occurrence.occurrence_id
+             LIMIT 2",
+            params![
+                provider,
+                session_id,
+                payload_ref,
+                generation,
+                anchor_id.as_str()
+            ],
+        )
+        .await
+        .map_err(|_| HydrationError::Unavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| HydrationError::Unavailable)?
+        .ok_or(HydrationError::Unavailable)?;
+    let message_id: String = row.get(0).map_err(|_| HydrationError::Unavailable)?;
+    let content_hash: String = row.get(1).map_err(|_| HydrationError::Unavailable)?;
+    let storage_kind: String = row.get(2).map_err(|_| HydrationError::Unavailable)?;
+    if storage_kind != "external"
+        || rows
+            .next()
+            .await
+            .map_err(|_| HydrationError::Unavailable)?
+            .is_some()
+    {
+        return Ok(HydrationResolution::Unavailable(
+            HydrationStateV1::RetainedButUnavailable,
+        ));
+    }
+    resolve_external_manifest(
+        conn,
+        provider,
+        session_id,
+        &message_id,
+        payload_ref,
+        &content_hash,
+    )
+    .await
+    .map_err(|_| HydrationError::Unavailable)
 }
 
 fn authorized_root_owner(snapshot: &TemporalExecutionSnapshot) -> Option<ObservationScopeV1> {
@@ -1212,6 +1305,9 @@ mod tests {
         SanitizerDispositionV1, SensitivityV1, SessionId, TemporalModeV1, UtcMicros,
     };
     use tracedecay_runtime_core::db::engine::{Executor, ReadSnapshot, params};
+    use tracedecay_sessions::runtime::lcm::{
+        LcmError, payload::read_verified_payload_content_with_checkpoint,
+    };
     use tracedecay_store::{
         AnchoredObservationWrite, ObservationStore, ObservationWrite,
         build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
@@ -2362,6 +2458,179 @@ mod tests {
             Err(HydrationError::Unavailable)
         );
         assert!(denied_output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn external_target_hydrates_selected_manifest_payload_and_refuses_file_drift() {
+        let dir = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        let (occurrence_observation, occurrence_anchor) =
+            Box::pin(persist_anchor(&runtime, 1)).await;
+        let (_, summary_anchor) = Box::pin(persist_anchor(&runtime, 2)).await;
+        let (_, authority_anchor) = Box::pin(persist_anchor(&runtime, 3)).await;
+        runtime
+            .seed_snapshot_hydration_fixture_for_test(
+                &occurrence_observation,
+                &occurrence_anchor,
+                &summary_anchor,
+                &authority_anchor,
+            )
+            .await;
+
+        let snapshot = authorized_snapshot(&occurrence_anchor);
+        let read = runtime.hydration_read_for_test().await;
+        let resolution = resolve_external_target(
+            &TemporalSqlRead::registered(&read.read),
+            &snapshot,
+            occurrence_anchor.anchor_id(),
+            occurrence_observation.source().provider().as_str(),
+            "session-1",
+            "snapshot-payload.bin",
+        )
+        .await
+        .expect("external target resolution");
+        let HydrationResolution::Available(descriptor) = resolution else {
+            panic!("manifest-bound payload was not available");
+        };
+        let PayloadSource::External {
+            payload_ref,
+            char_count,
+            ..
+        } = &descriptor.source
+        else {
+            panic!("selected target resolved to occurrence content");
+        };
+        let content = read_verified_payload_content_with_checkpoint(
+            &read.storage_root,
+            payload_ref.as_str(),
+            &descriptor.content_hash,
+            descriptor.byte_count,
+            *char_count,
+            &mut || Ok(()),
+        )
+        .expect("verified selected payload");
+        assert_eq!(content, "non-empty occurrence payload");
+        assert_ne!(content, "payload-1", "occurrence projection was reused");
+
+        drop(read);
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let writer = database
+            .writer_connection()
+            .expect("registered profile writer");
+        Executor::execute(
+            &writer,
+            "UPDATE lcm_external_payloads
+             SET content_hash = 'tampered-manifest-hash'
+             WHERE payload_ref = ?1",
+            [payload_ref.as_str()],
+        )
+        .await
+        .expect("tamper manifest-bound metadata");
+        let tampered_read = runtime.hydration_read_for_test().await;
+        assert!(matches!(
+            resolve_external_target(
+                &TemporalSqlRead::registered(&tampered_read.read),
+                &snapshot,
+                occurrence_anchor.anchor_id(),
+                occurrence_observation.source().provider().as_str(),
+                "session-1",
+                payload_ref.as_str(),
+            )
+            .await,
+            Ok(HydrationResolution::Unavailable(
+                HydrationStateV1::UnverifiableLegacy
+            ))
+        ));
+        drop(tampered_read);
+        Executor::execute(
+            &writer,
+            "UPDATE lcm_external_payloads
+             SET content_hash = ?1
+             WHERE payload_ref = ?2",
+            params![descriptor.content_hash.as_str(), payload_ref.as_str()],
+        )
+        .await
+        .expect("restore manifest-bound metadata");
+        Executor::execute_batch(
+            &writer,
+            "DROP TRIGGER session_external_payload_manifests_immutable_update_v1;",
+        )
+        .await
+        .expect("open immutable-manifest fault seam");
+        Executor::execute(
+            &writer,
+            "UPDATE session_external_payload_manifests
+             SET payload_digest = 'tampered-publication-digest'
+             WHERE payload_ref = ?1",
+            [payload_ref.as_str()],
+        )
+        .await
+        .expect("tamper immutable manifest");
+        let tampered_manifest_read = runtime.hydration_read_for_test().await;
+        assert!(matches!(
+            resolve_external_target(
+                &TemporalSqlRead::registered(&tampered_manifest_read.read),
+                &snapshot,
+                occurrence_anchor.anchor_id(),
+                occurrence_observation.source().provider().as_str(),
+                "session-1",
+                payload_ref.as_str(),
+            )
+            .await,
+            Ok(HydrationResolution::Unavailable(
+                HydrationStateV1::UnverifiableLegacy
+            ))
+        ));
+        drop(tampered_manifest_read);
+        Executor::execute(
+            &writer,
+            "UPDATE session_external_payload_manifests
+             SET payload_digest = ?1
+             WHERE payload_ref = ?2",
+            params![descriptor.content_hash.as_str(), payload_ref.as_str()],
+        )
+        .await
+        .expect("restore immutable manifest");
+        Executor::execute_batch(
+            &writer,
+            "CREATE TRIGGER session_external_payload_manifests_immutable_update_v1
+             BEFORE UPDATE ON session_external_payload_manifests BEGIN
+                 SELECT RAISE(ABORT, 'session external payload manifests are immutable');
+             END;",
+        )
+        .await
+        .expect("restore immutable-manifest guard");
+
+        let read = runtime.hydration_read_for_test().await;
+        let payload_path = read.storage_root.join("lcm-payloads").join(payload_ref);
+        fs::write(&payload_path, "tampered payload bytes").expect("tamper payload fixture");
+        assert_eq!(
+            read_verified_payload_content_with_checkpoint(
+                &read.storage_root,
+                payload_ref.as_str(),
+                &descriptor.content_hash,
+                descriptor.byte_count,
+                *char_count,
+                &mut || Ok(()),
+            ),
+            Err(LcmError::PayloadIntegrityMismatch)
+        );
+        fs::remove_file(&payload_path).expect("remove payload fixture");
+        assert_eq!(
+            read_verified_payload_content_with_checkpoint(
+                &read.storage_root,
+                payload_ref.as_str(),
+                &descriptor.content_hash,
+                descriptor.byte_count,
+                *char_count,
+                &mut || Ok(()),
+            ),
+            Err(LcmError::PayloadMissing)
+        );
     }
 
     /// An occurrence whose `message_id` was projected from the stable record id

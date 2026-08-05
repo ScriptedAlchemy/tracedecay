@@ -112,6 +112,10 @@ pub enum TranscriptPersistenceError {
         operation: &'static str,
         source: Box<dyn Error + Send + Sync>,
     },
+    Sanitization {
+        operation: &'static str,
+        source: tracedecay_sessions::runtime::lcm::LcmError,
+    },
 }
 
 impl TranscriptPersistenceError {
@@ -135,6 +139,9 @@ impl std::fmt::Display for TranscriptPersistenceError {
                 "transcript parse offset conflict: expected {expected:?}, actual {actual:?}"
             ),
             Self::Storage { operation, source } => write!(formatter, "{operation}: {source}"),
+            Self::Sanitization { operation, source } => {
+                write!(formatter, "{operation}: {source}")
+            }
         }
     }
 }
@@ -144,6 +151,7 @@ impl Error for TranscriptPersistenceError {
         match self {
             Self::Conflict { .. } => None,
             Self::Storage { source, .. } => Some(source.as_ref()),
+            Self::Sanitization { source, .. } => Some(source),
         }
     }
 }
@@ -406,7 +414,15 @@ impl RegisteredGlobalDb {
             payload_rollback,
         )
         .await
-        .map_err(|error| TranscriptPersistenceError::storage("upsert LCM raw message", error))?;
+        .map_err(|error| match error {
+            error @ tracedecay_sessions::runtime::lcm::LcmError::Sanitization(_) => {
+                TranscriptPersistenceError::Sanitization {
+                    operation: "sanitize LCM raw message",
+                    source: error,
+                }
+            }
+            error => TranscriptPersistenceError::storage("upsert LCM raw message", error),
+        })?;
         if !Self::upsert_session_message_projection(
             conn,
             &canonical_message,
