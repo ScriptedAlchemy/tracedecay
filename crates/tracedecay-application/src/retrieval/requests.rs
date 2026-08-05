@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, ManifestDigest,
@@ -217,19 +218,19 @@ pub struct AnchorExpandResult {
     pub anchors: Vec<RetrievalAnchorId>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthReadRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthReadResult {
     pub status: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaRequest {
     pub before_cursor: Option<String>,
@@ -237,7 +238,7 @@ pub struct HealthDeltaRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaScopeV1 {
     pub project_id: Option<String>,
@@ -245,14 +246,14 @@ pub struct HealthDeltaScopeV1 {
     pub path_prefix: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDimensionPointV1 {
     pub score_ppm: u64,
     pub denominator: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaPointV1 {
     pub watermark: ManifestDigest,
@@ -263,7 +264,7 @@ pub struct HealthDeltaPointV1 {
     pub dimensions: BTreeMap<String, HealthDimensionPointV1>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDimensionDeltaV1 {
     pub before_ppm: u64,
@@ -274,7 +275,7 @@ pub struct HealthDimensionDeltaV1 {
     pub status: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaCoverageV1 {
     pub eligible: Option<u64>,
@@ -283,14 +284,14 @@ pub struct HealthDeltaCoverageV1 {
     pub completeness: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaCurrentnessV1 {
     pub state: String,
     pub observed_at: UtcMicros,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaResult {
     pub schema_version: u32,

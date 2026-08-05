@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -32,12 +33,18 @@ pub fn repository_path_matches_scope(path: &str, scope_prefix: Option<&str>) -> 
 use crate::canonical_text::validate_canonical_identity as validate_code_identity;
 
 validated_string_newtype!(
-    plain,
+    schema,
     DomainError,
     validate_code_identity;
     CodeGenerationId,
     FileOccurrenceId,
     SymbolOccurrenceId,
+);
+
+validated_string_newtype!(
+    plain,
+    DomainError,
+    validate_code_identity;
     CodeSearchChunkId,
     LanguageId,
     LanguageDescriptorRevision,
@@ -51,8 +58,12 @@ validated_string_newtype!(
 );
 
 digest_id!(
-    DomainError, std::convert::identity;
+    @schema DomainError, std::convert::identity;
     ContentDigest,
+);
+
+digest_id!(
+    DomainError, std::convert::identity;
     FileIdentityDigest,
     SymbolIdentityDigest,
 );
@@ -72,7 +83,9 @@ impl ContentDigest {
 
 /// Byte range inside one sanitized source file. Mutable line numbers are
 /// never part of identity (Plan 25).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSpan {
     pub start_byte: u64,

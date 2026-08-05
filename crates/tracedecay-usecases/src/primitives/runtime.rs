@@ -8,6 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -259,21 +260,21 @@ pub struct FileMetadataPrimitiveResult {
     pub files: Vec<FileMetadataRecord>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StorageStatusPrimitiveRequest {
     #[serde(default)]
     pub include_details: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StorageStatusHistoryPointV1 {
     pub observed_at: i64,
     pub database_bytes: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StorageStatusPrimitiveResult {
     pub status: String,
@@ -296,7 +297,7 @@ pub struct StorageStatusPrimitiveResult {
     pub history_coverage: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticsPrimitiveScope {
     Workspace,
@@ -304,7 +305,7 @@ pub enum DiagnosticsPrimitiveScope {
     File(String),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsPrimitiveRequest {
     pub scope: DiagnosticsPrimitiveScope,
@@ -313,14 +314,14 @@ pub struct DiagnosticsPrimitiveRequest {
     pub cursor: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticPrimitiveRecord {
     pub logical_path: String,
     pub diagnostic: GenerationDiagnosticV1,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsPrimitiveResult {
     pub generation_id: CodeGenerationId,
