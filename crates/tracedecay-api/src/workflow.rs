@@ -18,10 +18,9 @@ use tracedecay_application::{
     WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest,
     WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
     WorkflowDefinitionRegisterRequest, WorkflowDefinitionRetireRequest,
-    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation, WorkflowFanOutRequest,
-    WorkflowRetirement,
+    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation, WorkflowRetirement,
 };
-use tracedecay_domain::{WorkflowDefinition, WorkflowRunProjection};
+use tracedecay_domain::WorkflowDefinition;
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem,
@@ -42,13 +41,12 @@ pub enum WorkflowOperation {
     DiffDefinition,
     ActivateDefinition,
     RetireDefinition,
-    ExecuteFanOut,
     HandoffIssue,
     HandoffRedeem,
 }
 
 impl WorkflowOperation {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 10] = [
         Self::RegisterDefinition,
         Self::ValidateDefinition,
         Self::GetDefinition,
@@ -57,7 +55,6 @@ impl WorkflowOperation {
         Self::DiffDefinition,
         Self::ActivateDefinition,
         Self::RetireDefinition,
-        Self::ExecuteFanOut,
         Self::HandoffIssue,
         Self::HandoffRedeem,
     ];
@@ -72,7 +69,6 @@ impl WorkflowOperation {
             Self::DiffDefinition => "operation.workflow.diff_definition",
             Self::ActivateDefinition => "operation.workflow.activate_definition",
             Self::RetireDefinition => "operation.workflow.retire_definition",
-            Self::ExecuteFanOut => "operation.workflow.execute_fan_out",
             Self::HandoffIssue => "operation.workflow.handoff_issue",
             Self::HandoffRedeem => "operation.workflow.handoff_redeem",
         }
@@ -88,7 +84,6 @@ impl WorkflowOperation {
             Self::DiffDefinition => "diff_definition",
             Self::ActivateDefinition => "activate_definition",
             Self::RetireDefinition => "retire_definition",
-            Self::ExecuteFanOut => "execute_fan_out",
             Self::HandoffIssue => "handoff_issue",
             Self::HandoffRedeem => "handoff_redeem",
         }
@@ -117,7 +112,6 @@ impl WorkflowOperation {
             Self::DiffDefinition => "diff-definition",
             Self::ActivateDefinition => "activate-definition",
             Self::RetireDefinition => "retire-definition",
-            Self::ExecuteFanOut => "execute-fan-out",
             Self::HandoffIssue => "handoff-issue",
             Self::HandoffRedeem => "handoff-redeem",
         }
@@ -133,7 +127,6 @@ impl WorkflowOperation {
             Self::DiffDefinition => "/workflow/diff-definition",
             Self::ActivateDefinition => "/workflow/activate-definition",
             Self::RetireDefinition => "/workflow/retire-definition",
-            Self::ExecuteFanOut => "/workflow/execute-fan-out",
             Self::HandoffIssue => "/workflow/handoff-issue",
             Self::HandoffRedeem => "/workflow/handoff-redeem",
         }
@@ -149,7 +142,6 @@ impl WorkflowOperation {
             Self::DiffDefinition => "/application/workflow/diff-definition",
             Self::ActivateDefinition => "/application/workflow/activate-definition",
             Self::RetireDefinition => "/application/workflow/retire-definition",
-            Self::ExecuteFanOut => "/application/workflow/execute-fan-out",
             Self::HandoffIssue => "/application/workflow/handoff-issue",
             Self::HandoffRedeem => "/application/workflow/handoff-redeem",
         }
@@ -165,7 +157,6 @@ impl WorkflowOperation {
             Self::DiffDefinition => schema_name::<WorkflowDefinitionDiffRequest>(),
             Self::ActivateDefinition => schema_name::<WorkflowDefinitionActivateRequest>(),
             Self::RetireDefinition => schema_name::<WorkflowDefinitionRetireRequest>(),
-            Self::ExecuteFanOut => schema_name::<WorkflowFanOutRequest>(),
             Self::HandoffIssue => schema_name::<TaskHandoffIssueRequest>(),
             Self::HandoffRedeem => schema_name::<TaskHandoffRedeemRequest>(),
         }
@@ -182,7 +173,6 @@ impl WorkflowOperation {
             Self::DiffDefinition => schema_name::<WorkflowDefinitionDiff>(),
             Self::ActivateDefinition => schema_name::<WorkflowActivation>(),
             Self::RetireDefinition => schema_name::<WorkflowRetirement>(),
-            Self::ExecuteFanOut => schema_name::<WorkflowRunProjection>(),
             Self::HandoffIssue => schema_name::<TaskHandoffGrant>(),
             Self::HandoffRedeem => schema_name::<TaskHandoffRedeemed>(),
         }

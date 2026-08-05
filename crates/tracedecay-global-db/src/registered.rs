@@ -24,35 +24,8 @@ pub struct RegisteredGlobalDb {
     authority: DatabaseAuthority,
 }
 
-pub struct RegisteredWorkApplicationServicesV1 {
-    commands:
-        tracedecay_application::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>,
-    projections: tracedecay_application::WorkProjectionReadService<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
-}
-
-impl RegisteredWorkApplicationServicesV1 {
-    pub fn commands(
-        &self,
-    ) -> &tracedecay_application::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
-    {
-        &self.commands
-    }
-
-    pub fn projections(
-        &self,
-    ) -> &tracedecay_application::WorkProjectionReadService<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.projections
-    }
-}
-
 /// PR17 workflow definition/activation and task-handoff-token services over
-/// the same registered Work exact-SQL channel as [`RegisteredWorkApplicationServicesV1`].
-/// This is not a second Work authority: [`WorkflowSqliteAuthority`] installs its
-/// tables through the exact handle `WorkSqliteStorage` owns.
+/// the registered exact-SQL channel.
 ///
 /// [`WorkflowSqliteAuthority`]: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority
 pub struct RegisteredWorkflowApplicationServicesV1 {
@@ -335,7 +308,7 @@ impl RegisteredGlobalDb {
     ///
     /// Exposed so the composition root can build the adapters it owns —
     /// `RuntimeEvidenceAssemblyStore`, `RuntimeExternalSourceStore`,
-    /// `GlobalDbObservationStore`, `DaemonWorkRuntimeV1` — without this crate
+    /// `GlobalDbObservationStore` — without this crate
     /// naming a root type. See the "root-owned adapters" seam note in
     /// `SEAMS.md`.
     pub fn runtime(&self) -> &StoreRuntimeHandle {
@@ -350,15 +323,16 @@ impl RegisteredGlobalDb {
         &self.authority
     }
 
-    pub fn work_storage(
+    fn workflow_storage_handle(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
-    {
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
+    > {
         let handle = self
             .runtime
             .authorized_exact_sql_handle(self.authority.clone())
             .map_err(|error| {
-                registered_error("attach registered Work storage", format!("{error:?}"))
+                registered_error("attach registered workflow storage", format!("{error:?}"))
             })?;
         validate_registered_identity(
             handle.binding(),
@@ -366,7 +340,7 @@ impl RegisteredGlobalDb {
             self.runtime.binding(),
             self.runtime.locator().verified(),
         )?;
-        Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle))
+        Ok(handle)
     }
 
     pub fn authorized_scope_set_storage(
@@ -396,26 +370,15 @@ impl RegisteredGlobalDb {
         )
     }
 
-    pub fn work_application_services(
-        &self,
-    ) -> tracedecay_runtime_core::errors::Result<RegisteredWorkApplicationServicesV1> {
-        let storage = self.work_storage()?;
-        Ok(RegisteredWorkApplicationServicesV1 {
-            commands: tracedecay_application::WorkService::new(storage.clone()),
-            projections: tracedecay_application::WorkProjectionReadService::new(storage),
-        })
-    }
-
-    /// Attaches the PR17 workflow-definition/task-handoff authority over the
-    /// registered Work exact-SQL handle. Installs `workflow_*` tables
-    /// idempotently through the same handle `work_storage` validates.
+    /// Attaches the workflow-definition/task-handoff authority over the
+    /// registered exact-SQL handle.
     pub fn workflow_storage(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     > {
-        let storage = self.work_storage()?;
-        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_work_storage(&storage)
+        let storage = self.workflow_storage_handle()?;
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_registered(storage)
             .map_err(|error| {
                 registered_error("attach registered workflow storage", format!("{error:?}"))
             })
@@ -432,29 +395,21 @@ impl RegisteredGlobalDb {
     }
 
     /// Attaches the single-use handoff-open authority through the same
-    /// registered Work exact-SQL handle as Work projections and workflow
-    /// state. The composition root supplies the target-version recheck port.
+    /// registered exact-SQL handle as workflow state.
     pub fn handoff_open_storage(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<
         tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority,
     > {
-        let storage = self.work_storage()?;
-        tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority::from_work_storage(
-            &storage,
-        )
-        .map_err(|error| {
-            registered_error(
-                "attach registered handoff-open storage",
-                format!("{error:?}"),
-            )
-        })
+        let storage = self.workflow_storage_handle()?;
+        tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority::from_registered(storage)
+            .map_err(|error| {
+                registered_error(
+                    "attach registered handoff-open storage",
+                    format!("{error:?}"),
+                )
+            })
     }
-
-    // Root-owned adapter, deliberately not built here: `work_runtime` returned
-    // `crate::daemon::work_runtime::DaemonWorkRuntimeV1<WorkSqliteStorage>`,
-    // which lives above this crate. The composition root builds it from
-    // `work_storage()` plus `Arc::clone(&registered)`; see `SEAMS.md`.
 
     pub fn storage_telemetry_handle(
         &self,

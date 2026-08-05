@@ -1,9 +1,4 @@
-//! Synchronous registered Work store for the storage suites.
-//!
-//! Work storage has exactly one transaction implementation: the registered
-//! exact-SQL channel the daemon uses. These tests run against that same
-//! channel rather than a private connection, so a test can never observe a
-//! transaction shape production does not have.
+//! Synchronous registered workflow store for the storage suites.
 
 use std::path::PathBuf;
 
@@ -12,7 +7,7 @@ use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
-use tracedecay_rusqlite_runtime::work::{WorkSqliteStorage, install_work_schema};
+use tracedecay_rusqlite_runtime::workflow::install_workflow_schema;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
 };
@@ -29,7 +24,7 @@ impl StorageOperationExecutor for NoTypedWrites {
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
     ) -> rusqlite::Result<()> {
-        unreachable!("Work storage writes only through the registered exact-SQL channel")
+        unreachable!("workflow writes only through the registered exact-SQL channel")
     }
 }
 
@@ -42,37 +37,35 @@ impl ReaderQueryExecutor for NoTypedReads {
         _snapshot: &rusqlite::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
-        unreachable!("Work storage reads only through the registered exact-SQL channel")
+        unreachable!("workflow reads only through the registered exact-SQL channel")
     }
 }
 
-/// A started registered store: writer, readers, and the Work storage bound to
-/// them. Dropping it stops both actors and removes the directory.
-pub struct RegisteredWorkStore {
-    storage: WorkSqliteStorage,
+/// A started registered workflow store.
+pub struct RegisteredWorkflowStore {
+    storage: ExactSqlHandle,
     path: PathBuf,
     _writer: PersistentWriter,
     _readers: ReaderPool<NoTypedReads>,
     _directory: TempDir,
 }
 
-impl RegisteredWorkStore {
-    /// Starts a registered store with the Work schema installed.
+impl RegisteredWorkflowStore {
     pub fn start(name: &str) -> Self {
         Self::start_with_setup(name, |_| {})
     }
 
     /// Starts a registered store, running `setup` against the file after the
-    /// Work schema is installed and before the writer takes ownership.
+    /// workflow schema is installed and before the writer takes ownership.
     pub fn start_with_setup(name: &str, setup: impl FnOnce(&Connection)) -> Self {
-        let directory = TempDir::new().expect("work store directory");
+        let directory = TempDir::new().expect("workflow store directory");
         let path = directory.path().join(format!("{name}.sqlite3"));
         {
-            let connection = Connection::open(&path).expect("open work store");
-            install_work_schema(&connection).expect("install work schema");
+            let connection = Connection::open(&path).expect("open workflow store");
+            install_workflow_schema(&connection).expect("install workflow schema");
             setup(&connection);
         }
-        let path = path.canonicalize().expect("canonicalize work store");
+        let path = path.canonicalize().expect("canonicalize workflow store");
         Self::open(name, path, directory)
     }
 
@@ -97,21 +90,21 @@ impl RegisteredWorkStore {
         let locator = locator(&binding);
         let writer = PersistentWriter::start(
             ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone())
-                .expect("work store writer locator"),
+                .expect("workflow store writer locator"),
             AdmissionConfigV1::default(),
             NoTypedWrites,
         )
-        .expect("start work store writer");
+        .expect("start workflow store writer");
         let readers = ReaderPool::start(
             ExistingReaderLocator::new(binding, locator, path.clone())
-                .expect("work store reader locator"),
+                .expect("workflow store reader locator"),
             AdmissionConfigV1::default().readers,
             NoTypedReads,
         )
-        .expect("start work store readers");
-        let handle = ExactSqlHandle::attach(&writer, &readers).expect("attach work store");
+        .expect("start workflow store readers");
+        let handle = ExactSqlHandle::attach(&writer, &readers).expect("attach workflow store");
         Self {
-            storage: WorkSqliteStorage::from_registered(handle),
+            storage: handle,
             path,
             _writer: writer,
             _readers: readers,
@@ -119,14 +112,14 @@ impl RegisteredWorkStore {
         }
     }
 
-    pub fn storage(&self) -> &WorkSqliteStorage {
+    pub fn storage(&self) -> &ExactSqlHandle {
         &self.storage
     }
 
     /// Opens a short-lived connection for assertions that inspect stored rows
     /// directly. Writes still go through the registered channel.
     pub fn inspect<T>(&self, read: impl FnOnce(&Connection) -> T) -> T {
-        let connection = Connection::open(&self.path).expect("open work store for inspection");
+        let connection = Connection::open(&self.path).expect("open workflow store for inspection");
         read(&connection)
     }
 
@@ -151,13 +144,13 @@ fn binding(name: &str) -> StoreRuntimeBindingV1 {
         "incarnation": 1,
         "authority_epoch": 1
     }))
-    .expect("work store binding")
+    .expect("workflow store binding")
 }
 
 fn locator(binding: &StoreRuntimeBindingV1) -> VerifiedStoreLocatorV1 {
     VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
-        StoreIncarnationV1::new(1).expect("work store incarnation"),
-        LocatorDigest::new(format!("sha256:{}", "5".repeat(64))).expect("work store digest"),
+        StoreIncarnationV1::new(1).expect("workflow store incarnation"),
+        LocatorDigest::new(format!("sha256:{}", "5".repeat(64))).expect("workflow store digest"),
     )
 }

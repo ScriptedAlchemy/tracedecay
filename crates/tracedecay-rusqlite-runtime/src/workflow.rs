@@ -1,8 +1,4 @@
-//! Durable workflow authority over the canonical Work registered SQL channel.
-//!
-//! Definitions, handoffs, and run events share the exact registered writer
-//! owned by `WorkSqliteStorage`. Fresh stores install the final schema as one
-//! Work schema; attaching this authority never creates or migrates tables.
+//! Durable workflow authority over the canonical registered SQL channel.
 
 use std::time::Duration;
 
@@ -21,26 +17,22 @@ use crate::exact_sql::{
     ExactSqlStatement as MigrationSqlStatement, ExactSqlTransaction, ExactSqlValue,
     ExactSqlValue as MigrationSqlValue,
 };
-use crate::work::WorkSqliteStorage;
+mod schema;
 
-mod run_journal;
+pub use schema::{WORKFLOW_SCHEMA_V1, install_workflow_schema};
 
 /// Workflow persistence on the registered Work writer.
 #[derive(Clone)]
 pub struct WorkflowSqliteAuthority {
-    storage: WorkSqliteStorage,
+    storage: ExactSqlHandle,
 }
 
 impl WorkflowSqliteAuthority {
-    /// Clone the crate-visible Work handle after the registered store proves
-    /// the exact final schema.
-    pub fn from_work_storage(
-        storage: &WorkSqliteStorage,
+    pub fn from_registered(
+        storage: ExactSqlHandle,
     ) -> Result<Self, WorkflowSqliteAuthorityBuildError> {
-        require_workflow_schema(&storage.handle)?;
-        Ok(Self {
-            storage: storage.clone(),
-        })
+        require_workflow_schema(&storage)?;
+        Ok(Self { storage })
     }
 }
 
@@ -63,8 +55,6 @@ fn require_workflow_schema(
                        'workflow_definitions',
                        'workflow_activations',
                        'workflow_handoffs',
-                       'workflow_run_events',
-                       'workflow_run_heads',
                        'workflow_schema'
                    )
                  ORDER BY name"
@@ -88,8 +78,6 @@ fn require_workflow_schema(
             "workflow_activations",
             "workflow_definitions",
             "workflow_handoffs",
-            "workflow_run_events",
-            "workflow_run_heads",
             "workflow_schema",
         ]
     {
@@ -113,26 +101,72 @@ fn require_workflow_schema(
                 row.values.get(1),
                 Some(ExactSqlValue::Text(digest))
                     if digest
-                        == "sha256:8e61c252fbcb854975c11b29b52d04a1d9209a16e036237c21a54d3b21ad5190"
+                        == schema::WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1
             )
     });
     if !valid_schema {
         return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
     }
-    let head_columns = handle
+    require_columns(
+        handle,
+        "workflow_definitions",
+        &[
+            ("definition_id", "TEXT", 1, 1),
+            ("definition_version", "INTEGER", 1, 2),
+            ("payload", "TEXT", 1, 0),
+            ("payload_digest", "TEXT", 1, 0),
+        ],
+    )?;
+    require_columns(
+        handle,
+        "workflow_activations",
+        &[
+            ("definition_id", "TEXT", 1, 1),
+            ("active_version", "INTEGER", 1, 0),
+        ],
+    )?;
+    require_columns(
+        handle,
+        "workflow_handoffs",
+        &[
+            ("token_digest", "TEXT", 1, 1),
+            ("scope_payload", "TEXT", 1, 0),
+            ("issued_at", "INTEGER", 1, 0),
+            ("expires_at", "INTEGER", 1, 0),
+            ("consumed", "INTEGER", 1, 0),
+        ],
+    )?;
+    Ok(())
+}
+
+fn require_columns(
+    handle: &ExactSqlHandle,
+    table: &str,
+    expected: &[(&str, &str, i64, i64)],
+) -> Result<(), WorkflowSqliteAuthorityBuildError> {
+    let columns = handle
         .query(
-            ExactSqlStatement::new(
-                "PRAGMA table_info(workflow_run_heads)".to_owned(),
-                Vec::new(),
-            )
-            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
+            ExactSqlStatement::new(format!("PRAGMA table_info({table})"), Vec::new())
+                .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
             Duration::from_secs(5),
         )
         .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
-    if head_columns.rows.len() != 5 {
-        return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
+    let exact = columns.rows.len() == expected.len()
+        && columns
+            .rows
+            .iter()
+            .zip(expected)
+            .all(|(row, (name, sql_type, not_null, primary_key))| {
+                matches!(row.values.get(1), Some(ExactSqlValue::Text(actual)) if actual == name)
+                    && matches!(row.values.get(2), Some(ExactSqlValue::Text(actual)) if actual == sql_type)
+                    && matches!(row.values.get(3), Some(ExactSqlValue::Integer(actual)) if actual == not_null)
+                    && matches!(row.values.get(5), Some(ExactSqlValue::Integer(actual)) if actual == primary_key)
+            });
+    if exact {
+        Ok(())
+    } else {
+        Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
     }
-    Ok(())
 }
 
 fn definition_unavailable(_: ExactSqlError) -> WorkflowDefinitionAuthorityError {
@@ -211,13 +245,11 @@ fn decode_json<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ()> {
 }
 
 fn query_handle(
-    storage: &WorkSqliteStorage,
+    storage: &ExactSqlHandle,
     sql: &str,
     params: Vec<MigrationSqlValue>,
 ) -> Result<MigrationSqlRows, MigrationSqlError> {
-    storage
-        .handle
-        .query(statement(sql, params)?, Duration::from_secs(5))
+    storage.query(statement(sql, params)?, Duration::from_secs(5))
 }
 
 fn query_tx(

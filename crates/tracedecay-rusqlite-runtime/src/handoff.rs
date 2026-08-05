@@ -1,8 +1,8 @@
-//! Durable single-use handoff opens on the canonical registered Work channel.
+//! Durable single-use handoff opens on the canonical registered SQL channel.
 //!
 //! This authority stores only secret-free token digests and bindings. It uses
-//! the exact SQL handle already owned by `WorkSqliteStorage`; it never opens a
-//! database or creates a parallel Work authority.
+//! the registered exact SQL handle; it never opens a database or creates a
+//! parallel authority.
 
 use std::time::Duration;
 
@@ -16,8 +16,6 @@ use crate::exact_sql::{
     ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
     ExactSqlValue,
 };
-use crate::work::WorkSqliteStorage;
-
 const HANDOFF_OPEN_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS handoff_open_grants_v1 (
     token_digest TEXT NOT NULL PRIMARY KEY,
@@ -45,12 +43,10 @@ pub struct HandoffOpenSqliteAuthority {
 }
 
 impl HandoffOpenSqliteAuthority {
-    pub fn from_work_storage(
-        storage: &WorkSqliteStorage,
+    pub fn from_registered(
+        handle: ExactSqlHandle,
     ) -> Result<Self, HandoffOpenSqliteAuthorityBuildError> {
-        let authority = Self {
-            handle: storage.handle.clone(),
-        };
+        let authority = Self { handle };
         authority
             .handle
             .execute_batch(HANDOFF_OPEN_SCHEMA_V1.to_owned())

@@ -1078,15 +1078,6 @@ pub(super) async fn register_project_open_production_owners(
     .map_err(|error| TraceDecayError::Config {
         message: format!("project-open Work authority is invalid: {error}"),
     })?;
-    let work_executable_bindings =
-        crate::config::work_executable_binding::PinnedWorkExecutableBindingResolver::shared_from_configuration(
-            &configuration,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "project-open Work executable binding authority is unavailable: {error}"
-            ),
-        })?;
     invocation
         .work_runtime_registrar()
         .register(
@@ -1097,8 +1088,6 @@ pub(super) async fn register_project_open_production_owners(
             work_grant.clone(),
             configuration_policy_digest.clone(),
             access.configuration_digest.clone(),
-            crate::sessions::codex_app_server::CodexAppServerSummaryConfig::default(),
-            work_executable_bindings,
         )
         .await
         .map_err(|error| TraceDecayError::Config {

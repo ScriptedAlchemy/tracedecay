@@ -38,7 +38,7 @@ use tracedecay_application::{
     WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
     WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
     WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation, WorkflowFanOutRequest, WorkflowRetirement,
+    WorkflowDefinitionValidation, WorkflowRetirement,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
@@ -309,7 +309,6 @@ pub(crate) enum WorkflowApplicationInvocation {
     DiffDefinition(WorkflowDefinitionDiffRequest),
     ActivateDefinition(WorkflowDefinitionActivateRequest),
     RetireDefinition(WorkflowDefinitionRetireRequest),
-    ExecuteFanOut(Box<WorkflowFanOutRequest>),
     HandoffIssue(TaskHandoffIssueRequest),
     HandoffRedeem(TaskHandoffRedeemRequest),
 }
@@ -325,7 +324,6 @@ impl WorkflowApplicationInvocation {
             Self::DiffDefinition(_) => "diff_definition",
             Self::ActivateDefinition(_) => "activate_definition",
             Self::RetireDefinition(_) => "retire_definition",
-            Self::ExecuteFanOut(_) => "execute_fan_out",
             Self::HandoffIssue(_) => "handoff_issue",
             Self::HandoffRedeem(_) => "handoff_redeem",
         }
@@ -2391,7 +2389,6 @@ pub(crate) enum WorkflowApplicationOutcome {
     DiffDefinition(ApplicationOutcome<WorkflowDefinitionDiff>),
     ActivateDefinition(ApplicationOutcome<WorkflowActivation>),
     RetireDefinition(ApplicationOutcome<WorkflowRetirement>),
-    ExecuteFanOut(ApplicationOutcome<tracedecay_domain::WorkflowRunProjection>),
     HandoffIssue(ApplicationOutcome<TaskHandoffGrant>),
     HandoffRedeem(ApplicationOutcome<TaskHandoffRedeemed>),
 }

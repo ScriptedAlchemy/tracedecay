@@ -3,24 +3,20 @@
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
     TaskHandoffGrant, TaskHandoffScope, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowRunAppendOutcome, WorkflowRunAppendRequest,
-    WorkflowRunStoragePort,
+    WorkflowDefinitionAuthorityPort,
 };
-use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, ProviderId, RepositoryId, RunId, TaskId, ThreadId,
-    UtcMicros, WorkCommandId, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
+    ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
     WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,
     WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::workflow::{
     WorkflowSqliteAuthority, WorkflowSqliteAuthorityBuildError,
 };
 
-mod work_registered_store;
+mod registered_workflow_store;
 
-use work_registered_store::RegisteredWorkStore;
+use registered_workflow_store::RegisteredWorkflowStore;
 
 fn id<T>(value: &str) -> T
 where
@@ -81,46 +77,26 @@ fn token_digest(secret: &str) -> ManifestDigest {
     canonical_sha256(&("tracedecay.application.task-handoff.v1", secret)).unwrap()
 }
 
-fn placement(run_id: RunId) -> WorkflowPlacementReceipt {
-    WorkflowPlacementReceipt::new(
-        run_id,
-        id::<WorkflowStepId>("prepare"),
-        WorkProviderRouteV1::new(
-            id::<ProviderId>("provider.workflow.runtime-store"),
-            id::<WorkProviderRouteId>("route.workflow.runtime-store.v1"),
-        )
-        .unwrap(),
-        WorkProviderBackendV1::CodexAppServer,
-        "model.workflow.runtime-store".to_owned(),
-        digest('b'),
-        digest('d'),
-        digest('8'),
-        safe_work_topology_policy_v1().placement,
-    )
-    .unwrap()
-}
-
-fn authority(store: &RegisteredWorkStore) -> WorkflowSqliteAuthority {
-    WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap()
+fn authority(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
+    WorkflowSqliteAuthority::from_registered(store.storage().clone()).unwrap()
 }
 
 #[test]
 fn non_final_store_requires_reset_without_runtime_schema_mutation() {
-    let store = RegisteredWorkStore::start_with_setup("workflow-reset-required", |connection| {
-        connection
-            .execute_batch(
-                "DROP TABLE workflow_run_heads;
-                 DROP TABLE workflow_run_events;
-                 DROP TABLE workflow_handoffs;
+    let store =
+        RegisteredWorkflowStore::start_with_setup("workflow-reset-required", |connection| {
+            connection
+                .execute_batch(
+                    "DROP TABLE workflow_handoffs;
                  DROP TABLE workflow_activations;
                  DROP TABLE workflow_definitions;
                  DROP TABLE workflow_schema;",
-            )
-            .unwrap();
-    });
+                )
+                .unwrap();
+        });
 
     assert!(matches!(
-        WorkflowSqliteAuthority::from_work_storage(store.storage()),
+        WorkflowSqliteAuthority::from_registered(store.storage().clone()),
         Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
     ));
     assert_eq!(
@@ -153,91 +129,26 @@ fn attachment_rejects_wrong_schema_version_digest_and_definition() {
         ),
         (
             "workflow-wrong-definition",
-            "DROP TABLE workflow_run_heads;
-             CREATE TABLE workflow_run_heads (
-                 run_id TEXT NOT NULL PRIMARY KEY,
-                 sequence INTEGER NOT NULL,
-                 projection_payload TEXT NOT NULL
+            "DROP TABLE workflow_handoffs;
+             CREATE TABLE workflow_handoffs (
+                 token_digest TEXT NOT NULL PRIMARY KEY,
+                 scope_payload TEXT NOT NULL
              ) STRICT;",
         ),
     ] {
-        let store = RegisteredWorkStore::start_with_setup(name, |connection| {
+        let store = RegisteredWorkflowStore::start_with_setup(name, |connection| {
             connection.execute_batch(mutation).unwrap();
         });
         assert!(matches!(
-            WorkflowSqliteAuthority::from_work_storage(store.storage()),
+            WorkflowSqliteAuthority::from_registered(store.storage().clone()),
             Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
         ));
     }
 }
 
 #[test]
-fn run_journal_appends_replays_and_rebuilds_after_restart() {
-    let store = RegisteredWorkStore::start("workflow-run-journal");
-    let authority = authority(&store);
-    let run_id = id::<RunId>("run.workflow.runtime-store.journal");
-    let admitted = WorkflowRunEvent::admitted(
-        run_id.clone(),
-        definition(1, "operation.prepare.v1"),
-        digest('d'),
-        digest('8'),
-        WorkflowRunEventContext {
-            command_id: id::<WorkCommandId>("command.workflow.runtime-store.admit"),
-            input_digest: digest('e'),
-            occurred_at: UtcMicros(10),
-        },
-    )
-    .unwrap();
-    let request = WorkflowRunAppendRequest {
-        expected_sequence: None,
-        event: admitted,
-    };
-    let projection = match WorkflowRunStoragePort::append(&authority, &request).unwrap() {
-        WorkflowRunAppendOutcome::Appended(projection) => projection,
-        WorkflowRunAppendOutcome::Replayed(_) => panic!("first append replayed"),
-    };
-    assert!(matches!(
-        WorkflowRunStoragePort::append(&authority, &request).unwrap(),
-        WorkflowRunAppendOutcome::Replayed(_)
-    ));
-
-    let started = projection
-        .next_event(
-            WorkflowRunCommand::StartStep {
-                step_id: id::<WorkflowStepId>("prepare"),
-                placement: placement(run_id.clone()),
-            },
-            WorkflowRunEventContext {
-                command_id: id::<WorkCommandId>("command.workflow.runtime-store.start"),
-                input_digest: digest('f'),
-                occurred_at: UtcMicros(11),
-            },
-        )
-        .unwrap();
-    WorkflowRunStoragePort::append(
-        &authority,
-        &WorkflowRunAppendRequest {
-            expected_sequence: Some(1),
-            event: started,
-        },
-    )
-    .unwrap();
-
-    let store = store.restart("workflow-run-journal");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
-    assert_eq!(
-        WorkflowRunStoragePort::projection(&authority, &run_id)
-            .unwrap()
-            .sequence(),
-        2
-    );
-    assert_eq!(store.count("workflow_run_events"), 2);
-    assert_eq!(store.count("workflow_run_heads"), 1);
-}
-
-#[test]
 fn definitions_activate_and_reject_conflicting_payloads() {
-    let store = RegisteredWorkStore::start("workflow-definitions");
+    let store = RegisteredWorkflowStore::start("workflow-definitions");
     let authority = authority(&store);
     let first = definition(1, "operation.prepare.v1");
     let second = definition(2, "operation.prepare.v1");
@@ -328,7 +239,7 @@ fn definitions_activate_and_reject_conflicting_payloads() {
 
 #[test]
 fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
-    let store = RegisteredWorkStore::start("workflow-handoff");
+    let store = RegisteredWorkflowStore::start("workflow-handoff");
     let authority = authority(&store);
     let scope = handoff_scope();
     let secret = "s".repeat(48);
@@ -434,7 +345,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
 
 #[test]
 fn definition_and_handoff_survive_registered_store_restart() {
-    let store = RegisteredWorkStore::start("workflow-restart");
+    let store = RegisteredWorkflowStore::start("workflow-restart");
     let authority = authority(&store);
     let first = definition(1, "operation.prepare.v1");
     WorkflowDefinitionAuthorityPort::insert(&authority, &first).unwrap();
@@ -462,7 +373,7 @@ fn definition_and_handoff_survive_registered_store_restart() {
     );
 
     let store = store.restart("workflow-restart");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let authority = WorkflowSqliteAuthority::from_registered(store.storage().clone()).unwrap();
     assert_eq!(
         WorkflowDefinitionAuthorityPort::load(&authority, first.definition_id(), 1)
             .unwrap()

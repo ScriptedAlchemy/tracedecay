@@ -30,24 +30,7 @@ impl HandoffOpenTargetPort for DaemonHandoffOpenTargets {
     ) -> Pin<Box<dyn Future<Output = Result<bool, HandoffOpenTargetError>> + Send + 'a>> {
         Box::pin(async move {
             match binding.target() {
-                HandoffOpenTargetV1::Task {
-                    task_id, version, ..
-                } => {
-                    let services = self
-                        .database
-                        .work_application_services()
-                        .map_err(|_| HandoffOpenTargetError::Unavailable)?;
-                    let snapshot = services
-                        .projections()
-                        .exact_snapshot(context, task_id)
-                        .map_err(|_| HandoffOpenTargetError::Unavailable)?;
-                    Ok(matches!(
-                        snapshot.projections(),
-                        [projection]
-                            if projection.task_id() == task_id
-                                && projection.version() == *version
-                    ))
-                }
+                HandoffOpenTargetV1::Task { .. } => Err(HandoffOpenTargetError::Unavailable),
                 HandoffOpenTargetV1::Investigation {
                     finding_id,
                     owner_version_digest,

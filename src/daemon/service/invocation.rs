@@ -45,8 +45,7 @@ use tracedecay_application::{
     PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
     ReconciliationState, RequestAdmission, RequestContext, RequestId, ResolvedScope,
     RetryDirective, SafeDiagnostic, TaskHandoffError, TaskHandoffRedeemed, TaskHandoffToken,
-    TemporalState, WorkExecutionError, WorkProjectionApplicationError, WorkflowCoordinationError,
-    WorkflowFanOutRuntimeError, callable_code_operations,
+    TemporalState, WorkflowCoordinationError, callable_code_operations,
 };
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
@@ -148,8 +147,6 @@ use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationS
 use crate::daemon::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
 };
-use crate::daemon::work_runtime::DaemonWorkRuntimeV1;
-use crate::daemon::workflow_runtime::execute_canonical_workflow;
 // Re-exported so the long tail of daemon-internal call sites can keep naming the
 // contract through `service::invocation::` while the split settles.
 #[cfg(test)]
