@@ -12,13 +12,156 @@ use tracedecay_application::{
 };
 
 use super::work::{
-    coalesced_alias_local_interruption, git_history_frontier_from_meta, git_history_source_frontier,
+    SessionSyncInterruption, coalesced_alias_local_interruption, git_history_frontier_from_meta,
+    git_history_source_frontier, git_sync_work_result,
 };
 use super::{
-    DaemonSessionSyncConfig, DaemonSessionSyncService, completed_profile_sweep_covers,
-    completion_termination, decode_matching_journal, journal_key,
+    DaemonSessionSyncConfig, DaemonSessionSyncService, SessionSyncWorkResult,
+    completed_profile_sweep_covers, completion_termination, decode_matching_journal, journal_key,
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
+
+#[test]
+fn cancel_after_first_git_commit_preserves_progress_and_cancelled_termination() {
+    let result = git_sync_work_result(
+        &ProjectId::new("project.cancel-after-commit").unwrap(),
+        crate::sessions::git_correlation::BoundedBackfillOutcome {
+            stats: crate::sessions::git_correlation::BackfillStats {
+                sessions_scanned: 1,
+                spans_written: 2,
+                commits_attributed: 3,
+                ..crate::sessions::git_correlation::BackfillStats::default()
+            },
+            committed: true,
+            frontier: crate::sessions::git_correlation::GitHistoryIndexFrontier {
+                activity_timestamp: 1_723_456_789,
+                source_rowid: 417,
+            },
+            remaining_sessions: 1,
+            unresolved_failures: 0,
+            interruption: Some(
+                crate::sessions::git_correlation::BoundedBackfillInterruption::Cancelled,
+            ),
+        },
+        Some(SessionSyncInterruption::Cancelled),
+    );
+    let SessionSyncWorkResult::Finished {
+        interruption,
+        committed,
+        stats,
+        coverage,
+        source_frontiers,
+        failure_codes,
+    } = result
+    else {
+        panic!("committed Git progress must produce durable terminal evidence");
+    };
+
+    assert!(committed);
+    assert_eq!(stats.sessions_scanned, 1);
+    assert_eq!(stats.spans_written, 2);
+    assert_eq!(stats.commits_attributed, 3);
+    assert_eq!(
+        coverage,
+        vec![SessionSyncSourceCoverageV1 {
+            store_scope: "git".to_owned(),
+            coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+        }]
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&source_frontiers[0].committed_cursor_json)
+            .unwrap(),
+        serde_json::json!({
+            "activity_timestamp": 1_723_456_789,
+            "source_rowid": 417,
+        })
+    );
+    assert_eq!(
+        failure_codes,
+        vec!["git_sync_cancelled_after_commit".to_owned()]
+    );
+    assert_eq!(
+        completion_termination(
+            interruption.and_then(SessionSyncInterruption::termination),
+            committed,
+            &stats,
+            false,
+            failure_codes.is_empty(),
+        ),
+        OperationTermination::Cancelled
+    );
+}
+
+#[test]
+fn deadline_after_first_git_commit_preserves_progress_and_timed_out_termination() {
+    let result = git_sync_work_result(
+        &ProjectId::new("project.deadline-after-commit").unwrap(),
+        crate::sessions::git_correlation::BoundedBackfillOutcome {
+            stats: crate::sessions::git_correlation::BackfillStats {
+                sessions_scanned: 1,
+                spans_written: 2,
+                commits_attributed: 3,
+                ..crate::sessions::git_correlation::BackfillStats::default()
+            },
+            committed: true,
+            frontier: crate::sessions::git_correlation::GitHistoryIndexFrontier {
+                activity_timestamp: 1_723_456_790,
+                source_rowid: 418,
+            },
+            remaining_sessions: 0,
+            unresolved_failures: 0,
+            interruption: Some(
+                crate::sessions::git_correlation::BoundedBackfillInterruption::Cancelled,
+            ),
+        },
+        Some(SessionSyncInterruption::TimedOut),
+    );
+    let SessionSyncWorkResult::Finished {
+        interruption,
+        committed,
+        stats,
+        coverage,
+        source_frontiers,
+        failure_codes,
+    } = result
+    else {
+        panic!("committed Git progress must produce durable terminal evidence");
+    };
+
+    assert!(committed);
+    assert_eq!(stats.sessions_scanned, 1);
+    assert_eq!(stats.spans_written, 2);
+    assert_eq!(stats.commits_attributed, 3);
+    assert_eq!(
+        coverage,
+        vec![SessionSyncSourceCoverageV1 {
+            store_scope: "git".to_owned(),
+            coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+        }]
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&source_frontiers[0].committed_cursor_json)
+            .unwrap(),
+        serde_json::json!({
+            "activity_timestamp": 1_723_456_790,
+            "source_rowid": 418,
+        })
+    );
+    assert_eq!(
+        failure_codes,
+        vec!["git_sync_timed_out_after_commit".to_owned()]
+    );
+    assert_eq!(
+        completion_termination(
+            interruption.and_then(SessionSyncInterruption::termination),
+            committed,
+            &stats,
+            false,
+            failure_codes.is_empty(),
+        ),
+        OperationTermination::TimedOut
+    );
+}
 
 #[test]
 fn committed_result_stays_terminal_when_cancel_or_deadline_arrives_late() {
@@ -29,11 +172,11 @@ fn committed_result_stays_terminal_when_cancel_or_deadline_arrives_late() {
     };
 
     assert_eq!(
-        completion_termination(true, &stats, true, true),
+        completion_termination(None, true, &stats, true, true),
         OperationTermination::Completed
     );
     assert_eq!(
-        completion_termination(true, &stats, true, false),
+        completion_termination(None, true, &stats, true, false),
         OperationTermination::Partial
     );
 }
@@ -41,7 +184,7 @@ fn committed_result_stays_terminal_when_cancel_or_deadline_arrives_late() {
 #[test]
 fn uncommitted_failure_is_not_reported_as_success() {
     assert_eq!(
-        completion_termination(false, &SessionSyncStatsV1::default(), true, false),
+        completion_termination(None, false, &SessionSyncStatsV1::default(), true, false,),
         OperationTermination::Failed
     );
 }
@@ -49,7 +192,7 @@ fn uncommitted_failure_is_not_reported_as_success() {
 #[test]
 fn partial_coverage_is_never_completed_without_failures() {
     assert_eq!(
-        completion_termination(false, &SessionSyncStatsV1::default(), false, true),
+        completion_termination(None, false, &SessionSyncStatsV1::default(), false, true,),
         OperationTermination::Failed
     );
     let stats = SessionSyncStatsV1 {
@@ -57,7 +200,7 @@ fn partial_coverage_is_never_completed_without_failures() {
         ..SessionSyncStatsV1::default()
     };
     assert_eq!(
-        completion_termination(true, &stats, false, true),
+        completion_termination(None, true, &stats, false, true),
         OperationTermination::Partial
     );
 }
