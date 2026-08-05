@@ -1882,7 +1882,7 @@ async fn ingest_active_messages(
         .await?;
         rewritten_message_ids.insert(message_id.clone());
         let raw = super::schema::load_raw_message(conn, provider, &message_id)
-            .await
+            .await?
             .ok_or_else(|| LcmError::Db("active message did not persist".to_string()))?;
         let replay_content =
             replay_content_value(&original_content, &raw, upsert.projection_text.as_str());
@@ -2260,7 +2260,7 @@ async fn load_raw_messages_for_session(
         .await?;
     let mut messages = Vec::new();
     while let Some(row) = rows.next().await? {
-        messages.push(raw::raw_message_from_row(&row)?);
+        messages.push(raw::verified_raw_message_from_row(&row)?);
     }
     Ok(messages)
 }

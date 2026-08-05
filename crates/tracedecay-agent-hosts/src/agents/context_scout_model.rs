@@ -188,12 +188,7 @@ fn response_schema() -> Value {
             "suggestion_text": {"type": "string"},
             "cited_anchor_ids": {
                 "type": "array",
-                "items": {
-                    "type": "array",
-                    "minItems": 16,
-                    "maxItems": 16,
-                    "items": {"type": "integer", "minimum": 0, "maximum": 255}
-                }
+                "items": {"type": "string"}
             }
         }
     })
@@ -301,7 +296,9 @@ mod tests {
                     dedupe_key: [1; 32],
                     category: super::super::context_scout_v2::ContextScoutCategoryV1::Verification,
                     suggestion_text: "Run the cited focused test.".to_string(),
-                    citation_anchor_ids: vec![[2; 16]],
+                    citation_anchor_ids: vec![
+                        tracedecay_domain::RetrievalAnchorId::new("anchor.model.fixture").unwrap(),
+                    ],
                 },
             ],
         }
@@ -311,7 +308,9 @@ mod tests {
         ContextScoutModelCandidateV1 {
             selected_dedupe_key: [1; 32],
             suggestion_text: "Run the cited focused test.".to_string(),
-            cited_anchor_ids: vec![[2; 16]],
+            cited_anchor_ids: vec![
+                tracedecay_domain::RetrievalAnchorId::new("anchor.model.fixture").unwrap(),
+            ],
         }
     }
 

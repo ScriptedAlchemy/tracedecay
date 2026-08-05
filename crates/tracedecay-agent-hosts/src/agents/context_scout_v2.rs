@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::o200k_base_singleton;
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{RetrievalAnchorId, UtcMicros};
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopedFeedbackV1};
 
 use crate::ports::context::{CancellationToken, MonotonicDeadline};
@@ -29,10 +29,16 @@ const MAX_SCOUT_ACTIVE_ADDRESSES: usize = 32;
 const MAX_SCOUT_MODEL_INPUT_TOKENS: usize = 2_048;
 const MAX_SCOUT_MODEL_OUTPUT_TOKENS: usize = 256;
 
+mod evidence;
 mod store;
 #[cfg(test)]
 mod store_tests;
 
+pub use evidence::{
+    ContextScoutEvidenceAvailabilityV1, ContextScoutEvidenceEnvelopeV1,
+    ContextScoutEvidenceSourceKindV1, ContextScoutEvidenceSourceReceiptV1,
+    ContextScoutRedactionReceiptV1,
+};
 pub use store::ProjectContextScoutDurableStoreV1;
 
 /// Exact destination for one advisory suggestion. Every field is opaque and
@@ -66,41 +72,6 @@ impl ContextScoutAddressV1 {
     }
 }
 
-/// Only saved-content and clean-generation evidence is eligible for durable
-/// envelopes. Dirty overlay data is represented only so callers can receive a
-/// typed suppression; it must never cross a durable boundary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutEvidenceGenerationV1 {
-    SavedContent,
-    CleanGeneration,
-    DirtyOverlay,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ContextScoutEvidenceBindingV1 {
-    pub anchor_id: [u8; 16],
-    pub content_identity: [u8; 32],
-    pub generation: ContextScoutEvidenceGenerationV1,
-}
-
-impl ContextScoutEvidenceBindingV1 {
-    fn validate(self) -> Result<(), ContextScoutErrorV1> {
-        if self.anchor_id == [0; 16] || self.content_identity == [0; 32] {
-            return Err(ContextScoutErrorV1::InvalidEvidence);
-        }
-        Ok(())
-    }
-
-    const fn durable(self) -> bool {
-        matches!(
-            self.generation,
-            ContextScoutEvidenceGenerationV1::SavedContent
-                | ContextScoutEvidenceGenerationV1::CleanGeneration
-        )
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutCategoryV1 {
@@ -118,7 +89,7 @@ pub struct ContextScoutCandidateV1 {
     pub category: ContextScoutCategoryV1,
     pub relevance_score: u16,
     pub suggestion_text: String,
-    pub evidence: Vec<ContextScoutEvidenceBindingV1>,
+    pub evidence: ContextScoutEvidenceEnvelopeV1,
     pub expires_at: UtcMicros,
 }
 
@@ -127,16 +98,16 @@ impl ContextScoutCandidateV1 {
         if self.dedupe_key == [0; 32]
             || !safe_suggestion_text(&self.suggestion_text)
             || self.suggestion_text.len() > limits.max_text_bytes
-            || self.evidence.is_empty()
-            || self.evidence.len() > limits.max_evidence
+            || self.evidence.anchor_count() == 0
+            || self.evidence.anchor_count() > limits.max_evidence
             || self.expires_at.0 <= 0
         {
             return Err(ContextScoutErrorV1::InvalidCandidate);
         }
+        self.evidence.validate()?;
         let mut anchors = BTreeSet::new();
-        for evidence in &self.evidence {
-            evidence.validate()?;
-            if !anchors.insert(evidence.anchor_id) {
+        for anchor in self.evidence.anchors() {
+            if !anchors.insert(anchor) {
                 return Err(ContextScoutErrorV1::InvalidCandidate);
             }
         }
@@ -144,7 +115,7 @@ impl ContextScoutCandidateV1 {
     }
 
     fn durable(&self) -> bool {
-        self.evidence.iter().all(|evidence| evidence.durable())
+        self.evidence.validate().is_ok()
     }
 }
 
@@ -258,6 +229,9 @@ pub enum ContextScoutSuppressionV1 {
     Duplicate,
     Cancelled,
     ModelOutputInvalid,
+    EvidencePartial,
+    EvidenceStale,
+    EvidenceUnavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,11 +345,35 @@ pub fn select_deterministic_context_scout(
     });
     let mut saw_expired = false;
     let mut saw_duplicate = false;
-    let mut saw_overlay = false;
+    let mut saw_partial = false;
+    let mut saw_stale = false;
+    let mut saw_unavailable = false;
+    let mut saw_cancelled = false;
     for candidate in candidates {
         if !candidate.durable() {
-            saw_overlay = true;
+            saw_unavailable = true;
             continue;
+        }
+        match candidate.evidence.availability {
+            ContextScoutEvidenceAvailabilityV1::Complete => {}
+            ContextScoutEvidenceAvailabilityV1::Partial
+                if input.delivery_window == ContextScoutDeliveryWindowV1::OnRequest => {}
+            ContextScoutEvidenceAvailabilityV1::Partial => {
+                saw_partial = true;
+                continue;
+            }
+            ContextScoutEvidenceAvailabilityV1::Stale => {
+                saw_stale = true;
+                continue;
+            }
+            ContextScoutEvidenceAvailabilityV1::Cancelled => {
+                saw_cancelled = true;
+                continue;
+            }
+            ContextScoutEvidenceAvailabilityV1::Unavailable => {
+                saw_unavailable = true;
+                continue;
+            }
         }
         if candidate.expires_at.0 <= input.now.0 {
             saw_expired = true;
@@ -403,8 +401,14 @@ pub fn select_deterministic_context_scout(
             ContextScoutDeliveryWindowV1::Suppressed => unreachable!("checked above"),
         });
     }
-    let reason = if saw_overlay {
-        ContextScoutSuppressionV1::DirtyOverlay
+    let reason = if saw_cancelled {
+        ContextScoutSuppressionV1::Cancelled
+    } else if saw_stale {
+        ContextScoutSuppressionV1::EvidenceStale
+    } else if saw_partial {
+        ContextScoutSuppressionV1::EvidencePartial
+    } else if saw_unavailable {
+        ContextScoutSuppressionV1::EvidenceUnavailable
     } else if saw_expired {
         ContextScoutSuppressionV1::Expired
     } else if saw_duplicate {
@@ -429,7 +433,7 @@ pub struct ContextScoutModelCandidateInputV1 {
     pub dedupe_key: [u8; 32],
     pub category: ContextScoutCategoryV1,
     pub suggestion_text: String,
-    pub citation_anchor_ids: Vec<[u8; 16]>,
+    pub citation_anchor_ids: Vec<RetrievalAnchorId>,
 }
 
 /// Structured model output may refine text only. It must select one supplied
@@ -439,7 +443,7 @@ pub struct ContextScoutModelCandidateInputV1 {
 pub struct ContextScoutModelCandidateV1 {
     pub selected_dedupe_key: [u8; 32],
     pub suggestion_text: String,
-    pub cited_anchor_ids: Vec<[u8; 16]>,
+    pub cited_anchor_ids: Vec<RetrievalAnchorId>,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -782,11 +786,7 @@ fn model_request(
             dedupe_key: candidate.dedupe_key,
             category: candidate.category,
             suggestion_text: candidate.suggestion_text.clone(),
-            citation_anchor_ids: candidate
-                .evidence
-                .iter()
-                .map(|evidence| evidence.anchor_id)
-                .collect(),
+            citation_anchor_ids: candidate.evidence.anchors().cloned().collect(),
         })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
@@ -820,11 +820,7 @@ fn validated_model_candidate(
     {
         return None;
     }
-    let expected = base
-        .evidence
-        .iter()
-        .map(|evidence| evidence.anchor_id)
-        .collect::<BTreeSet<_>>();
+    let expected = base.evidence.anchors().cloned().collect::<BTreeSet<_>>();
     let cited_len = output.cited_anchor_ids.len();
     let cited = output.cited_anchor_ids.into_iter().collect::<BTreeSet<_>>();
     if cited.len() != cited_len || expected != cited {
@@ -1884,12 +1880,8 @@ mod tests {
         );
     }
 
-    fn evidence(generation: ContextScoutEvidenceGenerationV1) -> ContextScoutEvidenceBindingV1 {
-        ContextScoutEvidenceBindingV1 {
-            anchor_id: [10; 16],
-            content_identity: [11; 32],
-            generation,
-        }
+    fn evidence() -> ContextScoutEvidenceEnvelopeV1 {
+        super::evidence::fixture_context_scout_evidence()
     }
 
     fn candidate(key: u8, score: u16) -> ContextScoutCandidateV1 {
@@ -1898,7 +1890,7 @@ mod tests {
             category: ContextScoutCategoryV1::Retrieval,
             relevance_score: score,
             suggestion_text: format!("Use evidence {key}."),
-            evidence: vec![evidence(ContextScoutEvidenceGenerationV1::SavedContent)],
+            evidence: evidence(),
             expires_at: UtcMicros(100),
         }
     }
@@ -2073,17 +2065,24 @@ mod tests {
     #[test]
     fn dirty_overlay_never_crosses_durable_checkpoint_or_receipt_boundary() {
         let mut overlay = candidate(1, 10);
-        overlay.evidence[0].generation = ContextScoutEvidenceGenerationV1::DirtyOverlay;
-        let decision = select_deterministic_context_scout(
-            &input(vec![overlay]),
-            ContextScoutLimitsV1::bounded_defaults(),
-        )
-        .unwrap();
+        overlay.evidence.content =
+            tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
+                session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
+                owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
+                agent_id: None,
+                document_version: 1,
+                overlay_digest: tracedecay_domain::ManifestDigest::new(format!(
+                    "sha256:{}",
+                    "e".repeat(64)
+                ))
+                .unwrap(),
+            };
         assert_eq!(
-            decision,
-            ContextScoutDecisionV1::Suppressed {
-                reason: ContextScoutSuppressionV1::DirtyOverlay
-            }
+            select_deterministic_context_scout(
+                &input(vec![overlay]),
+                ContextScoutLimitsV1::bounded_defaults(),
+            ),
+            Err(ContextScoutErrorV1::InvalidEvidence)
         );
     }
 
@@ -2117,7 +2116,10 @@ mod tests {
                     candidate: ContextScoutModelCandidateV1 {
                         selected_dedupe_key: [1; 32],
                         suggestion_text: "unbound model claim".to_string(),
-                        cited_anchor_ids: vec![[99; 16]],
+                        cited_anchor_ids: vec![
+                            tracedecay_domain::RetrievalAnchorId::new("anchor.model.unbound")
+                                .unwrap(),
+                        ],
                     },
                     receipt: model_receipt(),
                 })
@@ -2204,7 +2206,10 @@ mod tests {
                     candidate: ContextScoutModelCandidateV1 {
                         selected_dedupe_key: [1; 32],
                         suggestion_text: "bounded refinement".to_owned(),
-                        cited_anchor_ids: vec![[10; 16], [10; 16]],
+                        cited_anchor_ids: vec![
+                            tracedecay_domain::RetrievalAnchorId::new("anchor.scout").unwrap(),
+                            tracedecay_domain::RetrievalAnchorId::new("anchor.scout").unwrap(),
+                        ],
                     },
                     receipt: model_receipt(),
                 })
@@ -2383,7 +2388,7 @@ mod tests {
         let bytes = serde_json::to_vec(&serde_json::json!({
             "selected_dedupe_key": vec![1_u8; 32],
             "suggestion_text": "bounded",
-            "cited_anchor_ids": [vec![10_u8; 16]],
+            "cited_anchor_ids": ["anchor.scout"],
             "tool": "forbidden"
         }))
         .unwrap();
@@ -2917,7 +2922,18 @@ mod tests {
             },
         );
         let mut dirty = candidate(2, 10);
-        dirty.evidence[0].generation = ContextScoutEvidenceGenerationV1::DirtyOverlay;
+        dirty.evidence.content =
+            tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
+                session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
+                owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
+                agent_id: None,
+                document_version: 1,
+                overlay_digest: tracedecay_domain::ManifestDigest::new(format!(
+                    "sha256:{}",
+                    "f".repeat(64)
+                ))
+                .unwrap(),
+            };
         assert_eq!(
             runtime
                 .prepare(
@@ -2926,11 +2942,8 @@ mod tests {
                     ContextScoutRuntimeModeV1::ConfiguredModel,
                     model_execution(),
                 )
-                .await
-                .unwrap(),
-            ContextScoutRuntimeOutcomeV1::Suppressed {
-                reason: ContextScoutSuppressionV1::DirtyOverlay
-            }
+                .await,
+            Err(ContextScoutErrorV1::InvalidEvidence)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         let state = store.0.lock().unwrap();

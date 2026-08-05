@@ -984,7 +984,7 @@ impl DaemonLspOwnerRegistrar {
 
 #[derive(Debug, Error)]
 pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
-    #[error("a PR13 advisory runtime is already mounted for this project")]
+    #[error("a advisory runtime is already mounted for this project")]
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
@@ -1017,6 +1017,18 @@ impl DaemonAdvisoryRuntimeRegistrar {
         Self {
             service: service.clone(),
         }
+    }
+
+    pub(crate) async fn register_external_acquisition(
+        &self,
+        project_root: PathBuf,
+        runtime: Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>,
+    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
+        self.service
+            .project_runtimes
+            .register(project_root, runtime)
+            .await
+            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)
     }
 
     pub(crate) async fn register<GR, GA, CS, CE, PE, PC>(
