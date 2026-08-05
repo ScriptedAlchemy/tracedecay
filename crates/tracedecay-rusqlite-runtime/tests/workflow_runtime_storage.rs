@@ -247,6 +247,19 @@ fn attachment_rejects_wrong_schema_version_digest_and_definition() {
             "UPDATE workflow_schema SET definition_digest = 'sha256:wrong';",
         ),
         (
+            "workflow-extra-schema-identity",
+            "PRAGMA ignore_check_constraints = ON;
+             INSERT INTO workflow_schema (
+                 singleton,
+                 schema_version,
+                 definition_digest
+             ) VALUES (
+                 2,
+                 1,
+                 'sha256:ef3f0fdc0760f91f64f8cc567cee1174dbd94fec69c9de2a39f9683fd8b780da'
+             );",
+        ),
+        (
             "workflow-wrong-definition",
             "DROP TABLE workflow_handoffs;
              CREATE TABLE workflow_handoffs (

@@ -102,8 +102,8 @@ fn require_workflow_schema(
     let schema = handle
         .query(
             ExactSqlStatement::new(
-                "SELECT schema_version, definition_digest FROM workflow_schema
-                 WHERE singleton = 1"
+                "SELECT singleton, schema_version, definition_digest FROM workflow_schema
+                 ORDER BY singleton"
                     .to_owned(),
                 Vec::new(),
             )
@@ -111,16 +111,19 @@ fn require_workflow_schema(
             Duration::from_secs(5),
         )
         .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
-    let valid_schema = schema.rows.first().is_some_and(|row| {
-        matches!(
-            row.values.first(),
-            Some(ExactSqlValue::Integer(WORKFLOW_SCHEMA_VERSION_V1))
-        ) && matches!(
-            row.values.get(1),
-            Some(ExactSqlValue::Text(digest))
-                if digest == WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1
-        )
-    });
+    let valid_schema = schema.rows.len() == 1
+        && schema.rows.first().is_some_and(|row| {
+            matches!(row.values.first(), Some(ExactSqlValue::Integer(1)))
+                && matches!(
+                    row.values.get(1),
+                    Some(ExactSqlValue::Integer(WORKFLOW_SCHEMA_VERSION_V1))
+                )
+                && matches!(
+                    row.values.get(2),
+                    Some(ExactSqlValue::Text(digest))
+                        if digest == WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1
+                )
+        });
     if !valid_schema {
         return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
     }
