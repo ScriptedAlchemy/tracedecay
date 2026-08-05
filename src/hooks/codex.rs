@@ -4,20 +4,19 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
-#[cfg(test)]
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::claude::is_code_research_prompt;
-use super::memory_inject;
 use super::post_tool_use::{
     CODEX_POST_TOOL_USE_SPEC, captured_tool_output, notify_post_tool_use, tool_input_command_str,
     trusted_tool_failure,
 };
 use super::steering::{
-    HookWorkspaceStatus, append_context_block, build_codex_session_context_for_workspace,
-    cursor_index_signals_for_root,
+    HookWorkspaceStatus, append_context_recovery_hint, build_codex_session_context_for_workspace,
+    cursor_index_signals_for_root, session_start_from_compaction,
 };
 use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
@@ -58,30 +57,25 @@ pub async fn hook_codex_session_start() -> i32 {
         &event,
         &parsed,
     );
-    let guidance = if let Some(root) = root.as_deref() {
-        super::v2::dispatch(
-            tracedecay_hooks::HookHostV1::Codex,
-            &event,
-            root,
-            Some(&hook_telemetry),
-        )
-        .await
-        .into_recorded_guidance(&hook_telemetry)
-        .flatten()
-    } else {
-        None
-    };
-    match guidance {
-        Some(guidance) => println!(
-            "{}",
-            codex_additional_context_json("SessionStart", &guidance)
-        ),
-        None => println!("{}", serde_json::json!({})),
+    if let (Some(root), Some(event)) = (root.as_ref(), codex_session_start_hook_event(&parsed)) {
+        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
     }
+    let (mut context, _) = codex_session_context_for_event(&event).await;
+    let session_id = event_session_id(&parsed);
+    if root.is_none() && ingest_user_codex_session(session_id.clone(), Some(&hook_telemetry)).await
+    {
+        super::schedule_user_session_review("codex", session_id.as_deref());
+    }
+    if session_start_from_compaction(&event) {
+        append_context_recovery_hint(&mut context);
+    }
+    println!(
+        "{}",
+        codex_additional_context_json("SessionStart", &context)
+    );
     0
 }
 
-#[cfg(test)]
 fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
     event_cwd_from_parsed(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Codex, cwd))
 }
@@ -124,15 +118,7 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
     {
         append_tool_hint(&mut context, &hint);
     }
-    if let Some(recall) = Box::pin(codex_prompt_memory_recall(event)).await {
-        append_context_block(&mut context, &recall);
-    }
     context
-}
-
-async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    memory_inject::prompt_memory_recall(&parsed, || event_project_root_with_identity(&parsed)).await
 }
 
 /// Builds Codex session/prompt context.
@@ -164,11 +150,6 @@ pub async fn hook_codex_subagent_start() -> i32 {
         record_hook_invoked(root.as_deref(), HintAgent::Codex, "SubagentStart", &event);
     let count = record_codex_subagent_start(&event).await;
     let output = evaluate_codex_subagent_start(&event);
-    let digest = match root.as_deref() {
-        Some(root) => memory_inject::combined_session_memory_digest(root, None).await,
-        None => memory_inject::user_session_memory_digest(None).await,
-    };
-    let output = merge_codex_subagent_output(output, digest);
     eprintln!(
         "{}",
         codex_subagent_start_log_line(&event, count, output.is_some())
@@ -177,28 +158,6 @@ pub async fn hook_codex_subagent_start() -> i32 {
         println!("{output}");
     }
     0
-}
-
-fn merge_codex_subagent_output(output: Option<String>, digest: Option<String>) -> Option<String> {
-    let Some(digest) = digest else {
-        return output;
-    };
-    let Some(output) = output else {
-        return Some(codex_additional_context_json("SubagentStart", &digest));
-    };
-    let Ok(mut parsed) = serde_json::from_str::<Value>(&output) else {
-        return Some(output);
-    };
-    let Some(context) = parsed
-        .pointer_mut("/hookSpecificOutput/additionalContext")
-        .and_then(|value| value.as_str().map(str::to_string))
-    else {
-        return Some(output);
-    };
-    let mut merged = context;
-    append_context_block(&mut merged, &digest);
-    parsed["hookSpecificOutput"]["additionalContext"] = Value::String(merged);
-    Some(parsed.to_string())
 }
 
 /// Codex `PostToolUse` hook handler used to keep the graph fresh and to surface
@@ -297,29 +256,33 @@ fn decide_codex_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
 
 /// Codex `PostCompact` hook handler.
 ///
-/// Requests daemon-owned compaction. The hook only waits for the bounded
-/// daemon acknowledgement; transcript capture and model work remain detached.
+/// Replaces temporary compaction summaries from visible LCM source messages.
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
     let root = event_project_root_with_identity_from_json(&event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostCompact", &event);
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_millis(25),
-        codex_post_compact(&event, Some(&hook_telemetry)),
-    )
-    .await;
+    if std::env::var_os(crate::sessions::codex_app_server::CODEX_SUMMARY_CHILD_ENV).is_none() {
+        codex_post_compact(&event, Some(&hook_telemetry)).await;
+    }
     println!("{}", serde_json::json!({}));
     0
 }
 
+const CODEX_STOP_INGEST_BUDGET: Duration = Duration::from_secs(3);
+
 /// Codex `Stop` hook handler.
+///
+/// Codex emits this after the assistant finishes a turn. Projectless sessions
+/// need this terminal receipt because the prompt hook runs before the final
+/// assistant message has been appended to the rollout.
 pub async fn hook_codex_stop() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry =
         record_hook_invoked_parsed(root.as_deref(), HintAgent::Codex, "Stop", &event, &parsed);
+    let session_id = event_session_id(&parsed);
     if let Some(root) = root.as_deref()
         && let Some(guidance) = super::v2::dispatch(
             tracedecay_hooks::HookHostV1::Codex,
@@ -330,6 +293,10 @@ pub async fn hook_codex_stop() -> i32 {
         .await
         .into_recorded_guidance(&hook_telemetry)
     {
+        if ingest_codex_stop_transcript_with_budget(session_id.clone(), Some(&hook_telemetry)).await
+        {
+            super::schedule_user_session_review("codex", session_id.as_deref());
+        }
         if let Some(guidance) = guidance {
             println!("{}", codex_additional_context_json("Stop", &guidance));
         } else {
@@ -337,11 +304,19 @@ pub async fn hook_codex_stop() -> i32 {
         }
         return 0;
     }
+    let ingested = capture_codex_stop_with_budget(
+        finalize_codex_user_session(root.as_deref(), session_id.clone(), Some(&hook_telemetry)),
+        CODEX_STOP_INGEST_BUDGET,
+        Some(&hook_telemetry),
+    )
+    .await;
+    if ingested {
+        super::schedule_user_session_review("codex", session_id.as_deref());
+    }
     println!("{}", serde_json::json!({}));
     0
 }
 
-#[cfg(test)]
 async fn finalize_codex_user_session(
     project_root: Option<&Path>,
     session_id: Option<String>,
@@ -351,6 +326,52 @@ async fn finalize_codex_user_session(
         return false;
     }
     ingest_user_codex_session(session_id, telemetry).await
+}
+
+/// A V2-admitted project Stop still captures the provider's historical
+/// session through the profile daemon. The capture kernel correlates it back
+/// to registered projects; it is not a diagnostics substitute.
+async fn ingest_codex_stop_transcript(
+    session_id: Option<String>,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) -> bool {
+    ingest_user_codex_session(session_id, telemetry).await
+}
+
+async fn ingest_codex_stop_transcript_with_budget(
+    session_id: Option<String>,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) -> bool {
+    capture_codex_stop_with_budget(
+        ingest_codex_stop_transcript(session_id, telemetry),
+        CODEX_STOP_INGEST_BUDGET,
+        telemetry,
+    )
+    .await
+}
+
+async fn capture_codex_stop_with_budget(
+    capture: impl std::future::Future<Output = bool>,
+    budget: Duration,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) -> bool {
+    if let Some(telemetry) = telemetry {
+        telemetry.note_timeout_budget(budget);
+    }
+    match tokio::time::timeout(budget, capture).await {
+        Ok(captured) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(false);
+            }
+            captured
+        }
+        Err(_) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(true);
+            }
+            false
+        }
+    }
 }
 
 /// Builds a Codex hook stdout payload with `additionalContext`.
@@ -883,38 +904,6 @@ mod tests {
         assert!(CODEX_SUBAGENT_START_CONTEXT.contains("exploring-code"));
     }
 
-    #[test]
-    fn codex_subagent_output_merges_memory_digest_into_additional_context() {
-        let steering = codex_additional_context_json("SubagentStart", "steering text");
-        let digest = "Durable project memory:\n- [decision #1 trust 0.90] fact".to_string();
-
-        let merged =
-            merge_codex_subagent_output(Some(steering.clone()), Some(digest.clone())).unwrap();
-        let parsed: Value = serde_json::from_str(&merged).unwrap();
-        assert_eq!(
-            parsed["hookSpecificOutput"]["hookEventName"],
-            "SubagentStart"
-        );
-        let context = parsed["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap();
-        assert!(context.starts_with("steering text"));
-        assert!(context.contains("Durable project memory"));
-
-        let digest_only = merge_codex_subagent_output(None, Some(digest)).unwrap();
-        let parsed: Value = serde_json::from_str(&digest_only).unwrap();
-        assert_eq!(
-            parsed["hookSpecificOutput"]["hookEventName"],
-            "SubagentStart"
-        );
-
-        assert_eq!(
-            merge_codex_subagent_output(Some(steering.clone()), None),
-            Some(steering)
-        );
-        assert_eq!(merge_codex_subagent_output(None, None), None);
-    }
-
     struct EnvGuard {
         key: &'static str,
         previous: Option<std::ffi::OsString>,
@@ -951,6 +940,7 @@ mod tests {
         let daemon = crate::hooks::TestDaemonHookActionGuard::install([
             serde_json::json!({ "messages_upserted": 1 }),
             serde_json::json!({ "messages_upserted": 0 }),
+            serde_json::json!({ "messages_upserted": 1 }),
         ]);
 
         assert!(finalize_codex_user_session(None, Some("final-turn".to_string()), None).await);
@@ -963,9 +953,13 @@ mod tests {
                 .await,
             "project-scoped Stop receipts must never write the user session store"
         );
+        assert!(
+            ingest_codex_stop_transcript(Some("final-turn".to_string()), None).await,
+            "a V2-admitted project Stop must still request canonical historical capture"
+        );
 
         let calls = daemon.calls();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 3);
         for (project_root, arguments) in calls {
             assert_eq!(project_root, None);
             assert_eq!(arguments["action"], "ingest_transcript");
@@ -974,6 +968,15 @@ mod tests {
             assert_eq!(arguments["session_id"], "final-turn");
             assert_eq!(arguments["format"], "json");
         }
+    }
+
+    #[tokio::test]
+    async fn codex_v2_stop_capture_timeout_is_fail_open() {
+        assert_eq!(CODEX_STOP_INGEST_BUDGET, Duration::from_secs(3));
+        assert!(
+            !capture_codex_stop_with_budget(std::future::pending(), Duration::ZERO, None).await,
+            "bounded historical capture must not prevent Stop guidance from returning"
+        );
     }
 
     #[test]

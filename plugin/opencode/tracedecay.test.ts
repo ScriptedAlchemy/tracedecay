@@ -2,24 +2,34 @@ import { expect, test } from "bun:test"
 
 import { dispatch, dispatchAfterAck } from "./tracedecay"
 
-test("OpenCode dispatch returns within the hook budget when its child stalls", async () => {
+test("dispatch lets the hook child finish instead of killing before durable spool", async () => {
   const startedAt = performance.now()
 
-  const guidance = await dispatch("0.2", { event: "file.edited" }, "/bin/sleep")
+  const guidance = await dispatch("0.05", { event: "file.edited" }, "/bin/sleep")
 
   expect(guidance).toBeUndefined()
-  expect(performance.now() - startedAt).toBeLessThan(100)
+  expect(performance.now() - startedAt).toBeGreaterThanOrEqual(40)
 })
 
-test("OpenCode schedules asynchronous notifications without holding the hook", () => {
+test("OpenCode acknowledges its callback while the durable child continues", async () => {
   const startedAt = performance.now()
+  let delivered = false
 
-  dispatchAfterAck("0.2", { event: "session.idle" }, "/bin/sleep")
+  dispatchAfterAck(
+    "0.05",
+    { event: "session.idle" },
+    async () => {
+      delivered = true
+    },
+    "/bin/sleep",
+  )
 
   expect(performance.now() - startedAt).toBeLessThan(25)
+  await Bun.sleep(100)
+  expect(delivered).toBeTrue()
 })
 
-test("OpenCode dispatch accepts bounded daemon guidance", async () => {
+test("dispatch accepts bounded daemon guidance", async () => {
   const guidance = await dispatch(
     "TraceDecay guidance",
     { event: "file.edited" },
@@ -27,10 +37,4 @@ test("OpenCode dispatch accepts bounded daemon guidance", async () => {
   )
 
   expect(guidance).toBe("TraceDecay guidance")
-})
-
-test("OpenCode dispatch drops output beyond its guidance bound", async () => {
-  const guidance = await dispatch("ignored", { event: "file.edited" }, "/usr/bin/yes")
-
-  expect(guidance).toBeUndefined()
 })

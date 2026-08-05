@@ -1,5 +1,6 @@
 """tracedecay Hermes plugin registration."""
 import copy
+import atexit
 import json
 import hashlib
 import logging
@@ -488,84 +489,104 @@ def _pre_llm_call(*args, **kwargs):
         "For the full workflow, load plugin skill `tracedecay:tracedecay` with `skill_view`."
     )
 
+_TERMINAL_TOOL_NAMES = frozenset((
+    "terminal", "bash", "shell", "exec_command", "run_command", "terminal.exec",
+))
 _HOST_RECEIPT_QUEUE_LIMIT = 64
 _HOST_RECEIPT_QUEUE = deque()
-_HOST_RECEIPT_QUEUE_LOCK = threading.Lock()
-_HOST_RECEIPT_WORKER_ACTIVE = False
+_HOST_RECEIPT_QUEUE_CONDITION = threading.Condition()
+_HOST_RECEIPT_WORKER = None
+
+def _drain_host_receipts():
+    global _HOST_RECEIPT_WORKER
+    while True:
+        with _HOST_RECEIPT_QUEUE_CONDITION:
+            if not _HOST_RECEIPT_QUEUE:
+                _HOST_RECEIPT_WORKER = None
+                _HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+                return
+            queued = _HOST_RECEIPT_QUEUE.popleft()
+            _HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+        try:
+            candidate = queued.pop("_project_candidate", None)
+            hermes_home = queued.pop("_hermes_home", None)
+            trusted_project = queued.pop("_trusted_project", False)
+            if candidate:
+                route_state, resolved = _project_scope_resolution(
+                    candidate, hermes_home
+                )
+                if route_state == "unregistered" and trusted_project:
+                    resolved = _code_project_root(
+                        explicit=candidate,
+                        hermes_home=hermes_home,
+                    )
+                if not resolved:
+                    continue
+                queued["cwd"] = str(resolved)
+                route = queued.get("route")
+                if isinstance(route, dict):
+                    route["cwd"] = str(resolved)
+            subprocess.run(
+                [tools.TRACEDECAY_BIN, "hook-hermes-terminal-receipt"],
+                input=json.dumps(queued),
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=(
+                    tools.TRACEDECAY_LONG_TIMEOUT_SECONDS
+                    if queued.get("event") == "turnIngested" and not queued.get("cwd")
+                    else 2
+                ),
+                check=False,
+            )
+        except Exception as exc:
+            logger.debug("tracedecay host receipt notification failed: %s", exc)
 
 def _notify_host_receipt(event, thread_name):
-    global _HOST_RECEIPT_WORKER_ACTIVE
-    with _HOST_RECEIPT_QUEUE_LOCK:
-        if len(_HOST_RECEIPT_QUEUE) >= _HOST_RECEIPT_QUEUE_LIMIT:
-            logger.debug(
-                "tracedecay host receipt queue full; applying callback backpressure"
-            )
-            return False
+    global _HOST_RECEIPT_WORKER
+    start_failed = False
+    with _HOST_RECEIPT_QUEUE_CONDITION:
+        while len(_HOST_RECEIPT_QUEUE) >= _HOST_RECEIPT_QUEUE_LIMIT:
+            _HOST_RECEIPT_QUEUE_CONDITION.wait()
         _HOST_RECEIPT_QUEUE.append(event)
-        if _HOST_RECEIPT_WORKER_ACTIVE:
-            return True
-        _HOST_RECEIPT_WORKER_ACTIVE = True
-
-    def _drain():
-        global _HOST_RECEIPT_WORKER_ACTIVE
-        while True:
-            with _HOST_RECEIPT_QUEUE_LOCK:
-                if not _HOST_RECEIPT_QUEUE:
-                    _HOST_RECEIPT_WORKER_ACTIVE = False
-                    return
-                queued = _HOST_RECEIPT_QUEUE.popleft()
+        if _HOST_RECEIPT_WORKER is None:
+            worker = threading.Thread(
+                target=_drain_host_receipts,
+                name=thread_name,
+                daemon=False,
+            )
+            _HOST_RECEIPT_WORKER = worker
             try:
-                candidate = queued.pop("_project_candidate", None)
-                hermes_home = queued.pop("_hermes_home", None)
-                trusted_project = queued.pop("_trusted_project", False)
-                if candidate:
-                    route_state, resolved = _project_scope_resolution(
-                        candidate, hermes_home
-                    )
-                    if route_state == "unregistered" and trusted_project:
-                        resolved = _code_project_root(
-                            explicit=candidate,
-                            hermes_home=hermes_home,
-                        )
-                    if not resolved:
-                        continue
-                    queued["cwd"] = str(resolved)
-                    route = queued.get("route")
-                    if isinstance(route, dict):
-                        route["cwd"] = str(resolved)
-                subprocess.run(
-                    [tools.TRACEDECAY_BIN, "hook-hermes-terminal-receipt"],
-                    input=json.dumps(queued),
-                    text=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=(
-                        tools.TRACEDECAY_LONG_TIMEOUT_SECONDS
-                        if queued.get("event") == "turnIngested" and not queued.get("cwd")
-                        else 2
-                    ),
-                    check=False,
-                )
-            except Exception as exc:
-                logger.debug("tracedecay host receipt notification failed: %s", exc)
+                # Start while holding the condition so a concurrent session-end
+                # join can never observe a Thread that has not started yet.
+                worker.start()
+            except Exception:
+                _HOST_RECEIPT_WORKER = None
+                _HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+                start_failed = True
+    if start_failed:
+        _drain_host_receipts()
 
-    threading.Thread(target=_drain, name=thread_name, daemon=True).start()
-    return True
+def _join_host_receipts():
+    while True:
+        with _HOST_RECEIPT_QUEUE_CONDITION:
+            worker = _HOST_RECEIPT_WORKER
+        if worker is None:
+            return
+        worker.join()
+
+atexit.register(_join_host_receipts)
 
 def _post_tool_call(*args, **kwargs):
-    """Forward one content-free native post-tool callback to TraceDecay."""
+    """Send a bounded, fail-open terminal receipt to TraceDecay."""
     payload = {}
     if args and isinstance(args[0], dict):
         payload.update(args[0])
     payload.update(kwargs)
     tool_name = str(payload.get("tool_name") or payload.get("name") or "").lower()
-    if not tool_name:
+    if tool_name not in _TERMINAL_TOOL_NAMES:
         return None
-    tool_args = (
-        payload.get("tool_input")
-        if isinstance(payload.get("tool_input"), dict)
-        else payload.get("args") if isinstance(payload.get("args"), dict) else {}
-    )
+    tool_args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
     candidate = _code_project_root(
         explicit=payload.get("project_root") or payload.get("project_path"),
         cwd=payload.get("cwd") or tool_args.get("cwd") or tool_args.get("workdir"),
@@ -576,74 +597,36 @@ def _post_tool_call(*args, **kwargs):
     session_id = payload.get("session_id") or payload.get("thread_id")
     turn_id = payload.get("turn_id")
     tool_call_id = payload.get("tool_call_id") or payload.get("call_id")
-    if not session_id or not tool_call_id:
-        return None
     status = str(payload.get("status") or ("error" if payload.get("error") else "success"))
-    if status not in ("ok", "success", "completed", "error", "failed"):
-        status = "error" if payload.get("error") else "success"
+    duration = payload.get("duration_ms")
+    try:
+        duration = max(0, min(int(duration), 86_400_000)) if duration is not None else None
+    except (TypeError, ValueError):
+        duration = None
     event = {
-        "hook_event_name": "post_tool_call",
-        "cwd": str(candidate),
-        "session_id": str(session_id)[:256],
-        "tool_input": {},
-        "tool_name": tool_name[:128],
-        "extra": {
-            "status": status,
-            "tool_call_id": str(tool_call_id)[:256],
-            "turn_id": str(turn_id)[:256] if turn_id else "",
-        },
+        "agent": "hermes",
+        "event": "terminalReceipt",
         "_project_candidate": str(candidate),
         "_hermes_home": payload.get("hermes_home"),
         "_trusted_project": bool(
             payload.get("project_root") or payload.get("project_path")
         ),
-    }
-
-    _notify_host_receipt(event, "tracedecay-native-post-tool")
-    return None
-
-def _on_session_end(*args, **kwargs):
-    """Forward one content-free native session-end callback to TraceDecay."""
-    payload = {}
-    if args and isinstance(args[0], dict):
-        payload.update(args[0])
-    payload.update(kwargs)
-    session_id = payload.get("session_id") or payload.get("thread_id")
-    turn_id = payload.get("turn_id")
-    if not session_id or not turn_id:
-        return None
-    candidate = _code_project_root(
-        explicit=payload.get("project_root") or payload.get("project_path"),
-        cwd=payload.get("cwd"),
-        hermes_home=payload.get("hermes_home"),
-    )
-    if not candidate:
-        return None
-    interrupted = bool(payload.get("interrupted"))
-    event = {
-        "hook_event_name": "on_session_end",
-        "cwd": str(candidate),
-        "session_id": str(session_id)[:256],
-        "tool_input": None,
-        "tool_name": None,
-        "extra": {
-            "completed": bool(payload.get("completed", not interrupted)),
-            "interrupted": interrupted,
-            "model": str(payload.get("model") or "")[:256],
-            "platform": str(payload.get("platform") or "")[:64],
-            "task_id": str(payload.get("task_id") or "")[:256],
-            "telemetry_schema_version": str(
-                payload.get("telemetry_schema_version") or "hermes.observer.v1"
-            )[:64],
-            "turn_id": str(turn_id)[:256],
+        "route": {
+            "session_id": str(session_id)[:256] if session_id else None,
+            "thread_id": str(payload.get("thread_id"))[:256] if payload.get("thread_id") else None,
         },
-        "_project_candidate": str(candidate),
-        "_hermes_home": payload.get("hermes_home"),
-        "_trusted_project": bool(
-            payload.get("project_root") or payload.get("project_path")
-        ),
+        "receipt": {
+            "tool_call_id": str(tool_call_id)[:256] if tool_call_id else None,
+            "turn_id": str(turn_id)[:256] if turn_id else None,
+            "status": status[:32],
+            "duration_ms": duration,
+            "transcript_watermark": str(
+                payload.get("transcript_watermark") or turn_id or tool_call_id or ""
+            )[:256] or None,
+        },
     }
-    _notify_host_receipt(event, "tracedecay-native-session-end")
+
+    _notify_host_receipt(event, "tracedecay-terminal-receipt")
     return None
 
 def _turn_receipt_event(event_name, session_id, project_root, transcript_watermark):
@@ -2936,11 +2919,7 @@ class TraceDecayContextEngine(ContextEngine):
         self._report_compression_boundary(session_id, bound_session_id, kwargs)
 
     def on_session_end(self, session_id=None, messages=None, **kwargs):
-        forwarded = dict(kwargs)
-        forwarded.setdefault("session_id", session_id or self.active_session_id)
-        forwarded.setdefault("project_root", self.project_root)
-        forwarded.setdefault("hermes_home", self.hermes_home)
-        _on_session_end(**forwarded)
+        _join_host_receipts()
         # Real session boundary: drop the per-session record so long-lived
         # gateway processes do not accumulate dead conversation state.
         key = self._session_key(session_id)
@@ -4338,10 +4317,6 @@ def register(ctx):
         ctx.register_hook("post_tool_call", bind_hermes_home(_post_tool_call))
     except Exception as exc:
         logger.debug("tracedecay post_tool_call hook unavailable: %s", exc)
-    try:
-        ctx.register_hook("on_session_end", bind_hermes_home(_on_session_end))
-    except Exception as exc:
-        logger.debug("tracedecay on_session_end hook unavailable: %s", exc)
     # Declare the plugins.tracedecay config block so its keys exist in
     # load_config() even before the user edits config.yaml.
     register_config_defaults = getattr(ctx, "register_config_defaults", None)

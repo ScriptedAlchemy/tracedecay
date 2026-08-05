@@ -1,7 +1,6 @@
 import type { Hooks, Plugin } from "@opencode-ai/plugin"
 
 const TRACEDECAY_BIN = "__TRACEDECAY_BIN__"
-const HOOK_DISPATCH_BUDGET_MS = 25
 const MAX_GUIDANCE_BYTES = 8 * 1024
 
 export async function dispatch(
@@ -19,97 +18,83 @@ export async function dispatch(
   } catch {
     return undefined
   }
-
-  let timeoutId: ReturnType<typeof setTimeout> | undefined
-  const timedOut = new Promise<undefined>((resolve) => {
-    timeoutId = setTimeout(() => {
-      stop(process)
-      resolve(undefined)
-    }, HOOK_DISPATCH_BUDGET_MS)
-  })
-
-  try {
-    return await Promise.race([completedGuidance(process), timedOut])
-  } finally {
-    if (timeoutId !== undefined) clearTimeout(timeoutId)
-  }
+  const [status, guidance] = await Promise.all([
+    process.exited,
+    readBoundedGuidance(process.stdout),
+  ])
+  return status === 0 ? guidance : undefined
 }
 
 export function dispatchAfterAck(
   command: string,
   payload: unknown,
+  deliver: (guidance: string | undefined) => Promise<void>,
   executable = TRACEDECAY_BIN,
 ): void {
-  setTimeout(() => {
-    void dispatch(command, payload, executable).catch(() => undefined)
-  }, 0)
+  // `dispatch` spawns synchronously before its first await, so the native
+  // hook process owns the event before OpenCode receives this callback's ack.
+  void dispatch(command, payload, executable)
+    .then(deliver)
+    .catch(() => undefined)
 }
 
-async function completedGuidance(process: Bun.Subprocess): Promise<string | undefined> {
-  const [status, guidance] = await Promise.all([process.exited, readGuidance(process)])
-  return status === 0 ? guidance : undefined
-}
-
-async function readGuidance(process: Bun.Subprocess): Promise<string | undefined> {
-  const reader = process.stdout.getReader()
+async function readBoundedGuidance(
+  stdout: ReadableStream<Uint8Array>,
+): Promise<string | undefined> {
+  const reader = stdout.getReader()
   const chunks: Uint8Array[] = []
-  let byteLength = 0
-
+  let retainedBytes = 0
+  let oversized = false
   try {
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-
-      byteLength += value.byteLength
-      if (byteLength > MAX_GUIDANCE_BYTES) {
-        stop(process)
-        return undefined
+      if (!oversized && retainedBytes + value.byteLength <= MAX_GUIDANCE_BYTES) {
+        chunks.push(value)
+        retainedBytes += value.byteLength
+      } else {
+        oversized = true
+        chunks.length = 0
       }
-      chunks.push(value)
     }
   } catch {
     return undefined
-  } finally {
-    void reader.cancel().catch(() => undefined)
   }
-
-  const guidance = new TextDecoder().decode(concatenate(chunks, byteLength)).trim()
-  return guidance.length > 0 ? guidance : undefined
-}
-
-function concatenate(chunks: Uint8Array[], byteLength: number): Uint8Array {
-  const output = new Uint8Array(byteLength)
+  if (oversized) return undefined
+  const output = new Uint8Array(retainedBytes)
   let offset = 0
   for (const chunk of chunks) {
     output.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return output
+  const guidance = new TextDecoder().decode(output).trim()
+  return guidance.length > 0 ? guidance : undefined
 }
 
-function stop(process: Bun.Subprocess): void {
-  try {
-    process.kill()
-  } catch {
-    // The child may already have completed between the budget check and kill.
+export const TraceDecayPlugin: Plugin = async ({ client }) => {
+  const deliver = async (guidance: string | undefined): Promise<void> => {
+    if (!guidance) return
+    await client.tui.showToast({
+      body: { message: guidance, variant: "info" },
+    })
+  }
+
+  return {
+    event: ({ event }) => {
+      if (
+        event.type === "file.edited" ||
+        event.type === "lsp.updated" ||
+        event.type === "session.idle" ||
+        (event.type === "session.status" && event.properties.status.type === "idle")
+      ) {
+        dispatchAfterAck("hook-opencode-event", event, deliver)
+      }
+    },
+    "tool.execute.after": (
+      input: Parameters<NonNullable<Hooks["tool.execute.after"]>>[0],
+      output: Parameters<NonNullable<Hooks["tool.execute.after"]>>[1],
+    ) => {
+      dispatchAfterAck("hook-opencode-tool-after", { input, output }, deliver)
+    },
   }
 }
-
-export const TraceDecayPlugin: Plugin = async () => ({
-  event: ({ event }) => {
-    if (
-      event.type === "file.edited" ||
-      event.type === "lsp.updated" ||
-      event.type === "session.idle" ||
-      (event.type === "session.status" && event.properties.status.type === "idle")
-    ) {
-      dispatchAfterAck("hook-opencode-event", event)
-    }
-  },
-  "tool.execute.after": (
-    input: Parameters<NonNullable<Hooks["tool.execute.after"]>>[0],
-    output: Parameters<NonNullable<Hooks["tool.execute.after"]>>[1],
-  ) => {
-    dispatchAfterAck("hook-opencode-tool-after", { input, output })
-  },
-})

@@ -188,9 +188,8 @@ pub fn decode_native_hook_event(
     let signal = match host {
         NativeHostIdentityV1::ClaudeCode => decode_claude(&raw)?,
         NativeHostIdentityV1::Codex => decode_codex(&raw)?,
-        NativeHostIdentityV1::CursorDesktop => decode_cursor(&raw)?,
-        NativeHostIdentityV1::CursorCloud => {
-            return Err(NativeHookDecodeError::UnsupportedNativeEvent);
+        NativeHostIdentityV1::CursorDesktop | NativeHostIdentityV1::CursorCloud => {
+            decode_cursor(&raw)?
         }
         NativeHostIdentityV1::Hermes => decode_hermes(&raw)?,
         NativeHostIdentityV1::Kiro => decode_kiro(&raw)?,
@@ -316,6 +315,18 @@ struct CodexStopEvent {
     permission_mode: String,
     stop_hook_active: bool,
     last_assistant_message: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct CodexPostToolUseEvent {
+    session_id: String,
+    turn_id: String,
+    cwd: String,
+    tool_name: String,
+    tool_use_id: String,
+    tool_input: Value,
+    tool_response: Value,
 }
 
 #[allow(dead_code)]
@@ -523,6 +534,15 @@ fn decode_claude(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
 fn decode_codex(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
     match event_name(raw, "hook_event_name")? {
         "SessionStart" => Ok(NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start)),
+        "PostToolUse" => {
+            let event = decode_shape::<CodexPostToolUseEvent>(raw)?;
+            if event.tool_name.is_empty() || event.tool_use_id.is_empty() {
+                return Err(NativeHookDecodeError::MissingTypedIdentity);
+            }
+            Ok(NativeHookSignalV1::ToolLifecycle(
+                HookLifecyclePhaseV1::Completed,
+            ))
+        }
         "Stop" => {
             decode_shape::<CodexStopEvent>(raw)?;
             Ok(NativeHookSignalV1::SessionBoundary(
@@ -559,7 +579,7 @@ fn decode_cursor(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
 fn decode_hermes(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
     if let Some(event_bus_name) = raw.get("event") {
         return match event_bus_name.as_str().filter(|value| !value.is_empty()) {
-            Some("turnIngested") => Ok(NativeHookSignalV1::SessionBoundary(
+            Some("turnCompleted" | "turnIngested") => Ok(NativeHookSignalV1::SessionBoundary(
                 HookBoundaryV1::TurnComplete,
             )),
             Some("terminalReceipt") => {
@@ -778,6 +798,11 @@ mod tests {
                 include_bytes!("../fixtures/host_events/kimi/post-tool-use-edit.json"),
                 NativeHookSignalV1::SavedEdit,
             ),
+            (
+                NativeHostIdentityV1::KimiCode,
+                include_bytes!("../fixtures/host_events/kimi/stop.json"),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
         ];
 
         for (host, payload, signal) in captures {
@@ -851,54 +876,67 @@ mod tests {
     }
 
     #[test]
-    fn kiro_documented_unverified_events_are_rejected_instead_of_emulated() {
-        let kiro = include_str!("../fixtures/host_events/kiro.json");
-        for identity in ["prompt_boundary", "saved_edit", "stop"] {
+    fn hermes_turn_completion_and_ingestion_are_truthful_native_boundaries() {
+        for event in ["turnCompleted", "turnIngested"] {
+            let payload = serde_json::json!({
+                "agent": "hermes",
+                "event": event,
+                "route": {"session_id": "session.hermes"},
+                "receipt": {
+                    "status": "success",
+                    "transcript_watermark": "message.hermes"
+                }
+            });
             assert_eq!(
                 decode_native_hook_event(
-                    NativeHostIdentityV1::Kiro,
-                    fixture_request(kiro, identity).as_slice()
-                ),
-                if identity == "prompt_boundary" {
-                    Err(NativeHookDecodeError::UnsupportedNativeFamily)
-                } else {
-                    Err(NativeHookDecodeError::UnsupportedNativeEvent)
-                }
+                    NativeHostIdentityV1::Hermes,
+                    &serde_json::to_vec(&payload).unwrap(),
+                )
+                .unwrap()
+                .signal,
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete)
             );
         }
     }
 
     #[test]
-    fn callbacks_without_exact_native_identity_remain_unavailable() {
+    fn kiro_documented_unverified_events_are_rejected_instead_of_emulated() {
+        let kiro = include_str!("../fixtures/host_events/kiro.json");
         assert_eq!(
             decode_native_hook_event(
-                NativeHostIdentityV1::KimiCode,
-                include_bytes!("../fixtures/host_events/kimi/stop.json"),
-            ),
-            Err(NativeHookDecodeError::UnsupportedNativeFamily)
+                NativeHostIdentityV1::Kiro,
+                fixture_request(kiro, "prompt_boundary").as_slice()
+            )
+            .unwrap()
+            .signal,
+            NativeHookSignalV1::PromptBoundary
         );
-        assert_eq!(
-            decode_native_hook_event(
-                NativeHostIdentityV1::CursorCloud,
-                include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
-            ),
-            Err(NativeHookDecodeError::UnsupportedNativeEvent)
-        );
+        for identity in ["saved_edit", "stop"] {
+            assert_eq!(
+                decode_native_hook_event(
+                    NativeHostIdentityV1::Kiro,
+                    fixture_request(kiro, identity).as_slice()
+                ),
+                Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            );
+        }
     }
 
     #[test]
-    fn codex_documented_unverified_post_tool_use_stays_unavailable() {
+    fn codex_documented_post_tool_use_preserves_native_tool_lifecycle() {
         let codex = include_str!("../fixtures/host_events/codex.json");
         assert_eq!(
             decode_native_hook_event(
                 NativeHostIdentityV1::Codex,
                 fixture_request(codex, "saved_edit").as_slice()
-            ),
-            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            )
+            .unwrap()
+            .signal,
+            NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed)
         );
         assert_eq!(
             stock_event_support(NativeHostIdentityV1::Codex, HookEventFamily::ToolLifecycle),
-            HookEventSupportV1::Unavailable
+            HookEventSupportV1::Native
         );
     }
 

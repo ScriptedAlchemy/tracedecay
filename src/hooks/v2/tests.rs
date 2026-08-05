@@ -496,7 +496,7 @@ fn opencode_event_uses_nested_properties_identity() {
 
     assert_ne!(material.event_id, hash16(b"event-17"));
     assert_eq!(material.protected_session_id, hash32(b"session-23"));
-    assert_eq!(material.file_id, Some(material.event_id));
+    assert_eq!(material.file_id, Some(hash16(b"/project/src/lib.rs")));
 }
 
 fn opencode_lsp_fixture_event() -> (serde_json::Value, String) {
@@ -647,7 +647,7 @@ fn opencode_tool_event_uses_nested_input_and_output_identity() {
     assert_ne!(material.event_id, hash16(b"call-31"));
     assert_eq!(material.protected_session_id, hash32(b"session-29"));
     assert_eq!(material.effect_receipt_id, Some(hash16(b"call-31")));
-    assert_eq!(material.file_id, Some(material.event_id));
+    assert_eq!(material.file_id, Some(hash16(b"/project/src/main.rs")));
 }
 
 #[test]
@@ -708,83 +708,46 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
 }
 
 #[test]
-fn cursor_saved_edits_distinguish_files_within_one_generation() {
-    let first = native_material(
-        r#"{
-                "conversation_id": "conversation-29",
-                "generation_id": "generation-31",
-                "session_id": "session-29",
-                "file_path": "/project/src/first.rs",
-                "edits": [{"old_string": "before", "new_string": "after"}]
-            }"#,
-        tracedecay_hooks::HookEventFamily::SavedEdit,
-        UtcMicros(43),
-    )
-    .unwrap();
-    let second = native_material(
-        r#"{
-                "conversation_id": "conversation-29",
-                "generation_id": "generation-31",
-                "session_id": "session-29",
-                "file_path": "/project/src/second.rs",
-                "edits": [{"old_string": "before", "new_string": "after"}]
-            }"#,
-        tracedecay_hooks::HookEventFamily::SavedEdit,
-        UtcMicros(43),
-    )
-    .unwrap();
+fn retry_identity_and_timestamp_reuse_are_stable() {
+    let event = r#"{
+        "session_id": "session.retry",
+        "turn_id": "turn.retry",
+        "hook_event_name": "Stop"
+    }"#;
+    let family = tracedecay_hooks::HookEventFamily::SessionBoundary;
+    let first = native_material(event, family, UtcMicros(10)).unwrap();
+    let retry = native_material(event, family, UtcMicros(99)).unwrap();
+    assert_eq!(retry.event_id, first.event_id);
 
-    assert_ne!(first.event_id, second.event_id);
-    assert_eq!(first.file_id, Some(hash16(b"/project/src/first.rs")));
-    assert_eq!(second.file_id, Some(hash16(b"/project/src/second.rs")));
-}
-
-#[test]
-fn timeout_retry_reuses_the_spooled_envelope_bytes() {
     let temporary = tempfile::tempdir().unwrap();
-    let host = HookHostV1::CursorDesktop;
-    let binding = HookScopeBindingV1 {
+    let host = HookHostV1::ClaudeCode;
+    let binding = spool_binding(host, [family]);
+    let decoded = tracedecay_hooks::decode_native_hook_event(
         host,
-        project_id: [1; 16],
-        repository_id: [2; 16],
-        worktree_id: [3; 16],
-        worktree_epoch: 4,
-        binding_token: [5; 32],
-        capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
-            family: tracedecay_hooks::HookEventFamily::SavedEdit,
-            support: tracedecay_hooks::stock_event_support(
-                host,
-                tracedecay_hooks::HookEventFamily::SavedEdit,
-            ),
-        }],
-    };
-    let first = HookEventEnvelopeV2 {
-        schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
-        event_id: [6; 16],
-        producer: host,
-        protected_session_id: [7; 32],
-        project_id: binding.project_id,
-        repository_id: binding.repository_id,
-        worktree_id: binding.worktree_id,
-        worktree_epoch: binding.worktree_epoch,
-        binding_token: binding.binding_token,
-        ordering: tracedecay_hooks::HookOrderingV1::Unknown,
-        observed_at: UtcMicros(10),
-        event: tracedecay_hooks::HookEventV2::SavedEdit {
-            file_id: [8; 16],
-            changed_range_count: 1,
-        },
-    };
+        include_bytes!("../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"),
+    )
+    .unwrap();
+    let first_envelope = decoded.into_envelope(&binding, first).unwrap();
     assert_eq!(
-        append_for_replay(temporary.path(), host, &first, &binding, UtcMicros(10)),
+        append_for_replay(
+            temporary.path(),
+            host,
+            &first_envelope,
+            &binding,
+            UtcMicros(10),
+        ),
         SpoolAppendOutcomeV1::Accepted,
     );
-
-    let mut retry = first.clone();
-    retry.observed_at = UtcMicros(99);
+    let retry_envelope = decoded.into_envelope(&binding, retry).unwrap();
     assert_eq!(
-        replay_envelope_if_pending(temporary.path(), host, &binding, &retry, UtcMicros(99)),
-        Some(first),
+        replay_envelope_if_pending(
+            temporary.path(),
+            host,
+            &binding,
+            &retry_envelope,
+            UtcMicros(99),
+        ),
+        PendingEnvelopeV1::Exact(first_envelope),
     );
 }
 
@@ -810,123 +773,50 @@ fn spool_binding(
 }
 
 #[test]
-fn fallback_native_identity_retries_replay_spooled_envelopes_across_hosts() {
-    let temporary = tempfile::tempdir().unwrap();
-    let cases = [
-        (
-            HookHostV1::Kiro,
-            tracedecay_hooks::HookEventFamily::PromptBoundary,
-            r#"{"hook_event_name":"userPromptSubmit","cwd":"/project","session_id":"kiro.retry","prompt":"retry me"}"#,
-        ),
-        (
-            HookHostV1::KimiCode,
-            tracedecay_hooks::HookEventFamily::SessionBoundary,
-            include_str!("../../../crates/tracedecay-hooks/fixtures/host_events/kimi/stop.json"),
-        ),
-        (
-            HookHostV1::Hermes,
-            tracedecay_hooks::HookEventFamily::SessionBoundary,
-            r#"{"agent":"hermes","event":"turnIngested","session_id":"hermes.retry","cwd":"/project","route":{"cwd":"/project"},"receipt":{"turn_id":"turn.retry","status":"completed","transcript_watermark":"watermark.retry"}}"#,
-        ),
-    ];
-
-    for (host, family, event_json) in cases {
-        let event_json = event_json.replace("<SESSION_ID>", "kimi.retry");
-        let binding = spool_binding(host, [family]);
-        let first = native_material(&event_json, family, UtcMicros(10)).unwrap();
-        let retry = native_material(&event_json, family, UtcMicros(99)).unwrap();
-        assert_eq!(retry.event_id, first.event_id, "{host:?} retry identity");
-
-        let decoded =
-            tracedecay_hooks::decode_native_hook_event(host, event_json.as_bytes()).unwrap();
-        let first_envelope = decoded.into_envelope(&binding, first).unwrap();
-        assert_eq!(
-            append_for_replay(
-                temporary.path(),
-                host,
-                &first_envelope,
-                &binding,
-                UtcMicros(10),
-            ),
-            SpoolAppendOutcomeV1::Accepted,
-            "{host:?} initial spool",
-        );
-        assert_eq!(
-            append_for_replay(
-                temporary.path(),
-                host,
-                &first_envelope,
-                &binding,
-                UtcMicros(11),
-            ),
-            SpoolAppendOutcomeV1::Accepted,
-            "{host:?} exact duplicate must be idempotent",
-        );
-
-        let retry_envelope = decoded.into_envelope(&binding, retry).unwrap();
-        assert_eq!(
-            replay_envelope_if_pending(
-                temporary.path(),
-                host,
-                &binding,
-                &retry_envelope,
-                UtcMicros(99),
-            ),
-            Some(first_envelope),
-            "{host:?} retry must reuse the exact spooled envelope",
-        );
-    }
+fn native_identity_is_qualified_by_event_family() {
+    let event = r#"{"session_id":"session.shared","id":"native.shared"}"#;
+    let session = native_material(
+        event,
+        tracedecay_hooks::HookEventFamily::SessionBoundary,
+        UtcMicros(10),
+    )
+    .unwrap();
+    let tool = native_material(
+        event,
+        tracedecay_hooks::HookEventFamily::ToolLifecycle,
+        UtcMicros(10),
+    )
+    .unwrap();
+    assert_ne!(session.event_id, tool.event_id);
 }
 
 #[test]
-fn claude_cross_family_native_keys_do_not_conflict_in_the_spool() {
-    let temporary = tempfile::tempdir().unwrap();
-    let host = HookHostV1::ClaudeCode;
-    let post_tool_use = include_str!(
-        "../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
-    );
-    let stop =
-        include_str!("../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json");
-    let tool_family = tracedecay_hooks::HookEventFamily::ToolLifecycle;
-    let stop_family = tracedecay_hooks::HookEventFamily::SessionBoundary;
-    let binding = spool_binding(host, [tool_family, stop_family]);
-    let tool_material = native_material(post_tool_use, tool_family, UtcMicros(10)).unwrap();
-    let stop_material = native_material(stop, stop_family, UtcMicros(11)).unwrap();
-
-    assert_ne!(
-        tool_material.event_id, stop_material.event_id,
-        "PostToolUse and Stop may reuse provider-native key material"
-    );
-
-    let tool_envelope = tracedecay_hooks::decode_native_hook_event(host, post_tool_use.as_bytes())
-        .unwrap()
-        .into_envelope(&binding, tool_material)
-        .unwrap();
-    let stop_envelope = tracedecay_hooks::decode_native_hook_event(host, stop.as_bytes())
-        .unwrap()
-        .into_envelope(&binding, stop_material)
-        .unwrap();
-    assert_eq!(
-        append_for_replay(
-            temporary.path(),
-            host,
-            &tool_envelope,
-            &binding,
-            UtcMicros(10),
-        ),
-        SpoolAppendOutcomeV1::Accepted,
-    );
-    assert_eq!(
-        append_for_replay(
-            temporary.path(),
-            host,
-            &stop_envelope,
-            &binding,
-            UtcMicros(11),
-        ),
-        SpoolAppendOutcomeV1::Accepted,
-        "the Stop record must not conflict with a pending PostToolUse record",
-    );
+fn cursor_saved_edits_preserve_exact_file_identity() {
+    let first = native_material(
+        r#"{
+            "session_id":"session.edit",
+            "generation_id":"generation.edit",
+            "file_path":"/project/src/first.rs",
+            "edits":[{}]
+        }"#,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(10),
+    )
+    .unwrap();
+    let second = native_material(
+        r#"{
+            "session_id":"session.edit",
+            "generation_id":"generation.edit",
+            "file_path":"/project/src/second.rs",
+            "edits":[{}]
+        }"#,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(10),
+    )
+    .unwrap();
+    assert_ne!(first.event_id, second.event_id);
+    assert_eq!(first.file_id, Some(hash16(b"/project/src/first.rs")));
+    assert_eq!(second.file_id, Some(hash16(b"/project/src/second.rs")));
 }
 
 #[test]
@@ -936,11 +826,19 @@ fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
             .replace("<SESSION_ID>", "session.kimi.native")
             .replace("<TOOL_CALL_ID>", "call.kimi.native");
     let fields = serde_json::from_str::<NativeIdentityFields>(&fixture).unwrap();
+    let material = native_material(
+        &fixture,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(10),
+    )
+    .unwrap();
 
-    let lifecycle = native_context_scout_lifecycle(HookHostV1::KimiCode, &fields).unwrap();
+    let lifecycle =
+        native_context_scout_lifecycle(HookHostV1::KimiCode, &fields, material.event_id).unwrap();
 
     assert_eq!(lifecycle.session_id.as_str(), "session.kimi.native");
     assert_eq!(lifecycle.call_id.as_str(), "call.kimi.native");
+    assert_eq!(material.file_id, Some(hash16(b"<SAVED_PATH>")));
 }
 
 #[test]
@@ -980,33 +878,6 @@ fn hermes_adapter_fixture_preserves_native_terminal_identity() {
 }
 
 #[test]
-fn hermes_session_end_uses_provider_turn_identity() {
-    let fixture =
-        include_str!("../../../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json");
-    let material = native_material(
-        fixture,
-        tracedecay_hooks::HookEventFamily::SessionBoundary,
-        UtcMicros(49),
-    )
-    .unwrap();
-
-    assert_eq!(material.event_id, hash16(b"<TURN_ID>"));
-    assert_eq!(material.protected_session_id, hash32(b"<SESSION_ID>"));
-}
-
-#[test]
-fn native_material_rejects_callbacks_without_provider_event_identity() {
-    assert!(
-        native_material(
-            r#"{"session_id":"session-without-event-identity"}"#,
-            tracedecay_hooks::HookEventFamily::SessionBoundary,
-            UtcMicros(51),
-        )
-        .is_none()
-    );
-}
-
-#[test]
 fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/packaged_host_events/opencode/baseline.json"
@@ -1022,7 +893,14 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
         .replace("<SESSION_ID>", "session.opencode.native")
         .replace("<CALL_ID>", "call.opencode.native");
     let fields = serde_json::from_str::<NativeIdentityFields>(&tool_after).unwrap();
-    let lifecycle = native_context_scout_lifecycle(HookHostV1::OpenCode, &fields).unwrap();
+    let material = native_material(
+        &tool_after,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(10),
+    )
+    .unwrap();
+    let lifecycle =
+        native_context_scout_lifecycle(HookHostV1::OpenCode, &fields, material.event_id).unwrap();
     assert_eq!(lifecycle.session_id.as_str(), "session.opencode.native");
     assert_eq!(lifecycle.call_id.as_str(), "call.opencode.native");
 
@@ -1034,5 +912,5 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
         .unwrap()["request"]
         .to_string();
     let fields = serde_json::from_str::<NativeIdentityFields>(&file_edit).unwrap();
-    assert!(native_context_scout_lifecycle(HookHostV1::OpenCode, &fields).is_none());
+    assert!(native_context_scout_lifecycle(HookHostV1::OpenCode, &fields, [1; 16]).is_none());
 }

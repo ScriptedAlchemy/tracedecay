@@ -70,7 +70,7 @@ fn daemon_tool_json_returns_project_warming_without_retrying() {
 
         let error = tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            daemon_tool_json(None, "tracedecay_fact_store", serde_json::json!({})),
+            daemon_tool_json(None, "tracedecay_status", serde_json::json!({})),
         )
         .await
         .expect("hook daemon call retried project warming")

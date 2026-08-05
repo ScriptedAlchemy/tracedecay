@@ -4,7 +4,7 @@
 //! context, so handlers stay silent unless they intend to block (exit code 2
 //! with stderr sent back to the model).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tracedecay_hooks::DaemonHookEvent;
@@ -14,10 +14,14 @@ use super::post_tool_use::{EmptyPathPolicy, notify_edited_paths};
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
     event_cwd_from_parsed, event_project_root, event_project_root_from_json,
-    event_project_root_or_process_cwd, event_project_root_with_identity_from_json,
-    event_session_id, read_hook_event, record_hook_invoked, record_hook_invoked_parsed,
-    rel_under_root, research_block_reason,
+    event_project_root_or_process_cwd, event_session_id, read_hook_event, record_hook_invoked,
+    record_hook_invoked_parsed, rel_under_root, research_block_reason,
 };
+
+/// Largest transcript tail the Kiro `userPromptSubmit` hook will read per call.
+const KIRO_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
+/// Wall-clock budget for the Kiro prompt-submit catch-up ingest.
+const KIRO_HOT_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_millis(1_500);
 
 /// Kiro `preToolUse` hook handler.
 ///
@@ -128,28 +132,46 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 
 /// Kiro `userPromptSubmit` hook handler.
 ///
-/// Admits Kiro's native prompt boundary through the daemon-owned V2 route.
+/// Resets the per-turn counter, catches up transcripts, and injects bounded
+/// user/project memory relevant to the submitted prompt.
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
-    if let Some(response) = kiro_prompt_submit_response(&event).await {
-        println!("{response}");
-    }
-    0
-}
-
-async fn kiro_prompt_submit_response(event: &str) -> Option<String> {
-    let root = event_project_root_with_identity_from_json(event).await;
+    let root = event_project_root_from_json(&event);
     let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", event);
-    super::v2::dispatch_for_scope(
-        tracedecay_hooks::HookHostV1::Kiro,
-        event,
-        root.as_deref(),
+        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
+    let v2_guidance = if let Some(root) = root.as_deref() {
+        super::v2::dispatch(
+            tracedecay_hooks::HookHostV1::Kiro,
+            &event,
+            root,
+            Some(&hook_telemetry),
+        )
+        .await
+        .into_recorded_guidance(&hook_telemetry)
+    } else {
+        None
+    };
+    reset_counter_for_kiro_event(&event, Some(&hook_telemetry)).await;
+    let ingest = ingest_kiro_transcript_for_event(
+        &event,
+        Some(KIRO_HOT_INGEST_MAX_BYTES),
+        KIRO_HOT_INGEST_BUDGET,
         Some(&hook_telemetry),
     )
-    .await
-    .into_recorded_guidance(&hook_telemetry)
-    .flatten()
+    .await;
+    if ingest.user_scope && ingest.messages_upserted > 0 {
+        // User-scope catch-up can ingest several changed Kiro sessions in one
+        // bounded sweep, so let the reflector select all recent Kiro evidence
+        // instead of falsely attributing the batch to the prompt's session id.
+        super::schedule_user_session_review("kiro", None);
+    }
+    if let Some(guidance) = v2_guidance {
+        if let Some(guidance) = guidance {
+            println!("{guidance}");
+        }
+        return 0;
+    }
+    0
 }
 
 /// Kiro `postToolUse` hook handler used to keep the graph fresh after writes.
@@ -170,6 +192,82 @@ pub async fn hook_kiro_post_tool_use() -> i32 {
     );
     notify_kiro_post_tool_use(&parsed, &hook_telemetry).await;
     0
+}
+
+async fn reset_counter_for_kiro_event(
+    event_json: &str,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) {
+    let Some(project_root) = kiro_project_root(event_json) else {
+        return;
+    };
+    super::reset_counter_for_project(&project_root, telemetry).await;
+}
+
+/// Incrementally ingests Kiro IDE transcripts for the workspace referenced by
+/// `event_json`. Always fails open.
+#[derive(Default)]
+struct KiroIngestOutcome {
+    user_scope: bool,
+    messages_upserted: u64,
+}
+
+async fn ingest_kiro_transcript_for_event(
+    event_json: &str,
+    max_new_bytes: Option<u64>,
+    budget: std::time::Duration,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) -> KiroIngestOutcome {
+    let project_root = kiro_project_root(event_json);
+    let mut args = serde_json::json!({
+        "action": "ingest_transcript",
+        "provider": "kiro",
+        "user_scope": project_root.is_none(),
+        "event_json": event_json,
+    });
+    if let Some(max_new_bytes) = max_new_bytes {
+        args["max_new_bytes"] = serde_json::json!(max_new_bytes);
+    }
+    args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
+    if let Some(telemetry) = telemetry {
+        telemetry.note_timeout_budget(budget);
+    }
+    match tokio::time::timeout(
+        budget,
+        super::daemon_hook_action(project_root.as_deref(), args, telemetry),
+    )
+    .await
+    {
+        Ok(Ok(result)) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(false);
+            }
+            KiroIngestOutcome {
+                user_scope: result
+                    .get("user_scope")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                messages_upserted: result
+                    .get("messages_upserted")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            }
+        }
+        Ok(Err(error)) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(false);
+            }
+            eprintln!("[tracedecay] Kiro transcript ingest daemon call failed: {error}");
+            KiroIngestOutcome::default()
+        }
+        Err(_) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(true);
+            }
+            eprintln!("[tracedecay] Kiro transcript ingest daemon call timed out");
+            KiroIngestOutcome::default()
+        }
+    }
 }
 
 async fn notify_kiro_post_tool_use(parsed: &Value, telemetry: &super::analytics::HookTimingSpan) {
@@ -244,42 +342,52 @@ fn collect_event_path_fields(value: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Kiro write events may omit `cwd`, so the hook falls back to its own working
+/// directory before resolving. Shares the host-neutral resolver with every other
+/// `cwd`-carrying host.
+fn kiro_project_root(event_json: &str) -> Option<PathBuf> {
+    // An unreadable payload names no directory, so it takes the same
+    // process-cwd fallback a payload without `cwd` does.
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    event_project_root_or_process_cwd(&parsed)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn prompt_submit_without_provider_event_identity_remains_unavailable() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().unwrap();
-        let project_root = project.path().canonicalize().unwrap();
-        crate::storage::write_enrollment_marker(
-            &project_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_kiro_prompt_admission".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
-        let daemon = crate::hooks::TestDaemonHookActionGuard::install([]);
+    #[allow(clippy::await_holding_lock)]
+    async fn transcript_ingest_forwards_its_budget_to_the_daemon() {
+        let _lock = crate::hooks::lock_test_env();
+        let cwd = tempfile::tempdir().unwrap();
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([
+            serde_json::json!({ "user_scope": true, "messages_upserted": 3 }),
+        ]);
         let event = serde_json::json!({
-            "hook_event_name": "userPromptSubmit",
-            "session_id": "kiro-prompt-session",
-            "cwd": project_root,
-            "prompt": "find the active symbol",
+            "session_id": "kiro-budget",
+            "cwd": cwd.path(),
         })
         .to_string();
 
-        let started = std::time::Instant::now();
-        assert_eq!(kiro_prompt_submit_response(&event).await, None);
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(100),
-            "unsupported prompt classification exceeded the bounded hook path"
-        );
-        assert!(
-            daemon.calls().is_empty(),
-            "a documented callback without replay-safe identity must not reach daemon admission"
-        );
+        let outcome = ingest_kiro_transcript_for_event(
+            &event,
+            Some(8_192),
+            std::time::Duration::from_millis(375),
+            None,
+        )
+        .await;
+
+        assert!(outcome.user_scope);
+        assert_eq!(outcome.messages_upserted, 3);
+        let calls = daemon.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+        assert_eq!(calls[0].1["action"], "ingest_transcript");
+        assert_eq!(calls[0].1["provider"], "kiro");
+        assert_eq!(calls[0].1["max_new_bytes"], 8_192);
+        assert_eq!(calls[0].1["timeout_budget_ms"], 375);
+        assert_eq!(calls[0].1["format"], "json");
     }
 }
