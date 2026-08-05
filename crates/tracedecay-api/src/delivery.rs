@@ -11,13 +11,12 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, HttpBody};
 use axum::extract::{Request, State};
-use axum::http::header::{
-    CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_NONE_MATCH,
-};
+use axum::http::header::{CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, ETAG};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
+use headers::{ETag, HeaderMapExt, IfNoneMatch};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tower_http::compression::CompressionLayer;
@@ -164,7 +163,11 @@ pub fn embedded_asset_router(
 async fn delivery_policy(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path_is_api = is_api_path(request.uri().path());
-    let if_none_match = request.headers().get(IF_NONE_MATCH).cloned();
+    let if_none_match = request
+        .headers()
+        .typed_try_get::<IfNoneMatch>()
+        .ok()
+        .flatten();
     let mut response = next.run(request).await;
 
     if is_sse(response.headers()) {
@@ -182,21 +185,22 @@ async fn delivery_policy(request: Request, next: Next) -> Response {
         .get(CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.eq_ignore_ascii_case("gzip"));
-    if gzip_representation
-        && let Some(gzip_etag) = response.headers().get(ETAG).and_then(gzip_semantic_etag)
-    {
-        response.headers_mut().insert(ETAG, gzip_etag);
+    if gzip_representation && let Some(etag) = response.headers().get(ETAG).cloned() {
+        if let Some(gzip_etag) = gzip_representation_etag(&etag) {
+            response.headers_mut().insert(ETAG, gzip_etag);
+        } else {
+            response.headers_mut().remove(ETAG);
+        }
     }
 
     if method != Method::GET && method != Method::HEAD {
         return response;
     }
 
-    if response.status() == StatusCode::OK
+    if response.status().is_success()
         && if_none_match
             .as_ref()
-            .zip(response.headers().get(ETAG))
-            .is_some_and(|(candidates, current)| etag_matches(candidates, current))
+            .is_some_and(|condition| if_none_match_fails(condition, response.headers()))
     {
         *response.status_mut() = StatusCode::NOT_MODIFIED;
         response.headers_mut().remove(CONTENT_LENGTH);
@@ -205,9 +209,7 @@ async fn delivery_policy(request: Request, next: Next) -> Response {
     }
 
     if method == Method::HEAD {
-        if response.headers().contains_key(CONTENT_ENCODING) {
-            response.headers_mut().remove(CONTENT_LENGTH);
-        } else if !response.headers().contains_key(CONTENT_LENGTH)
+        if !response.headers().contains_key(CONTENT_LENGTH)
             && let Some(length) = response.body().size_hint().exact()
             && let Ok(value) = HeaderValue::from_str(&length.to_string())
         {
@@ -322,34 +324,24 @@ fn is_sse(headers: &HeaderMap) -> bool {
         .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
-fn etag_matches(candidates: &HeaderValue, current: &HeaderValue) -> bool {
-    let Some(candidates) = candidates.to_str().ok() else {
-        return false;
-    };
-    let Some(current) = current.to_str().ok().and_then(normalize_etag) else {
-        return false;
-    };
-    candidates.split(',').any(|candidate| {
-        let candidate = candidate.trim();
-        candidate == "*" || normalize_etag(candidate).is_some_and(|tag| tag == current)
-    })
-}
-
-fn normalize_etag(value: &str) -> Option<&str> {
-    let value = value.trim().strip_prefix("W/").unwrap_or(value.trim());
-    (value.len() >= 2 && value.starts_with('"') && value.ends_with('"')).then_some(value)
-}
-
-fn gzip_semantic_etag(etag: &HeaderValue) -> Option<HeaderValue> {
-    let etag = etag.to_str().ok()?;
-    let normalized = normalize_etag(etag)?;
-    if etag.starts_with("W/") {
-        return Some(etag.parse().ok()?);
+fn if_none_match_fails(condition: &IfNoneMatch, headers: &HeaderMap) -> bool {
+    if condition == &IfNoneMatch::any() {
+        return true;
     }
-    if normalized != etag {
+    headers
+        .typed_try_get::<ETag>()
+        .ok()
+        .flatten()
+        .is_some_and(|current| !condition.precondition_passes(&current))
+}
+
+fn gzip_representation_etag(etag: &HeaderValue) -> Option<HeaderValue> {
+    let etag = etag.to_str().ok()?;
+    etag.parse::<ETag>().ok()?;
+    if etag.starts_with("W/") {
         return None;
     }
-    HeaderValue::from_str(&format!("W/{etag}")).ok()
+    HeaderValue::from_str(&format!("{}--gzip\"", &etag[..etag.len() - 1])).ok()
 }
 
 fn valid_asset_path(path: &str) -> bool {
@@ -532,6 +524,37 @@ mod tests {
                         r#"{"value":"this response explicitly forbids transformation"}"#,
                     )
                 }),
+            )
+            .route(
+                "/api/precompressed",
+                get(|| async {
+                    (
+                        [
+                            (CONTENT_TYPE, HeaderValue::from_static("application/json")),
+                            (CONTENT_ENCODING, HeaderValue::from_static("gzip")),
+                            (CONTENT_LENGTH, HeaderValue::from_static("18")),
+                        ],
+                        "already-compressed",
+                    )
+                }),
+            )
+            .route(
+                "/api/created",
+                get(|| async {
+                    (
+                        StatusCode::CREATED,
+                        Json(json!({"value": "an existing untagged representation"})),
+                    )
+                }),
+            )
+            .route(
+                "/api/comma-tag",
+                get(|| async {
+                    (
+                        [(ETAG, HeaderValue::from_static("\"release,2026\""))],
+                        Json(json!({"value": "an opaque validator containing a comma"})),
+                    )
+                }),
             );
         http_delivery_router(router)
     }
@@ -633,6 +656,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wildcard_if_none_match_matches_an_existing_untagged_success() {
+        let response = api_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/created")
+                    .header(IF_NONE_MATCH, "*")
+                    .body(Body::empty())
+                    .expect("valid wildcard conditional request"),
+            )
+            .await
+            .expect("infallible router");
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert!(!response.headers().contains_key(ETAG));
+        assert!(
+            to_bytes(response.into_body(), BODY_LIMIT)
+                .await
+                .expect("bounded body")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn if_none_match_parses_a_quoted_opaque_tag_containing_a_comma() {
+        let response = api_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/comma-tag")
+                    .header(IF_NONE_MATCH, "\"release,2026\"")
+                    .body(Body::empty())
+                    .expect("valid comma-tag conditional request"),
+            )
+            .await
+            .expect("infallible router");
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn if_none_match_evaluates_all_repeated_header_fields() {
+        let response = api_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/comma-tag")
+                    .header(IF_NONE_MATCH, "\"stale\"")
+                    .header(IF_NONE_MATCH, "\"release,2026\"")
+                    .body(Body::empty())
+                    .expect("valid repeated conditional request"),
+            )
+            .await
+            .expect("infallible router");
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
     async fn head_preserves_get_metadata_without_a_body() {
         let response = api_router()
             .oneshot(
@@ -671,7 +747,30 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[CONTENT_ENCODING], "gzip");
         assert_eq!(response.headers()[VARY], "accept-encoding");
-        assert_eq!(response.headers()[ETAG], "W/\"data-v1\"");
+        assert_eq!(response.headers()[ETAG], "\"data-v1--gzip\"");
+        assert!(
+            to_bytes(response.into_body(), BODY_LIMIT)
+                .await
+                .expect("bounded body")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn head_preserves_handler_length_for_an_already_encoded_representation() {
+        let response = api_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/api/precompressed")
+                    .body(Body::empty())
+                    .expect("valid precompressed HEAD request"),
+            )
+            .await
+            .expect("infallible router");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_ENCODING], "gzip");
+        assert_eq!(response.headers()[CONTENT_LENGTH], "18");
         assert!(
             to_bytes(response.into_body(), BODY_LIMIT)
                 .await
@@ -708,7 +807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gzip_uses_a_weak_semantic_etag_for_conditional_requests() {
+    async fn gzip_uses_a_distinct_strong_etag_for_conditional_requests() {
         let identity = api_router()
             .oneshot(
                 Request::builder()
@@ -731,9 +830,9 @@ mod tests {
             .await
             .expect("infallible router");
         assert_eq!(gzip.headers()[CONTENT_ENCODING], "gzip");
-        assert_eq!(gzip.headers()[ETAG], "W/\"data-v1\"");
+        assert_eq!(gzip.headers()[ETAG], "\"data-v1--gzip\"");
 
-        let current = api_router()
+        let identity_validator = api_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/data")
@@ -744,10 +843,23 @@ mod tests {
             )
             .await
             .expect("infallible router");
+        assert_eq!(identity_validator.status(), StatusCode::OK);
+
+        let current = api_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/data")
+                    .header(ACCEPT_ENCODING, "gzip")
+                    .header(IF_NONE_MATCH, "\"data-v1--gzip\"")
+                    .body(Body::empty())
+                    .expect("valid conditional gzip request"),
+            )
+            .await
+            .expect("infallible router");
         assert_eq!(current.status(), StatusCode::NOT_MODIFIED);
         assert_eq!(current.headers()[CONTENT_ENCODING], "gzip");
         assert_eq!(current.headers()[VARY], "accept-encoding");
-        assert_eq!(current.headers()[ETAG], "W/\"data-v1\"");
+        assert_eq!(current.headers()[ETAG], "\"data-v1--gzip\"");
     }
 
     #[tokio::test]
