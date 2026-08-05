@@ -44,6 +44,12 @@ where
         }
         validate_workspace_progress_tokens(params)?;
         let previous = parse_workspace_previous_results(params)?;
+        // Partial root sets are never carried into another request. A later
+        // request must re-read every root so a generation change in a root
+        // that was previously ready cannot be combined with newly completed
+        // siblings.
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
 
         let workspace = self.lifecycle.gateway.workspace().clone();
         let roots = workspace.roots().to_vec();
@@ -116,12 +122,15 @@ where
             }
         }
         if pending {
+            let ready_roots = self.diagnostics.workspace_snapshots.len();
+            self.diagnostics.workspace_snapshots.clear();
+            self.diagnostics.workspace_failures.clear();
             return Err(refresh_pending_failure(
                 None,
                 None,
                 Some(format!(
                     "workspace-roots-ready={}/{}",
-                    self.diagnostics.workspace_snapshots.len(),
+                    ready_roots,
                     roots.len()
                 )),
                 None,

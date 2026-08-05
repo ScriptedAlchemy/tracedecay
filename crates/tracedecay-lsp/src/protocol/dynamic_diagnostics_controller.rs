@@ -16,7 +16,9 @@ enum DynamicDiagnosticState {
     Registered,
     Unregistering {
         request_id: LspRequestId,
-        register_after: bool,
+    },
+    UnregistrationRequired {
+        cancel_request: Option<LspRequestId>,
     },
     RegistrationFailed,
     UnregistrationFailed,
@@ -72,8 +74,10 @@ where
     }
 
     pub(super) fn reconcile_dynamic_diagnostics(&mut self) {
-        let desired = self.dynamic_diagnostics.negotiated
-            && self.lifecycle.control.lifecycle() == SessionLifecycle::Ready
+        if !self.dynamic_diagnostics.negotiated {
+            return;
+        }
+        let desired = self.lifecycle.control.lifecycle() == SessionLifecycle::Ready
             && self.diagnostics.provider.supports_workspace_diagnostics();
         let readiness_changed = desired != self.dynamic_diagnostics.last_desired;
         self.dynamic_diagnostics.last_desired = desired;
@@ -82,20 +86,26 @@ where
             self.lifecycle
                 .gateway
                 .bind_dynamic_diagnostics(false, false, false);
+            self.diagnostics.workspace_snapshots.clear();
+            self.diagnostics.workspace_failures.clear();
             match self.dynamic_diagnostics.state.clone() {
                 DynamicDiagnosticState::Registering { request_id } => {
-                    self.queue_server_request_cancellation(request_id);
-                    self.queue_dynamic_diagnostic_unregistration(false);
+                    self.require_dynamic_diagnostic_unregistration(Some(request_id));
                 }
                 DynamicDiagnosticState::Registered => {
-                    self.queue_dynamic_diagnostic_unregistration(false);
+                    self.require_dynamic_diagnostic_unregistration(None);
                 }
+                DynamicDiagnosticState::UnregistrationRequired { cancel_request } => {
+                    self.dynamic_diagnostics.state =
+                        DynamicDiagnosticState::UnregistrationRequired { cancel_request };
+                    self.drive_dynamic_diagnostic_unregistration();
+                }
+                DynamicDiagnosticState::Unregistering { .. } => {}
                 DynamicDiagnosticState::RegistrationFailed if readiness_changed => {
                     self.dynamic_diagnostics.state = DynamicDiagnosticState::Unregistered;
                 }
                 DynamicDiagnosticState::Unregistered
                 | DynamicDiagnosticState::RegistrationFailed
-                | DynamicDiagnosticState::Unregistering { .. }
                 | DynamicDiagnosticState::UnregistrationFailed => {}
             }
             return;
@@ -109,17 +119,16 @@ where
                 DynamicDiagnosticState::UnregistrationFailed => {
                     // The client may still retain the old registration. Clear
                     // that uncertainty before attempting the same stable id.
-                    self.dynamic_diagnostics.state = DynamicDiagnosticState::Registered;
-                    self.queue_dynamic_diagnostic_unregistration(true);
+                    self.require_dynamic_diagnostic_unregistration(None);
                     return;
                 }
-                DynamicDiagnosticState::Unregistering { request_id, .. } => {
-                    self.dynamic_diagnostics.state = DynamicDiagnosticState::Unregistering {
-                        request_id,
-                        register_after: true,
-                    };
+                DynamicDiagnosticState::UnregistrationRequired { cancel_request } => {
+                    self.dynamic_diagnostics.state =
+                        DynamicDiagnosticState::UnregistrationRequired { cancel_request };
+                    self.drive_dynamic_diagnostic_unregistration();
                     return;
                 }
+                DynamicDiagnosticState::Unregistering { .. } => return,
                 _ => {}
             }
         }
@@ -139,6 +148,9 @@ where
             | DynamicDiagnosticState::Unregistering { .. }
             | DynamicDiagnosticState::RegistrationFailed
             | DynamicDiagnosticState::UnregistrationFailed => {}
+            DynamicDiagnosticState::UnregistrationRequired { .. } => {
+                self.drive_dynamic_diagnostic_unregistration();
+            }
         }
     }
 
@@ -162,14 +174,11 @@ where
                 self.reconcile_dynamic_diagnostics();
                 true
             }
-            DynamicDiagnosticState::Unregistering {
-                request_id,
-                register_after,
-            } if &request_id == id => {
+            DynamicDiagnosticState::Unregistering { request_id } if &request_id == id => {
                 self.lifecycle
                     .gateway
                     .bind_dynamic_diagnostics(false, false, false);
-                self.dynamic_diagnostics.state = if succeeded || register_after {
+                self.dynamic_diagnostics.state = if succeeded {
                     DynamicDiagnosticState::Unregistered
                 } else {
                     DynamicDiagnosticState::UnregistrationFailed
@@ -195,14 +204,14 @@ where
                 self.reconcile_dynamic_diagnostics();
             }
             DynamicDiagnosticState::Registering { request_id }
-            | DynamicDiagnosticState::Unregistering { request_id, .. } => {
-                self.queue_server_request_cancellation(request_id);
-                self.dynamic_diagnostics.state = DynamicDiagnosticState::Registered;
-                self.queue_dynamic_diagnostic_unregistration(true);
+            | DynamicDiagnosticState::Unregistering { request_id } => {
+                self.require_dynamic_diagnostic_unregistration(Some(request_id));
             }
             DynamicDiagnosticState::Registered | DynamicDiagnosticState::UnregistrationFailed => {
-                self.dynamic_diagnostics.state = DynamicDiagnosticState::Registered;
-                self.queue_dynamic_diagnostic_unregistration(true);
+                self.require_dynamic_diagnostic_unregistration(None);
+            }
+            DynamicDiagnosticState::UnregistrationRequired { cancel_request } => {
+                self.require_dynamic_diagnostic_unregistration(cancel_request);
             }
         }
     }
@@ -217,7 +226,7 @@ where
             self.dynamic_diagnostics.state = DynamicDiagnosticState::RegistrationFailed;
             return;
         };
-        let queued = self.enqueue_value(json!({
+        let queued = self.enqueue_capability_control_value(json!({
             "jsonrpc": "2.0",
             "id": request_id_value(request_id.clone()),
             "method": "client/registerCapability",
@@ -239,7 +248,30 @@ where
         }
     }
 
-    fn queue_dynamic_diagnostic_unregistration(&mut self, register_after: bool) {
+    fn require_dynamic_diagnostic_unregistration(&mut self, cancel_request: Option<LspRequestId>) {
+        self.lifecycle
+            .gateway
+            .bind_dynamic_diagnostics(false, false, false);
+        self.dynamic_diagnostics.state =
+            DynamicDiagnosticState::UnregistrationRequired { cancel_request };
+        self.drive_dynamic_diagnostic_unregistration();
+    }
+
+    fn drive_dynamic_diagnostic_unregistration(&mut self) {
+        let DynamicDiagnosticState::UnregistrationRequired { mut cancel_request } =
+            self.dynamic_diagnostics.state.clone()
+        else {
+            return;
+        };
+        if let Some(request_id) = cancel_request.clone() {
+            if !self.queue_server_request_cancellation(request_id) {
+                return;
+            }
+            cancel_request = None;
+            self.dynamic_diagnostics.state = DynamicDiagnosticState::UnregistrationRequired {
+                cancel_request: None,
+            };
+        }
         let Ok(request_id) = self
             .dynamic_diagnostics
             .next_request_id
@@ -249,7 +281,7 @@ where
             self.dynamic_diagnostics.state = DynamicDiagnosticState::UnregistrationFailed;
             return;
         };
-        let queued = self.enqueue_value(json!({
+        let queued = self.enqueue_capability_control_value(json!({
             "jsonrpc": "2.0",
             "id": request_id_value(request_id.clone()),
             "method": "client/unregisterCapability",
@@ -261,18 +293,18 @@ where
             },
         }));
         if queued {
-            self.dynamic_diagnostics.state = DynamicDiagnosticState::Unregistering {
-                request_id,
-                register_after,
-            };
+            self.dynamic_diagnostics.state = DynamicDiagnosticState::Unregistering { request_id };
+        } else {
+            self.dynamic_diagnostics.state =
+                DynamicDiagnosticState::UnregistrationRequired { cancel_request };
         }
     }
 
-    fn queue_server_request_cancellation(&mut self, request_id: LspRequestId) {
-        let _ = self.enqueue_value(json!({
+    fn queue_server_request_cancellation(&mut self, request_id: LspRequestId) -> bool {
+        self.enqueue_capability_control_value(json!({
             "jsonrpc": "2.0",
             "method": "$/cancelRequest",
             "params": { "id": request_id_value(request_id) },
-        }));
+        }))
     }
 }
