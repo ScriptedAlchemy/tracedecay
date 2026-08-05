@@ -20,6 +20,7 @@ use crate::application::advisory::{
 };
 use crate::application::external_source_acquisition::{
     ExternalSourceAcquisitionOwnerV1, SourceAcquisitionPolicyV1, SourceAcquisitionRunOutcomeV1,
+    SourceAdmittedAcquisitionRunV1,
 };
 use crate::application::external_source_github::{
     GitHubExternalSourceAcquisitionV1, GitHubExternalSourceOpenErrorV1,
@@ -40,8 +41,8 @@ pub(crate) type DaemonExternalAcquisitionFutureV1<'a> =
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DaemonExternalAcquisitionOutcomeV1 {
-    Processed(SourceAcquisitionRunOutcomeV1),
-    Deferred(SourceAcquisitionRunOutcomeV1),
+    Processed(SourceAdmittedAcquisitionRunV1),
+    Deferred(SourceAdmittedAcquisitionRunV1),
     Unavailable,
 }
 
@@ -52,7 +53,8 @@ impl DaemonExternalAcquisitionOutcomeV1 {
                 tracing::info!(
                     target: "tracedecay::external_acquisition",
                     project_id = project_id.as_str(),
-                    outcome = ?outcome,
+                    admission_receipt = outcome.admission().receipt_digest().as_str(),
+                    outcome = ?outcome.outcome(),
                     "canonical GitHub external acquisition bounded run observed"
                 );
             }
@@ -60,7 +62,8 @@ impl DaemonExternalAcquisitionOutcomeV1 {
                 tracing::debug!(
                     target: "tracedecay::external_acquisition",
                     project_id = project_id.as_str(),
-                    outcome = ?outcome,
+                    admission_receipt = outcome.admission().receipt_digest().as_str(),
+                    outcome = ?outcome.outcome(),
                     "canonical GitHub external acquisition remains deferred"
                 );
             }
@@ -238,25 +241,22 @@ impl ProductionGitHubExternalAcquisitionV1 {
             Ok(event) => event,
             Err(_) => return DaemonExternalAcquisitionOutcomeV1::Unavailable,
         };
-        if self
+        match self
             .owner
-            .admit_event(
+            .admit_event_and_run_one(
                 self.adapter.definition(),
                 self.adapter.binding(),
                 self.adapter.acquisition_request(),
                 event,
                 observed_at,
+                &self.cancellation,
             )
             .await
-            .is_err()
         {
-            return DaemonExternalAcquisitionOutcomeV1::Unavailable;
-        }
-        match self.owner.run_one(observed_at, &self.cancellation).await {
-            Ok(SourceAcquisitionRunOutcomeV1::Idle) => {
-                DaemonExternalAcquisitionOutcomeV1::Deferred(SourceAcquisitionRunOutcomeV1::Idle)
+            Ok(run) if run.outcome() == &SourceAcquisitionRunOutcomeV1::Idle => {
+                DaemonExternalAcquisitionOutcomeV1::Deferred(run)
             }
-            Ok(outcome) => DaemonExternalAcquisitionOutcomeV1::Processed(outcome),
+            Ok(run) => DaemonExternalAcquisitionOutcomeV1::Processed(run),
             Err(_) => DaemonExternalAcquisitionOutcomeV1::Unavailable,
         }
     }

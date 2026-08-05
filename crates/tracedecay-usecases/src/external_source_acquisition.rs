@@ -308,6 +308,22 @@ pub enum SourceAcquisitionRunOutcomeV1 {
     BlockedRemoteChange,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceAdmittedAcquisitionRunV1 {
+    admission: SourceEventAdmissionReceiptV1,
+    outcome: SourceAcquisitionRunOutcomeV1,
+}
+
+impl SourceAdmittedAcquisitionRunV1 {
+    pub fn admission(&self) -> &SourceEventAdmissionReceiptV1 {
+        &self.admission
+    }
+
+    pub fn outcome(&self) -> &SourceAcquisitionRunOutcomeV1 {
+        &self.outcome
+    }
+}
+
 pub struct ExternalSourceAcquisitionOwnerV1<S, A, F, C> {
     state: Arc<S>,
     authorization: Arc<A>,
@@ -315,7 +331,8 @@ pub struct ExternalSourceAcquisitionOwnerV1<S, A, F, C> {
     commit: Arc<C>,
     policy: SourceAcquisitionPolicyV1,
     wake: tokio::sync::Notify,
-    /// Serializes provider effects across background draining and direct runs.
+    /// Serializes admissions with provider effects so a run's finish CAS cannot
+    /// leave its completed task active after a concurrent successor admission.
     run_gate: tokio::sync::Mutex<()>,
 }
 
@@ -392,6 +409,20 @@ where
         request: &SourceAcquisitionRequestV1,
         event: SourceEventV1,
         admitted_at: UtcMicros,
+    ) -> Result<SourceEventAdmissionReceiptV1, ExternalSourceAcquisitionErrorV1> {
+        let _run = self.run_gate.lock().await;
+        self.admit_event_inner(definition, binding, request, event, admitted_at, true)
+            .await
+    }
+
+    async fn admit_event_inner(
+        &self,
+        definition: &SourceDefinitionV1,
+        binding: &SourceBindingV1,
+        request: &SourceAcquisitionRequestV1,
+        event: SourceEventV1,
+        admitted_at: UtcMicros,
+        notify_runner: bool,
     ) -> Result<SourceEventAdmissionReceiptV1, ExternalSourceAcquisitionErrorV1> {
         definition
             .validate()
@@ -540,7 +571,7 @@ where
                 .map_err(|_| ExternalSourceAcquisitionErrorV1::StateUnavailable)?
             {
                 SourceAcquisitionCasOutcomeV1::Committed => {
-                    if admission.schedules_refresh() {
+                    if notify_runner && admission.schedules_refresh() {
                         self.wake.notify_one();
                     }
                     return Ok(admission.receipt().clone());
@@ -549,6 +580,50 @@ where
             }
         }
         Err(ExternalSourceAcquisitionErrorV1::StateContended)
+    }
+
+    /// Atomically admit one event and run the exact refresh authority named by
+    /// its receipt before the mounted background drain can claim that work.
+    pub async fn admit_event_and_run_one(
+        &self,
+        definition: &SourceDefinitionV1,
+        binding: &SourceBindingV1,
+        request: &SourceAcquisitionRequestV1,
+        event: SourceEventV1,
+        admitted_at: UtcMicros,
+        cancellation: &ObservationCancellation,
+    ) -> Result<SourceAdmittedAcquisitionRunV1, ExternalSourceAcquisitionErrorV1> {
+        let _run = self.run_gate.lock().await;
+        let admission = self
+            .admit_event_inner(definition, binding, request, event, admitted_at, false)
+            .await?;
+        let outcome = async {
+            let state = self
+                .state
+                .load(admission.binding())
+                .await
+                .map_err(|_| ExternalSourceAcquisitionErrorV1::StateUnavailable)?
+                .ok_or(ExternalSourceAcquisitionErrorV1::InvalidState)?;
+            if !state.is_ready(admitted_at) {
+                return Ok(SourceAcquisitionRunOutcomeV1::Idle);
+            }
+            let active = state
+                .active()
+                .ok_or(ExternalSourceAcquisitionErrorV1::InvalidState)?;
+            if active.event_receipt().original_refresh().receipt_digest()
+                != admission.original_refresh().receipt_digest()
+            {
+                return Err(ExternalSourceAcquisitionErrorV1::AuthorityChanged);
+            }
+            self.run_ready_state_exclusive(state, admitted_at, cancellation)
+                .await
+        }
+        .await;
+        self.wake.notify_one();
+        Ok(SourceAdmittedAcquisitionRunV1 {
+            admission,
+            outcome: outcome?,
+        })
     }
 
     pub async fn run_one(
@@ -576,6 +651,19 @@ where
         else {
             return Ok(SourceAcquisitionRunOutcomeV1::Idle);
         };
+        self.run_ready_state_exclusive(state, now, cancellation)
+            .await
+    }
+
+    async fn run_ready_state_exclusive(
+        &self,
+        state: SourceAcquisitionQueueStateV1,
+        now: UtcMicros,
+        cancellation: &ObservationCancellation,
+    ) -> Result<SourceAcquisitionRunOutcomeV1, ExternalSourceAcquisitionErrorV1> {
+        if cancellation.is_cancelled() {
+            return Ok(SourceAcquisitionRunOutcomeV1::Cancelled);
+        }
         state
             .validate()
             .map_err(|_| ExternalSourceAcquisitionErrorV1::InvalidState)?;
