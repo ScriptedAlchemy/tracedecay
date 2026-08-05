@@ -1,6 +1,156 @@
 use super::*;
 
 #[tokio::test]
+async fn pinned_project_config_is_the_only_activation_authority() {
+    let repo = temp_repo();
+    let process_default = SyncConfig::default();
+    assert!(!process_default.auto_watch);
+    let watcher = GitWatcher::from_parts(
+        process_default.clone(),
+        true,
+        MaintenanceCoordinator::default(),
+        Some(crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(32)),
+    );
+
+    assert_eq!(
+        watcher
+            .ensure_watching_with_config(repo.path(), &process_default)
+            .await,
+        GitWatcherAdmission::Disabled
+    );
+    assert!(watcher.inner.projects.lock().await.is_empty());
+
+    let mut pinned = process_default;
+    pinned.auto_watch = true;
+    assert_eq!(
+        watcher
+            .ensure_watching_with_config(repo.path(), &pinned)
+            .await,
+        GitWatcherAdmission::Ready,
+        "an exact pinned project opt-in must activate even when process defaults are off"
+    );
+    assert_eq!(watcher.inner.projects.lock().await.len(), 1);
+    assert!(watcher.shutdown().await.is_clean());
+}
+
+#[test]
+fn metadata_paths_route_to_exact_worktree_or_shared_reconciliation() {
+    let (_container, primary, linked) = linked_worktree_fixture();
+    let common = crate::worktree::git_common_dir(&primary).expect("git common directory");
+    let primary_root = primary.canonicalize().expect("primary root");
+    let linked_root = linked.canonicalize().expect("linked root");
+    let linked_git_dir = worktree_git_dir(&linked).expect("linked git directory");
+    let state = Arc::new(WatchState::new(
+        common.clone(),
+        primary_root,
+        worktree_git_dir(&primary).expect("primary git directory"),
+        MaintenanceCoordinator::default(),
+    ));
+    assert!(matches!(
+        state.register_worktree(linked_root.clone(), linked_git_dir.clone(), 8),
+        WorktreeRegistration::Ready
+    ));
+
+    classify_and_mark(
+        &state,
+        &notify::Event {
+            kind: EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![linked_git_dir.join("HEAD")],
+            attrs: notify::event::EventAttributes::default(),
+        },
+    );
+    {
+        let mut dirty = state.dirty.blocking_lock();
+        assert_eq!(dirty.affected_roots, BTreeSet::from([linked_root]));
+        assert!(!dirty.reconcile_metadata);
+        assert!(dirty.take());
+    }
+
+    classify_and_mark(
+        &state,
+        &notify::Event {
+            kind: EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![common.join("refs/heads/main")],
+            attrs: notify::event::EventAttributes::default(),
+        },
+    );
+    assert!(
+        state.dirty.blocking_lock().reconcile_metadata,
+        "shared refs truthfully widen to every mounted sibling"
+    );
+}
+
+#[test]
+fn linked_operation_marker_does_not_starve_exact_sibling_frontier() {
+    let (_container, primary, linked) = linked_worktree_fixture();
+    let primary_root = primary.canonicalize().expect("primary root");
+    let linked_root = linked.canonicalize().expect("linked root");
+    let linked_git_dir = worktree_git_dir(&linked).expect("linked git directory");
+    let state = WatchState::new(
+        crate::worktree::git_common_dir(&primary).expect("git common directory"),
+        primary_root.clone(),
+        worktree_git_dir(&primary).expect("primary git directory"),
+        MaintenanceCoordinator::default(),
+    );
+    assert!(matches!(
+        state.register_worktree(linked_root.clone(), linked_git_dir.clone(), 8),
+        WorktreeRegistration::Ready
+    ));
+    std::fs::create_dir(linked_git_dir.join("rebase-merge")).expect("operation marker");
+    let daemon_cancellation = crate::application::context::CancellationToken::new();
+    let cancellation = state.cancellation(&daemon_cancellation);
+
+    assert!(matches!(
+        operation_state_blocking(
+            &state,
+            8,
+            &cancellation,
+            StdInstant::now() + GIT_OBSERVATION_BUDGET,
+            Some(&BTreeSet::from([primary_root])),
+        ),
+        OperationObservation::State(OperationState::Idle)
+    ));
+    assert!(matches!(
+        operation_state_blocking(
+            &state,
+            8,
+            &cancellation,
+            StdInstant::now() + GIT_OBSERVATION_BUDGET,
+            Some(&BTreeSet::from([linked_root])),
+        ),
+        OperationObservation::State(OperationState::InFlight)
+    ));
+}
+
+#[test]
+fn deferred_freshness_retry_is_single_and_backoff_bounded() {
+    let state = WatchState::new(
+        PathBuf::from("/repo/.git"),
+        PathBuf::from("/repo"),
+        PathBuf::from("/repo/.git"),
+        MaintenanceCoordinator::default(),
+    );
+    let started = Instant::now();
+    state.schedule_retry();
+    let first = state.retry_not_before().expect("first retry");
+    state.schedule_retry();
+    let merged = state.retry_not_before().expect("merged retry");
+    assert!(merged > first);
+
+    for _ in 0..32 {
+        state.schedule_retry();
+    }
+    assert!(
+        state.retry_not_before().expect("bounded retry")
+            <= Instant::now() + Duration::from_secs(60),
+        "retry amplification must cap at one minute"
+    );
+    assert!(first > started);
+    state.clear_retry();
+    assert!(state.retry_not_before().is_none());
+}
+
+#[tokio::test]
 async fn concurrent_spawn_retains_one_backstop_task() {
     let mut config = fast_watch_config();
     config.backstop_interval_mins = 1;

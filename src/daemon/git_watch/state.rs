@@ -1,18 +1,20 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
-use std::time::{Duration, Instant};
+use std::time::Instant as StdInstant;
 
 use tokio::sync::{Mutex, Notify};
+use tokio::time::Instant;
 
-use super::{DirtySet, ProjectHealth};
+use super::DirtySet;
+use super::health::ProjectHealth;
 use crate::application::context::CancellationToken;
+use crate::config::SyncConfig;
 use crate::daemon::maintenance::MaintenanceCoordinator;
 
 pub(super) enum WorktreeRegistration {
@@ -62,7 +64,7 @@ impl OperationScanProbe {
         }
         self.active.fetch_add(1, Ordering::AcqRel);
         self.entered.notify_one();
-        let started = Instant::now();
+        let started = StdInstant::now();
         let mut guard = self
             .wait_lock
             .lock()
@@ -90,11 +92,14 @@ impl OperationScanProbe {
 /// OS watchers without collapsing their freshness requests.
 pub(super) struct WatchState {
     pub(super) common_dir: PathBuf,
+    pub(super) config: SyncConfig,
     worktrees: RwLock<BTreeMap<PathBuf, PathBuf>>,
     pub(super) dirty: Mutex<DirtySet>,
     pub(super) reconciliation_pending: AtomicBool,
     pub(super) wake: Notify,
     pub(super) reconfigure: Notify,
+    retry_not_before: std::sync::Mutex<Option<Instant>>,
+    retry_backoff_ms: AtomicU64,
     pub(super) maintenance: MaintenanceCoordinator,
     pub(super) health: ProjectHealth,
     pub(super) task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -110,19 +115,39 @@ pub(super) struct WatchState {
 }
 
 impl WatchState {
+    #[cfg(test)]
     pub(super) fn new(
         common_dir: PathBuf,
         project_root: PathBuf,
         git_dir: PathBuf,
         maintenance: MaintenanceCoordinator,
     ) -> Self {
+        Self::new_with_config(
+            common_dir,
+            project_root,
+            git_dir,
+            maintenance,
+            SyncConfig::default(),
+        )
+    }
+
+    pub(super) fn new_with_config(
+        common_dir: PathBuf,
+        project_root: PathBuf,
+        git_dir: PathBuf,
+        maintenance: MaintenanceCoordinator,
+        config: SyncConfig,
+    ) -> Self {
         Self {
             common_dir,
+            config,
             worktrees: RwLock::new(BTreeMap::from([(project_root, git_dir)])),
             dirty: Mutex::new(DirtySet::default()),
             reconciliation_pending: AtomicBool::new(false),
             wake: Notify::new(),
             reconfigure: Notify::new(),
+            retry_not_before: std::sync::Mutex::new(None),
+            retry_backoff_ms: AtomicU64::new(250),
             maintenance,
             health: ProjectHealth::default(),
             task: Mutex::new(None),
@@ -192,6 +217,31 @@ impl WatchState {
             .collect()
     }
 
+    /// Resolves callback paths to exact mounted worktree roots. Shared ref
+    /// registries and unknown paths return `None`, which truthfully requests
+    /// repository-wide reconciliation.
+    pub(super) fn event_roots(&self, paths: &[PathBuf]) -> Option<BTreeSet<PathBuf>> {
+        if paths.is_empty() {
+            return None;
+        }
+        let worktrees = self.worktrees();
+        let mut routed = BTreeSet::new();
+        for path in paths {
+            if path.starts_with(self.common_dir.join("refs"))
+                || path == &self.common_dir.join("packed-refs")
+            {
+                return None;
+            }
+            let root = worktrees
+                .iter()
+                .filter(|(_, git_dir)| path.starts_with(git_dir))
+                .max_by_key(|(_, git_dir)| git_dir.components().count())
+                .map(|(root, _)| root.clone())?;
+            routed.insert(root);
+        }
+        Some(routed)
+    }
+
     pub(super) fn cancellation(&self, daemon: &CancellationToken) -> WatchCancellation {
         WatchCancellation {
             daemon: daemon.clone(),
@@ -205,8 +255,33 @@ impl WatchState {
         self.reconfigure.notify_waiters();
     }
 
-    pub(super) fn is_retired(&self) -> bool {
-        self.retirement.is_cancelled()
+    pub(super) fn schedule_retry(&self) {
+        const RETRY_MAX_MS: u64 = 60_000;
+        let delay_ms = self.retry_backoff_ms.load(Ordering::Acquire);
+        *self
+            .retry_not_before
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Instant::now() + Duration::from_millis(delay_ms));
+        self.retry_backoff_ms.store(
+            delay_ms.saturating_mul(2).min(RETRY_MAX_MS),
+            Ordering::Release,
+        );
+    }
+
+    pub(super) fn retry_not_before(&self) -> Option<Instant> {
+        *self
+            .retry_not_before
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn clear_retry(&self) {
+        *self
+            .retry_not_before
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.retry_backoff_ms.store(250, Ordering::Release);
     }
 
     pub(super) fn prune_missing_worktrees(&self, mut should_stop: impl FnMut() -> bool) -> bool {
