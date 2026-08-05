@@ -132,7 +132,7 @@ impl DaemonInvocationService {
         }
         replicas.sort_by(|left, right| left.2.scope_digest.cmp(&right.2.scope_digest));
         replicas.dedup_by(|left, right| left.2.scope_digest == right.2.scope_digest);
-        let mut replica_digests = Vec::with_capacity(replicas.len());
+        let mut replica_receipts = Vec::with_capacity(replicas.len());
         for (ordinal, project_root, scope, storage) in &replicas {
             let revalidated_at = current_micros();
             if deadline.is_elapsed_at(revalidated_at) {
@@ -201,9 +201,14 @@ impl DaemonInvocationService {
                 _ => return None,
             }
             coordinator_storage
-                .record_durable_replica(idempotency_key, &command_digest, &replica_digest)
+                .record_durable_replica(
+                    idempotency_key,
+                    &command_digest,
+                    &scope.scope_digest,
+                    &replica_digest,
+                )
                 .ok()?;
-            replica_digests.push(replica_digest);
+            replica_receipts.push((scope.scope_digest.clone(), replica_digest));
         }
         let commit_at = current_micros();
         if deadline.is_elapsed_at(commit_at) {
@@ -220,8 +225,8 @@ impl DaemonInvocationService {
             &use_case,
         )
         .await?;
-        for ((ordinal, project_root, scope, _), expected_digest) in
-            replicas.iter().zip(&replica_digests)
+        for ((ordinal, project_root, scope, _), (_, expected_digest)) in
+            replicas.iter().zip(&replica_receipts)
         {
             let reauthorization = self
                 .multi_root_query_context(
@@ -245,8 +250,21 @@ impl DaemonInvocationService {
                 return None;
             }
         }
+        for (_, _, _, storage) in &replicas {
+            let tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Applied(
+                applied,
+            ) = storage
+                .complete_durable_replica(idempotency_key, &command_digest)
+                .ok()?
+            else {
+                return None;
+            };
+            if applied != next {
+                return None;
+            }
+        }
         match coordinator_storage
-            .complete_durable_compare_and_swap(idempotency_key, &command_digest, &replica_digests)
+            .complete_durable_compare_and_swap(idempotency_key, &command_digest, &replica_receipts)
             .ok()?
         {
             tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Applied(

@@ -447,12 +447,21 @@ fn durable_scope_set_cas_replays_terminal_results_and_rejects_key_reuse() {
     );
     store
         .storage
-        .record_durable_replica(idempotency_key, &command_digest, &replica_digest)
+        .record_durable_replica(
+            idempotency_key,
+            &command_digest,
+            &replica_digest,
+            &replica_digest,
+        )
         .unwrap();
     assert_eq!(
         store
             .storage
-            .complete_durable_compare_and_swap(idempotency_key, &command_digest, &[replica_digest],)
+            .complete_durable_compare_and_swap(
+                idempotency_key,
+                &command_digest,
+                &[(replica_digest.clone(), replica_digest)],
+            )
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Applied(first.clone())
     );
@@ -493,7 +502,7 @@ fn durable_scope_set_cas_requires_exact_replica_receipts() {
     assert_eq!(store.storage.read(first.scope_set_id()).unwrap(), None);
     store
         .storage
-        .record_durable_replica(idempotency_key, &command_digest, &replica_a)
+        .record_durable_replica(idempotency_key, &command_digest, &replica_a, &replica_a)
         .unwrap();
     assert!(matches!(
         store
@@ -501,7 +510,10 @@ fn durable_scope_set_cas_requires_exact_replica_receipts() {
             .complete_durable_compare_and_swap(
                 idempotency_key,
                 &command_digest,
-                &[replica_a.clone(), replica_b.clone()],
+                &[
+                    (replica_a.clone(), replica_a.clone()),
+                    (replica_b.clone(), replica_b.clone()),
+                ],
             )
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Pending(_)
@@ -509,7 +521,7 @@ fn durable_scope_set_cas_requires_exact_replica_receipts() {
     assert_eq!(store.storage.read(first.scope_set_id()).unwrap(), None);
     store
         .storage
-        .record_durable_replica(idempotency_key, &command_digest, &replica_b)
+        .record_durable_replica(idempotency_key, &command_digest, &replica_b, &replica_b)
         .unwrap();
     assert_eq!(
         store
@@ -517,7 +529,10 @@ fn durable_scope_set_cas_requires_exact_replica_receipts() {
             .complete_durable_compare_and_swap(
                 idempotency_key,
                 &command_digest,
-                &[replica_a, replica_b],
+                &[
+                    (replica_a.clone(), replica_a),
+                    (replica_b.clone(), replica_b),
+                ],
             )
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Applied(first)
@@ -529,6 +544,63 @@ fn durable_scope_set_cas_requires_exact_replica_receipts() {
             .unwrap()
             .map(|scope_set| scope_set.revision()),
         Some(ScopeSetRevision::new(1).unwrap())
+    );
+}
+
+#[test]
+fn durable_scope_set_cas_replaces_stale_replica_authorization_on_retry() {
+    let store = RegisteredScopeSetStore::start("durable-reauthorization", |_| {});
+    let first = scope_set_for_actor(1, "actor.owner");
+    let command_digest = digest('a');
+    let replica_key = digest('b');
+    let stale_authorization = digest('c');
+    let current_authorization = digest('d');
+    let idempotency_key = "request.scope-set.durable-reauthorization";
+
+    store
+        .storage
+        .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &first)
+        .unwrap();
+    store
+        .storage
+        .record_durable_replica(
+            idempotency_key,
+            &command_digest,
+            &replica_key,
+            &stale_authorization,
+        )
+        .unwrap();
+    assert!(matches!(
+        store
+            .storage
+            .complete_durable_compare_and_swap(
+                idempotency_key,
+                &command_digest,
+                &[(replica_key.clone(), current_authorization.clone())],
+            )
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Pending(_)
+    ));
+
+    store
+        .storage
+        .record_durable_replica(
+            idempotency_key,
+            &command_digest,
+            &replica_key,
+            &current_authorization,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .storage
+            .complete_durable_compare_and_swap(
+                idempotency_key,
+                &command_digest,
+                &[(replica_key, current_authorization)],
+            )
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Applied(first)
     );
 }
 
@@ -583,7 +655,7 @@ fn durable_scope_set_cas_hides_prepares_and_preserves_readable_state_on_conflict
     assert!(matches!(
         replica
             .storage
-            .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &next)
+            .prepare_durable_replica(idempotency_key, &command_digest, &next)
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Pending(_)
     ));
@@ -591,12 +663,28 @@ fn durable_scope_set_cas_hides_prepares_and_preserves_readable_state_on_conflict
     assert_eq!(replica.storage.read(next.scope_set_id()).unwrap(), None);
     coordinator
         .storage
-        .record_durable_replica(idempotency_key, &command_digest, &replica_digest)
+        .record_durable_replica(
+            idempotency_key,
+            &command_digest,
+            &replica_digest,
+            &replica_digest,
+        )
         .unwrap();
+    assert_eq!(
+        replica
+            .storage
+            .complete_durable_replica(idempotency_key, &command_digest)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Applied(next.clone())
+    );
     assert!(matches!(
         coordinator
             .storage
-            .complete_durable_compare_and_swap(idempotency_key, &command_digest, &[replica_digest],)
+            .complete_durable_compare_and_swap(
+                idempotency_key,
+                &command_digest,
+                &[(replica_digest.clone(), replica_digest)],
+            )
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Applied(_)
     ));
@@ -605,6 +693,13 @@ fn durable_scope_set_cas_hides_prepares_and_preserves_readable_state_on_conflict
         Some(next.clone())
     );
     assert_eq!(replica.storage.read(next.scope_set_id()).unwrap(), None);
+    assert_eq!(
+        replica
+            .storage
+            .prepare_durable_replica(idempotency_key, &command_digest, &next)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Applied(next.clone())
+    );
 
     let second = scope_set_for_actor(2, "actor.owner");
     let second_key = "request.scope-set.hidden-prepare.second";
@@ -628,6 +723,13 @@ fn durable_scope_set_cas_hides_prepares_and_preserves_readable_state_on_conflict
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Pending(_)
     ));
+    assert_eq!(
+        replica
+            .storage
+            .complete_durable_replica(second_key, &second_digest)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Applied(second.clone())
+    );
     assert_eq!(replica.storage.read(second.scope_set_id()).unwrap(), None);
 
     let conflict_coordinator =
@@ -686,14 +788,23 @@ fn durable_scope_set_cas_revalidates_expected_state_at_publication() {
         .unwrap();
     store
         .storage
-        .record_durable_replica(idempotency_key, &command_digest, &replica_digest)
+        .record_durable_replica(
+            idempotency_key,
+            &command_digest,
+            &replica_digest,
+            &replica_digest,
+        )
         .unwrap();
     store.storage.compare_and_swap(None, &concurrent).unwrap();
 
     assert_eq!(
         store
             .storage
-            .complete_durable_compare_and_swap(idempotency_key, &command_digest, &[replica_digest],)
+            .complete_durable_compare_and_swap(
+                idempotency_key,
+                &command_digest,
+                &[(replica_digest.clone(), replica_digest)],
+            )
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Conflict(Some(concurrent.clone()))
     );

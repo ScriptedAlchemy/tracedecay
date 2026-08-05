@@ -33,8 +33,9 @@ CREATE TABLE IF NOT EXISTS authorized_scope_set_transactions_v1 (
 ) STRICT;
 CREATE TABLE IF NOT EXISTS authorized_scope_set_replica_receipts_v1 (
     idempotency_key TEXT NOT NULL,
-    replica_digest TEXT NOT NULL,
-    PRIMARY KEY (idempotency_key, replica_digest),
+    replica_key TEXT NOT NULL,
+    authorization_digest TEXT NOT NULL,
+    PRIMARY KEY (idempotency_key, replica_key),
     FOREIGN KEY (idempotency_key)
         REFERENCES authorized_scope_set_transactions_v1(idempotency_key)
 ) STRICT;
@@ -324,9 +325,13 @@ impl AuthorizedScopeSetSqliteStorage {
         &self,
         idempotency_key: &str,
         command_digest: &ManifestDigest,
-        replica_digest: &ManifestDigest,
+        replica_key: &ManifestDigest,
+        authorization_digest: &ManifestDigest,
     ) -> Result<(), AuthorizedScopeSetStoreError> {
-        replica_digest
+        replica_key
+            .validate()
+            .map_err(|error| AuthorizedScopeSetStoreError::InvalidData(error.to_string()))?;
+        authorization_digest
             .validate()
             .map_err(|error| AuthorizedScopeSetStoreError::InvalidData(error.to_string()))?;
         let transaction = self.handle.begin_immediate()?;
@@ -343,13 +348,16 @@ impl AuthorizedScopeSetSqliteStorage {
             ));
         }
         transaction.execute(ExactSqlStatement::new(
-            "INSERT OR IGNORE INTO authorized_scope_set_replica_receipts_v1
-                 (idempotency_key, replica_digest)
-             VALUES (?1, ?2)"
+            "INSERT INTO authorized_scope_set_replica_receipts_v1
+                 (idempotency_key, replica_key, authorization_digest)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(idempotency_key, replica_key) DO UPDATE SET
+                 authorization_digest = excluded.authorization_digest"
                 .to_owned(),
             vec![
                 ExactSqlValue::Text(idempotency_key.to_owned()),
-                ExactSqlValue::Text(replica_digest.as_str().to_owned()),
+                ExactSqlValue::Text(replica_key.as_str().to_owned()),
+                ExactSqlValue::Text(authorization_digest.as_str().to_owned()),
             ],
         )?)?;
         transaction.commit()?;
@@ -360,15 +368,18 @@ impl AuthorizedScopeSetSqliteStorage {
         &self,
         idempotency_key: &str,
         command_digest: &ManifestDigest,
-        expected_replicas: &[ManifestDigest],
+        expected_replicas: &[(ManifestDigest, ManifestDigest)],
     ) -> Result<AuthorizedScopeSetDurableCasV1, AuthorizedScopeSetStoreError> {
         if expected_replicas.is_empty() {
             return Err(AuthorizedScopeSetStoreError::InvalidData(
                 "scope-set durable CAS requires at least one replica".to_owned(),
             ));
         }
-        for replica in expected_replicas {
-            replica
+        for (replica_key, authorization_digest) in expected_replicas {
+            replica_key
+                .validate()
+                .map_err(|error| AuthorizedScopeSetStoreError::InvalidData(error.to_string()))?;
+            authorization_digest
                 .validate()
                 .map_err(|error| AuthorizedScopeSetStoreError::InvalidData(error.to_string()))?;
         }
@@ -388,10 +399,10 @@ impl AuthorizedScopeSetSqliteStorage {
             AuthorizedScopeSetDurableCasV1::Pending(next) => {
                 let rows = transaction
                     .query(ExactSqlStatement::new(
-                        "SELECT replica_digest
+                        "SELECT replica_key, authorization_digest
                          FROM authorized_scope_set_replica_receipts_v1
                          WHERE idempotency_key = ?1
-                         ORDER BY replica_digest"
+                         ORDER BY replica_key"
                             .to_owned(),
                         vec![ExactSqlValue::Text(idempotency_key.to_owned())],
                     )?)?
@@ -399,10 +410,17 @@ impl AuthorizedScopeSetSqliteStorage {
                 let mut actual = rows
                     .into_iter()
                     .map(|row| match row.values.as_slice() {
-                        [ExactSqlValue::Text(digest)] => ManifestDigest::new(digest.clone())
-                            .map_err(|error| {
+                        [
+                            ExactSqlValue::Text(replica_key),
+                            ExactSqlValue::Text(authorization_digest),
+                        ] => Ok((
+                            ManifestDigest::new(replica_key.clone()).map_err(|error| {
                                 AuthorizedScopeSetStoreError::InvalidData(error.to_string())
-                            }),
+                            })?,
+                            ManifestDigest::new(authorization_digest.clone()).map_err(|error| {
+                                AuthorizedScopeSetStoreError::InvalidData(error.to_string())
+                            })?,
+                        )),
                         _ => Err(AuthorizedScopeSetStoreError::InvalidData(
                             "scope-set replica receipt has an invalid shape".to_owned(),
                         )),
@@ -411,7 +429,15 @@ impl AuthorizedScopeSetSqliteStorage {
                 actual.sort();
                 let mut expected = expected_replicas.to_vec();
                 expected.sort();
-                expected.dedup();
+                if expected
+                    .windows(2)
+                    .any(|pair| pair[0].0.as_str() == pair[1].0.as_str())
+                {
+                    transaction.rollback()?;
+                    return Err(AuthorizedScopeSetStoreError::InvalidData(
+                        "scope-set durable CAS has duplicate replica keys".to_owned(),
+                    ));
+                }
                 if actual != expected {
                     transaction.rollback()?;
                     return Ok(AuthorizedScopeSetDurableCasV1::Pending(next));
@@ -465,6 +491,36 @@ impl AuthorizedScopeSetSqliteStorage {
                 Ok(AuthorizedScopeSetDurableCasV1::Applied(next))
             }
         }
+    }
+
+    /// Mark a participant prepare terminal without making it readable.
+    ///
+    /// Canonical visibility belongs exclusively to the coordinator store.
+    pub fn complete_durable_replica(
+        &self,
+        idempotency_key: &str,
+        command_digest: &ManifestDigest,
+    ) -> Result<AuthorizedScopeSetDurableCasV1, AuthorizedScopeSetStoreError> {
+        let transaction = self.handle.begin_immediate()?;
+        let Some(state) = read_durable_cas(&transaction, idempotency_key, command_digest)? else {
+            transaction.rollback()?;
+            return Err(AuthorizedScopeSetStoreError::InvalidData(
+                "scope-set durable replica journal is missing".to_owned(),
+            ));
+        };
+        let AuthorizedScopeSetDurableCasV1::Pending(next) = state else {
+            transaction.rollback()?;
+            return Ok(state);
+        };
+        transaction.execute(ExactSqlStatement::new(
+            "UPDATE authorized_scope_set_transactions_v1
+             SET status = 'applied', result_payload = next_payload
+             WHERE idempotency_key = ?1 AND status = 'pending'"
+                .to_owned(),
+            vec![ExactSqlValue::Text(idempotency_key.to_owned())],
+        )?)?;
+        transaction.commit()?;
+        Ok(AuthorizedScopeSetDurableCasV1::Applied(next))
     }
 
     /// Remove a non-terminal replica prepare after the canonical coordinator
