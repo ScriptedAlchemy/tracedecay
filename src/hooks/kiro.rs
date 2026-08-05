@@ -163,7 +163,7 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
         // User-scope catch-up can ingest several changed Kiro sessions in one
         // bounded sweep, so let the reflector select all recent Kiro evidence
         // instead of falsely attributing the batch to the prompt's session id.
-        super::schedule_user_session_review("kiro", None);
+        super::schedule_user_session_review("kiro", None).await;
     }
     if let Some(guidance) = v2_guidance {
         if let Some(guidance) = guidance {

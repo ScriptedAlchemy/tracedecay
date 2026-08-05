@@ -282,7 +282,7 @@ pub async fn hook_prompt_submit() {
         && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
             .await
     {
-        super::schedule_user_session_review("claude", session_id.as_deref());
+        super::schedule_user_session_review("claude", session_id.as_deref()).await;
     }
     if let Some(root) = root.as_deref()
         && let Err(error) = super::daemon_hook_action(

@@ -211,7 +211,7 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         .await;
         if outcome.user_scope && outcome.messages_upserted > 0 {
             let session_id = event_session_id_from_json(&event);
-            super::schedule_user_session_review("cursor", session_id.as_deref());
+            super::schedule_user_session_review("cursor", session_id.as_deref()).await;
         }
         if let Some(guidance) = guidance {
             println!("{}", serde_json::json!({ "additional_context": guidance }));
@@ -229,7 +229,7 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
     .await;
     if outcome.user_scope && outcome.messages_upserted > 0 {
         let session_id = event_session_id_from_json(&event);
-        super::schedule_user_session_review("cursor", session_id.as_deref());
+        super::schedule_user_session_review("cursor", session_id.as_deref()).await;
     }
     println!("{}", serde_json::json!({}));
     0
@@ -391,19 +391,6 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
     None
 }
 
-/// Pure decision logic for Cursor `postToolUse` hook events.
-///
-/// Returns a soft `additional_context` payload (Cursor's documented
-/// `postToolUse` output shape) for exploration tools tracedecay can replace.
-/// Invalid or unrelated tool events fail open with no output. Session-level
-/// dedupe lives in [`cursor_post_tool_use_decision`]; this stays pure for
-/// tests.
-pub fn evaluate_cursor_post_tool_use(event_json: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let hint = decide_hint(&cursor_tool_hint_input(&parsed))?;
-    Some(format_cursor_post_tool_use_decision(&hint))
-}
-
 fn format_cursor_post_tool_use_decision(hint: &ToolHint) -> String {
     serde_json::json!({
         "additional_context": format_tool_hint(hint),
@@ -427,8 +414,8 @@ fn prepare_cursor_post_tool_use_hint(event_json: &str) -> Option<(String, ToolHi
     Some((hint_id, hint))
 }
 
-/// Impure `postToolUse` path: [`evaluate_cursor_post_tool_use`] plus
-/// per-session hint dedupe persisted under the project's `.tracedecay/` dir.
+/// Cursor `postToolUse` hint decision with per-session dedupe persisted under
+/// the project's `.tracedecay/` dir.
 pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
     let (hint_id, hint) = prepare_cursor_post_tool_use_hint(event_json)?;
     let hint = deduped_cursor_hint(event_json, &hint_id, hint)?;
@@ -589,19 +576,6 @@ fn cursor_event_cwd(event: &Value) -> Option<PathBuf> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-}
-
-/// Extracts the repo-relative paths edited in a Cursor `afterFileEdit` event.
-///
-/// Cursor sends an absolute `file_path` (plus an `edits` array). We strip the
-/// resolved `project_root` prefix and normalize to forward slashes so the hook
-/// can notify the daemon about only the changed files. Paths outside the project
-/// root are skipped.
-pub fn cursor_after_file_edit_rel_paths(event_json: &str, project_root: &Path) -> Vec<String> {
-    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
-        return Vec::new();
-    };
-    cursor_after_file_edit_rel_paths_from_parsed(&parsed, project_root)
 }
 
 fn cursor_after_file_edit_rel_paths_from_parsed(
@@ -908,7 +882,8 @@ fn cursor_after_file_edit_new_text(parsed: &Value) -> Option<String> {
 /// edits (too small, no function shape, non-source file) and events without an
 /// edit body fail open with no output. Session-level dedupe lives in the impure
 /// paths; this stays pure for tests.
-pub fn evaluate_cursor_after_file_edit(event_json: &str) -> Option<String> {
+#[cfg(test)]
+fn evaluate_cursor_after_file_edit(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let hint = decide_hint(&cursor_after_file_edit_hint_input(&parsed))?;
     Some(format_cursor_post_tool_use_decision(&hint))
@@ -930,11 +905,10 @@ fn prepare_cursor_after_file_edit_hint(event_json: &str) -> Option<(String, Tool
     Some((hint_id, hint))
 }
 
-/// Impure `afterFileEdit` redundancy path: [`evaluate_cursor_after_file_edit`]
-/// plus per-session hint dedupe persisted under the project's `.tracedecay/` dir.
+/// Cursor `afterFileEdit` redundancy decision with per-session hint dedupe.
 /// Shares [`deduped_cursor_hint`] with `postToolUse`, so the redundancy category
-/// surfaces at most once per Cursor session regardless of which surface first
-/// emits it.
+/// surfaces at most once per Cursor session regardless of which surface emits
+/// it first.
 pub fn cursor_after_file_edit_decision(event_json: &str) -> Option<String> {
     let (hint_id, hint) = prepare_cursor_after_file_edit_hint(event_json)?;
     let hint = deduped_cursor_hint(event_json, &hint_id, hint)?;
