@@ -311,6 +311,7 @@ pub struct McpServer {
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
     retained_project_graph_resolver: Option<RetainedProjectGraphResolver>,
+    branch_query_port: Option<Arc<dyn tracedecay_application::BranchQueryPort>>,
     #[cfg(any(test, feature = "test-transport"))]
     _host_admission_test_runtime:
         Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
@@ -690,6 +691,7 @@ impl McpServer {
             code_index_search_executor,
             code_index_search_authority,
             retained_project_graph_resolver,
+            branch_query_port,
             project_routes,
             application_invocation_executor,
             project_server_live,
@@ -886,6 +888,7 @@ impl McpServer {
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
             retained_project_graph_resolver,
+            branch_query_port,
             #[cfg(any(test, feature = "test-transport"))]
             _host_admission_test_runtime: host_admission_test_runtime,
             initialize_root_routing_enabled: AtomicBool::new(true),

@@ -367,6 +367,21 @@ pub(super) async fn dispatch_git_tools(
     args: Value,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
+    if matches!(
+        tool_name,
+        "tracedecay_branch_search" | "tracedecay_branch_diff"
+    ) {
+        let controls = tracedecay_application::BranchQueryControlsV1 {
+            deadline: options.application_deadline.clone(),
+            cancellation: options.application_cancellation.clone(),
+        };
+        return if tool_name == "tracedecay_branch_search" {
+            git::handle_branch_search(options.branch_query_port, args, controls).await
+        } else {
+            git::handle_branch_diff(options.branch_query_port, args, controls).await
+        };
+    }
+
     // Every git handler below performs unbounded gix work — tree walks,
     // revwalks, diffs, the branch-add index build — so a diverged or
     // pathological ref would hang the request. The admission layer carries a
@@ -385,8 +400,6 @@ pub(super) async fn dispatch_git_tools(
             "tracedecay_changelog" => git::handle_changelog(cg, args).await,
             "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
             "tracedecay_pr_context" => git::handle_pr_context(cg, args).await,
-            "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
-            "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
             "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
             _ => Err(unknown_tool_error(tool_name)),
         }

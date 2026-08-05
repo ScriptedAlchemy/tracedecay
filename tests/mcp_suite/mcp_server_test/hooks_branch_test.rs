@@ -530,7 +530,7 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
 }
 
 #[tokio::test]
-async fn cross_branch_tools_keep_using_explicit_branch_dbs_after_drift_reopen() {
+async fn direct_mcp_branch_query_does_not_open_an_explicit_branch_db() {
     let (_env, project, server) = setup_branch_drift_fixture().await;
 
     git(&project, &["checkout", "feature"]);
@@ -556,14 +556,14 @@ async fn cross_branch_tools_keep_using_explicit_branch_dbs_after_drift_reopen() 
     .await;
     assert!(
         main_search["error"].is_null(),
-        "explicit main branch search should not error after drift: {main_search}"
+        "typed tool result: {main_search}"
     );
     let main_search_text = main_search["result"]["content"][0]["text"]
         .as_str()
         .expect("branch_search should return text content");
     assert!(
-        !main_search_text.contains("feature_only"),
-        "explicit main branch search must ignore the live feature branch DB: {main_search_text}"
+        main_search_text.contains("graph_authority_unavailable"),
+        "a direct MCP server must not open a branch graph: {main_search_text}"
     );
 }
 

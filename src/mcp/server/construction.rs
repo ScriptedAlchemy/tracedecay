@@ -69,6 +69,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
+    pub(crate) branch_query_port: Option<Arc<dyn tracedecay_application::BranchQueryPort>>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
@@ -167,6 +168,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            branch_query_port: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
             project_server_live: None,
@@ -244,6 +246,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            branch_query_port: None,
             project_routes,
             application_invocation_executor: None,
             project_server_live: None,
@@ -300,6 +303,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            branch_query_port: None,
             project_routes,
             application_invocation_executor: None,
             project_server_live: None,
@@ -359,6 +363,14 @@ impl McpServerConstructionContext {
         resolver: super::RetainedProjectGraphResolver,
     ) -> Self {
         self.retained_project_graph_resolver = Some(resolver);
+        self
+    }
+
+    pub(crate) fn with_branch_query_port(
+        mut self,
+        port: Arc<dyn tracedecay_application::BranchQueryPort>,
+    ) -> Self {
+        self.branch_query_port = Some(port);
         self
     }
 

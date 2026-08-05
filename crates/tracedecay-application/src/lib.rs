@@ -8,6 +8,7 @@
 pub mod advisory;
 pub mod api_migration;
 pub mod authorization;
+pub mod branch_query;
 pub mod clock;
 pub mod configuration;
 pub mod context;
@@ -60,6 +61,14 @@ pub use authorization::{
     AuthorizationAdmission, AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome,
     AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,
     SourceAuthorizationSnapshot,
+};
+pub use branch_query::{
+    BRANCH_DIFF_CAPABILITY_ID_V1, BRANCH_QUERY_DEFAULT_LIMIT_V1, BRANCH_QUERY_MAX_LIMIT_V1,
+    BRANCH_SEARCH_CAPABILITY_ID_V1, BranchChangedSymbolV1, BranchDiffRequestV1, BranchDiffResultV1,
+    BranchDiffSummaryV1, BranchDiffSymbolV1, BranchGraphGenerationV1, BranchQueryControlsV1,
+    BranchQueryFuture, BranchQueryOutcomeV1, BranchQueryPartialReasonV1, BranchQueryPort,
+    BranchQueryRequestV1, BranchQueryResultV1, BranchQueryUnavailableReasonV1, BranchSearchMatchV1,
+    BranchSearchRequestV1, BranchSearchResultV1, BranchSnapshotIdentityV1,
 };
 pub use clock::now_micros;
 pub use configuration::{

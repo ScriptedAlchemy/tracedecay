@@ -56,59 +56,27 @@ pub(crate) fn handle_branch_list(cg: &TraceDecay, args: &Value) -> ToolResult {
 }
 
 /// Handles `tracedecay_branch_search` tool calls.
-pub(crate) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let branch =
-        args.get("branch")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: branch".to_string(),
-            })?;
-    let query =
-        args.get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: query".to_string(),
-            })?;
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(10, |v| v.min(500) as usize);
-
-    let branch_cg = TraceDecay::open_branch_with_registered_configuration(
-        cg.project_root(),
-        branch,
-        crate::tracedecay::TraceDecayOpenOptions::default(),
-        cg.store_layout().clone(),
-        cg.configuration_runtime().registered_database(),
-        cg.profile_database().clone(),
-        cg.store_runtime_registry().clone(),
+pub(crate) async fn handle_branch_search(
+    port: Option<&dyn tracedecay_application::BranchQueryPort>,
+    args: Value,
+    controls: tracedecay_application::BranchQueryControlsV1,
+) -> Result<ToolResult> {
+    let request: tracedecay_application::BranchSearchRequestV1 =
+        serde_json::from_value(args.clone()).map_err(|error| TraceDecayError::Config {
+            message: format!("invalid tracedecay_branch_search request: {error}"),
+        })?;
+    request
+        .validate()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid tracedecay_branch_search request: {error}"),
+        })?;
+    let outcome = invoke_branch_query(
+        port,
+        tracedecay_application::BranchQueryRequestV1::Search(request),
+        controls,
     )
-    .await?;
-    let results = branch_cg.search(query, limit).await?;
-
-    let items: Vec<Value> = results
-        .iter()
-        .map(|r| {
-            json!({
-                "id": r.node.id,
-                "name": r.node.name,
-                "kind": r.node.kind.as_str(),
-                "file": r.node.file_path,
-                "line": r.node.start_line,
-                "signature": r.node.signature,
-                "score": r.score,
-                "branch": branch,
-            })
-        })
-        .collect();
-
-    let items = json!(items);
-    Ok(generic_tool_result(
-        Some(cg.project_root()),
-        &args,
-        &items,
-        vec![],
-    ))
+    .await;
+    render_branch_query_outcome(&args, outcome)
 }
 
 /// Handles `tracedecay_branch_diff` tool calls.
@@ -116,202 +84,123 @@ pub(crate) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result
 /// Compares code graphs between two branches. For each symbol present in
 /// either branch, reports whether it was added, removed, or changed
 /// (signature differs).
-pub(crate) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let project_root = cg.project_root();
-    let tracedecay_dir = &cg.store_layout().data_root;
-
-    // Resolve base and head branches
-    let meta = crate::branch_meta::load_branch_meta(tracedecay_dir).ok_or_else(|| {
-        TraceDecayError::Config {
-            message: "no branch tracking configured — run `tracedecay branch add` first"
-                .to_string(),
-        }
-    })?;
-
-    let base_name = args
-        .get("base")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&meta.default_branch);
-    let head_name = args
-        .get("head")
-        .and_then(|v| v.as_str())
-        .or_else(|| cg.active_branch())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "cannot determine head branch — specify it explicitly".to_string(),
+pub(crate) async fn handle_branch_diff(
+    port: Option<&dyn tracedecay_application::BranchQueryPort>,
+    args: Value,
+    controls: tracedecay_application::BranchQueryControlsV1,
+) -> Result<ToolResult> {
+    let request: tracedecay_application::BranchDiffRequestV1 = serde_json::from_value(args.clone())
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid tracedecay_branch_diff request: {error}"),
         })?;
-
-    if base_name == head_name {
-        // pr_context returns empty arrays for the same-ref case; do the same here
-        // so callers get a consistent shape and can simply check the summary.
-        let result = json!({
-            "base": base_name,
-            "head": head_name,
-            "note": format!("base and head are the same branch: '{base_name}'"),
-            "summary": { "added": 0, "removed": 0, "changed": 0 },
-            "added": [],
-            "removed": [],
-            "changed": [],
-        });
-        return Ok(generic_tool_result(
-            Some(cg.project_root()),
-            &args,
-            &result,
-            vec![],
-        ));
-    }
-
-    let file_filter = args.get("file").and_then(|v| v.as_str());
-    let kind_filter = args.get("kind").and_then(|v| v.as_str());
-
-    let base_cg = TraceDecay::open_branch_with_registered_configuration(
-        project_root,
-        base_name,
-        crate::tracedecay::TraceDecayOpenOptions::default(),
-        cg.store_layout().clone(),
-        cg.configuration_runtime().registered_database(),
-        cg.profile_database().clone(),
-        cg.store_runtime_registry().clone(),
+    request
+        .validate()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid tracedecay_branch_diff request: {error}"),
+        })?;
+    let outcome = invoke_branch_query(
+        port,
+        tracedecay_application::BranchQueryRequestV1::Diff(request),
+        controls,
     )
-    .await?;
-    let head_cg = if cg.active_branch() == Some(head_name) && !cg.is_fallback() {
-        None // use the already-open cg
-    } else {
-        Some(
-            TraceDecay::open_branch_with_registered_configuration(
-                project_root,
-                head_name,
-                crate::tracedecay::TraceDecayOpenOptions::default(),
-                cg.store_layout().clone(),
-                cg.configuration_runtime().registered_database(),
-                cg.profile_database().clone(),
-                cg.store_runtime_registry().clone(),
-            )
-            .await?,
-        )
-    };
-    let head_ref = head_cg.as_ref().unwrap_or(cg);
+    .await;
+    render_branch_query_outcome(&args, outcome)
+}
 
-    let base_files = base_cg.get_all_files().await?;
-    let head_files = head_ref.get_all_files().await?;
-
-    // Build file sets for filtering — only compare files present in either branch
-    let base_file_set: HashSet<&str> = base_files.iter().map(|f| f.path.as_str()).collect();
-    let head_file_set: HashSet<&str> = head_files.iter().map(|f| f.path.as_str()).collect();
-    let all_files: HashSet<&str> = base_file_set.union(&head_file_set).copied().collect();
-
-    let mut added = Vec::new();
-    let mut removed = Vec::new();
-    let mut changed = Vec::new();
-    let mut touched = Vec::new();
-
-    for file_path in &all_files {
-        if let Some(filter) = file_filter
-            && !file_path.starts_with(filter)
-            && *file_path != filter
-        {
-            continue;
-        }
-
-        let base_nodes = base_cg.get_nodes_by_file(file_path).await?;
-        let head_nodes = head_ref.get_nodes_by_file(file_path).await?;
-
-        // Index by qualified_name for matching
-        let base_map: HashMap<&str, &crate::types::Node> = base_nodes
-            .iter()
-            .map(|n| (n.qualified_name.as_str(), n))
-            .collect();
-        let head_map: HashMap<&str, &crate::types::Node> = head_nodes
-            .iter()
-            .map(|n| (n.qualified_name.as_str(), n))
-            .collect();
-
-        for (qn, node) in &head_map {
-            if let Some(filter) = kind_filter
-                && node.kind.as_str() != filter
-            {
-                continue;
-            }
-            if !base_map.contains_key(qn) {
-                added.push(json!({
-                    "name": node.name,
-                    "qualified_name": node.qualified_name,
-                    "kind": node.kind.as_str(),
-                    "file": node.file_path,
-                    "line": node.start_line,
-                    "signature": node.signature,
-                }));
-                touched.push(node.file_path.clone());
-            }
-        }
-
-        for (qn, node) in &base_map {
-            if let Some(filter) = kind_filter
-                && node.kind.as_str() != filter
-            {
-                continue;
-            }
-            if !head_map.contains_key(qn) {
-                removed.push(json!({
-                    "name": node.name,
-                    "qualified_name": node.qualified_name,
-                    "kind": node.kind.as_str(),
-                    "file": node.file_path,
-                    "line": node.start_line,
-                    "signature": node.signature,
-                }));
-                touched.push(node.file_path.clone());
-            }
-        }
-
-        // Changed: in both but signature differs
-        for (qn, head_node) in &head_map {
-            if let Some(filter) = kind_filter
-                && head_node.kind.as_str() != filter
-            {
-                continue;
-            }
-            if let Some(base_node) = base_map.get(qn)
-                && base_node.signature != head_node.signature
-            {
-                changed.push(json!({
-                    "name": head_node.name,
-                    "qualified_name": head_node.qualified_name,
-                    "kind": head_node.kind.as_str(),
-                    "file": head_node.file_path,
-                    "line": head_node.start_line,
-                    "base_signature": base_node.signature,
-                    "head_signature": head_node.signature,
-                }));
-                touched.push(head_node.file_path.clone());
-            }
-        }
-    }
-
-    let result = json!({
-        "base": base_name,
-        "head": head_name,
-        "summary": {
-            "added": added.len(),
-            "removed": removed.len(),
-            "changed": changed.len(),
+async fn invoke_branch_query(
+    port: Option<&dyn tracedecay_application::BranchQueryPort>,
+    request: tracedecay_application::BranchQueryRequestV1,
+    controls: tracedecay_application::BranchQueryControlsV1,
+) -> tracedecay_application::BranchQueryOutcomeV1 {
+    match port {
+        Some(port) => port.execute(request, controls).await,
+        None => tracedecay_application::BranchQueryOutcomeV1::Unavailable {
+            reason:
+                tracedecay_application::BranchQueryUnavailableReasonV1::GraphAuthorityUnavailable,
         },
-        "added": added,
-        "removed": removed,
-        "changed": changed,
-    });
+    }
+}
 
-    let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
-    Ok(generic_tool_result(
-        Some(cg.project_root()),
-        &args,
-        &result,
-        touched_files,
-    ))
+fn render_branch_query_outcome(
+    args: &Value,
+    outcome: tracedecay_application::BranchQueryOutcomeV1,
+) -> Result<ToolResult> {
+    let touched = touched_files_from_branch_outcome(&outcome);
+    let semantic_failure = !matches!(
+        outcome,
+        tracedecay_application::BranchQueryOutcomeV1::Complete { .. }
+            | tracedecay_application::BranchQueryOutcomeV1::Partial { .. }
+    );
+    let failure_message = semantic_failure.then(|| branch_query_failure_message(&outcome));
+    let payload = serde_json::to_value(&outcome)?;
+    let result = generic_tool_result(None, args, &payload, touched);
+    Ok(if let Some(message) = failure_message {
+        result
+            .with_semantic_error(true)
+            .with_failure_message(message)
+    } else {
+        result
+    })
+}
+
+fn touched_files_from_branch_outcome(
+    outcome: &tracedecay_application::BranchQueryOutcomeV1,
+) -> Vec<String> {
+    let result = match outcome {
+        tracedecay_application::BranchQueryOutcomeV1::Complete { result }
+        | tracedecay_application::BranchQueryOutcomeV1::Partial { result, .. } => result,
+        _ => return Vec::new(),
+    };
+    let tracedecay_application::BranchQueryResultV1::Diff(diff) = result else {
+        return Vec::new();
+    };
+    unique_file_paths(
+        diff.added
+            .iter()
+            .map(|symbol| symbol.file.as_str())
+            .chain(diff.removed.iter().map(|symbol| symbol.file.as_str()))
+            .chain(diff.changed.iter().map(|symbol| symbol.file.as_str())),
+    )
+}
+
+fn branch_query_failure_message(outcome: &tracedecay_application::BranchQueryOutcomeV1) -> String {
+    match outcome {
+        tracedecay_application::BranchQueryOutcomeV1::Denied => {
+            "branch query was not authorized".to_owned()
+        }
+        tracedecay_application::BranchQueryOutcomeV1::Cancelled => {
+            "branch query was cancelled".to_owned()
+        }
+        tracedecay_application::BranchQueryOutcomeV1::TimedOut => {
+            "branch query exceeded its deadline".to_owned()
+        }
+        tracedecay_application::BranchQueryOutcomeV1::Unavailable { reason } => {
+            format!("branch query is unavailable: {reason:?}")
+        }
+        tracedecay_application::BranchQueryOutcomeV1::Complete { .. }
+        | tracedecay_application::BranchQueryOutcomeV1::Partial { .. } => String::new(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DenyingPort {
+        invoked: AtomicBool,
+    }
+
+    impl tracedecay_application::BranchQueryPort for DenyingPort {
+        fn execute<'a>(
+            &'a self,
+            _request: tracedecay_application::BranchQueryRequestV1,
+            _controls: tracedecay_application::BranchQueryControlsV1,
+        ) -> tracedecay_application::BranchQueryFuture<'a> {
+            self.invoked.store(true, Ordering::Release);
+            Box::pin(async { tracedecay_application::BranchQueryOutcomeV1::Denied })
+        }
+    }
 
     #[test]
     fn admin_branch_add_requires_a_nonempty_branch_name() {
@@ -339,6 +228,43 @@ mod tests {
         assert_eq!(
             admin_branch_add_outcome_name(&crate::branch::BranchAddOutcome::Deferred),
             "deferred"
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_branch_query_port_is_typed_unavailable() {
+        let result = handle_branch_search(
+            None,
+            json!({"branch": "main", "query": "needle"}),
+            tracedecay_application::BranchQueryControlsV1::default(),
+        )
+        .await
+        .expect("typed outcome");
+        assert_eq!(result.semantic_error(), Some(true));
+        assert!(
+            result
+                .failure_message()
+                .is_some_and(|message| message.contains("GraphAuthorityUnavailable"))
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_search_invokes_only_the_injected_application_port() {
+        let port = DenyingPort {
+            invoked: AtomicBool::new(false),
+        };
+        let result = handle_branch_search(
+            Some(&port),
+            json!({"branch": "main", "query": "needle"}),
+            tracedecay_application::BranchQueryControlsV1::default(),
+        )
+        .await
+        .expect("typed denial");
+        assert!(port.invoked.load(Ordering::Acquire));
+        assert_eq!(result.semantic_error(), Some(true));
+        assert_eq!(
+            result.failure_message(),
+            Some("branch query was not authorized")
         );
     }
 }

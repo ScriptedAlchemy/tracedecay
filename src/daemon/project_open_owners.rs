@@ -2924,6 +2924,8 @@ fn production_owner_capabilities()
         "capability.application.git.history",
         "capability.application.git.blame",
         "capability.application.git.hunks",
+        tracedecay_application::BRANCH_SEARCH_CAPABILITY_ID_V1,
+        tracedecay_application::BRANCH_DIFF_CAPABILITY_ID_V1,
         LSP_WORKSPACE_CAPABILITY_ID_V1,
         "capability.application.source-edit.ast-grep-rewrite",
         "capability.application.source-edit.insert-at",
@@ -2994,6 +2996,8 @@ mod tests {
             "capability.application.git.history",
             "capability.application.git.blame",
             "capability.application.git.hunks",
+            tracedecay_application::BRANCH_SEARCH_CAPABILITY_ID_V1,
+            tracedecay_application::BRANCH_DIFF_CAPABILITY_ID_V1,
         ] {
             let capability = CapabilityId::new(capability).expect("Git read capability");
             assert!(
