@@ -17,8 +17,9 @@ use crate::runtime::{
 };
 
 use super::failure::{
-    ProviderRunOutcome, TranscriptCatchUpFailure, classify_transcript_ingest_failure,
-    claude_catch_up_failure, warn_transcript_catch_up_failure,
+    ProviderRunOutcome, TranscriptCatchUpFailure, cancelled_claude_provider_outcome,
+    cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
+    warn_transcript_catch_up_failure,
 };
 
 pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
@@ -107,6 +108,11 @@ impl<'a> ProjectProviderRun<'a> {
                     remaining = remaining.saturating_sub(progress.bytes_consumed);
                 }
                 Err(error) => {
+                    if let Some(cancelled) =
+                        cancelled_provider_outcome(Some(&error), self.cancellation)
+                    {
+                        return cancelled;
+                    }
                     let failure = warn_transcript_catch_up_failure(
                         "codex",
                         "observation",
@@ -149,15 +155,21 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
             ),
-            Err(error) => ProviderRunOutcome::failed(
-                warn_transcript_catch_up_failure(
-                    "kiro",
-                    "observation",
-                    &error,
-                    "project Kiro observation catch-up failed",
-                ),
-                0,
-            ),
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
+                ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "kiro",
+                        "observation",
+                        &error,
+                        "project Kiro observation catch-up failed",
+                    ),
+                    0,
+                )
+            }
         }
     }
 
@@ -187,6 +199,10 @@ impl<'a> ProjectProviderRun<'a> {
                 run
             }
             Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
                 let mut run = ProviderRunOutcome::failed(
                     warn_transcript_catch_up_failure(
                         "kimi",
@@ -247,6 +263,10 @@ impl<'a> ProjectProviderRun<'a> {
                 run
             }
             Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
                 let mut run = ProviderRunOutcome::failed(
                     warn_transcript_catch_up_failure(
                         "opencode",
@@ -303,6 +323,10 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
             ),
             Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
                 let failure =
                     classify_transcript_ingest_failure(self.candidate.id(), "observation", &error);
                 tracing::warn!(
@@ -335,15 +359,21 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.bytes_consumed,
                 outcome.deferred || outcome.bytes_consumed > self.max_new_bytes,
             ),
-            Err(error) => ProviderRunOutcome::failed(
-                warn_transcript_catch_up_failure(
-                    "vibe",
-                    "observation",
-                    &error,
-                    "project Vibe observation catch-up failed",
-                ),
-                0,
-            ),
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
+                ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "vibe",
+                        "observation",
+                        &error,
+                        "project Vibe observation catch-up failed",
+                    ),
+                    0,
+                )
+            }
         }
     }
 
@@ -371,6 +401,11 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome
             }
             Err(error) => {
+                if let Some(cancelled) =
+                    cancelled_claude_provider_outcome(&error, self.cancellation)
+                {
+                    return cancelled;
+                }
                 let failure = claude_catch_up_failure("observation", &error);
                 tracing::warn!(
                     reason_code = failure.reason_code,
@@ -430,12 +465,18 @@ impl<'a> ProjectProviderRun<'a> {
                     stats.source_deferred || stats.bytes_consumed > remaining,
                 ));
             }
-            Err(error) => outcome.add_failure(warn_transcript_catch_up_failure(
-                "cursor",
-                "observation",
-                &error,
-                "project Cursor observation catch-up failed",
-            )),
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(Some(&error), self.cancellation)
+                {
+                    return cancelled;
+                }
+                outcome.add_failure(warn_transcript_catch_up_failure(
+                    "cursor",
+                    "observation",
+                    &error,
+                    "project Cursor observation catch-up failed",
+                ));
+            }
         }
         outcome
     }

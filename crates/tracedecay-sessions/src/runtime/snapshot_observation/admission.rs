@@ -223,6 +223,7 @@ impl SnapshotAdmissionRunner {
                 record.session_id(),
                 &source_identity,
                 scope,
+                cancellation,
             )
             .await?;
             ensure_snapshot_admission_active(provider, cancellation)?;
@@ -242,6 +243,7 @@ impl SnapshotAdmissionRunner {
                 record.session_id(),
                 &source_identity,
                 scope,
+                cancellation,
             )
             .await?;
             ensure_snapshot_admission_active(provider, cancellation)?;
@@ -260,21 +262,23 @@ impl SnapshotAdmissionRunner {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     ensure_snapshot_admission_active(provider, cancellation)?;
-                    if snapshot_range_was_committed(
+                    let committed = snapshot_range_was_committed(
                         facade,
                         &source_identity,
                         scope,
                         generation,
                         range,
                     )
-                    .await
-                    {
+                    .await;
+                    ensure_snapshot_admission_active(provider, cancellation)?;
+                    if committed {
                         cursors.remove(record.session_id());
                         continue;
                     }
                     return Err(host_admission_error(provider, error));
                 }
             };
+            ensure_snapshot_admission_active(provider, cancellation)?;
             match outcome {
                 CaptureObservationOutcome::Persisted { outcome, .. }
                 | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
@@ -344,12 +348,7 @@ fn ensure_snapshot_admission_active(
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<()> {
     if cancellation.is_cancelled() {
-        return Err(TranscriptIngestError::NonDurableRecord {
-            provider,
-            offset: 0,
-            end_offset: 0,
-            reason: "admission_cancelled",
-        });
+        return Err(TranscriptIngestError::Cancelled { provider });
     }
     Ok(())
 }
@@ -363,6 +362,7 @@ async fn session_cursor(
     session_id: &str,
     source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
+    cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<Option<ObservationSourceCursorV1>> {
     if let Some(cursor) = cursors.get(session_id) {
         return Ok(cursor.clone());
@@ -370,7 +370,14 @@ async fn session_cursor(
     let cursor = facade
         .get_source_cursor(source, scope)
         .await
-        .map_err(|outcome| host_admission_error(provider, outcome))?;
+        .map_err(|outcome| {
+            if cancellation.is_cancelled() {
+                TranscriptIngestError::Cancelled { provider }
+            } else {
+                host_admission_error(provider, outcome)
+            }
+        })?;
+    ensure_snapshot_admission_active(provider, cancellation)?;
     cursors.insert(session_id.to_owned(), cursor.clone());
     Ok(cursor)
 }
@@ -454,7 +461,14 @@ pub async fn advance_snapshot_coverage_maybe(
         .advance_non_durable_source_cursor(advance, cancellation.clone())
         .await
         .map(|_| ())
-        .map_err(|outcome| host_admission_error(provider, outcome))
+        .map_err(|outcome| {
+            if cancellation.is_cancelled() {
+                TranscriptIngestError::Cancelled { provider }
+            } else {
+                host_admission_error(provider, outcome)
+            }
+        })?;
+    ensure_snapshot_admission_active(provider, cancellation)
 }
 
 pub async fn snapshot_range_was_committed(
@@ -481,7 +495,151 @@ pub fn snapshot_cursor_covers_range(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use crate::admission::HostAdmission;
+    use crate::admission::test_support::{MemoryHostAdmission, PanicHostAdmission};
+
     use super::*;
+
+    #[derive(Clone)]
+    struct TestSnapshotRecord {
+        session_id: String,
+        native_record_id: String,
+        payload: Vec<u8>,
+    }
+
+    impl SnapshotAdmissionRecord for TestSnapshotRecord {
+        fn provider(&self) -> &'static str {
+            "test"
+        }
+
+        fn session_id(&self) -> &str {
+            &self.session_id
+        }
+
+        fn native_record_id(&self) -> &str {
+            &self.native_record_id
+        }
+
+        fn order(&self) -> u64 {
+            0
+        }
+
+        fn payload(&self) -> &[u8] {
+            &self.payload
+        }
+    }
+
+    fn test_record() -> TestSnapshotRecord {
+        TestSnapshotRecord {
+            session_id: "session-1".to_owned(),
+            native_record_id: "message-1".to_owned(),
+            payload: br#"{
+                "provider": "test",
+                "session_id": "session-1",
+                "message_id": "message-1",
+                "role": "user",
+                "ordinal": 0,
+                "text": "retry me"
+            }"#
+            .to_vec(),
+        }
+    }
+
+    fn discovery(paths: Vec<PathBuf>) -> FileDiscoveryReport {
+        FileDiscoveryReport {
+            paths,
+            truncated: None,
+            skipped_oversized_entries: 0,
+            bytes_charged: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_snapshot_sweep_returns_control_error_before_admission() {
+        let cancellation = ObservationCancellation::default();
+        cancellation.cancel();
+
+        let error = capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+            &PanicHostAdmission,
+            "test",
+            ObservationScopeV1::Profile,
+            &cancellation,
+            None,
+            || discovery(Vec::new()),
+            |_| Ok(0),
+            |_| Ok(None),
+        )
+        .await
+        .expect_err("pre-cancellation must terminate the sweep");
+
+        assert!(matches!(
+            error,
+            TranscriptIngestError::Cancelled { provider: "test" }
+        ));
+    }
+
+    #[tokio::test]
+    async fn mid_sweep_cancellation_advances_no_coverage_and_retry_commits() {
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        admission.cancel_on_next_cursor_read(cancellation.clone());
+        let path = PathBuf::from("session-1.snapshot");
+        let generation = ObservationSourceGenerationV1::new(1).unwrap();
+
+        let error = capture_snapshot_observations(
+            &admission,
+            "test",
+            ObservationScopeV1::Profile,
+            &cancellation,
+            None,
+            || discovery(vec![path.clone()]),
+            |_| Ok(1),
+            |_| Ok(Some((generation, vec![test_record()]))),
+        )
+        .await
+        .expect_err("mid-sweep cancellation must terminate the sweep");
+
+        assert!(matches!(
+            error,
+            TranscriptIngestError::Cancelled { provider: "test" }
+        ));
+        assert!(admission.observations().is_empty());
+        let source = snapshot_source_identity("test", "session-1").unwrap();
+        assert!(
+            admission
+                .get_source_cursor(&source, &ObservationScopeV1::Profile)
+                .await
+                .unwrap()
+                .is_none(),
+            "cancellation must not advance source coverage"
+        );
+        assert!(
+            admission
+                .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://test/v1",)
+                .await
+                .unwrap()
+                .is_none(),
+            "cancellation must not publish provider coverage"
+        );
+
+        let retry = capture_snapshot_observations(
+            &admission,
+            "test",
+            ObservationScopeV1::Profile,
+            &ObservationCancellation::default(),
+            None,
+            || discovery(vec![path]),
+            |_| Ok(1),
+            |_| Ok(Some((generation, vec![test_record()]))),
+        )
+        .await
+        .expect("retry after cancellation must succeed");
+
+        assert_eq!(retry.stats.messages_upserted, 1);
+        assert_eq!(admission.observations().len(), 1);
+    }
 
     #[test]
     fn snapshot_budget_is_aggregate_and_reports_deferral() {

@@ -211,13 +211,21 @@ impl ActiveAdmission<'_> {
         self.admission
             .advance_non_durable_source_cursor(advance, self.cancellation.clone())
             .await
-            .map_err(|outcome| TranscriptIngestError::NonDurableRecord {
-                provider: self.provider,
-                offset: checkpoint.offset,
-                end_offset: checkpoint.end_offset,
-                reason: outcome
-                    .reason_code
-                    .unwrap_or("non_durable_cursor_advance_failed"),
+            .map_err(|outcome| {
+                if self.cancellation.is_cancelled() {
+                    TranscriptIngestError::Cancelled {
+                        provider: self.provider,
+                    }
+                } else {
+                    TranscriptIngestError::NonDurableRecord {
+                        provider: self.provider,
+                        offset: checkpoint.offset,
+                        end_offset: checkpoint.end_offset,
+                        reason: outcome
+                            .reason_code
+                            .unwrap_or("non_durable_cursor_advance_failed"),
+                    }
+                }
             })?;
         *expected_cursor =
             Some(self.cursor_at(checkpoint.end_offset, checkpoint.resume_fingerprint)?);
@@ -312,12 +320,20 @@ impl ActiveAdmission<'_> {
                 )
                 .await
             }
-            Err(outcome) => Err(TranscriptIngestError::NonDurableRecord {
-                provider: self.provider,
-                offset: frame.checkpoint.offset,
-                end_offset: frame.checkpoint.end_offset,
-                reason: outcome.reason_code.unwrap_or("host_admission_incomplete"),
-            }),
+            Err(outcome) => {
+                if self.cancellation.is_cancelled() {
+                    Err(TranscriptIngestError::Cancelled {
+                        provider: self.provider,
+                    })
+                } else {
+                    Err(TranscriptIngestError::NonDurableRecord {
+                        provider: self.provider,
+                        offset: frame.checkpoint.offset,
+                        end_offset: frame.checkpoint.end_offset,
+                        reason: outcome.reason_code.unwrap_or("host_admission_incomplete"),
+                    })
+                }
+            }
         }
     }
 }
@@ -344,15 +360,21 @@ pub(super) async fn admit_jsonl_observations<State>(
         cancellation,
     } = request;
     if cancellation.is_cancelled() {
-        return Ok(JsonlObservationAdmissionProgress {
-            bytes_consumed: 0,
-            source_deferred: true,
-        });
+        return Err(TranscriptIngestError::Cancelled { provider });
     }
     let mut expected_cursor = admission
         .get_source_cursor(&source, &scope)
         .await
-        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })?;
+        .map_err(|_| {
+            if cancellation.is_cancelled() {
+                TranscriptIngestError::Cancelled { provider }
+            } else {
+                TranscriptIngestError::InvalidFrameState { provider }
+            }
+        })?;
+    if cancellation.is_cancelled() {
+        return Err(TranscriptIngestError::Cancelled { provider });
+    }
     let previous = expected_cursor
         .as_ref()
         .map_or(StoredCursor::default(), |cursor| StoredCursor {
@@ -375,7 +397,7 @@ pub(super) async fn admit_jsonl_observations<State>(
         MAX_JSONL_RECORD_BYTES,
         resume_state,
     )?;
-    let mut progress = JsonlObservationAdmissionProgress {
+    let progress = JsonlObservationAdmissionProgress {
         bytes_consumed: raw.read_through.saturating_sub(raw.start_offset),
         source_deferred: raw.deferred.is_some(),
     };
@@ -395,8 +417,7 @@ pub(super) async fn admit_jsonl_observations<State>(
         "transcript admission batch started"
     );
     if cancellation.is_cancelled() {
-        progress.source_deferred = true;
-        return Ok(progress);
+        return Err(TranscriptIngestError::Cancelled { provider });
     }
     let generation = ObservationSourceGenerationV1::new(raw.new_cursor.file_id)?;
     let mut state = initialize(JsonlObservationScan {
@@ -419,8 +440,7 @@ pub(super) async fn admit_jsonl_observations<State>(
 
     for (frame_index, frame) in raw.frames.into_iter().enumerate() {
         if active.cancellation.is_cancelled() {
-            progress.source_deferred = true;
-            break;
+            return Err(TranscriptIngestError::Cancelled { provider });
         }
         if frame_index % 256 == 0 {
             tracing::trace!(
@@ -439,8 +459,7 @@ pub(super) async fn admit_jsonl_observations<State>(
             .is_some_and(|skipped| skipped.offset < frame.offset)
         {
             if active.cancellation.is_cancelled() {
-                progress.source_deferred = true;
-                break;
+                return Err(TranscriptIngestError::Cancelled { provider });
             }
             let skipped = skipped
                 .next()
@@ -459,8 +478,7 @@ pub(super) async fn admit_jsonl_observations<State>(
                 .await?;
         }
         if active.cancellation.is_cancelled() {
-            progress.source_deferred = true;
-            break;
+            return Err(TranscriptIngestError::Cancelled { provider });
         }
 
         let range =
@@ -510,6 +528,8 @@ pub(super) async fn admit_jsonl_observations<State>(
                 )
                 .await?;
         }
+    } else {
+        return Err(TranscriptIngestError::Cancelled { provider });
     }
     tracing::debug!(
         event = "transcript_admission_batch",

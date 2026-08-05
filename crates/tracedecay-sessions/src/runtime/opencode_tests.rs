@@ -501,11 +501,8 @@ async fn cancellation_during_admission_is_typed_and_persists_no_payloads() {
 
     assert!(matches!(
         error,
-        TranscriptIngestError::NonDurableRecord {
-            provider: "opencode",
-            offset: 0,
-            end_offset: 0,
-            reason: "admission_cancelled",
+        TranscriptIngestError::Cancelled {
+            provider: "opencode"
         }
     ));
     assert!(admission.observations().is_empty());
