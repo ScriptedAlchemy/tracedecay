@@ -1913,7 +1913,7 @@ mod tests {
         assert!(supported_object_format("sha256"));
         assert!(!supported_object_format("sha512"));
 
-        let (directory, _assembler, runner) = repository_fixture();
+        let (_directory, _assembler, runner) = repository_fixture();
         let before = runner.index_bytes().expect("index before probes");
         fs::write(runner.index_lock_path(), b"external owner").expect("external lock");
         assert!(matches!(
