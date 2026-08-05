@@ -6291,6 +6291,7 @@ dependencies = [
  "getrandom 0.2.17",
  "gix",
  "glob",
+ "hmac 0.13.0",
  "hex",
  "ignore",
  "regex",

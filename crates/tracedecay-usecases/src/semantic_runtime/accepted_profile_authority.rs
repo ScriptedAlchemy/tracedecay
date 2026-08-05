@@ -2,16 +2,19 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use thiserror::Error;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, VectorGenerationIdV1, canonical_sha256};
+use zeroize::Zeroizing;
 
 use super::SemanticRuntimeFuture;
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalRuntimeCompatibilityV1,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_search_eval::semantic_native::SemanticNativeStageResultV1;
 use tracedecay_search_eval::{
     CandidateWorkloadV1, DirectEvaluationReportV1, direct_evaluated_profile_material,
@@ -22,12 +25,30 @@ const ACTIVATION_WORKLOAD_JSON: &str = include_str!(
 );
 const VALIDATION_RECEIPT_DOMAIN: &str =
     "tracedecay.semantic.accepted-profile-validation-receipt.v1";
+const VALIDATION_RECEIPT_KEY_BYTES: usize = 32;
 
+// Retained receipts do not carry a fallback signer. Replacing this singleton
+// would invalidate every accepted profile, so its database lifetime is
+// enforced rather than allowing an unjournaled key rotation.
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profiles_v1 (
     profile_digest TEXT PRIMARY KEY NOT NULL,
     authority_json TEXT NOT NULL
-);";
+);
+CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_v1 (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    key_material BLOB NOT NULL CHECK (length(key_material) = 32)
+);
+CREATE TRIGGER IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_no_update_v1
+BEFORE UPDATE ON configuration_semantic_accepted_profile_receipt_key_v1
+BEGIN
+    SELECT RAISE(ABORT, 'accepted profile receipt key is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_no_delete_v1
+BEFORE DELETE ON configuration_semantic_accepted_profile_receipt_key_v1
+BEGIN
+    SELECT RAISE(ABORT, 'accepted profile receipt key is immutable');
+END;";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SemanticAcceptedProfileAuthorityErrorV1 {
@@ -94,24 +115,22 @@ impl RegisteredSemanticAcceptedProfileAuthorityV1 {
         let evaluation_repository_root = evaluation_repository_root
             .canonicalize()
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?;
-        let receipt = validate_publication_authority(
+        let evidence = validate_publication_authority(
             &evaluation_repository_root,
             &report,
             &accepted_profile,
             &runtime,
             &publication_identity,
             &freshness_vector_digest,
-        )?
-        .into_receipt()?;
-        let stored = StoredAcceptedProfileAuthorityV1 {
+        )?;
+        let stored = StoredAcceptedProfileAuthorityPayloadV1 {
             report,
             accepted_profile: accepted_profile.clone(),
             runtime,
             publication_identity,
             freshness_vector_digest,
-            receipt,
         };
-        let json = serde_json::to_string(&stored)
+        let payload_json = serde_json::to_string(&stored)
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
         self.ensure_schema().await?;
         let transaction = self
@@ -119,6 +138,15 @@ impl RegisteredSemanticAcceptedProfileAuthorityV1 {
             .begin_write_transaction()
             .await
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?;
+        let key = ensure_validation_receipt_key(&transaction).await?;
+        let receipt =
+            evidence.into_receipt(&key, accepted_profile.profile_digest(), &payload_json)?;
+        let json = serde_json::to_string(&StoredAcceptedProfileAuthorityEnvelopeV1 {
+            schema_version: 1,
+            payload_json,
+            receipt,
+        })
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
         let affected = transaction
             .execute(
                 "INSERT INTO configuration_semantic_accepted_profiles_v1 (
@@ -180,9 +208,21 @@ impl RegisteredSemanticAcceptedProfileAuthorityV1 {
         let json: String = row
             .get(0)
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
-        let stored: StoredAcceptedProfileAuthorityV1 = serde_json::from_str(&json)
+        let key = read_validation_receipt_key(&snapshot)
+            .await?
+            .ok_or(SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+        let envelope: StoredAcceptedProfileAuthorityEnvelopeV1 = serde_json::from_str(&json)
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
-        stored.validate(profile_digest)
+        if envelope.schema_version != 1 {
+            return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+        }
+        envelope
+            .receipt
+            .verify_authenticity(&key, profile_digest, &envelope.payload_json)?;
+        let stored: StoredAcceptedProfileAuthorityPayloadV1 =
+            serde_json::from_str(&envelope.payload_json)
+                .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+        stored.validate(profile_digest, &envelope.receipt.bindings)
     }
 }
 
@@ -200,19 +240,27 @@ impl SemanticAcceptedProfileAuthorityPortV1 for RegisteredSemanticAcceptedProfil
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredAcceptedProfileAuthorityV1 {
+struct StoredAcceptedProfileAuthorityEnvelopeV1 {
+    schema_version: u32,
+    payload_json: String,
+    receipt: AcceptedProfileValidationReceiptV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredAcceptedProfileAuthorityPayloadV1 {
     report: DirectEvaluationReportV1,
     accepted_profile: AcceptedRetrievalProfileV1,
     runtime: RetrievalRuntimeCompatibilityV1,
     publication_identity: SemanticEvaluationPublicationIdentityV1,
     freshness_vector_digest: ManifestDigest,
-    receipt: AcceptedProfileValidationReceiptV1,
 }
 
-impl StoredAcceptedProfileAuthorityV1 {
+impl StoredAcceptedProfileAuthorityPayloadV1 {
     fn validate(
         self,
         expected_digest: &ManifestDigest,
+        expected_bindings: &AcceptedProfileValidationBindingsV1,
     ) -> Result<SemanticAcceptedProfileAuthorityRecordV1, SemanticAcceptedProfileAuthorityErrorV1>
     {
         if self.accepted_profile.profile_digest() != expected_digest {
@@ -224,7 +272,7 @@ impl StoredAcceptedProfileAuthorityV1 {
             &self.runtime,
             &self.publication_identity,
             &self.freshness_vector_digest,
-            &self.receipt,
+            expected_bindings,
         )?;
         Ok(SemanticAcceptedProfileAuthorityRecordV1 {
             accepted_profile: self.accepted_profile,
@@ -241,8 +289,11 @@ struct ValidatedActivationEvidenceV1 {
 impl ValidatedActivationEvidenceV1 {
     fn into_receipt(
         self,
+        key: &[u8],
+        profile_digest: &ManifestDigest,
+        payload_json: &str,
     ) -> Result<AcceptedProfileValidationReceiptV1, SemanticAcceptedProfileAuthorityErrorV1> {
-        AcceptedProfileValidationReceiptV1::from_validated(self)
+        AcceptedProfileValidationReceiptV1::from_validated(self, key, profile_digest, payload_json)
     }
 }
 
@@ -307,7 +358,7 @@ fn validate_retained_authority(
     runtime: &RetrievalRuntimeCompatibilityV1,
     publication_identity: &SemanticEvaluationPublicationIdentityV1,
     freshness_vector_digest: &ManifestDigest,
-    receipt: &AcceptedProfileValidationReceiptV1,
+    expected_bindings: &AcceptedProfileValidationBindingsV1,
 ) -> Result<(), SemanticAcceptedProfileAuthorityErrorV1> {
     let evaluation = PassingRetrievalEvaluationV1::from_report(
         report,
@@ -332,7 +383,10 @@ fn validate_retained_authority(
         freshness_vector_digest,
         &evaluation,
     )?;
-    receipt.verify(&bindings)
+    if expected_bindings != &bindings {
+        return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -363,9 +417,13 @@ struct AcceptedProfileValidationReceiptV1 {
 impl AcceptedProfileValidationReceiptV1 {
     fn from_validated(
         evidence: ValidatedActivationEvidenceV1,
+        key: &[u8],
+        profile_digest: &ManifestDigest,
+        payload_json: &str,
     ) -> Result<Self, SemanticAcceptedProfileAuthorityErrorV1> {
         let bindings = evidence.bindings;
-        let authentication_digest = receipt_authentication_digest(&bindings)?;
+        let authentication_digest =
+            receipt_authentication_digest(key, profile_digest, payload_json, &bindings)?;
         Ok(Self {
             schema_version: 1,
             bindings,
@@ -373,16 +431,24 @@ impl AcceptedProfileValidationReceiptV1 {
         })
     }
 
-    fn verify(
+    fn verify_authenticity(
         &self,
-        expected: &AcceptedProfileValidationBindingsV1,
+        key: &[u8],
+        expected_profile_digest: &ManifestDigest,
+        payload_json: &str,
     ) -> Result<(), SemanticAcceptedProfileAuthorityErrorV1> {
         self.authentication_digest
             .validate()
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
         if self.schema_version != 1
-            || &self.bindings != expected
-            || self.authentication_digest != receipt_authentication_digest(&self.bindings)?
+            || &self.bindings.accepted_profile_digest != expected_profile_digest
+            || self.authentication_digest
+                != receipt_authentication_digest(
+                    key,
+                    expected_profile_digest,
+                    payload_json,
+                    &self.bindings,
+                )?
         {
             return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
         }
@@ -437,10 +503,82 @@ fn receipt_bindings(
 }
 
 fn receipt_authentication_digest(
+    key: &[u8],
+    profile_digest: &ManifestDigest,
+    payload_json: &str,
     bindings: &AcceptedProfileValidationBindingsV1,
 ) -> Result<ManifestDigest, SemanticAcceptedProfileAuthorityErrorV1> {
-    canonical_sha256(&(VALIDATION_RECEIPT_DOMAIN, bindings))
-        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)
+    let authenticated = serde_json::to_vec(&(
+        VALIDATION_RECEIPT_DOMAIN,
+        profile_digest,
+        payload_json,
+        bindings,
+    ))
+    .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key)
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+    mac.update(&authenticated);
+    ManifestDigest::new(format!(
+        "sha256:{}",
+        hex::encode(mac.finalize().into_bytes())
+    ))
+    .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)
+}
+
+async fn read_validation_receipt_key(
+    executor: &impl QueryExecutor,
+) -> Result<Option<Zeroizing<Vec<u8>>>, SemanticAcceptedProfileAuthorityErrorV1> {
+    let mut rows = executor
+        .query(
+            "SELECT key_material
+             FROM configuration_semantic_accepted_profile_receipt_key_v1
+             WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?
+    else {
+        return Ok(None);
+    };
+    let material = Zeroizing::new(
+        row.get::<Vec<u8>>(0)
+            .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?,
+    );
+    if material.len() != VALIDATION_RECEIPT_KEY_BYTES
+        || rows
+            .next()
+            .await
+            .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?
+            .is_some()
+    {
+        return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+    }
+    Ok(Some(material))
+}
+
+async fn ensure_validation_receipt_key(
+    executor: &impl Executor,
+) -> Result<Zeroizing<Vec<u8>>, SemanticAcceptedProfileAuthorityErrorV1> {
+    if let Some(material) = read_validation_receipt_key(executor).await? {
+        return Ok(material);
+    }
+    let mut material = Zeroizing::new(vec![0_u8; VALIDATION_RECEIPT_KEY_BYTES]);
+    getrandom::getrandom(material.as_mut_slice())
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?;
+    executor
+        .execute(
+            "INSERT INTO configuration_semantic_accepted_profile_receipt_key_v1 (
+                singleton, key_material
+             ) VALUES (1, ?1)",
+            params![material.as_slice()],
+        )
+        .await
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?;
+    Ok(material)
 }
 
 fn manifest_digest(value: &str) -> Result<ManifestDigest, SemanticAcceptedProfileAuthorityErrorV1> {
@@ -537,6 +675,7 @@ fn validate_runtime_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
@@ -572,8 +711,12 @@ mod tests {
 
     fn retained_receipt(
         bindings: AcceptedProfileValidationBindingsV1,
+        key: &[u8],
+        profile_digest: &ManifestDigest,
+        payload_json: &str,
     ) -> AcceptedProfileValidationReceiptV1 {
-        let authentication_digest = receipt_authentication_digest(&bindings).unwrap();
+        let authentication_digest =
+            receipt_authentication_digest(key, profile_digest, payload_json, &bindings).unwrap();
         AcceptedProfileValidationReceiptV1 {
             schema_version: 1,
             bindings,
@@ -583,6 +726,8 @@ mod tests {
 
     #[test]
     fn retained_receipt_resolution_survives_source_move_delete_and_change() {
+        let key = [0x19; VALIDATION_RECEIPT_KEY_BYTES];
+        let payload_json = r#"{"retained":"evaluation-evidence"}"#;
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("publishing-worktree");
         let moved = directory.path().join("moved-worktree");
@@ -590,43 +735,143 @@ mod tests {
         std::fs::write(source.join("fixture.rs"), "pub fn original() {}\n").unwrap();
 
         let bindings = retained_bindings();
-        let receipt = retained_receipt(bindings.clone());
+        let profile_digest = bindings.accepted_profile_digest.clone();
+        let receipt = retained_receipt(bindings, &key, &profile_digest, payload_json);
         let retained_json = serde_json::to_string(&receipt).unwrap();
         assert!(!retained_json.contains(source.to_string_lossy().as_ref()));
-        receipt.verify(&bindings).unwrap();
+        receipt
+            .verify_authenticity(&key, &profile_digest, payload_json)
+            .unwrap();
 
         std::fs::rename(&source, &moved).unwrap();
-        receipt.verify(&bindings).unwrap();
+        receipt
+            .verify_authenticity(&key, &profile_digest, payload_json)
+            .unwrap();
         std::fs::write(moved.join("fixture.rs"), "pub fn changed() {}\n").unwrap();
-        receipt.verify(&bindings).unwrap();
+        receipt
+            .verify_authenticity(&key, &profile_digest, payload_json)
+            .unwrap();
         std::fs::remove_dir_all(&moved).unwrap();
-        receipt.verify(&bindings).unwrap();
+        receipt
+            .verify_authenticity(&key, &profile_digest, payload_json)
+            .unwrap();
     }
 
     #[test]
-    fn retained_receipt_rejects_tampered_receipt_report_and_profile_bindings() {
+    fn retained_receipt_rejects_wrong_secret_profile_payload_and_bindings() {
+        let key = [0x2a; VALIDATION_RECEIPT_KEY_BYTES];
+        let wrong_key = [0x3b; VALIDATION_RECEIPT_KEY_BYTES];
+        let payload_json = r#"{"retained":"raw-evaluation-evidence"}"#;
         let bindings = retained_bindings();
-        let receipt = retained_receipt(bindings.clone());
+        let profile_digest = bindings.accepted_profile_digest.clone();
+        let receipt = retained_receipt(bindings, &key, &profile_digest, payload_json);
 
         let mut tampered_receipt = receipt.clone();
         tampered_receipt.authentication_digest = digest('c');
         assert_eq!(
-            tampered_receipt.verify(&bindings),
+            tampered_receipt.verify_authenticity(&key, &profile_digest, payload_json),
             Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
         );
 
-        let mut tampered_report = bindings.clone();
-        tampered_report.report_digest = digest('d');
+        let mut tampered_bindings = receipt.clone();
+        tampered_bindings.bindings.report_digest = digest('d');
         assert_eq!(
-            receipt.verify(&tampered_report),
+            tampered_bindings.verify_authenticity(&key, &profile_digest, payload_json),
             Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
         );
 
-        let mut tampered_profile = bindings;
-        tampered_profile.accepted_profile_digest = digest('e');
         assert_eq!(
-            receipt.verify(&tampered_profile),
+            receipt.verify_authenticity(&wrong_key, &profile_digest, payload_json),
             Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
         );
+        assert_eq!(
+            receipt.verify_authenticity(&key, &digest('e'), payload_json),
+            Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
+        );
+        assert_eq!(
+            receipt.verify_authenticity(
+                &key,
+                &profile_digest,
+                r#"{"retained":"changed-evaluation-evidence"}"#,
+            ),
+            Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_resolve_rejects_self_consistent_public_forgery_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = RegisteredGlobalDbTestRuntime::profile(directory.path().join("profile"))
+            .await
+            .unwrap();
+        let database = runtime.profile_database_arc();
+        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::open(Arc::clone(&database))
+            .await
+            .unwrap();
+
+        let transaction = database.begin_write_transaction().await.unwrap();
+        let original_key = ensure_validation_receipt_key(&transaction).await.unwrap();
+        let original_key = original_key.to_vec();
+        transaction.commit().await.unwrap();
+
+        let bindings = retained_bindings();
+        let profile_digest = bindings.accepted_profile_digest.clone();
+        let payload_json = r#"{"status":"PASS","raw_outputs":[]}"#.to_owned();
+        let legacy_public_digest =
+            canonical_sha256(&(VALIDATION_RECEIPT_DOMAIN, &bindings)).unwrap();
+        let forged = StoredAcceptedProfileAuthorityEnvelopeV1 {
+            schema_version: 1,
+            payload_json,
+            receipt: AcceptedProfileValidationReceiptV1 {
+                schema_version: 1,
+                bindings,
+                authentication_digest: legacy_public_digest,
+            },
+        };
+        let forged_json = serde_json::to_string(&forged).unwrap();
+        database
+            .writer_connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO configuration_semantic_accepted_profiles_v1 (
+                    profile_digest, authority_json
+                 ) VALUES (?1, ?2)",
+                params![profile_digest.as_str(), forged_json],
+            )
+            .await
+            .unwrap();
+        drop(authority);
+        drop(database);
+
+        let remounted = runtime.remount_profile_database_for_test().await.unwrap();
+        let snapshot = remounted.read_snapshot().await.unwrap();
+        let remounted_key = read_validation_receipt_key(&snapshot)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(remounted_key.as_slice(), original_key.as_slice());
+        drop(snapshot);
+
+        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::open(Arc::clone(&remounted))
+            .await
+            .unwrap();
+        assert_eq!(
+            authority.resolve_record(&profile_digest).await,
+            Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
+        );
+
+        let transaction = remounted.begin_write_transaction().await.unwrap();
+        assert!(
+            transaction
+                .execute(
+                    "UPDATE configuration_semantic_accepted_profile_receipt_key_v1
+                     SET key_material = ?1
+                     WHERE singleton = 1",
+                    params![vec![0x7c_u8; VALIDATION_RECEIPT_KEY_BYTES]],
+                )
+                .await
+                .is_err()
+        );
+        transaction.rollback().await.unwrap();
     }
 }
