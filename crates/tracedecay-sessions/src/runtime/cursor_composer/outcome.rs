@@ -43,10 +43,7 @@ impl CursorComposerSweepOutcome {
     }
 
     pub(in crate::runtime) fn jsonl_skip_session_ids(&self) -> HashSet<String> {
-        self.owned_session_ids
-            .union(&self.projected_session_ids)
-            .cloned()
-            .collect()
+        self.owned_session_ids.clone()
     }
 
     pub(super) fn terminated(

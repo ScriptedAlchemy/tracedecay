@@ -126,7 +126,7 @@ fn write_cursor_jsonl(home: &std::path::Path, project: &std::path::Path, session
     std::fs::create_dir_all(&transcript_dir).expect("Cursor transcript directory");
     std::fs::write(
         transcript_dir.join(format!("{session_id}.jsonl")),
-        r#"{"role":"user","message":{"content":[{"type":"text","text":"JSONL fallback"}]}}"#,
+        "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"JSONL fallback\"}]}}\n",
     )
     .expect("Cursor JSONL transcript");
 }
@@ -334,6 +334,45 @@ async fn queued_cursor_projections_are_reported_and_keep_the_pass_deferred() {
     assert_eq!(outcome.messages_upserted, QUEUED_PROJECTIONS as u64);
     assert!(outcome.deferred_by_byte_cap);
     assert_eq!(admission.pending_projection_count(), 0);
+}
+
+#[tokio::test]
+async fn queued_jsonl_projection_does_not_hide_new_message_from_the_same_session() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let home = tempfile::tempdir().expect("Cursor home tempdir");
+    let project_id = tracedecay_domain::ProjectId::new("project.cursor-jsonl-append").expect("id");
+    let admission = MemoryHostAdmission::default();
+    queue_cursor_projection(&admission, &project_id, "queued-jsonl-session").await;
+    write_cursor_jsonl(home.path(), project.path(), "queued-jsonl-session");
+
+    let composer = CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .expect("projection-only Composer sweep");
+    assert_eq!(composer.sessions_upserted, 1);
+    assert!(composer.owned_session_ids.is_empty());
+
+    let jsonl = crate::runtime::with_transcript_source_home(
+        home.path().to_path_buf(),
+        crate::runtime::cursor::try_ingest_cursor_project_sweep_capped(
+            project.path(),
+            &admission,
+            project_id,
+            None,
+            composer.jsonl_skip_session_ids(),
+        ),
+    )
+    .await
+    .expect("new JSONL content remains eligible");
+
+    assert_eq!(jsonl.sessions_upserted, 1);
+    assert_eq!(jsonl.messages_upserted, 1);
 }
 
 #[tokio::test]
