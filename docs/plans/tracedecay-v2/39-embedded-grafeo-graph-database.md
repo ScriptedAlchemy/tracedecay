@@ -753,9 +753,12 @@ Classify every hit. Retained hits must be relational fixtures/docs that describe
 
 Delete SQLite graph/vector fixtures and protocols, graph branch cloning, V1/V2 graph and memory migrations, backfills, compatibility readers, feature flags, aliases, and unused dependencies. Remove a dependency with its last production caller.
 
-- [ ] **Step 3: Verify documentation authority**
+- [x] **Step 3: Verify documentation authority**
 
-Update the V2 plan set to name Grafeo and `tracedecay-graph-db`; remove petgraph, sidecar, branch-fact, dual-write, old graph-SQL, and migration language from active plans.
+The active V2 plan set names Grafeo and `tracedecay-graph-db` as the sole graph
+authority. It contains no instruction to introduce a second graph library,
+sidecar, branch-fact store, dual-write, old graph-SQL authority, or data-format
+migration path.
 
 - [ ] **Step 4: Verify and commit**
 

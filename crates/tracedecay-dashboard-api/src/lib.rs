@@ -102,7 +102,6 @@ mod lcm_api;
 #[path = "../../tracedecay-sessions/src/runtime/lcm/dashboard_fixes_tests.rs"]
 mod lcm_dashboard_fixes_tests;
 mod lcm_queries;
-mod lcm_service;
 mod loom_api;
 mod memory_analysis;
 mod memory_api;
@@ -1310,20 +1309,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/plugins/hermes-lcm/session/{session_id}",
             get(lcm_api::session),
         )
-        .route("/api/plugins/hermes-lcm/node/{node_id}", get(lcm_api::node))
         .route("/api/plugins/hermes-lcm/timeline", get(lcm_api::timeline))
-        .route(
-            "/api/plugins/hermes-lcm/compression",
-            get(lcm_api::compression),
-        )
-        .route(
-            "/api/plugins/hermes-lcm/payloads/health",
-            get(lcm_api::payloads_health),
-        )
-        .route(
-            "/api/plugins/hermes-lcm/payloads/gc",
-            get(lcm_api::payloads_gc_preview).post(lcm_api::payloads_gc_apply),
-        )
         // Code graph explorer API (project-local nodes / edges / files tables)
         .route("/api/plugins/graph/overview", get(graph_api::overview))
         .route("/api/plugins/graph/search", get(graph_api::search))
@@ -1476,7 +1462,8 @@ async fn project_scoped_api_gateway(
     let selected = match runtime.selected_project_state(&project_id).await {
         Ok(selected) => selected,
         Err(err) if projects::is_registry_unavailable_error(&err) => {
-            return projects::registry_unavailable_response(&err).into_response();
+            return projects::registry_unavailable_response(&runtime.active_state(), &err)
+                .into_response();
         }
         Err(err) => {
             return (
@@ -1703,8 +1690,6 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "features": {
             "memory": true,
             "lcm": has_lcm,
-            "lcm_gc": has_lcm,
-            "lcm_payload_health": has_lcm,
             "graph": true,
             "analytics": true,
             "feedback": state.feedback_status_reader.is_some(),
@@ -2184,6 +2169,218 @@ mod authority_tests {
                 "project-scoped gateway route for /api/{tail} should resolve"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn graph_overview_returns_the_canonical_dashboard_envelope() {
+        let fixture = DashboardStateFixture::open("project.dashboard-graph-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/graph/overview")
+                    .body(Body::empty())
+                    .expect("graph overview request"),
+            )
+            .await
+            .expect("graph overview response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("graph overview body");
+        let value: Value = serde_json::from_slice(&body).expect("graph overview json");
+
+        assert_eq!(
+            value["schema_revision"],
+            crate::read_model::DASHBOARD_SCHEMA_REVISION_V1
+        );
+        assert_eq!(value["domain_state"], "ready");
+        assert_eq!(value["authorization"]["outcome"], "authorized");
+        assert!(value["payload"]["totals"].is_object());
+    }
+
+    #[tokio::test]
+    async fn missing_project_registry_is_an_enveloped_unknown_read() {
+        let fixture = DashboardStateFixture::open("project.dashboard-registry-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects")
+                    .body(Body::empty())
+                    .expect("project registry request"),
+            )
+            .await
+            .expect("project registry response");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the daemon answered; source unavailability belongs in the envelope"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("project registry body");
+        let value: Value = serde_json::from_slice(&body).expect("project registry json");
+
+        assert_eq!(value["schema_revision"], 1);
+        assert_eq!(value["domain_state"], "unknown");
+        assert_eq!(value["payload"]["status"], "missing_registry");
+        assert_eq!(value["coverage"]["completeness"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn memory_status_returns_the_canonical_dashboard_envelope() {
+        let fixture = DashboardStateFixture::open("project.dashboard-memory-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/holographic/status")
+                    .body(Body::empty())
+                    .expect("memory status request"),
+            )
+            .await
+            .expect("memory status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("memory status body");
+        let value: Value = serde_json::from_slice(&body).expect("memory status json");
+
+        assert_eq!(value["schema_revision"], 1);
+        assert_eq!(value["domain_state"], "ready");
+        assert_eq!(value["coverage"]["completeness"], "complete");
+        assert!(value["payload"]["memory"].is_object());
+    }
+
+    #[tokio::test]
+    async fn lcm_browse_reads_are_typed_unavailable_until_temporal_hydration_mounts() {
+        let fixture = DashboardStateFixture::open("project.dashboard-lcm-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        for uri in [
+            "/api/plugins/hermes-lcm/overview",
+            "/api/plugins/hermes-lcm/search?q=needle",
+            "/api/plugins/hermes-lcm/session/session-missing",
+            "/api/plugins/hermes-lcm/timeline",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("LCM browse request"),
+                )
+                .await
+                .expect("LCM browse response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("LCM browse body");
+            let value: Value = serde_json::from_slice(&body).expect("LCM browse json");
+
+            assert_eq!(value["schema_revision"], 1, "{uri}");
+            assert_eq!(value["domain_state"], "unknown", "{uri}");
+            assert!(value["payload"].is_null(), "{uri}");
+            assert_eq!(
+                value["coverage"]["omission_reasons"],
+                serde_json::json!(["lcm_temporal_retrieval_not_mounted"]),
+                "{uri}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_analytics_is_an_enveloped_unknown_read() {
+        let fixture = DashboardStateFixture::open("project.dashboard-analytics-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/analytics/overview")
+                    .body(Body::empty())
+                    .expect("analytics overview request"),
+            )
+            .await
+            .expect("analytics overview response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("analytics overview body");
+        let value: Value = serde_json::from_slice(&body).expect("analytics overview json");
+
+        assert_eq!(value["schema_revision"], 1);
+        assert_eq!(value["domain_state"], "unknown");
+        assert_eq!(value["payload"]["available"], false);
+        assert_eq!(
+            value["coverage"]["omission_reasons"],
+            serde_json::json!(["analytics_sources_unavailable"])
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_analytics_detail_reads_are_enveloped_unknown_states() {
+        let fixture = DashboardStateFixture::open("project.dashboard-analytics-detail").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        for uri in [
+            "/api/plugins/analytics/hints",
+            "/api/plugins/analytics/usage",
+            "/api/plugins/analytics/underused",
+            "/api/plugins/analytics/diagnostics",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("analytics detail request"),
+                )
+                .await
+                .expect("analytics detail response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("analytics detail body");
+            let value: Value = serde_json::from_slice(&body).expect("analytics detail json");
+
+            assert_eq!(value["schema_revision"], 1, "{uri}");
+            assert_eq!(value["domain_state"], "unknown", "{uri}");
+            assert_eq!(value["payload"]["available"], false, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_savings_is_an_enveloped_unknown_read() {
+        let fixture = DashboardStateFixture::open("project.dashboard-savings-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/savings/overview")
+                    .body(Body::empty())
+                    .expect("savings overview request"),
+            )
+            .await
+            .expect("savings overview response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("savings overview body");
+        let value: Value = serde_json::from_slice(&body).expect("savings overview json");
+
+        assert_eq!(value["schema_revision"], 1);
+        assert_eq!(value["domain_state"], "unknown");
+        assert_eq!(value["payload"]["savings"]["available"], false);
+        assert_eq!(value["payload"]["sessions"]["available"], false);
+        assert_eq!(value["payload"]["turns"]["available"], false);
     }
 
     #[test]

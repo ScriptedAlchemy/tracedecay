@@ -6,7 +6,7 @@ import {
   InspectorPanel,
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { CenteredState, LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
@@ -14,8 +14,8 @@ import { VirtualList } from '../../ui/VirtualList.tsx';
 import { cn } from '../../ui/cn';
 import { elideStart, splitCount } from '../../ui/format.ts';
 import { ambiguityNote, annotateHubs, describeSubgraph, displayName } from './hubs.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
-import type { LegacyResult } from '../../data/query/legacy.ts';
+import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
+import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
@@ -51,17 +51,18 @@ const BASE = '/api/plugins/graph';
  * symbol search, node inspector. The virtualized list beside the canvas is
  * its accessible equivalent. */
 export function CodePage() {
-  const overview = useLegacy(
+  const overview = useEnvelope(
     ['graph', 'overview'],
     `${BASE}/overview`,
     GraphOverviewPayloadV1Schema,
   );
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');
-  const search = useLegacy(
+  const search = useEnvelope(
     ['graph', 'search', submitted],
     `${BASE}/search?q=${encodeURIComponent(submitted)}&limit=100`,
     GraphSearchPayloadV1Schema,
+    { enabled: submitted !== '' },
   );
   const [selected, setSelected] = useState<TraceFocus | null>(null);
   // The TRACE drill-in (plan 11b). It is a state of THIS page, not a route:
@@ -69,14 +70,15 @@ export function CodePage() {
   // change between them would break the "one navigable space" model. Escape
   // and the back control return to the spine.
   const [traced, setTraced] = useState<TraceFocus | null>(null);
-  const subgraph = useLegacy(
+  const subgraph = useEnvelope(
     ['graph', 'subgraph', selected?.id ?? ''],
     `${BASE}/subgraph${selected ? `?node_id=${encodeURIComponent(selected.id)}` : ''}`,
     GraphSubgraphPayloadV1Schema,
   );
   const canvasNodes = useMemo(() => {
-    if (subgraph.data?.outcome !== 'ok') return [];
-    return subgraph.data.data.nodes.map((node) => ({
+    const payload = envelopePayload(subgraph.data);
+    if (!payload) return [];
+    return payload.nodes.map((node) => ({
       id: node.id,
       label: node.name ?? node.qualified_name ?? node.id,
       kind: node.kind,
@@ -84,8 +86,9 @@ export function CodePage() {
     }));
   }, [subgraph.data]);
   const canvasEdges = useMemo(() => {
-    if (subgraph.data?.outcome !== 'ok') return [];
-    return subgraph.data.data.edges.map((edge) => ({
+    const payload = envelopePayload(subgraph.data);
+    if (!payload) return [];
+    return payload.edges.map((edge) => ({
       source: edge.source,
       target: edge.target,
       kind: edge.kind,
@@ -94,17 +97,16 @@ export function CodePage() {
   const activationRef = useRef(new ActivationField({ halfLifeMs: 3200 }));
   // Search results strike their nodes: querying the graph makes it fire.
   useEffect(() => {
-    if (search.data?.outcome !== 'ok') return;
-    const hits = (search.data.data.results ?? []).map((node) => node.id);
+    const payload = envelopePayload(search.data);
+    if (!payload) return;
+    const hits = (payload.results ?? []).map((node) => node.id);
     if (hits.length) activationRef.current.strike(hits, 0.9);
   }, [search.data]);
   const selectFromCanvas = useCallback(
     (id: string | null) => {
       if (id == null) return setSelected(null);
-      const node =
-        subgraph.data?.outcome === 'ok'
-          ? subgraph.data.data.nodes.find((candidate) => candidate.id === id)
-          : undefined;
+      const payload = envelopePayload(subgraph.data);
+      const node = payload?.nodes.find((candidate) => candidate.id === id);
       if (node) setSelected(node);
     },
     [subgraph.data],
@@ -127,12 +129,20 @@ export function CodePage() {
             hint="press / to focus, Esc to clear"
             submitted={submitted}
           />
-          <LegacyBoundary title="Graph" pending={overview.isPending} result={overview.data}>
-            {(data) => {
-              // Every total here is measured: `LegacyBoundary` runs this only
-              // for `outcome: 'ok'`, and renders every other reading — including
-              // the 500 this route raises on a failed query — as the failure it
-              // was. So a zero here is a real zero and is printed as one.
+          <ReadSection
+            title="Graph"
+            chrome="panel"
+            className="border-0"
+            state={envelopeReadState(overview.isPending, overview.data, {
+              loading: 'reading the code graph overview',
+              transport: 'the code graph overview could not be read',
+            })}
+          >
+            {(envelope) => {
+              const data = envelope.payload;
+              // Every total here is measured: `ReadSection` runs this only after
+              // envelope acceptance; transport and schema refusals render as
+              // blocked states instead. So a zero here is a real zero.
               const kinds = (data.nodes_by_kind ?? [])
                 .slice(0, 12)
                 .map((k) => ({ label: k.kind, value: k.count, hint: 'nodes' }));
@@ -180,7 +190,7 @@ export function CodePage() {
                 </div>
               );
             }}
-          </LegacyBoundary>
+          </ReadSection>
           {/* Connectedness is the spine's subject; layering is the other
            * structural reading of the same graph, and it belongs beside the
            * totals rather than inside the canvas — it is a property of the
@@ -228,9 +238,7 @@ export function CodePage() {
                 selectedId={selected?.id ?? null}
                 onSelect={selectFromCanvas}
                 activation={activationRef.current}
-                totalNodes={
-                  overview.data?.outcome === 'ok' ? overview.data.data.totals.nodes : null
-                }
+                totalNodes={envelopePayload(overview.data)?.totals.nodes ?? null}
                 seedLabel={selected ? displayName(selected) : null}
               />
             </div>
@@ -367,7 +375,7 @@ function GraphSlicePane({
   seedLabel,
 }: {
   pending: boolean;
-  result: LegacyResult<GraphSubgraphPayloadV1> | undefined;
+  result: EnvelopeResult<GraphSubgraphPayloadV1> | undefined;
   nodes: ComponentProps<typeof GraphCanvas>['nodes'];
   edges: ComponentProps<typeof GraphCanvas>['edges'];
   selectedId: string | null;
@@ -377,8 +385,17 @@ function GraphSlicePane({
   seedLabel: string | null;
 }) {
   return (
-    <LegacyBoundary title="Code graph" pending={pending} result={result}>
-      {(payload) => {
+    <ReadSection
+      title="Code graph"
+      chrome="panel"
+      className="border-0"
+      state={envelopeReadState(pending, result, {
+        loading: 'reading the graph slice',
+        transport: 'the graph slice could not be read',
+      })}
+    >
+      {(envelope) => {
+        const payload = envelope.payload;
         if (payload.nodes.length === 0) {
           // An answered read that returned no symbols, said as the measurement
           // it is. The slice route reports its own failures with a non-2xx the
@@ -419,7 +436,7 @@ function GraphSlicePane({
           </>
         );
       }}
-    </LegacyBoundary>
+    </ReadSection>
   );
 }
 
@@ -435,14 +452,23 @@ function SymbolMatches({
   onSelect,
 }: {
   pending: boolean;
-  result: LegacyResult<GraphSearchPayloadV1> | undefined;
+  result: EnvelopeResult<GraphSearchPayloadV1> | undefined;
   submitted: string;
   selected: TraceFocus | null;
   onSelect: (node: GraphNodeV1) => void;
 }) {
   return (
-    <LegacyBoundary title="Symbols" pending={pending} result={result}>
-      {(data) => {
+    <ReadSection
+      title="Symbols"
+      chrome="panel"
+      className="border-0"
+      state={envelopeReadState(pending, result, {
+        loading: 'searching symbols',
+        transport: 'symbol search could not be read',
+      })}
+    >
+      {(envelope) => {
+        const data = envelope.payload;
         const rows = data.results ?? [];
         if (rows.length === 0)
           return (
@@ -475,7 +501,7 @@ function SymbolMatches({
           />
         );
       }}
-    </LegacyBoundary>
+    </ReadSection>
   );
 }
 
@@ -503,13 +529,22 @@ function TopConnectedList({
   selected,
 }: {
   overviewPending: boolean;
-  overviewResult: LegacyResult<GraphOverviewPayloadV1> | undefined;
+  overviewResult: EnvelopeResult<GraphOverviewPayloadV1> | undefined;
   onSelect: (node: GraphNodeV1) => void;
   selected: TraceFocus | null;
 }) {
   return (
-    <LegacyBoundary title="Code" pending={overviewPending} result={overviewResult}>
-      {(payload) => {
+    <ReadSection
+      title="Code"
+      chrome="panel"
+      className="border-0"
+      state={envelopeReadState(overviewPending, overviewResult, {
+        loading: 'reading connected symbols',
+        transport: 'connected symbols could not be read',
+      })}
+    >
+      {(envelope) => {
+        const payload = envelope.payload;
         const hubs = payload.top_connected;
         if (hubs.length === 0)
           return (
@@ -527,7 +562,7 @@ function TopConnectedList({
           />
         );
       }}
-    </LegacyBoundary>
+    </ReadSection>
   );
 }
 

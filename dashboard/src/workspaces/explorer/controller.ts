@@ -14,13 +14,14 @@ import {
   ExplorerReadContextV1Schema,
   ExplorerSessionSizeV1Schema,
   GraphOverviewPayloadV1Schema,
+  MemoryOverviewPayloadV1Schema,
   type ExplorerQueryRunV1,
   type ExplorerReadContextV1,
   type ExplorerSessionSizeV1,
 } from '../../contracts/generated.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { AnyObject } from '../../data/query/legacy.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
+import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { queryTerms } from '../../ui/search/terms.ts';
 import { absenceVerdict, type AbsenceVerdict } from './absence.ts';
 import {
@@ -39,21 +40,12 @@ import { LANES, type Hit, type LaneId } from './model.ts';
 /**
  * The two browse endpoints that have no generated payload type.
  *
- * `/api/plugins/graph/overview` does have one — `graph_service::overview_payload`
- * returns `GraphOverviewPayloadV1` and `graph_api::overview` serialises it
- * whole — so the code lane reads it through the generated schema and gets
- * `GraphNodeV1` rows. The LCM and memory overviews are assembled as
- * `serde_json::Map` values in `lcm_api::overview` and `memory_api::overview`,
- * and neither response envelope has a schemars type behind it, so there is
- * nothing generated to import. These two schemas therefore read only the field
- * each lane actually renders and pass the rest through untouched; they claim
- * nothing about the shape of a row.
+ * The LCM overview is the sole generated-contract gap until the next contract
+ * generation. Its local schema reads only the field this lane would render;
+ * it makes no claim about the rows themselves.
  */
 const LcmOverviewPayload = z
   .object({ latest_summary_nodes: z.array(AnyObject) })
-  .passthrough();
-const MemoryPayload = z
-  .object({ holographic: z.object({ facts: z.array(AnyObject) }).passthrough() })
   .passthrough();
 
 /* ------------------------------------------------------------------ routes */
@@ -180,22 +172,22 @@ export function useExplorerController(): ExplorerController {
       ? runResult.envelope.payload
       : undefined;
 
-  const graphBrowse = useLegacy(
+  const graphBrowse = useEnvelope(
     ['explorer', 'graph-overview'],
     '/api/plugins/graph/overview',
     GraphOverviewPayloadV1Schema,
     { enabled: !searching },
   );
-  const lcmBrowse = useLegacy(
+  const lcmBrowse = useEnvelope(
     ['explorer', 'lcm-overview'],
     '/api/plugins/hermes-lcm/overview',
     LcmOverviewPayload,
     { enabled: !searching },
   );
-  const memory = useLegacy(
+  const memory = useEnvelope(
     ['explorer', 'memory-overview'],
     '/api/plugins/holographic/?limit=25',
-    MemoryPayload,
+    MemoryOverviewPayloadV1Schema,
     { enabled: !searching },
   );
   const graphBrowseData = graphBrowse.data;

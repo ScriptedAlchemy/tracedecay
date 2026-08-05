@@ -33,9 +33,9 @@ import {
   type LcmSessionPayloadV1,
   type LcmSummaryNodeV1,
 } from '../../contracts/generated.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
+import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { InspectorPanel } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { Legend, Meter, Readout } from '../../ui/instrument.tsx';
 import { formatStamp, splitCount } from '../../ui/format.ts';
@@ -64,7 +64,7 @@ export function SessionInspector({
    * The page a reader asked for, held until it arrives on screen.
    *
    * It lives up here because the transcript below does not survive the trip: a
-   * new `limit`/`offset` is a new query, so `LegacyBoundary` swings to its
+   * new `limit`/`offset` is a new query, so the read boundary swings to its
    * loading state and unmounts the whole page of rows — including the control
    * that was just activated. Focus goes to the document, and a keyboard user is
    * returned to the top of the app with no indication that anything moved. A
@@ -72,7 +72,7 @@ export function SessionInspector({
    * could not repair it.
    */
   const [pagedTo, setPagedTo] = useState<number | null>(null);
-  const session = useLegacy(
+  const session = useEnvelope(
     ['lcm', 'session', sessionId, offset, order],
     `/api/plugins/hermes-lcm/session/${encodeURIComponent(sessionId)}?limit=${PAGE_SIZE}&offset=${offset}&order=${order}`,
     LcmSessionPayloadV1Schema,
@@ -82,8 +82,17 @@ export function SessionInspector({
     <InspectorPanel title="Session transcript" onClose={onClose}>
       <div className="flex flex-col gap-3">
         <p className="td-value break-all text-3xs text-text-muted">{sessionId}</p>
-        <LegacyBoundary title="Transcript" pending={session.isPending} result={session.data}>
-          {(payload) =>
+        <ReadSection
+          title="Transcript"
+          chrome="centered"
+          state={envelopeReadState(session.isPending, session.data, {
+            loading: 'reading transcript',
+            transport: 'transcript could not be read',
+          })}
+        >
+          {(envelope) => {
+            const payload = envelope.payload;
+            return (
             payload.exists === false ? (
               <StateChip
                 kind="unknown"
@@ -106,8 +115,9 @@ export function SessionInspector({
                 onArrived={() => setPagedTo(null)}
               />
             )
-          }
-        </LegacyBoundary>
+            );
+          }}
+        </ReadSection>
       </div>
     </InspectorPanel>
   );

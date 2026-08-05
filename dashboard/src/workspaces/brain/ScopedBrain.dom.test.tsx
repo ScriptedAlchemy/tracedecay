@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ScopedBrain } from './ScopedBrain.tsx';
 import { useScope } from '../../data/scope/store.ts';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
+import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 
 // The canvas is a WebGL renderer; this suite is about which reads compose the
 // surface and what it says when one of them is legitimately unavailable.
@@ -24,6 +25,18 @@ vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
  */
 const wire = (path: string) => resolveFixture(path) as Record<string, unknown>;
 
+function wirePayload(path: string): Record<string, unknown> {
+  const fixture = wire(path);
+  return (fixture['payload'] ?? fixture) as Record<string, unknown>;
+}
+
+function withEnvelopePayload(
+  payload: Record<string, unknown>,
+  domainState = 'ready',
+): Record<string, unknown> {
+  return fixtureEnvelope(payload, domainState);
+}
+
 /**
  * The scoped readout renders `<dt>label</dt><dd>figure</dd>` per statistic.
  * Read the figure through its term: counting em dashes anywhere on the page
@@ -39,7 +52,7 @@ function readout(label: string): string | null {
  * every registered project whether or not its graph is mounted. Its store
  * carries a `release/2.4` graph scope, which is the branch these tests read
  * back to prove the backbone survived a failed graph read. */
-const CONTEXT = wire('/api/projects/proj_x');
+const CONTEXT = withEnvelopePayload(wirePayload('/api/projects/proj_x'));
 
 /** Wire-true unseeded slice, cut down to two nodes and the edge between them.
  * `graph_service.rs::subgraph_payload` writes `seed_id`, `mode`, `nodes`,
@@ -49,7 +62,7 @@ const CONTEXT = wire('/api/projects/proj_x');
  * when Brain read the scoped gateway through its own all-optional copy of the
  * subgraph shape. */
 const SUBGRAPH = (() => {
-  const shared = wire('/api/plugins/graph/subgraph');
+  const shared = wirePayload('/api/plugins/graph/subgraph');
   const nodes = (shared['nodes'] as Record<string, unknown>[]).slice(0, 2);
   const [alpha, beta] = nodes;
   return {
@@ -68,17 +81,23 @@ const SUBGRAPH = (() => {
   };
 })();
 
+const SUBGRAPH_ENVELOPE = withEnvelopePayload(SUBGRAPH);
+
 /** An empty slice the daemon really can send: the read succeeded and found
  * nothing to draw. */
 const SUBGRAPH_EMPTY = { ...SUBGRAPH, nodes: [], edges: [] };
+const SUBGRAPH_EMPTY_ENVELOPE = withEnvelopePayload(SUBGRAPH_EMPTY);
 
-const graphOverview = (totals: Record<string, number>) => ({
-  ...wire('/api/plugins/graph/overview'),
-  totals,
-});
+const graphOverview = (totals: Record<string, number>) =>
+  withEnvelopePayload({
+    ...wirePayload('/api/plugins/graph/overview'),
+    totals,
+  });
 
-const MEMORY_STATUS = wire('/api/plugins/holographic/status');
-const ANALYTICS = wire('/api/plugins/analytics/overview');
+const MEMORY_PAYLOAD = wirePayload('/api/plugins/holographic/status');
+const MEMORY_STATUS_ENVELOPE = withEnvelopePayload(MEMORY_PAYLOAD);
+const ANALYTICS_PAYLOAD = wirePayload('/api/plugins/analytics/overview');
+const ANALYTICS_ENVELOPE = withEnvelopePayload(ANALYTICS_PAYLOAD);
 
 /** Routes each request to a canned body, mirroring the daemon: the scoped
  * gateway 404s with `not_found` when a project's graph is not mounted. */
@@ -108,8 +127,8 @@ function renderScoped() {
 
 describe('ScopedBrain', () => {
   beforeEach(() => {
-    // The scoped reads must be rewritten through the project gateway, which is
-    // what `useLegacy` does off the store's current scope.
+    // The scoped reads must be rewritten through the project gateway from the
+    // store's current scope.
     useScope.getState().selectProject('proj_x', 'ai-train');
   });
 
@@ -120,13 +139,13 @@ describe('ScopedBrain', () => {
 
   it('reads this project through the scoped gateway, not the active project', async () => {
     const fetchMock = serve({
-      '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+      '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
       '/api/projects/proj_x/plugins/graph/overview': {
         status: 200,
         body: graphOverview({ nodes: 12_873, edges: 41_206, files: 642 }),
       },
-      '/api/projects/proj_x/plugins/holographic/status': { status: 200, body: MEMORY_STATUS },
-      '/api/projects/proj_x/plugins/analytics/overview': { status: 200, body: ANALYTICS },
+      '/api/projects/proj_x/plugins/holographic/status': { status: 200, body: MEMORY_STATUS_ENVELOPE },
+      '/api/projects/proj_x/plugins/analytics/overview': { status: 200, body: ANALYTICS_ENVELOPE },
       '/api/projects/proj_x': { status: 200, body: CONTEXT },
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -144,6 +163,7 @@ describe('ScopedBrain', () => {
     expect(scoped.every((url) => url.startsWith('/api/projects/proj_x/plugins/'))).toBe(
       true,
     );
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain('/api/projects/proj_x');
 
     // Real readouts, from the project's own stores.
     expect(screen.getByText('12.9')).toBeTruthy();
@@ -176,7 +196,7 @@ describe('ScopedBrain', () => {
    *
    * `graph_response` maps every read failure to 500 `read_failed`, so a 200
    * carrying no nodes is the daemon reporting that the unseeded slice found
-   * nothing to draw. The surface used to answer that with "the legacy response
+   * nothing to draw. The surface used to answer that with "the generic response
    * cannot distinguish empty data from query failure" — a claim about the
    * contract that the contract contradicts, and one that left a genuinely
    * empty project looking like a broken read forever.
@@ -185,7 +205,7 @@ describe('ScopedBrain', () => {
     vi.stubGlobal(
       'fetch',
       serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_EMPTY },
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_EMPTY_ENVELOPE },
         '/api/projects/proj_x': { status: 200, body: CONTEXT },
       }),
     );
@@ -213,7 +233,11 @@ describe('ScopedBrain', () => {
       serve({
         '/api/projects/proj_x/plugins/graph/subgraph': {
           status: 200,
-          body: { ...SUBGRAPH_EMPTY, mode: 'seeded', seed_id: null },
+          body: withEnvelopePayload({
+            ...SUBGRAPH_EMPTY,
+            mode: 'seeded',
+            seed_id: null,
+          }),
         },
         '/api/projects/proj_x': { status: 200, body: CONTEXT },
       }),
@@ -240,7 +264,7 @@ describe('ScopedBrain', () => {
           status: 200,
           body: graphOverview({ nodes: 0, edges: 0, files: 0 }),
         },
-        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
         '/api/projects/proj_x': { status: 200, body: CONTEXT },
       }),
     );
@@ -257,7 +281,7 @@ describe('ScopedBrain', () => {
     vi.stubGlobal(
       'fetch',
       serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
         '/api/projects/proj_x/plugins/graph/overview': {
           status: 500,
           body: { status: 'read_failed', error: 'graph count query failed' },
@@ -279,7 +303,7 @@ describe('ScopedBrain', () => {
     vi.stubGlobal(
       'fetch',
       serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
         '/api/projects/proj_x/plugins/graph/overview': {
           status: 200,
           body: graphOverview({ nodes: 1204, edges: 0, files: 88 }),
@@ -309,27 +333,27 @@ describe('ScopedBrain', () => {
     vi.stubGlobal(
       'fetch',
       serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
         '/api/projects/proj_x/plugins/graph/overview': {
           status: 200,
           body: graphOverview({ nodes: 1204, edges: 3300, files: 88 }),
         },
         '/api/projects/proj_x/plugins/holographic/status': {
           status: 200,
-          body: {
-            ...MEMORY_STATUS,
+          body: withEnvelopePayload({
+            ...MEMORY_PAYLOAD,
             exists: false,
             error: 'no memory bank at /store/proj_x/memory.db',
-            memory: { ...(MEMORY_STATUS['memory'] as object), fact_count: 0, entity_count: 0 },
-          },
+            memory: { ...(MEMORY_PAYLOAD['memory'] as object), fact_count: 0, entity_count: 0 },
+          }),
         },
         '/api/projects/proj_x/plugins/analytics/overview': {
           status: 200,
-          body: {
-            ...ANALYTICS,
+          body: withEnvelopePayload({
+            ...ANALYTICS_PAYLOAD,
             available: false,
-            usage: { ...(ANALYTICS['usage'] as object), available: false, event_count: 0 },
-          },
+            usage: { ...(ANALYTICS_PAYLOAD['usage'] as object), available: false, event_count: 0 },
+          }),
         },
         '/api/projects/proj_x': { status: 200, body: CONTEXT },
       }),
@@ -357,15 +381,15 @@ describe('ScopedBrain', () => {
     vi.stubGlobal(
       'fetch',
       serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
         '/api/projects/proj_x/plugins/holographic/status': {
           status: 200,
-          body: {
-            ...MEMORY_STATUS,
+          body: withEnvelopePayload({
+            ...MEMORY_PAYLOAD,
             exists: true,
             error: '',
-            memory: { ...(MEMORY_STATUS['memory'] as object), fact_count: 0, entity_count: 12 },
-          },
+            memory: { ...(MEMORY_PAYLOAD['memory'] as object), fact_count: 0, entity_count: 12 },
+          }),
         },
         '/api/projects/proj_x': { status: 200, body: CONTEXT },
       }),
@@ -382,8 +406,8 @@ describe('ScopedBrain', () => {
    * The registry backbone failing, told apart from a project that holds
    * nothing.
    *
-   * `projects.rs::context` answers 503 with a complete payload whose `status`
-   * is `registry_unavailable` and whose `stores`/`aliases` are empty — so a
+   * `projects.rs::context` answers a typed envelope whose `status` is
+   * `registry_unavailable` and whose `stores`/`aliases` are empty — so a
    * rail that read those arrays without checking `status` drew the exact
    * picture an empty project draws. The reason it sent is the difference
    * between "this project has no stores" and "nothing could be read".
@@ -392,28 +416,57 @@ describe('ScopedBrain', () => {
     vi.stubGlobal(
       'fetch',
       serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
         '/api/projects/proj_x': {
-          status: 503,
-          body: {
-            status: 'registry_unavailable',
-            error: 'unable to open /home/x/.tracedecay/global.db',
-            is_active: null,
-            project: null,
-            aliases: [],
-            stores: [],
-          },
+          status: 200,
+          body: withEnvelopePayload(
+            {
+              status: 'registry_unavailable',
+              error: 'unable to open /home/x/.tracedecay/global.db',
+              is_active: null,
+              project: null,
+              aliases: [],
+              stores: [],
+            },
+            'partial',
+          ),
         },
       }),
     );
     renderScoped();
 
-    await waitFor(() =>
-      expect(screen.getByText(/registry reported: registry_unavailable/i)).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByText('Source unavailable')).toBeTruthy());
     expect(screen.getByText(/unable to open \/home\/x\/\.tracedecay\/global\.db/)).toBeTruthy();
     // The store card the successful backbone draws must not be there.
     expect(screen.queryByText('release/2.4')).toBeNull();
+  });
+
+  it('treats a typed 200 missing project as an absent deep link, not an unknown read', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
+        '/api/projects/proj_x': {
+          status: 200,
+          body: withEnvelopePayload(
+            {
+              status: 'not_found',
+              error: 'no project registered with id proj_x',
+              is_active: null,
+              project: null,
+              aliases: [],
+              stores: [],
+            },
+            'complete_zero_findings',
+          ),
+        },
+      }),
+    );
+    renderScoped();
+
+    expect(await screen.findByText('Complete · zero findings')).toBeTruthy();
+    expect(screen.getByText(/no project registered with id proj_x/)).toBeTruthy();
+    expect(screen.queryByText(/no response has been recorded/i)).toBeNull();
   });
 
   it('prints an em dash rather than a number it was never given', async () => {

@@ -43,33 +43,147 @@ const HINT_CATEGORIES: &[&str] = &[
 const ANALYTICS_EVENT_LIMIT: usize = 10_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct AnalyticsUsageCategoryV1 {
-    kind: String,
-    category: String,
-    events: i64,
+pub struct AnalyticsUsageCategoryV1 {
+    pub kind: String,
+    pub category: String,
+    pub events: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct AnalyticsUsageSummaryV1 {
-    available: bool,
+pub struct AnalyticsUsageSummaryV1 {
+    pub available: bool,
     #[serde(default)]
-    source: Option<String>,
-    message_count: i64,
+    pub source: Option<String>,
+    pub message_count: i64,
     #[serde(default)]
-    event_count: Option<i64>,
-    by_category: Vec<AnalyticsUsageCategoryV1>,
+    pub event_count: Option<i64>,
+    pub by_category: Vec<AnalyticsUsageCategoryV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsHintCategoryV1 {
+    pub category: String,
+    pub emitted: i64,
+    pub followed: i64,
+    pub ignored: i64,
+    pub suppressed: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsHintsPayloadV1 {
+    pub available: bool,
+    pub source: String,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub by_category: Vec<AnalyticsHintCategoryV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsAgentUsageV1 {
+    pub agent: String,
+    pub sessions: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsAgentsPayloadV1 {
+    pub available: bool,
+    pub source: String,
+    pub by_agent: Vec<AnalyticsAgentUsageV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsUnderusedFamilyV1 {
+    pub family: String,
+    pub relevant_events: i64,
+    pub usage_events: i64,
+    pub missed_events: i64,
+    pub underused: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsUnderusedPayloadV1 {
+    pub available: bool,
+    pub db: String,
+    pub families: Vec<AnalyticsUnderusedFamilyV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsDiagnosticsRatiosV1 {
+    pub events_per_message: f64,
+    pub tool_calls_per_message: f64,
+    pub mcp_tool_calls_per_message: f64,
+    pub hook_calls_per_message: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsEventKindCountV1 {
+    pub event_kind: String,
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsToolCountV1 {
+    pub tool_name: String,
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsOutcomeCountV1 {
+    pub outcome: String,
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsHookWindowV1 {
+    pub window_rows: i64,
+    pub rows_scanned: i64,
+    pub rows_included: i64,
+    pub truncated: bool,
+    pub total_rows_known: bool,
+    pub oldest_ts_unix_ms: Option<i64>,
+    pub newest_ts_unix_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsRecentEventV1 {
+    pub timestamp: Option<i64>,
+    pub event_kind: String,
+    pub hook_name: String,
+    pub tool_name: String,
+    pub outcome: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsDiagnosticsPayloadV1 {
+    pub available: bool,
+    pub source: String,
+    pub message_count: i64,
+    pub event_count: i64,
+    pub tool_call_count: i64,
+    pub mcp_tool_call_count: i64,
+    pub tracedecay_call_count: i64,
+    pub hook_call_count: i64,
+    #[serde(default)]
+    pub events_per_hour: Option<f64>,
+    pub ratios: AnalyticsDiagnosticsRatiosV1,
+    pub by_event_kind: Vec<AnalyticsEventKindCountV1>,
+    pub by_tool: Vec<AnalyticsToolCountV1>,
+    pub by_mcp_tool: Vec<AnalyticsToolCountV1>,
+    pub by_outcome: Vec<AnalyticsOutcomeCountV1>,
+    pub hook_window: AnalyticsHookWindowV1,
+    pub recent_events: Vec<AnalyticsRecentEventV1>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
-pub(super) struct AnalyticsOverviewPayloadV1 {
+pub struct AnalyticsOverviewPayloadV1 {
     available: bool,
     db: String,
     scope: String,
-    hints: Value,
+    hints: AnalyticsHintsPayloadV1,
     usage: AnalyticsUsageSummaryV1,
-    agents: Value,
-    diagnostics: Value,
-    underused_tool_families: Value,
+    agents: AnalyticsAgentsPayloadV1,
+    diagnostics: AnalyticsDiagnosticsPayloadV1,
+    underused_tool_families: Vec<AnalyticsUnderusedFamilyV1>,
     observatory: Option<ObservatoryReadModelV1>,
 }
 
@@ -82,31 +196,88 @@ struct HintCounts {
 }
 
 /// `GET /api/plugins/analytics/overview`
-pub async fn overview(State(state): State<DashboardState>) -> Response {
+pub async fn overview(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<AnalyticsOverviewPayloadV1>>> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
     let observatory = Some(observatory_model(&state).await);
-    let hints = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
+    let hints = match typed_hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
+        Ok(hints) => hints,
+        Err(error) => {
+            return Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                error,
+            ));
+        }
+    };
     let usage = match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await
     {
         Ok(usage) => usage,
-        Err(response) => return response,
+        Err(error) => {
+            return Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                error,
+            ));
+        }
     };
-    let agents = agent_usage_summary(state.lcm_db.as_deref()).await;
-    let diagnostics = diagnostics_summary(&state, durable_events.as_deref()).await;
-    let underused = underused_tool_families(state.lcm_db.as_deref()).await;
+    let agents = match typed_agent_usage_summary(state.lcm_db.as_deref()).await {
+        Ok(agents) => agents,
+        Err(error) => {
+            return Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                error,
+            ));
+        }
+    };
+    let diagnostics = match typed_diagnostics_summary(&state, durable_events.as_deref()).await {
+        Ok(diagnostics) => diagnostics,
+        Err(error) => {
+            return Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                error,
+            ));
+        }
+    };
+    let underused = match underused_tool_families(state.lcm_db.as_deref()).await {
+        Ok(Some(families)) => families,
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            return Json(DashboardEnvelopeV1::unavailable(
+                scope_from_state(&state),
+                None,
+                error,
+            ));
+        }
+    };
 
-    Json(AnalyticsOverviewPayloadV1 {
+    let payload = AnalyticsOverviewPayloadV1 {
         available: state.lcm_db.is_some() || durable_events.is_some(),
-        db: state.lcm_db_path,
-        scope: state.lcm_scope,
+        db: state.lcm_db_path.clone(),
+        scope: state.lcm_scope.clone(),
         hints,
         usage,
         agents,
         diagnostics,
         underused_tool_families: underused,
         observatory,
-    })
-    .into_response()
+    };
+    if payload.available {
+        Json(DashboardEnvelopeV1::ready(
+            scope_from_state(&state),
+            DashboardCoverageV1::unknown(),
+            Some(payload),
+        ))
+    } else {
+        Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            Some(payload),
+            "analytics_sources_unavailable",
+        ))
+    }
 }
 
 /// Canonical Plan 26 Observatory read model. CLI/MCP call the same application
@@ -200,13 +371,13 @@ async fn observatory_model(state: &DashboardState) -> ObservatoryReadModelV1 {
     read_model
 }
 
-async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Value {
+async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Result<Value, String> {
     let Some(db) = db else {
-        return json!({
+        return Ok(json!({
             "available": false,
             "source": "session_store_unavailable",
             "by_agent": [],
-        });
+        }));
     };
 
     let rows = query_rows(
@@ -220,7 +391,7 @@ async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Value {
         (),
     )
     .await
-    .unwrap_or_default();
+    .map_err(|error| format!("analytics agent usage query failed: {error}"))?;
 
     let mut by_agent: BTreeMap<String, i64> = BTreeMap::new();
     for row in rows {
@@ -233,7 +404,7 @@ async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Value {
         *by_agent.entry(label.to_string()).or_default() += 1;
     }
 
-    json!({
+    Ok(json!({
         "available": true,
         "source": "sessions",
         "by_agent": by_agent.into_iter().map(|(agent, sessions)| {
@@ -242,7 +413,13 @@ async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Value {
                 "sessions": sessions,
             })
         }).collect::<Vec<_>>(),
-    })
+    }))
+}
+
+async fn typed_agent_usage_summary(
+    db: Option<&RegisteredGlobalDb>,
+) -> Result<AnalyticsAgentsPayloadV1, String> {
+    decode_analytics_contract(agent_usage_summary(db).await?, "analytics agent usage")
 }
 
 fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Option<&'static str> {
@@ -256,33 +433,178 @@ fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Optio
 }
 
 /// `GET /api/plugins/analytics/hints`
-pub async fn hints(State(state): State<DashboardState>) -> Json<Value> {
+pub async fn hints(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<AnalyticsHintsPayloadV1>>> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    Json(hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await)
+    let payload = match typed_hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                error,
+            ));
+        }
+    };
+    if !payload.available {
+        return Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            Some(payload),
+            "analytics_hint_source_unavailable",
+        ));
+    }
+    let count = payload.by_category.len() as u64;
+    let envelope = if durable_events
+        .as_ref()
+        .is_some_and(|events| events.len() == ANALYTICS_EVENT_LIMIT)
+    {
+        DashboardEnvelopeV1::partial(
+            scope_from_state(&state),
+            count.saturating_add(1),
+            count,
+            "hint_categories",
+            vec!["analytics_event_limit".to_owned()],
+            Some(payload),
+        )
+    } else {
+        DashboardEnvelopeV1::ready(
+            scope_from_state(&state),
+            DashboardCoverageV1::complete(count, "hint_categories"),
+            Some(payload),
+        )
+    };
+    Json(envelope)
 }
 
 /// `GET /api/plugins/analytics/usage`
-pub async fn usage(State(state): State<DashboardState>) -> Response {
+pub async fn usage(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<AnalyticsUsageSummaryV1>>> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
     match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
-        Ok(usage) => Json(usage).into_response(),
-        Err(response) => response,
+        Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            Some(payload),
+            "analytics_usage_source_unavailable",
+        )),
+        Ok(payload)
+            if durable_events
+                .as_ref()
+                .is_some_and(|events| events.len() == ANALYTICS_EVENT_LIMIT) =>
+        {
+            let examined = payload.event_count.unwrap_or(payload.message_count).max(0) as u64;
+            Json(DashboardEnvelopeV1::partial(
+                scope_from_state(&state),
+                examined.saturating_add(1),
+                examined,
+                "analytics_events",
+                vec!["analytics_event_limit".to_owned()],
+                Some(payload),
+            ))
+        }
+        Ok(payload) => {
+            let count = payload.event_count.unwrap_or(payload.message_count).max(0) as u64;
+            Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(count, "analytics_events"),
+                Some(payload),
+            ))
+        }
+        Err(error) => Json(DashboardEnvelopeV1::error(
+            scope_from_state(&state),
+            None,
+            error,
+        )),
     }
 }
 
 /// `GET /api/plugins/analytics/diagnostics`
-pub async fn diagnostics(State(state): State<DashboardState>) -> Json<Value> {
+pub async fn diagnostics(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<AnalyticsDiagnosticsPayloadV1>>> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    Json(diagnostics_summary(&state, durable_events.as_deref()).await)
+    let payload = match typed_diagnostics_summary(&state, durable_events.as_deref()).await {
+        Ok(payload) => payload,
+        Err(error) => {
+            return Json(DashboardEnvelopeV1::error(
+                scope_from_state(&state),
+                None,
+                error,
+            ));
+        }
+    };
+    if !payload.available {
+        return Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            Some(payload),
+            "analytics_diagnostics_sources_unavailable",
+        ));
+    }
+    let truncated_events = durable_events
+        .as_ref()
+        .is_some_and(|events| events.len() == ANALYTICS_EVENT_LIMIT);
+    if truncated_events || payload.hook_window.truncated {
+        let mut reasons = Vec::new();
+        if truncated_events {
+            reasons.push("analytics_event_limit".to_owned());
+        }
+        if payload.hook_window.truncated {
+            reasons.push("hook_analytics_window".to_owned());
+        }
+        return Json(DashboardEnvelopeV1::partial(
+            scope_from_state(&state),
+            2,
+            2_u64.saturating_sub(reasons.len() as u64),
+            "analytics_sources",
+            reasons,
+            Some(payload),
+        ));
+    }
+    Json(DashboardEnvelopeV1::ready(
+        scope_from_state(&state),
+        DashboardCoverageV1::complete(2, "analytics_sources"),
+        Some(payload),
+    ))
 }
 
 /// `GET /api/plugins/analytics/underused`
-pub async fn underused(State(state): State<DashboardState>) -> Json<Value> {
-    Json(json!({
-        "available": state.lcm_db.is_some(),
-        "db": state.lcm_db_path,
-        "families": underused_tool_families(state.lcm_db.as_deref()).await,
-    }))
+pub async fn underused(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<AnalyticsUnderusedPayloadV1>>> {
+    match underused_tool_families(state.lcm_db.as_deref()).await {
+        Ok(Some(families)) => {
+            let payload = AnalyticsUnderusedPayloadV1 {
+                available: true,
+                db: state.lcm_db_path.clone(),
+                families,
+            };
+            Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(payload.families.len() as u64, "tool_families"),
+                Some(payload),
+            ))
+        }
+        Ok(None) => Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            Some(AnalyticsUnderusedPayloadV1 {
+                available: false,
+                db: state.lcm_db_path.clone(),
+                families: Vec::new(),
+            }),
+            "analytics_underused_source_unavailable",
+        )),
+        Err(error) => Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            Some(AnalyticsUnderusedPayloadV1 {
+                available: false,
+                db: state.lcm_db_path.clone(),
+                families: Vec::new(),
+            }),
+            error,
+        )),
+    }
 }
 
 fn empty_hint_rows() -> Vec<Value> {
@@ -507,6 +829,24 @@ fn hint_efficacy_from_events(events: &[Value]) -> Value {
     })
 }
 
+fn decode_analytics_contract<T: serde::de::DeserializeOwned>(
+    value: Value,
+    label: &str,
+) -> Result<T, String> {
+    serde_json::from_value(value)
+        .map_err(|error| format!("{label} did not match its response contract: {error}"))
+}
+
+async fn typed_hint_summary(
+    db: Option<&RegisteredGlobalDb>,
+    durable_events: Option<&[Value]>,
+) -> Result<AnalyticsHintsPayloadV1, String> {
+    decode_analytics_contract(
+        hint_summary(db, durable_events).await,
+        "analytics hint summary",
+    )
+}
+
 async fn hint_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[Value]>) -> Value {
     if let Some(events) = durable_events {
         return hint_summary_from_events(events);
@@ -586,8 +926,12 @@ async fn hint_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[
     })
 }
 
-async fn session_message_rows(db: Option<&RegisteredGlobalDb>) -> Option<Vec<Value>> {
-    let db = db?;
+async fn session_message_rows(
+    db: Option<&RegisteredGlobalDb>,
+) -> Result<Option<Vec<Value>>, String> {
+    let Some(db) = db else {
+        return Ok(None);
+    };
     query_rows(
         db.read_connection(),
         "SELECT COALESCE(tool_names, '') AS tool_names,
@@ -599,7 +943,8 @@ async fn session_message_rows(db: Option<&RegisteredGlobalDb>) -> Option<Vec<Val
         (),
     )
     .await
-    .ok()
+    .map(Some)
+    .map_err(|error| format!("session-message query failed: {error}"))
 }
 
 fn usage_summary_from_events(events: &[Value]) -> Value {
@@ -697,31 +1042,26 @@ fn increment_usage_count(counts: &mut BTreeMap<(String, String), i64>, kind: &st
 async fn typed_usage_summary(
     db: Option<&RegisteredGlobalDb>,
     durable_events: Option<&[Value]>,
-) -> Result<AnalyticsUsageSummaryV1, Response> {
-    let usage = usage_summary(db, durable_events).await;
-    serde_json::from_value::<AnalyticsUsageSummaryV1>(usage).map_err(|error| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "contract_invalid",
-                "error": format!("analytics usage summary did not match its contract: {error}"),
-            })),
-        )
-            .into_response()
-    })
+) -> Result<AnalyticsUsageSummaryV1, String> {
+    let usage = usage_summary(db, durable_events).await?;
+    serde_json::from_value::<AnalyticsUsageSummaryV1>(usage)
+        .map_err(|error| format!("analytics usage summary did not match its contract: {error}"))
 }
 
-async fn usage_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[Value]>) -> Value {
+async fn usage_summary(
+    db: Option<&RegisteredGlobalDb>,
+    durable_events: Option<&[Value]>,
+) -> Result<Value, String> {
     if let Some(events) = durable_events {
-        return usage_summary_from_events(events);
+        return Ok(usage_summary_from_events(events));
     }
 
-    let Some(rows) = session_message_rows(db).await else {
-        return json!({
+    let Some(rows) = session_message_rows(db).await? else {
+        return Ok(json!({
             "available": false,
             "message_count": 0,
             "by_category": [],
-        });
+        }));
     };
 
     let mut counts: BTreeMap<(String, String), i64> = BTreeMap::new();
@@ -735,11 +1075,11 @@ async fn usage_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&
         }
     }
 
-    json!({
+    Ok(json!({
         "available": true,
         "message_count": rows.len() as i64,
         "by_category": usage_count_rows(counts),
-    })
+    }))
 }
 
 fn usage_count_rows(counts: BTreeMap<(String, String), i64>) -> Vec<Value> {
@@ -755,12 +1095,29 @@ fn usage_count_rows(counts: BTreeMap<(String, String), i64>) -> Vec<Value> {
         .collect()
 }
 
-async fn diagnostics_summary(state: &DashboardState, durable_events: Option<&[Value]>) -> Value {
+async fn diagnostics_summary(
+    state: &DashboardState,
+    durable_events: Option<&[Value]>,
+) -> Result<Value, String> {
     let message_count = session_message_rows(state.lcm_db.as_deref())
-        .await
+        .await?
         .map_or(0, |rows| rows.len() as i64);
     let hook_analytics = read_hook_analytics_rows(state);
-    diagnostics_summary_from_parts(message_count, &hook_analytics, durable_events)
+    Ok(diagnostics_summary_from_parts(
+        message_count,
+        &hook_analytics,
+        durable_events,
+    ))
+}
+
+async fn typed_diagnostics_summary(
+    state: &DashboardState,
+    durable_events: Option<&[Value]>,
+) -> Result<AnalyticsDiagnosticsPayloadV1, String> {
+    decode_analytics_contract(
+        diagnostics_summary(state, durable_events).await?,
+        "analytics diagnostics",
+    )
 }
 
 pub fn diagnostics_summary_from_parts(
@@ -1239,19 +1596,32 @@ fn recent_hook_rows(rows: &[Value], limit: usize) -> Vec<Value> {
         .collect()
 }
 
-async fn underused_tool_families(db: Option<&RegisteredGlobalDb>) -> Value {
-    let Some(rows) = session_message_rows(db).await else {
-        return Value::Array(Vec::new());
+async fn underused_tool_families(
+    db: Option<&RegisteredGlobalDb>,
+) -> Result<Option<Vec<AnalyticsUnderusedFamilyV1>>, String> {
+    let Some(rows) = session_message_rows(db).await? else {
+        return Ok(None);
     };
 
-    json!(underused_tool_family_signals(rows.iter().map(|row| {
-        let text = str_field(row, "text");
-        ToolUsageObservation {
-            tool_names: Some(str_field(row, "tool_names")),
-            metadata_json: Some(str_field(row, "metadata_json")),
-            text: Some(text),
-        }
-    })))
+    Ok(Some(
+        underused_tool_family_signals(rows.iter().map(|row| {
+            let text = str_field(row, "text");
+            ToolUsageObservation {
+                tool_names: Some(str_field(row, "tool_names")),
+                metadata_json: Some(str_field(row, "metadata_json")),
+                text: Some(text),
+            }
+        }))
+        .into_iter()
+        .map(|signal| AnalyticsUnderusedFamilyV1 {
+            family: signal.family,
+            relevant_events: signal.relevant_events,
+            usage_events: signal.usage_events,
+            missed_events: signal.missed_events,
+            underused: signal.underused,
+        })
+        .collect(),
+    ))
 }
 
 fn normalize(value: &str) -> String {
@@ -1263,10 +1633,22 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        HOOK_ANALYTICS_WINDOW_ROWS, HookAnalyticsRows, HookAnalyticsWindow,
-        diagnostics_summary_from_parts, hint_efficacy_from_events, hint_summary_from_events,
-        read_hook_analytics_file, recent_hook_rows, sort_hook_analytics_rows,
+        AnalyticsDiagnosticsPayloadV1, HOOK_ANALYTICS_WINDOW_ROWS, HookAnalyticsRows,
+        HookAnalyticsWindow, decode_analytics_contract, diagnostics_summary_from_parts,
+        hint_efficacy_from_events, hint_summary_from_events, read_hook_analytics_file,
+        recent_hook_rows, sort_hook_analytics_rows,
     };
+
+    #[test]
+    fn unavailable_diagnostics_value_decodes_to_the_canonical_payload() {
+        let value = diagnostics_summary_from_parts(0, &HookAnalyticsRows::empty(), None);
+        let payload: AnalyticsDiagnosticsPayloadV1 =
+            decode_analytics_contract(value, "analytics diagnostics").unwrap();
+
+        assert!(!payload.available);
+        assert_eq!(payload.event_count, 0);
+        assert!(!payload.hook_window.truncated);
+    }
 
     #[test]
     fn hint_summary_counts_current_event_kinds_without_impossible_outcomes() {
