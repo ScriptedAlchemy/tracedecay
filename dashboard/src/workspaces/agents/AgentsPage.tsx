@@ -1,11 +1,11 @@
 import { z } from 'zod';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { ReadFailure } from '../../ui/LegacyStates.tsx';
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
-import { useLegacy } from '../../data/query/useLegacy.ts';
 import { AnalyticsUsageSummaryV1Schema } from '../../contracts/generated.ts';
+import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { logFraction } from '../../viz/scale.ts';
 import {
   ANALYTICS_EVENT_LIMIT,
@@ -22,7 +22,7 @@ import {
 
 const BASE = '/api/plugins/analytics';
 
-const HintsPayload = z
+const UnderusedPayload = z
   .object({
     available: z.boolean().optional(),
     families: z
@@ -68,7 +68,7 @@ const DiagnosticsPayload = z
       .array(
         z
           .object({
-            timestamp: z.number(),
+            timestamp: z.number().nullable(),
             event_kind: z.string().optional(),
             tool_name: z.string().optional(),
             outcome: z.string().optional(),
@@ -102,33 +102,44 @@ const DiagnosticsPayload = z
  * covers is stated in hours beside it.
  */
 export function AgentsPage() {
-  // `analytics_api::usage` answers with the same body the overview route
-  // decodes as `AnalyticsUsageSummaryV1`, so this read is contracted even
-  // though the handler's own return type is still `Value`. Its three siblings
-  // below — underused, hints and diagnostics — are not modelled in Rust at all.
-  const usage = useLegacy(
+  // The analytics family is envelope-only. The local schemas for underused and
+  // diagnostics bridge the generated-contract update, which follows the
+  // backend schema floor; they still reject a bare response today.
+  const usage = useEnvelope(
     ['analytics', 'usage'],
     `${BASE}/usage`,
     AnalyticsUsageSummaryV1Schema,
-  );
-  const hints = useLegacy(['analytics', 'underused'], `${BASE}/underused`, HintsPayload);
-  const diagnostics = useLegacy(
-    ['analytics', 'diagnostics'],
-    `${BASE}/diagnostics`,
-    DiagnosticsPayload,
     // The hook-analytics fold is ~14s against a real store. Once is enough per
     // visit; a refetch interval here would keep a reader's browser and the
     // daemon both busy for no new reading.
     { staleTime: 5 * 60_000 },
   );
+  const underused = useEnvelope(
+    ['analytics', 'underused'],
+    `${BASE}/underused`,
+    UnderusedPayload,
+  );
+  const diagnostics = useEnvelope(
+    ['analytics', 'diagnostics'],
+    `${BASE}/diagnostics`,
+    DiagnosticsPayload,
+    { staleTime: 5 * 60_000 },
+  );
 
   return (
-    <LegacyBoundary title="Agents" pending={usage.isPending} result={usage.data}>
-      {(data) => {
+    <ReadSection
+      title="Agents"
+      chrome="centered"
+      state={envelopeReadState(usage.isPending, usage.data, {
+        loading: 'reading analytics usage',
+        transport: 'analytics usage could not be read',
+      })}
+    >
+      {(envelope) => {
+        const data = envelope.payload;
         const rows: UsageRow[] = data.by_category;
         const dominance = summarizeDominance(rows);
-        const diag =
-          diagnostics.data?.outcome === 'ok' ? diagnostics.data.data : undefined;
+        const diag = envelopePayload(diagnostics.data);
         const diagnosticsAvailable = diag?.available !== false;
         const diagnosticsRead = diagnosticsAvailable ? diag : undefined;
         const window = describeWindow(
@@ -218,44 +229,61 @@ export function AgentsPage() {
               </OverviewCard>
 
               <OverviewCard title="Most-called tools">
-                <LegacyBoundary
+                <ReadSection
                   title="Tools"
-                  pending={diagnostics.isPending}
-                  result={diagnostics.data}
+                  chrome="centered"
+                  state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
+                    loading: 'reading analytics diagnostics',
+                    transport: 'analytics diagnostics could not be read',
+                  })}
                 >
-                  {(payload) =>
+                  {(envelope) => {
+                    const payload = envelope.payload;
+                    return (
                     payload.available === false ? (
                       <ReadFailure label="Analytics diagnostics unavailable" />
                     ) : (
                       <ToolRanking rows={payload.by_mcp_tool ?? []} />
                     )
-                  }
-                </LegacyBoundary>
+                    );
+                  }}
+                </ReadSection>
               </OverviewCard>
 
               <OverviewCard title="Latest events">
-                <LegacyBoundary
+                <ReadSection
                   title="Events"
-                  pending={diagnostics.isPending}
-                  result={diagnostics.data}
+                  chrome="centered"
+                  state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
+                    loading: 'reading analytics diagnostics',
+                    transport: 'analytics diagnostics could not be read',
+                  })}
                 >
-                  {(payload) =>
+                  {(envelope) => {
+                    const payload = envelope.payload;
+                    return (
                     payload.available === false ? (
                       <ReadFailure label="Analytics diagnostics unavailable" />
                     ) : (
                       <RecentTape rows={payload.recent_events ?? []} />
                     )
-                  }
-                </LegacyBoundary>
+                    );
+                  }}
+                </ReadSection>
               </OverviewCard>
 
               <OverviewCard title="What the window is made of">
-                <LegacyBoundary
+                <ReadSection
                   title="Composition"
-                  pending={diagnostics.isPending}
-                  result={diagnostics.data}
+                  chrome="centered"
+                  state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
+                    loading: 'reading analytics diagnostics',
+                    transport: 'analytics diagnostics could not be read',
+                  })}
                 >
-                  {(payload) =>
+                  {(envelope) => {
+                    const payload = envelope.payload;
+                    return (
                     payload.available === false ? (
                       <ReadFailure label="Analytics diagnostics unavailable" />
                     ) : (
@@ -265,26 +293,37 @@ export function AgentsPage() {
                         counted={payload.event_count ?? window.events}
                       />
                     )
-                  }
-                </LegacyBoundary>
+                    );
+                  }}
+                </ReadSection>
               </OverviewCard>
 
               <OverviewCard title="Tool families the hint engine watches">
-                <LegacyBoundary title="Hints" pending={hints.isPending} result={hints.data}>
-                  {(hintData) =>
+                <ReadSection
+                  title="Hints"
+                  chrome="centered"
+                  state={envelopeReadState(underused.isPending, underused.data, {
+                    loading: 'reading underused tool families',
+                    transport: 'underused tool families could not be read',
+                  })}
+                >
+                  {(envelope) => {
+                    const hintData = envelope.payload;
+                    return (
                     hintData.available === false ? (
                       <ReadFailure label="Hint diagnostics unavailable" />
                     ) : (
                       <FamilyList rows={hintData.families ?? []} />
                     )
-                  }
-                </LegacyBoundary>
+                    );
+                  }}
+                </ReadSection>
               </OverviewCard>
             </OverviewGrid>
           </div>
         );
       }}
-    </LegacyBoundary>
+    </ReadSection>
   );
 }
 

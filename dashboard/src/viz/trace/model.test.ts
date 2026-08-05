@@ -11,13 +11,16 @@ import { describe, expect, it } from 'vitest';
 
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import {
+  DashboardEnvelopeV1Schema,
   GraphNeighborsPayloadV1Schema,
 } from '../../contracts/generated.ts';
 import { TRACE_BUDGET, buildSimSpec, buildTraceModel, type NeighborsPayload } from './model.ts';
 import { ringLabel } from './render.ts';
 
 function neighbors(id: string): NeighborsPayload {
-  return resolveFixture(`/api/plugins/graph/node/${id}/neighbors`) as NeighborsPayload;
+  return DashboardEnvelopeV1Schema(GraphNeighborsPayloadV1Schema).parse(
+    resolveFixture(`/api/plugins/graph/node/${id}/neighbors`),
+  ).payload;
 }
 
 function hopIds(payload: NeighborsPayload): string[] {

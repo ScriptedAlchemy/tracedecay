@@ -1,5 +1,4 @@
 import { useMemo, useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
@@ -8,8 +7,9 @@ import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
 import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
 import { useProjectEntry } from '../../data/query/projectRegistry.ts';
-import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
-import { scopedQueryKey, scopedUrl, useScope } from '../../data/scope/store.ts';
+import { type EnvelopeResult } from '../../data/query/envelope.ts';
+import { useScope } from '../../data/scope/store.ts';
+import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { relativeTime } from './BrainPage.tsx';
 import {
   AnalyticsOverviewPayloadV1Schema,
@@ -20,22 +20,6 @@ import {
   type ProjectContextPayloadV1,
   type ProjectStoreContext,
 } from '../../contracts/generated.ts';
-import type { WireSchema } from '../../data/query/wireSchema.ts';
-
-function useBrainEnvelope<T>(
-  key: readonly unknown[],
-  url: string,
-  schema: WireSchema<T>,
-) {
-  const scope = useScope((s) => s.scope);
-  const target = scopedUrl(scope, url);
-  return useQuery<EnvelopeResult<T>>({
-    queryKey: scopedQueryKey(scope, key, url),
-    queryFn: ({ signal }) => fetchEnvelope(target, schema, { signal }),
-    refetchInterval: false,
-    staleTime: 60_000,
-  });
-}
 
 function envelopePayload<T>(result: EnvelopeResult<T> | undefined): T | null {
   return result?.outcome === 'envelope' ? result.envelope.payload : null;
@@ -78,22 +62,22 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   // called, it is fetched once, and a registry change invalidates both.
   const context = useProjectEntry(projectId);
 
-  const subgraph = useBrainEnvelope(
+  const subgraph = useEnvelope(
     ['brain', 'subgraph'],
     '/api/plugins/graph/subgraph',
     GraphSubgraphPayloadV1Schema,
   );
-  const overview = useBrainEnvelope(
+  const overview = useEnvelope(
     ['brain', 'graph-overview'],
     '/api/plugins/graph/overview',
     GraphOverviewPayloadV1Schema,
   );
-  const memory = useBrainEnvelope(
+  const memory = useEnvelope(
     ['brain', 'memory-status'],
     '/api/plugins/holographic/status',
     MemoryStatusPayloadV1Schema,
   );
-  const analytics = useBrainEnvelope(
+  const analytics = useEnvelope(
     ['brain', 'analytics'],
     '/api/plugins/analytics/overview',
     AnalyticsOverviewPayloadV1Schema,
