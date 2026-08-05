@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { WORKSPACES } from '../routes';
 import { cn } from '../../ui/cn';
-import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
+import { useProjectRegistry, projectRegistryPayload } from '../../data/query/projectRegistry.ts';
 import { activationFor, useScope } from '../../data/scope/store.ts';
 
 interface PaletteEntry {
@@ -65,9 +65,10 @@ export function CommandPalette({
         onOpenChange(false);
       },
     }));
+    const listing = projectRegistryPayload(projects.data);
     const projectEntries =
-      projects.data?.outcome === 'ok'
-        ? (projects.data.data.project_tree ?? []).flatMap((group) =>
+      listing?.status === 'ok'
+        ? (listing.project_tree ?? []).flatMap((group) =>
             group.projects.map((project) => ({
               id: `scope:${project.project_id}:${project.canonical_root}`,
               label: project.label,

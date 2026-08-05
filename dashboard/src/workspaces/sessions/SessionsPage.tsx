@@ -6,24 +6,23 @@ import {
   InspectorPanel,
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { formatStamp, splitCount } from '../../ui/format.ts';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
+import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { LcmTimelinePayloadV1Schema } from '../../contracts/generated.ts';
 import { SessionInspector } from './SessionInspector.tsx';
 
 const BASE = '/api/plugins/hermes-lcm';
 
 /**
- * UNCONTRACTED. `lcm_api.rs::overview` and `::search` still answer with
- * `serde_json::Value`, so these two are read structurally. Every other route
- * this workspace touches is generated; when those two gain a schemars DTO these
- * go with them.
+ * The inner overview and search schemas bridge the generated-contract update.
+ * Both already arrive through DashboardEnvelopeV1, so a bare response is a
+ * schema refusal rather than an empty session list.
  */
 const OverviewPayload = z
   .object({ exists: z.boolean().optional(), latest_sessions: z.array(AnyObject).optional() })
@@ -49,12 +48,12 @@ const SearchPayload = z
 /** Sessions: LCM store — overview stats, transcript search across every
  * provider, session list, and drill-down. */
 export function SessionsPage() {
-  const overview = useLegacy(['lcm', 'overview'], `${BASE}/overview`, OverviewPayload);
-  const timeline = useLegacy(['lcm', 'timeline'], `${BASE}/timeline`, LcmTimelinePayloadV1Schema);
+  const overview = useEnvelope(['lcm', 'overview'], `${BASE}/overview`, OverviewPayload);
+  const timeline = useEnvelope(['lcm', 'timeline'], `${BASE}/timeline`, LcmTimelinePayloadV1Schema);
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null);
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');
-  const search = useLegacy(
+  const search = useEnvelope(
     ['lcm', 'search', submitted],
     `${BASE}/search?q=${encodeURIComponent(submitted)}&limit=50`,
     SearchPayload,
@@ -83,8 +82,16 @@ export function SessionsPage() {
             hint="press / to focus, Esc to clear"
             submitted={submitted}
           />
-        <LegacyBoundary title="LCM" pending={timeline.isPending} result={timeline.data}>
-          {(data) => {
+        <ReadSection
+          title="LCM"
+          chrome="centered"
+          state={envelopeReadState(timeline.isPending, timeline.data, {
+            loading: 'reading LCM timeline',
+            transport: 'LCM timeline could not be read',
+          })}
+        >
+          {(envelope) => {
+            const data = envelope.payload;
             if (data.exists === false) {
               return (
                 <p className="text-2xs leading-relaxed text-text-muted">
@@ -142,13 +149,21 @@ export function SessionsPage() {
               </div>
             );
           }}
-        </LegacyBoundary>
+        </ReadSection>
         </div>
       }
       list={
         submitted !== '' ? (
-          <LegacyBoundary title="Transcript search" pending={search.isPending} result={search.data}>
-            {(data) => {
+          <ReadSection
+            title="Transcript search"
+            chrome="centered"
+            state={envelopeReadState(search.isPending, search.data, {
+              loading: 'searching transcripts',
+              transport: 'transcript search could not be read',
+            })}
+          >
+            {(envelope) => {
+              const data = envelope.payload;
               const hits = data.matches?.messages ?? [];
               if (hits.length === 0)
                 return (
@@ -214,10 +229,18 @@ export function SessionsPage() {
                 </div>
               );
             }}
-          </LegacyBoundary>
+          </ReadSection>
         ) : (
-        <LegacyBoundary title="Sessions" pending={overview.isPending} result={overview.data}>
-          {(data) => {
+        <ReadSection
+          title="Sessions"
+          chrome="centered"
+          state={envelopeReadState(overview.isPending, overview.data, {
+            loading: 'reading LCM sessions',
+            transport: 'LCM sessions could not be read',
+          })}
+        >
+          {(envelope) => {
+            const data = envelope.payload;
             if (data.exists === false) {
               return (
                 <p className="p-6 text-center text-sm text-text-muted">
@@ -294,7 +317,7 @@ export function SessionsPage() {
               />
             );
           }}
-        </LegacyBoundary>
+        </ReadSection>
         )
       }
       inspector={
