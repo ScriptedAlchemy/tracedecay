@@ -731,7 +731,7 @@ where
 {
     let mut rows = transaction
         .query(
-            "SELECT 1 FROM git_repository_mutation_quarantines
+            "SELECT 1 FROM git_index_repository_quarantines
              WHERE repository_id = ?1 AND active = 1 LIMIT 1",
             params![repository_id.as_str()],
         )
