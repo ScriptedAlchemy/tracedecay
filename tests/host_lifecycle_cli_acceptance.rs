@@ -680,6 +680,82 @@ fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
 }
 
 #[test]
+fn feedback_policy_failure_precedes_apply_and_restore_mutations() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::Hermes);
+    let originals = seed_host(case, &cli);
+    assert_success(
+        case.id,
+        "install --no-dashboard",
+        cli.run(&["install", "--agent", case.id, "--no-dashboard"]),
+    );
+    let receipt = latest_receipt(&cli, case.host);
+    let before_apply = owned_bytes(&cli, &receipt, &originals);
+    let config_path = cli.profile.join("config.toml");
+    let valid_config = fs::read(&config_path).unwrap();
+    let corrupt_config =
+        b"installed_agents = [\"hermes\"]\nagent_dashboard_enabled = { hermes = false\n";
+    let state = cli.home.path().join("hermes-policy-feedback.json");
+    let apply_args = [
+        "feedback-rollback",
+        "apply",
+        "--agent",
+        case.id,
+        "--state",
+        state.to_str().unwrap(),
+        "--yes",
+    ];
+
+    fs::write(&config_path, corrupt_config).unwrap();
+    let refused_apply = cli.run_with_env(
+        &apply_args,
+        "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
+        "next",
+    );
+    assert!(!refused_apply.status.success());
+    assert!(!state.exists());
+    assert_eq!(owned_bytes(&cli, &receipt, &originals), before_apply);
+
+    fs::write(&config_path, &valid_config).unwrap();
+    assert_success(
+        case.id,
+        "feedback apply",
+        cli.run_with_env(
+            &apply_args,
+            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
+            "next",
+        ),
+    );
+    let applied = owned_bytes(&cli, &receipt, &originals);
+    assert_ne!(applied, before_apply);
+
+    fs::write(&config_path, corrupt_config).unwrap();
+    let refused_restore = cli.run(&[
+        "feedback-rollback",
+        "restore",
+        "--state",
+        state.to_str().unwrap(),
+        "--yes",
+    ]);
+    assert!(!refused_restore.status.success());
+    assert_eq!(owned_bytes(&cli, &receipt, &originals), applied);
+
+    fs::write(&config_path, valid_config).unwrap();
+    assert_success(
+        case.id,
+        "feedback restore",
+        cli.run(&[
+            "feedback-rollback",
+            "restore",
+            "--state",
+            state.to_str().unwrap(),
+            "--yes",
+        ]),
+    );
+    assert_eq!(owned_bytes(&cli, &receipt, &originals), before_apply);
+}
+
+#[test]
 fn codex_lifecycle_refuses_unavailable_noninteractive_activation() {
     let cli = IsolatedCli::new();
     let case = host_case(HostKindV1::Codex);

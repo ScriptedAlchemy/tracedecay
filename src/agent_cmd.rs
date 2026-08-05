@@ -1008,8 +1008,8 @@ enum FeedbackRollbackCliStatus {
     Restored,
 }
 
-const FEEDBACK_ROLLBACK_STATE_SCHEMA_VERSION: u16 = 5;
-const MIN_FEEDBACK_ROLLBACK_STATE_SCHEMA_VERSION: u16 = 4;
+const FEEDBACK_ROLLBACK_STATE_SCHEMA_VERSION: u16 = 6;
+const MIN_FEEDBACK_ROLLBACK_STATE_SCHEMA_VERSION: u16 = 6;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FeedbackRollbackCliState {
@@ -1021,6 +1021,7 @@ struct FeedbackRollbackCliState {
     previous_manifest: tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
     previous_contents: Vec<tracedecay::agents::host_bundle_v2::HostBundleArtifactContentV1>,
     target_manifest: tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
+    dashboard_enabled: bool,
     switch_operation_id: [u8; 16],
     effect_started: bool,
     registration_effect_started: bool,
@@ -2195,6 +2196,8 @@ fn feedback_rollback_dry_run(agent_id: &str) -> tracedecay::errors::Result<()> {
 }
 
 fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::errors::Result<()> {
+    let dashboard_enabled =
+        load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(agent_id);
     let (home, lifecycle_root, aggregate, target) = feedback_rollback_inputs(agent_id)?;
     let (previous, _previous_receipt) = feedback_live_core_receipt(&home, &aggregate)?;
     let previous_contents = read_feedback_repair_contents(&home, &previous)?;
@@ -2217,6 +2220,7 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
         previous_manifest: previous.clone(),
         previous_contents,
         target_manifest: target.manifest.clone(),
+        dashboard_enabled,
         switch_operation_id: request.operation_id,
         effect_started: false,
         registration_effect_started: false,
@@ -2268,14 +2272,13 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
     let lifecycle = rollback.into_lifecycle();
     let writer = lifecycle.into_storage();
 
-    let dashboard = load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(&state.agent_id);
     let context = tracedecay::agents::InstallContext {
         home: home.clone(),
         tracedecay_bin: tracedecay::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string()),
         tool_permissions: tracedecay::agents::expected_tool_perms(),
         project_root: None,
-        dashboard,
+        dashboard: state.dashboard_enabled,
     };
     let registration_snapshot = validate_feedback_registration_snapshot(
         &home,
@@ -2380,6 +2383,16 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
         .identity
         .validate(&state.agent_id, &home, &lifecycle_root)?;
     let integration = tracedecay::agents::get_integration(&state.agent_id)?;
+    let dashboard_enabled =
+        load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(&state.agent_id);
+    if dashboard_enabled != state.dashboard_enabled {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "feedback rollback dashboard policy changed for {:?}; restore the exact policy before resuming",
+                state.agent_id
+            ),
+        });
+    }
     if state.switch_receipt.is_none() && !state.effect_started {
         validate_feedback_registration_restore(
             &home,
@@ -2597,14 +2610,13 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
     persist_feedback_state(state_path, &lifecycle_root, &state)?;
     let lifecycle = rollback.into_lifecycle();
     let writer = lifecycle.into_storage();
-    let dashboard = load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(&state.agent_id);
     let context = tracedecay::agents::InstallContext {
         home,
         tracedecay_bin: tracedecay::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string()),
         tool_permissions: tracedecay::agents::expected_tool_perms(),
         project_root: None,
-        dashboard,
+        dashboard: state.dashboard_enabled,
     };
     if !state.compensation_preserves_registration {
         restore_feedback_registration(

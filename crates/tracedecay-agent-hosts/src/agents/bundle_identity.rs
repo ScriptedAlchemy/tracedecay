@@ -137,7 +137,10 @@ fn collect_discovered_files(root: &Path, path: &Path, paths: &mut Vec<String>) -
         }
     };
     if metadata.is_file() {
-        paths.push(bundle_relative_path(root, path)?);
+        let relative = bundle_relative_path(root, path)?;
+        if is_auto_discovered_entrypoint(&relative) {
+            paths.push(relative);
+        }
         return Ok(());
     }
     if !metadata.is_dir() {
@@ -161,6 +164,23 @@ fn collect_discovered_files(root: &Path, path: &Path, paths: &mut Vec<String>) -
         collect_discovered_files(root, &entry.path(), paths)?;
     }
     Ok(())
+}
+
+fn is_auto_discovered_entrypoint(relative: &str) -> bool {
+    let path = Path::new(relative);
+    if relative.starts_with("skills/") {
+        return path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md");
+    }
+    if relative.starts_with("agents/") || relative.starts_with("commands/") {
+        return path.extension().and_then(|extension| extension.to_str()) == Some("md");
+    }
+    if relative.starts_with("hooks/")
+        || relative.starts_with(".claude-plugin/")
+        || relative.starts_with(".codex-plugin/")
+    {
+        return path.extension().and_then(|extension| extension.to_str()) == Some("json");
+    }
+    false
 }
 
 fn bundle_relative_path(root: &Path, path: &Path) -> Result<String> {
