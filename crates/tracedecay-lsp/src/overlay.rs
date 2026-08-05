@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::diagnostics::{LspRange, PositionError, utf16_position_to_byte_offset};
+use crate::diagnostics::{LspRange, PositionError};
 use crate::gateway::operation_table::{BoundedOperationTable, OperationAdmission, OperationPoll};
 use crate::gateway::{AdmittedRoot, LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner};
 use crate::provider::{
@@ -16,16 +16,18 @@ use crate::provider::{
     DiagnosticSnapshotPort, GenerationDiagnostics,
 };
 use crate::request_sequence::ProcessLocalRequestSequence;
-use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseInputEdit, ParsePoint};
+use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
 #[cfg(test)]
 use tracedecay_code_extraction::incremental::{ParseReport, ParseReuse};
 use tracedecay_domain::{ContentDigest, ManifestDigest, canonical_sha256};
 
 mod retained_parse;
 mod retention;
+mod text_edits;
 
 use retained_parse::RetainedOverlayParse;
-pub use retained_parse::{OverlayParseState, OverlayParseUnavailable};
+pub use retained_parse::{OverlayExtractionState, OverlayParseState, OverlayParseUnavailable};
+use text_edits::apply_change;
 
 /// A single unsaved document cannot consume more than two MiB of the daemon.
 pub const MAX_OVERLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -52,7 +54,7 @@ pub struct OverlayChange {
 ///
 /// `ephemeral` is intentionally explicit so adapters cannot accidentally
 /// treat an unsaved view as a reusable clean-generation input.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct OverlaySnapshot {
     pub uri: String,
     pub language_id: String,
@@ -60,6 +62,7 @@ pub struct OverlaySnapshot {
     pub text: String,
     pub ephemeral: bool,
     pub parse_state: OverlayParseState,
+    pub extraction_state: OverlayExtractionState,
 }
 
 /// Failure while admitting or applying an overlay update.
@@ -222,77 +225,8 @@ fn snapshot(uri: &str, document: &DocumentOverlay) -> OverlaySnapshot {
         version: document.version,
         text: document.text.clone(),
         ephemeral: true,
-        parse_state: document.retained_parse.state().clone(),
-    }
-}
-
-fn apply_change(text: &mut String, change: &OverlayChange) -> Result<ParseInputEdit, OverlayError> {
-    let Some(range) = change.range else {
-        if change.range_length.is_some() {
-            return Err(OverlayError::RangeLengthWithoutRange);
-        }
-        let edit = ParseInputEdit {
-            start_byte: 0,
-            old_end_byte: text.len(),
-            new_end_byte: change.text.len(),
-            start_position: ParsePoint { row: 0, column: 0 },
-            old_end_position: parse_point_at(text, text.len()),
-            new_end_position: parse_point_at(&change.text, change.text.len()),
-        };
-        text.clone_from(&change.text);
-        return Ok(edit);
-    };
-    let start =
-        utf16_position_to_byte_offset(text, range.start).map_err(OverlayError::InvalidRange)?;
-    let end = utf16_position_to_byte_offset(text, range.end).map_err(OverlayError::InvalidRange)?;
-    if start > end {
-        return Err(OverlayError::InvalidRange(
-            PositionError::CharacterOutOfBounds,
-        ));
-    }
-    if let Some(received) = change.range_length {
-        let expected = text[start..end].encode_utf16().count() as u32;
-        if expected != received {
-            return Err(OverlayError::InvalidRangeLength { expected, received });
-        }
-    }
-    let start_position = parse_point_at(text, start);
-    let edit = ParseInputEdit {
-        start_byte: start,
-        old_end_byte: end,
-        new_end_byte: start.saturating_add(change.text.len()),
-        start_position,
-        old_end_position: parse_point_at(text, end),
-        new_end_position: replacement_end_point(start_position, &change.text),
-    };
-    text.replace_range(start..end, &change.text);
-    Ok(edit)
-}
-
-fn parse_point_at(text: &str, byte_offset: usize) -> ParsePoint {
-    let prefix = &text.as_bytes()[..byte_offset];
-    let row = prefix.iter().filter(|byte| **byte == b'\n').count();
-    let column = prefix
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(prefix.len(), |last_newline| {
-            prefix.len().saturating_sub(last_newline + 1)
-        });
-    ParsePoint { row, column }
-}
-
-fn replacement_end_point(start: ParsePoint, replacement: &str) -> ParsePoint {
-    let end = parse_point_at(replacement, replacement.len());
-    if end.row == 0 {
-        ParsePoint {
-            row: start.row,
-            column: start.column.saturating_add(end.column),
-        }
-    } else {
-        ParsePoint {
-            row: start.row.saturating_add(end.row),
-            column: end.column,
-        }
+        parse_state: document.retained_parse.parse_state().clone(),
+        extraction_state: document.retained_parse.extraction_state().clone(),
     }
 }
 
@@ -998,6 +932,9 @@ mod tests {
             text: "fn main() {}".to_owned(),
             ephemeral: true,
             parse_state: OverlayParseState::Unavailable(OverlayParseUnavailable::ParseFailed),
+            extraction_state: OverlayExtractionState::Unavailable(
+                OverlayParseUnavailable::ParseFailed,
+            ),
         };
         assert_eq!(
             adapter.request_document_refresh(&root, "file:///root/a.rs", Some(&overlay), None,),
