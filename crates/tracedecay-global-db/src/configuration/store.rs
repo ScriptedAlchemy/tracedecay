@@ -440,19 +440,28 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             .begin_write_transaction()
             .await
             .map_err(|_| ConfigurationError::Unavailable)?;
-        commit_canonical_genesis_transaction(
-            &transaction,
-            &genesis.target_revision_id,
-            &resolution,
-            created_at,
-        )
-        .await?;
-        let current = current_state_from_transaction(&transaction).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| ConfigurationError::Unavailable)?;
-        Ok(current)
+        let outcome = async {
+            commit_canonical_genesis_transaction(
+                &transaction,
+                &genesis.target_revision_id,
+                &resolution,
+                created_at,
+            )
+            .await?;
+            current_state_from_transaction(&transaction).await
+        }
+        .await;
+        match outcome {
+            Ok(current) => transaction
+                .commit()
+                .await
+                .map(|()| current)
+                .map_err(|_| ConfigurationError::Unavailable),
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(_) => Err(ConfigurationError::Unavailable),
+            },
+        }
     }
 
     #[cfg(test)]
