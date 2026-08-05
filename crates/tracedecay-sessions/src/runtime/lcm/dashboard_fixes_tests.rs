@@ -34,6 +34,21 @@ struct DashboardFixture {
     _tmp: TempDir,
 }
 
+async fn load_raw_message_for_test(
+    sessions: &RegisteredGlobalDb,
+    provider: &str,
+    message_id: &str,
+) -> tracedecay_sessions::runtime::lcm::LcmRawMessage {
+    let snapshot = sessions
+        .read_snapshot()
+        .await
+        .expect("registered raw-message snapshot");
+    tracedecay_sessions::runtime::lcm::schema::load_raw_message(&snapshot, provider, message_id)
+        .await
+        .expect("registered raw-message lookup")
+        .expect("raw-message fixture")
+}
+
 impl DashboardFixture {
     async fn open(external_payload: bool, provider_collision: bool) -> Self {
         let tmp = tempfile::tempdir().expect("LCM dashboard fixture");
@@ -257,10 +272,8 @@ async fn seed_lcm_fixture(
             .await
             .expect("externalized message");
         assert!(matches!(
-            sessions
-                .lcm_load_raw_message(PROVIDER, "msg-x")
+            load_raw_message_for_test(sessions, PROVIDER, "msg-x")
                 .await
-                .expect("externalized raw message")
                 .storage_kind,
             LcmStorageKind::External
         ));
@@ -277,20 +290,14 @@ async fn seed_lcm_fixture(
         );
     }
 
-    let store_a = sessions
-        .lcm_load_raw_message(PROVIDER, "msg-a")
+    let store_a = load_raw_message_for_test(sessions, PROVIDER, "msg-a")
         .await
-        .expect("msg-a raw projection")
         .store_id;
-    let store_b = sessions
-        .lcm_load_raw_message(PROVIDER, "msg-b")
+    let store_b = load_raw_message_for_test(sessions, PROVIDER, "msg-b")
         .await
-        .expect("msg-b raw projection")
         .store_id;
-    let store_c = sessions
-        .lcm_load_raw_message(PROVIDER, "msg-c")
+    let store_c = load_raw_message_for_test(sessions, PROVIDER, "msg-c")
         .await
-        .expect("msg-c raw projection")
         .store_id;
     let linked = insert_summary_node(
         sessions,

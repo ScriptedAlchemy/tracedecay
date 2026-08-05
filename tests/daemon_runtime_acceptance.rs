@@ -1,19 +1,28 @@
-//! Mandatory PR13 daemon journey gate over production startup authorities.
+//! Mandatory daemon journey over production startup authorities.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay::agents::context_scout_v2::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1, ContextScoutDecisionV1,
-    ContextScoutDeliveryWindowV1, ContextScoutEvidenceBindingV1, ContextScoutEvidenceGenerationV1,
-    ContextScoutLimitsV1, ContextScoutSelectionInputV1, select_deterministic_context_scout,
+    ContextScoutDeliveryWindowV1, ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
+    ContextScoutEvidenceSourceReceiptV1, ContextScoutLimitsV1, ContextScoutRedactionReceiptV1,
+    ContextScoutSelectionInputV1, select_deterministic_context_scout,
 };
 use tracedecay::agents::host_bundle_v2::{
     HostKindV1, HostRegistrationRouteV1, stock_host_registration_evidence,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_application::feedback_surface_catalog_contribution;
-use tracedecay_domain::UtcMicros;
+use tracedecay_application::{
+    AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
+    EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
+    TemporalState, feedback_surface_catalog_contribution,
+};
+use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
+use tracedecay_domain::{
+    CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId, TemporalModeV1,
+    UtcMicros,
+};
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
     HookEventFamily, HookHostV1, HookSpoolConfigV1, HookSpoolV1, NativeEnvelopeMaterialV1,
@@ -23,11 +32,97 @@ use tracedecay_tool_catalog::BindingSurface;
 
 mod common;
 
+fn id<T>(value: &str) -> T
+where
+    T: TryFrom<String>,
+    T::Error: std::fmt::Debug,
+{
+    T::try_from(value.to_owned()).unwrap()
+}
+
+fn digest(character: char) -> ManifestDigest {
+    ManifestDigest::new(format!("sha256:{}", character.to_string().repeat(64))).unwrap()
+}
+
+fn scout_evidence(now: UtcMicros) -> ContextScoutEvidenceEnvelopeV1 {
+    let scope = ResolvedScope::new(
+        id("project.scout.acceptance"),
+        id("repository.scout.acceptance"),
+        id("worktree.scout.acceptance"),
+        Some(id::<RefId>("refs/heads/main")),
+    )
+    .unwrap();
+    let generation = id::<CodeGenerationId>("generation.scout.acceptance");
+    ContextScoutEvidenceEnvelopeV1::claim(
+        FeedbackScopeV1 {
+            project_id: scope.project_id.clone(),
+            repository_id: scope.repository_id.clone(),
+            worktree_id: scope.worktree_id.clone(),
+            branch_ref: "refs/heads/main".to_owned(),
+            head_commit_id: id("commit.scout.acceptance"),
+        },
+        scope.clone(),
+        FeedbackContentIdentityV1::SavedContent {
+            generation_digest: digest('c'),
+            file_digest: digest('d'),
+        },
+        generation.clone(),
+        AuthorityReceipt {
+            grant_id: id("grant.scout.acceptance"),
+            grant_revision: 1,
+            grant_digest: digest('a'),
+            authorized_scope_digest: scope.scope_digest.clone(),
+            disclosure: DisclosureClass::Evidence,
+            policy: PolicyDecisionRef::new(
+                "policy.scout.acceptance",
+                1,
+                digest('b'),
+                ComponentVersion::new("policy.scout.acceptance.v1").unwrap(),
+            )
+            .unwrap(),
+            revalidated_at: UtcMicros(now.0 - 1),
+        },
+        ContextScoutRedactionReceiptV1::MetadataOnly {
+            disclosure: DisclosureClass::Evidence,
+        },
+        vec![ContextScoutEvidenceSourceReceiptV1 {
+            source: ContextScoutEvidenceSourceKindV1::Code,
+            contribution_state: RetrieverContributionState::Completed,
+            temporal: TemporalState {
+                requested_mode: TemporalModeV1::Current,
+                requested_at: UtcMicros(now.0 - 1),
+                resolved_at: now,
+                source_generation: Some(generation),
+                watermark_digest: Some(digest('e')),
+                freshness: FreshnessState::Current,
+            },
+            coverage: EvidenceCoverage {
+                requested_domains: vec![EvidenceDomain::Diagnostic],
+                visited: Some(1),
+                eligible: Some(1),
+                returned: 1,
+                completeness: CoverageCompleteness::Complete,
+                domains: vec![CoverageDomainState {
+                    domain: EvidenceDomain::Diagnostic,
+                    completeness: CoverageCompleteness::Complete,
+                }],
+            },
+            anchors: vec![id::<RetrievalAnchorId>("anchor.scout.acceptance")],
+        }],
+        now,
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn authentic_callback_to_all_delivery_surfaces() {
     let (_environment, project) = common::IsolatedEnv::acquire().await;
     std::fs::create_dir_all(project.join("src")).unwrap();
-    std::fs::write(project.join("src/lib.rs"), "pub fn pr13_callback() {}\n").unwrap();
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn advisory_callback() {}\n",
+    )
+    .unwrap();
     TraceDecay::init(&project)
         .await
         .expect("production project initialization");
@@ -75,7 +170,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     .expect("authentic callback binds to project-open Hook V2 scope");
     assert_eq!(envelope.event.family(), decoded.family());
 
-    let spool_root = layout.data_root.join("pr13-hook-replay");
+    let spool_root = layout.data_root.join("advisory-hook-replay");
     let (mut spool, _) = HookSpoolV1::open(
         &spool_root,
         HookSpoolConfigV1::stock(HookHostV1::ClaudeCode),
@@ -114,11 +209,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
                 category: ContextScoutCategoryV1::Coordination,
                 relevance_score: 10_000,
                 suggestion_text: "Another active agent edited this file.".to_owned(),
-                evidence: vec![ContextScoutEvidenceBindingV1 {
-                    anchor_id: [13; 16],
-                    content_identity: [14; 32],
-                    generation: ContextScoutEvidenceGenerationV1::SavedContent,
-                }],
+                evidence: scout_evidence(now),
                 expires_at: UtcMicros(now.0 + 1_000_000),
             }],
         },

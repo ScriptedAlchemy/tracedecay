@@ -1,4 +1,4 @@
-//! Strict PR13 runtime acceptance over authentic provider response captures.
+//! Strict advisory runtime acceptance over authentic provider response captures.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::process::Command;
@@ -208,9 +208,9 @@ fn captured_response(source: &str) -> Value {
 
 fn scope() -> FeedbackScopeV1 {
     FeedbackScopeV1 {
-        project_id: ProjectId::new("project.pr13.runtime.capture").unwrap(),
-        repository_id: RepositoryId::new("repository.pr13.runtime.capture").unwrap(),
-        worktree_id: WorktreeId::new("worktree.pr13.runtime.capture").unwrap(),
+        project_id: ProjectId::new("project.advisory.runtime.capture").unwrap(),
+        repository_id: RepositoryId::new("repository.advisory.runtime.capture").unwrap(),
+        worktree_id: WorktreeId::new("worktree.advisory.runtime.capture").unwrap(),
         branch_ref: "refs/heads/codex/tracedecay-total-redesign-plan".to_owned(),
         head_commit_id: CommitId::new("e29900448db98ae58e90d08770a3bb8bfa710846").unwrap(),
     }
@@ -232,7 +232,7 @@ fn github_source_access_uses_owner_bound_ureq_dtos() {
 #[tokio::test]
 async fn authentic_github_and_ci_responses_use_production_decoders() {
     let pull_request = captured_response(include_str!(
-        "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/pull_request.json"
+        "../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json"
     ));
     let request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::RestGetPullRequest,
@@ -275,7 +275,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
         ..request.clone()
     };
     let review = captured_response(include_str!(
-        "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/review.json"
+        "../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review.json"
     ));
     assert!(
         decoder
@@ -304,7 +304,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     )
     .unwrap();
     let thread = captured_response(include_str!(
-        "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/review_thread.graphql.json"
+        "../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
     ));
     let thread_request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
@@ -345,16 +345,16 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
 
     let ci = GitHubCiOfficialResponseDecoderV1::decode(
         include_str!(
-            "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/workflow_run.json"
+            "../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_run.json"
         ),
         include_str!(
-            "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/workflow_job.json"
+            "../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_job.json"
         ),
         include_str!(
-            "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/check_run.json"
+            "../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_run.json"
         ),
         include_str!(
-            "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/check_annotations.json"
+            "../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_annotations.json"
         ),
     )
     .expect("authentic CI responses decode");
@@ -365,7 +365,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
 #[tokio::test]
 async fn corrupt_provider_identity_fails_production_decoder() {
     let mut pull_request = captured_response(include_str!(
-        "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/pull_request.json"
+        "../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json"
     ));
     pull_request["id"] = json!(0);
     let request = GitHubReviewReadRequestV1 {
@@ -415,10 +415,10 @@ fn proximity_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext 
     )
     .unwrap();
     let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.pr13.proximity").unwrap(),
+        CapabilityGrantId::new("grant.advisory.proximity").unwrap(),
         1,
         ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
-        ActorId::new("actor.pr13.proximity.issuer").unwrap(),
+        ActorId::new("actor.advisory.proximity.issuer").unwrap(),
         UtcMicros(now.0.saturating_sub(1_000_000)),
         UtcMicros(now.0.saturating_add(60_000_000)),
         resolved.clone(),
@@ -428,12 +428,12 @@ fn proximity_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext 
     )
     .unwrap();
     RequestContext::new(
-        ActorId::new("actor.pr13.proximity").unwrap(),
+        ActorId::new("actor.advisory.proximity").unwrap(),
         resolved,
         grant,
-        RequestId::new("request.pr13.proximity").unwrap(),
+        RequestId::new("request.advisory.proximity").unwrap(),
         Deadline::new(UtcMicros(now.0.saturating_add(30_000_000))).unwrap(),
-        CancellationContext::active("cancel.pr13.proximity").unwrap(),
+        CancellationContext::active("cancel.advisory.proximity").unwrap(),
     )
     .unwrap()
 }
@@ -448,10 +448,10 @@ fn ci_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext {
     )
     .unwrap();
     let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.pr13.ci").unwrap(),
+        CapabilityGrantId::new("grant.advisory.ci").unwrap(),
         1,
         ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
-        ActorId::new("actor.pr13.ci.issuer").unwrap(),
+        ActorId::new("actor.advisory.ci.issuer").unwrap(),
         UtcMicros(now.0.saturating_sub(1_000_000)),
         UtcMicros(now.0.saturating_add(60_000_000)),
         resolved.clone(),
@@ -465,12 +465,12 @@ fn ci_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext {
     )
     .unwrap();
     RequestContext::new(
-        ActorId::new("actor.pr13.ci").unwrap(),
+        ActorId::new("actor.advisory.ci").unwrap(),
         resolved,
         grant,
-        RequestId::new("request.pr13.ci").unwrap(),
+        RequestId::new("request.advisory.ci").unwrap(),
         Deadline::new(UtcMicros(now.0.saturating_add(30_000_000))).unwrap(),
-        CancellationContext::active("cancel.pr13.ci").unwrap(),
+        CancellationContext::active("cancel.advisory.ci").unwrap(),
     )
     .unwrap()
 }
@@ -558,7 +558,7 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
         pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
     };
     let fixture: Value = serde_json::from_str(include_str!(
-        "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/review_comment.json"
+        "../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_comment.json"
     ))
     .unwrap();
     let body = fixture.pointer("/response/body").unwrap().as_str().unwrap();
@@ -680,7 +680,7 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
 #[tokio::test]
 async fn unauthorized_ci_request_is_denied_before_provider_read() {
     let fixture =
-        tracedecay::application::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1()
+        tracedecay::application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap();
     let scope = scope();
     let request = CiFailureLocalizationRequestV1 {
@@ -743,7 +743,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
     graph.index_all().await.expect("canonical graph index");
     let graph = Arc::new(graph);
     let mut provider_record =
-        tracedecay::application::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1()
+        tracedecay::application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap()
             .ci_provider_record;
     provider_record.workflow_run.head_sha = scope.head_commit_id.as_str().to_owned();
@@ -766,13 +766,13 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
         provider_record,
         observation: CiRetainedProviderObservationV1 {
             observation_id: CanonicalObservationIdV1::new(
-                canonical_sha256(&"observation.pr13.ci.graph")
+                canonical_sha256(&"observation.advisory.ci.graph")
                     .unwrap()
                     .as_str()
                     .to_owned(),
             )
             .unwrap(),
-            failure_anchor: RetrievalAnchorId::new("anchor.pr13.ci.graph").unwrap(),
+            failure_anchor: RetrievalAnchorId::new("anchor.advisory.ci.graph").unwrap(),
             provider_head_commit_id: scope.head_commit_id.clone(),
             failure_kind: tracedecay_domain::feedback::CiFailureKindV1::TestFailure,
             observed_at: now_micros(),
@@ -838,7 +838,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
 #[tokio::test]
 async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
     let fixture =
-        tracedecay::application::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1()
+        tracedecay::application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap();
     let scope = scope();
     let request = GitHubReviewReadRequestV1 {
@@ -860,7 +860,7 @@ async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
 }
 
 /// Authentic Cursor and Codex hook packets must cross the packaged CLI,
-/// daemon-owned Hook V2 admission/delivery ports, and the registered PR13
+/// daemon-owned Hook V2 admission/delivery ports, and the registered advisory
 /// advisory owner. A committed ingest alone is insufficient: the same process
 /// must then return a non-vacuous typed four-pillar terminal cycle.
 #[tokio::test]
@@ -913,12 +913,12 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
     ))
     .unwrap();
-    event["conversation_id"] = json!("conversation-pr13-proximity");
-    event["generation_id"] = json!("generation-pr13-proximity");
+    event["conversation_id"] = json!("conversation-advisory-proximity");
+    event["generation_id"] = json!("generation-advisory-proximity");
     event["model"] = json!("cursor-fixture");
     event["file_path"] = json!(project.join("src/lib.rs"));
     event["edits"] = json!([{"old_string": "", "new_string": "pub fn shared_edit() {}"}]);
-    event["session_id"] = json!("session-pr13-proximity");
+    event["session_id"] = json!("session-advisory-proximity");
     event["cursor_version"] = json!("fixture");
     event["workspace_roots"] = json!([project.clone()]);
     event["user_email"] = json!("redacted@example.invalid");
@@ -973,14 +973,14 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "fixtures/provider_normalization/codex/session_meta.input.json"
     ))
     .unwrap();
-    codex_meta["payload"]["id"] = json!("session-pr13-proximity");
+    codex_meta["payload"]["id"] = json!("session-advisory-proximity");
     codex_meta["payload"]["cwd"] = json!(project.clone());
     let codex_message: Value = serde_json::from_str(include_str!(
         "fixtures/provider_normalization/codex/agent_message.input.json"
     ))
     .unwrap();
     std::fs::write(
-        codex_sessions.join("rollout-pr13-proximity.jsonl"),
+        codex_sessions.join("rollout-advisory-proximity.jsonl"),
         format!("{codex_meta}\n{codex_message}\n"),
     )
     .unwrap();
@@ -989,8 +989,8 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"
     ))
     .unwrap();
-    stop["session_id"] = json!("session-pr13-proximity");
-    stop["turn_id"] = json!("turn-pr13-proximity-stop");
+    stop["session_id"] = json!("session-advisory-proximity");
+    stop["turn_id"] = json!("turn-advisory-proximity-stop");
     stop["cwd"] = json!(project.clone());
     stop["model"] = json!("codex-fixture");
     stop["permission_mode"] = json!("default");

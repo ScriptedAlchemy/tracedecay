@@ -23,5 +23,5 @@ pub use operations::{
     CompatibilityFactCurationOperationV1, CompatibilityFactCurationReceiptV1,
     CompatibilityFactLinkV1, CompatibilityFactMergeEntitiesV1, CompatibilityFactNormalizeTagsV1,
     CompatibilityFactRelationV1, CompatibilityFactRepairVectorV1,
-    CompatibilityLegacyEntityTargetV1,
+    CompatibilityLegacyEntityTargetV1, CompatibilityRelationProvenanceV1,
 };

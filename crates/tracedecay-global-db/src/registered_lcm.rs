@@ -13,11 +13,11 @@ use tracedecay_sessions::runtime::{
         LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
         LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
         LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-        LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRecentSession,
-        LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
-        LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmSummaryExpansion, LcmSummaryNode,
-        LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
-        compression, dag, doctor, gc, payload, query, raw, schema,
+        LcmPreflightRequest, LcmPreflightResponse, LcmRecentSession, LcmSessionBoundaryRequest,
+        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
+        LcmStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
+        LcmSummarySourceMessage, LcmSummarySourceRange, compression, dag, doctor, gc, payload,
+        query, raw,
     },
 };
 
@@ -262,13 +262,29 @@ impl RegisteredGlobalDb {
         query::session_replay_slice(&snapshot, request).await
     }
 
-    pub async fn lcm_load_raw_message(
+    /// Resolves only the persisted locator for admission and readiness checks.
+    ///
+    /// Production callers that do not need content must use this metadata-only
+    /// route. Content hydration remains owned by authorized temporal execution.
+    pub async fn lcm_raw_message_store_id(
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<LcmRawMessage> {
-        let snapshot = self.read_snapshot().await.ok()?;
-        schema::load_raw_message(&snapshot, provider, message_id).await
+    ) -> Result<Option<i64>, LcmError> {
+        let snapshot = self.read_snapshot().await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT store_id
+                 FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2",
+                params![provider, message_id],
+            )
+            .await?;
+        rows.next()
+            .await?
+            .map(|row| row.get(0))
+            .transpose()
+            .map_err(Into::into)
     }
 
     pub async fn lcm_status_with_options(
@@ -401,6 +417,7 @@ impl RegisteredGlobalDb {
             );
         }
         draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
+        let draft = tracedecay_sessions::runtime::lcm::dag::sanitize_summary_draft(draft)?;
         drop(snapshot);
 
         let transaction = self

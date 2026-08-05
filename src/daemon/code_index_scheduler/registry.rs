@@ -7,10 +7,14 @@
 //! [`CodeIndexWorktreeSchedulerV1`]; this module never runs it while holding the
 //! registry map lock.
 
-use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::{
+    collections::BTreeMap,
+    path::{Component, Path, PathBuf},
+    sync::{
+        Arc, Mutex, RwLock, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
@@ -25,6 +29,8 @@ use super::{
 };
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
+
+mod resident_memory;
 
 /// Bounded daemon-wide concurrency for expensive background reconciles and
 /// mounts. A single global permit serialized EVERY project/worktree cold build
@@ -139,6 +145,7 @@ pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
 #[derive(Clone)]
 pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
+    pub(super) resident_memory: Arc<resident_memory::ProcessResidentMemoryV1>,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
     mount_admission: Arc<tokio::sync::Semaphore>,
@@ -160,26 +167,6 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
-    pub fn new(max_worktrees: usize) -> Self {
-        let (generation_publications, _) =
-            tokio::sync::broadcast::channel(GENERATION_PUBLICATION_CHANNEL_CAPACITY);
-        Self {
-            max_worktrees,
-            byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
-            mounted: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-            mount_admission: Arc::new(tokio::sync::Semaphore::new(
-                bounded_daemon_admission_permits(),
-            )),
-            background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
-                bounded_daemon_admission_permits(),
-            )),
-            generation_publications,
-            cadence_telemetry: Arc::new(Mutex::new(CodeIndexCadenceTelemetryV1::default())),
-            activations: Arc::new(Mutex::new(BTreeMap::new())),
-            test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
-        }
-    }
-
     pub(in crate::daemon) fn register_activation(
         &self,
         scope: &tracedecay_application::ResolvedScope,

@@ -499,7 +499,7 @@ pub(super) fn compatibility_curation_operation_digest(
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
             "source_label": operation.source_label(),
-            "metadata": operation.metadata(),
+            "provenance": operation.provenance(),
         })),
         CompatibilityFactCurationOperationV1::RepairVector(operation) => Ok(json!({
             "kind": "repair_vector",

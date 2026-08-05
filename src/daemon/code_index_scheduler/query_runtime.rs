@@ -1,8 +1,8 @@
-//! Fail-closed production activation and execution for authenticated query search.
+//! Production activation and execution for authenticated query search.
 //!
-//! The daemon owns only orchestration here. Accepted profile/evaluation state
-//! and durable provider-derived query/cursor keys come from a configured authority port;
-//! this module never chooses weights, anchors, revisions, or key material.
+//! Exact/lexical/graph search starts from the checked-in fallback workload and
+//! durable query/cursor keys. Optional-stage upgrades additionally require an
+//! accepted profile/evaluation from the configured authority port.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -33,6 +33,11 @@ use tracedecay_query::retrieval::{
     AuthorizedQueryFallbackV1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
     RetrievalPortError, SanitizedRetrievalRequestV1,
 };
+
+const QUERY_FALLBACK_PROFILE_ID: &str = "query-fallback";
+const QUERY_FALLBACK_WORKLOAD_JSON: &str = include_str!(
+    "../../../tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
+);
 
 /// Immutable evidence that a configured authority accepted one exact query
 /// profile for one exact admitted scope.
@@ -93,10 +98,71 @@ pub(in crate::daemon) enum QueryRuntimeMountErrorV1 {
     PrivacyDomainMismatch,
     #[error("no complete current code generation exists for the exact admitted scope")]
     GenerationUnavailable,
+    #[error("checked-in query fallback policy is invalid: {0}")]
+    InvalidFallbackPolicy(String),
+    #[error("durable query fallback cursor key is unavailable: {0}")]
+    FallbackKeyUnavailable(String),
     #[error(transparent)]
     Authority(#[from] QueryAuthorityErrorV1),
     #[error("query authority mount failed: {0}")]
     Mount(String),
+}
+
+/// Mount the checked-in exact/lexical/graph policy without claiming that an
+/// optional-stage evaluation passed. This authority remains callable while no
+/// semantic profile has been genuinely evaluated and published.
+pub(in crate::daemon) async fn mount_core_query_authority_on_project_open(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    scope: &ResolvedScope,
+    cursor_keys: &crate::global_db::session_temporal::GlobalDbCursorKeyProvider,
+) -> Result<(), QueryRuntimeMountErrorV1> {
+    let latest = registry
+        .latest_complete_fresh_for_scope(scope)
+        .await
+        .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?;
+    let privacy_domain = latest.generation.manifest().privacy_domain.clone();
+    let workload: crate::search_eval::CandidateWorkloadV1 =
+        serde_json::from_str(QUERY_FALLBACK_WORKLOAD_JSON)
+            .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
+    let material =
+        crate::search_eval::direct_evaluated_profile_material(&workload, QUERY_FALLBACK_PROFILE_ID)
+            .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
+    if material.rerank.is_some() {
+        return Err(QueryRuntimeMountErrorV1::InvalidFallbackPolicy(
+            "query fallback unexpectedly enables reranking".to_owned(),
+        ));
+    }
+    let workload_digest = crate::search_eval::compute_workload_digest(&workload)
+        .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
+    let policy_anchor = RetrievalAnchorId::new(format!(
+        "policy.query-fallback.workload.v1.{workload_digest}"
+    ))
+    .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
+    let profile = FusionProfile {
+        evaluation_result_anchor: policy_anchor.clone(),
+        ..material.profile
+    };
+    let diversity = DiversityPolicy {
+        evaluation_result_anchor: Some(policy_anchor),
+        ..material.diversity
+    };
+    let ranking_revision =
+        ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
+            .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
+    let keyring = cursor_keys
+        .retrieval_keyring(privacy_domain)
+        .map_err(|error| QueryRuntimeMountErrorV1::FallbackKeyUnavailable(error.to_string()))?;
+    let authority = Arc::new(QueryAuthorityV1::new(
+        profile,
+        diversity,
+        ranking_revision,
+        keyring,
+    )?);
+    registry
+        .mount_query_authority(project_root, scope, authority)
+        .await
+        .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
 }
 
 /// Resolve and validate one exact accepted authority without mounting it.

@@ -76,6 +76,7 @@ pub mod path_scope;
 pub mod privacy;
 pub mod project_registry;
 pub mod redundancy;
+pub mod resident_memory;
 pub mod runtime_identity;
 pub mod serde_util;
 pub mod sqlite_read_snapshot;

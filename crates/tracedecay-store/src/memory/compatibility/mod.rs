@@ -29,6 +29,7 @@ pub use curation::{
     CompatibilityFactRepairVectorV1, CompatibilityFactUpdateCommandV1,
     CompatibilityFactUpdateOutcomeV1, CompatibilityFactUpdatePatchV1,
     CompatibilityLegacyEntityTargetV1, CompatibilityMemoryRepairCommandV1,
+    CompatibilityRelationProvenanceV1,
 };
 pub use dashboard::{
     CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,

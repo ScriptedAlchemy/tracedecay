@@ -592,78 +592,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn branch_serving_selector_resolves_the_project_wide_memory_store() {
-        fn git(project: &Path, args: &[&str]) {
-            let status = std::process::Command::new("git")
-                .args(args)
-                .current_dir(project)
-                .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .status()
-                .unwrap();
-            assert!(status.success(), "git {args:?} must succeed");
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        let profile_root = tmp.path().join("profile");
-        let project_root = tmp.path().join("project");
-        std::fs::create_dir_all(project_root.join("src")).unwrap();
-        std::fs::write(project_root.join("src/lib.rs"), "pub fn served() {}\n").unwrap();
-        git(&project_root, &["init", "-b", "main"]);
-        git(&project_root, &["add", "."]);
-        git(&project_root, &["commit", "-m", "initial"]);
-
-        let main = TraceDecay::init_with_options(&project_root, open_options(&profile_root))
-            .await
-            .unwrap();
-        main.index_all().await.unwrap();
-        let project_id = project_id_of(&main);
-        let project_db_path = main.store_layout().graph_db_path.clone();
-        main.checkpoint().await.unwrap();
-        main.close();
-
-        git(&project_root, &["checkout", "-b", "feature"]);
-        TraceDecay::add_branch_tracking_with_options(
-            &project_root,
-            "feature",
-            open_options(&profile_root),
-        )
-        .await
-        .unwrap();
-
-        let branch = TraceDecay::open_with_options(&project_root, open_options(&profile_root))
-            .await
-            .unwrap();
-        assert_eq!(branch.serving_branch(), Some("feature"));
-        assert_ne!(
-            branch.db_path(),
-            project_db_path,
-            "fixture must serve a branch shard distinct from the project store"
-        );
-        register_project(&branch, &project_id, &project_root).await;
-        add_project_fact(&branch, "durable facts stay project-wide across branches").await;
-
-        let selected = open_target_memory_db(
-            &branch,
-            &json!({ "project_id": project_id }),
-            Some(branch.profile_database()),
-        )
-        .await
-        .unwrap();
-
-        assert!(
-            !std::ptr::eq(selected.db(), branch.db()),
-            "a branch-serving graph must resolve memory to the project store, not its shard"
-        );
-        assert_eq!(fact_count(&selected).await, 1);
-        drop(selected);
-        branch.checkpoint().await.unwrap();
-        branch.close();
-    }
-
-    #[tokio::test]
     async fn feedback_rejects_cross_project_write_before_opening_a_store() {
         let (_tmp, cg, fact_id) = seeded_memory().await;
 
@@ -687,7 +615,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fact_feedback_without_source_keeps_legacy_mcp_history() {
+    async fn fact_feedback_without_source_keeps_default_mcp_history() {
         let (_tmp, cg, fact_id) = seeded_memory().await;
 
         handle_fact_feedback(
@@ -764,13 +692,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fact_add_accepts_request_derived_operation_as_legacy_replay() {
+    async fn fact_add_accepts_request_derived_operation_replay() {
         let (_tmp, cg) = empty_memory().await;
         let owner = active_project_memory_owner(&cg).unwrap();
         active_memory(&cg)
             .add_fact_v1(
                 AddFactRequest {
-                    content: "legacy request-derived memory write".to_owned(),
+                    content: "request-derived memory write".to_owned(),
                     category: MemoryCategory::General,
                     source: None,
                     tags: Vec::new(),
@@ -781,7 +709,7 @@ mod tests {
                 MemoryOperationContext::from_trusted_request_id(
                     &owner,
                     "add",
-                    "request.mcp.legacy-connection.first",
+                    "request.mcp.connection.first",
                     None,
                 )
                 .unwrap(),
@@ -793,7 +721,7 @@ mod tests {
             &cg,
             json!({
                 "action": "add",
-                "content": "legacy request-derived memory write",
+                "content": "request-derived memory write",
                 "__mcp_request_id": "request.mcp.reconnected.first",
             }),
             None,

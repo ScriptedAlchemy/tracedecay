@@ -96,6 +96,9 @@ impl ProjectRuntimeRegistryV1 {
         }
 
         for (project_root, runtime) in runtimes {
+            if let Some(external_acquisition) = runtime.external_acquisition {
+                external_acquisition.cancel();
+            }
             if let Some(work) = runtime.work {
                 let _ = work.into_runtime().shutdown();
             }

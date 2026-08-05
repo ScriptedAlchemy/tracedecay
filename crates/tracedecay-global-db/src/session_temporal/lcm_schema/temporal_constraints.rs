@@ -44,19 +44,27 @@ async fn temporal_schema_rejects_cross_session_and_generation_rows() {
          VALUES ('session-one', 1, 'turn-one', 0, 'provider', 100);
          INSERT INTO session_occurrences (
             session_id, generation, occurrence_id, source_observation_id,
-            projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
-            valid_time_json, evidence_json, snippet_text, index_text
+            source_provider, projection_output_ordinal, retrieval_anchor_id,
+            role, knowledge_at, valid_time_json, evidence_json,
+            sanitized_content_digest, sanitized_content_bytes,
+            snippet_text, index_text
          )
          VALUES
             ('session-one', 1, 'occurrence-one', 'observation-one',
-             0, 'anchor-one', 'assistant', 100,
-             json_object('kind', 'unknown'), '{}', 'one', 'one'),
+             'test', 0, 'anchor-one', 'assistant', 100,
+             json_object('kind', 'unknown'), '{}',
+             '0000000000000000000000000000000000000000000000000000000000000000',
+             3, 'one', 'one'),
             ('session-one', 2, 'occurrence-two', 'observation-one',
-             0, 'anchor-one', 'assistant', 100,
-             json_object('kind', 'unknown'), '{}', 'two', 'two'),
+             'test', 0, 'anchor-one', 'assistant', 100,
+             json_object('kind', 'unknown'), '{}',
+             '0000000000000000000000000000000000000000000000000000000000000000',
+             3, 'two', 'two'),
             ('session-two', 1, 'occurrence-three', 'observation-one',
-             0, 'anchor-one', 'assistant', 100,
-             json_object('kind', 'unknown'), '{}', 'three', 'three');",
+             'test', 0, 'anchor-one', 'assistant', 100,
+             json_object('kind', 'unknown'), '{}',
+             '0000000000000000000000000000000000000000000000000000000000000000',
+             5, 'three', 'three');",
     )
     .await
     .unwrap();
@@ -160,13 +168,17 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
          VALUES ('session-one', 1, 'building', '{}', 100);
          INSERT INTO session_occurrences (
             session_id, generation, occurrence_id, source_observation_id,
-            projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
-            valid_time_json, evidence_json, snippet_text, index_text
+            source_provider, projection_output_ordinal, retrieval_anchor_id,
+            role, knowledge_at, valid_time_json, evidence_json,
+            sanitized_content_digest, sanitized_content_bytes,
+            snippet_text, index_text
          )
          VALUES (
             'session-one', 1, 'occurrence-one', 'observation-one',
-            0, 'anchor-subject', 'assistant', 100,
-            json_object('kind', 'known', 'valid_at', 100), '{}', 'one', 'one'
+            'test', 0, 'anchor-subject', 'assistant', 100,
+            json_object('kind', 'known', 'valid_at', 100), '{}',
+            '0000000000000000000000000000000000000000000000000000000000000000',
+            3, 'one', 'one'
          );
          INSERT INTO session_assertions (
             session_id, generation, assertion_id, assertion_kind,
@@ -242,13 +254,17 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
         (
             "INSERT INTO session_occurrences (
                  session_id, generation, occurrence_id, source_observation_id,
-                 projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
-                 valid_time_json, evidence_json, snippet_text, index_text
+                 source_provider, projection_output_ordinal, retrieval_anchor_id,
+                 role, knowledge_at, valid_time_json, evidence_json,
+                 sanitized_content_digest, sanitized_content_bytes,
+                 snippet_text, index_text
              )
              VALUES (
                  'session-one', 1, 'occurrence-invalid-time', 'observation-one',
-                 1, 'anchor-subject', 'assistant', 101,
-                 json_object('kind', 'unknown', 'valid_at', 101), '{}', 'bad', 'bad'
+                 'test', 1, 'anchor-subject', 'assistant', 101,
+                 json_object('kind', 'unknown', 'valid_at', 101), '{}',
+                 '0000000000000000000000000000000000000000000000000000000000000000',
+                 3, 'bad', 'bad'
              )",
             "unknown occurrence valid time must not include valid_at",
         ),
@@ -256,6 +272,33 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
         assert!(
             conn.execute(sql, ()).await.is_err(),
             "schema accepted an invalid row: {description}"
+        );
+    }
+    for (assignment, description) in [
+        ("source_provider = ''", "blank source provider"),
+        (
+            "sanitized_content_digest = 'ABC'",
+            "non-canonical sanitized content digest",
+        ),
+        (
+            "sanitized_content_bytes = -1",
+            "negative sanitized content byte count",
+        ),
+    ] {
+        assert!(
+            conn.execute(
+                &format!(
+                    "UPDATE session_occurrences
+                     SET {assignment}
+                     WHERE session_id = 'session-one'
+                       AND generation = 1
+                       AND occurrence_id = 'occurrence-one'"
+                ),
+                (),
+            )
+            .await
+            .is_err(),
+            "schema accepted {description}"
         );
     }
 }
