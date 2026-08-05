@@ -131,7 +131,7 @@ fn incremental_extraction_matches_cold_canonical_rows_and_visits_only_changed_ru
 #[test]
 fn composite_source_masking_preserves_incremental_astro_canonical_rows() {
     let pool = SharedRetainedParsePool::default();
-    let extractor = AstroExtractor::new();
+    let extractor = AstroExtractor;
     let before = "---\nconst title = 'old';\n---\n<h1>{title}</h1>\n";
     let after = "---\nconst title = 'new';\n---\n<h1>{title}</h1>\n";
 
