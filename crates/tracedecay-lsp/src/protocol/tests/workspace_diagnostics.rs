@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
@@ -498,4 +498,213 @@ fn rejected_registration_stays_unavailable_until_a_new_readiness_epoch() {
     let retry: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
     assert_eq!(retry["method"], "client/registerCapability");
     assert_ne!(retry["id"], register["id"]);
+}
+
+fn fill_ordinary_outbound_capacity<P, S, D>(session: &mut DaemonLspProtocolSession<P, S, D>)
+where
+    P: FeedbackCyclePort,
+    S: SemanticProviderPort,
+    D: DiagnosticSnapshotPort,
+{
+    for ordinal in 0..MAX_QUEUED_OUTBOUND_MESSAGES {
+        if !session.enqueue_value(json!({
+            "jsonrpc": "2.0",
+            "method": "window/logMessage",
+            "params": { "type": 4, "message": format!("queued-{ordinal}") },
+        })) {
+            return;
+        }
+    }
+    panic!("ordinary messages consumed the reserved capability-control capacity");
+}
+
+#[test]
+fn full_ordinary_queue_cannot_starve_readiness_loss_controls() {
+    let ready = Arc::new(AtomicBool::new(true));
+    let mut session = dynamic_workspace_session(Arc::clone(&ready));
+    let register: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    fill_ordinary_outbound_capacity(&mut session);
+
+    ready.store(false, Ordering::Release);
+    session.flush_due(2);
+    let controls = session
+        .drain_outbound()
+        .into_iter()
+        .filter_map(|frame| serde_json::from_slice::<Value>(&frame).ok())
+        .filter(|frame| {
+            matches!(
+                frame["method"].as_str(),
+                Some("$/cancelRequest" | "client/unregisterCapability")
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(controls.len(), 2);
+    assert_eq!(controls[0]["params"]["id"], register["id"]);
+    assert_eq!(controls[1]["method"], "client/unregisterCapability");
+}
+
+#[test]
+fn saturated_reconnect_resync_stays_fail_closed_after_control_enqueue_failure() {
+    let ready = Arc::new(AtomicBool::new(true));
+    let mut session = dynamic_workspace_session(ready);
+    let register: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    acknowledge_dynamic_request(&mut session, &dynamic_request_id(&register), 2);
+    fill_ordinary_outbound_capacity(&mut session);
+
+    // The first reset queues unregister. The second consumes the final two
+    // reserved slots with cancellation + replacement unregister. The third
+    // must retain a fail-closed retry state when no control slot remains.
+    for _ in 0..3 {
+        session.detach().unwrap();
+        session.reconnect().unwrap();
+    }
+    session.drain_outbound();
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":9,"method":"workspace/diagnostic","params":{"previousResultIds":[]}}"#,
+        3,
+    );
+    let unavailable: Value = session
+        .drain_outbound()
+        .into_iter()
+        .filter_map(|frame| serde_json::from_slice::<Value>(&frame).ok())
+        .find(|frame| frame["id"] == 9)
+        .unwrap();
+    assert_eq!(unavailable["error"]["code"], -32601);
+}
+
+#[derive(Clone)]
+struct ChangingPartialWorkspaceDiagnostics {
+    phase: Arc<AtomicU8>,
+    left_reads: Arc<AtomicUsize>,
+}
+
+impl ChangingPartialWorkspaceDiagnostics {
+    fn ready_snapshot(
+        &self,
+        root: &AdmittedRoot,
+        message: &str,
+        generation: u64,
+    ) -> WorkspaceDiagnosticSnapshotOutcome {
+        let uri = format!("{}/src/lib.rs", root.uri());
+        WorkspaceDiagnosticSnapshotOutcome::Ready {
+            diagnostics: WorkspaceGenerationDiagnostics {
+                code_generation_id: format!("code-generation-{generation}"),
+                snapshot_digest: digest(if generation == 1 { 'd' } else { 'e' }),
+                documents: vec![WorkspaceDocumentDiagnostics {
+                    uri: uri.clone(),
+                    version: None,
+                    content_digest: ContentDigest::of_bytes(message.as_bytes()),
+                    diagnostics: GenerationDiagnostics {
+                        generation,
+                        authority_digest: digest(if generation == 1 { 'f' } else { '9' }),
+                        upstream: vec![GatewayDiagnostic {
+                            uri,
+                            range: LspRange {
+                                start: LspPosition {
+                                    line: 0,
+                                    character: 0,
+                                },
+                                end: LspPosition {
+                                    line: 0,
+                                    character: 1,
+                                },
+                            },
+                            severity: Some(DiagnosticSeverity::Warning),
+                            code: Some("generation".to_owned()),
+                            code_description_uri: None,
+                            message: message.to_owned(),
+                            source: DiagnosticSource::Upstream,
+                            related_information: Vec::new(),
+                            data: None,
+                        }],
+                        tracedecay: Vec::new(),
+                    },
+                }],
+            },
+            completed_operation_id: None,
+        }
+    }
+}
+
+impl DiagnosticSnapshotPort for ChangingPartialWorkspaceDiagnostics {
+    fn document_diagnostics(
+        &self,
+        _root: &AdmittedRoot,
+        _document_uri: &str,
+        _overlay: Option<&OverlaySnapshot>,
+    ) -> DiagnosticSnapshotOutcome {
+        DiagnosticSnapshotOutcome::Failed {
+            source_generation: None,
+            failure_class: "not-used".to_owned(),
+        }
+    }
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        true
+    }
+
+    fn workspace_diagnostics(
+        &self,
+        _workspace: &AuthorizedLspWorkspace,
+        root: &AdmittedRoot,
+        _overlays: &[OverlaySnapshot],
+    ) -> WorkspaceDiagnosticSnapshotOutcome {
+        let phase = self.phase.load(Ordering::Acquire);
+        if root.uri() == "file:///left" {
+            self.left_reads.fetch_add(1, Ordering::AcqRel);
+            return self.ready_snapshot(
+                root,
+                if phase == 1 { "old-left" } else { "new-left" },
+                u64::from(phase),
+            );
+        }
+        if phase == 1 {
+            WorkspaceDiagnosticSnapshotOutcome::Refreshing(DiagnosticRefreshIdentity {
+                operation_id: "refresh-right".to_owned(),
+                source_generation: Some(1),
+                target_generation: Some(2),
+            })
+        } else {
+            self.ready_snapshot(root, "new-right", 2)
+        }
+    }
+}
+
+#[test]
+fn partial_workspace_retry_replaces_roots_from_the_changed_generation() {
+    let phase = Arc::new(AtomicU8::new(1));
+    let left_reads = Arc::new(AtomicUsize::new(0));
+    let diagnostics = ChangingPartialWorkspaceDiagnostics {
+        phase: Arc::clone(&phase),
+        left_reads: Arc::clone(&left_reads),
+    };
+    let mut session = initialize_workspace(
+        vec![
+            AdmittedRoot::authorized("file:///left", digest('a')),
+            AdmittedRoot::authorized("file:///right", digest('b')),
+        ],
+        diagnostics,
+    );
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":2,"method":"workspace/diagnostic","params":{"previousResultIds":[]}}"#,
+        2,
+    );
+    let pending: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert_eq!(pending["error"]["code"], -32802);
+
+    phase.store(2, Ordering::Release);
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":3,"method":"workspace/diagnostic","params":{"previousResultIds":[]}}"#,
+        3,
+    );
+    let completed: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert_eq!(left_reads.load(Ordering::Acquire), 2);
+    let messages = completed["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["items"].as_array().into_iter().flatten())
+        .filter_map(|item| item["message"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(messages, BTreeSet::from(["new-left", "new-right"]));
 }

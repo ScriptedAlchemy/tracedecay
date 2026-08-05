@@ -6,7 +6,7 @@
 //! only when their real upstream authorities resolve; missing identity fails
 //! closed and placeholder owners are never installed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -39,8 +39,8 @@ use tracedecay_domain::{
 };
 use tracedecay_hooks::{HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, HookHostV1};
 use tracedecay_lsp::{
-    ContextProjectionKind, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
-    GatewayCapabilities, LspRuntimeFailure, LspRuntimeFuture, TRACEDECAY_CONTEXT_REVISION,
+    DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
+    LspRuntimeFuture,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -107,10 +107,18 @@ use crate::daemon::service::invocation::{
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
-use crate::graph_semantic_capabilities;
 use crate::mcp::McpServer;
 use tracedecay_lsp::analyzer::broker::{AdmittedLspProvider, MountedLspProvider};
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
+
+mod lsp_registration;
+
+use lsp_registration::production_lsp_registration;
+
+#[cfg(test)]
+use crate::graph_semantic_capabilities;
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
 const DAEMON_BINDING: &str = "binding.tracedecay-daemon.project-open";
@@ -1680,29 +1688,6 @@ async fn register_production_lsp_owner(
         .await
 }
 
-fn production_lsp_registration(
-    admitted_providers: &[AdmittedLspProvider],
-) -> (Vec<String>, GatewayCapabilities) {
-    let revision = TRACEDECAY_CONTEXT_REVISION;
-    let gateway_capabilities = GatewayCapabilities {
-        semantic: graph_semantic_capabilities(),
-        context_projections: BTreeMap::from([
-            (ContextProjectionKind::diagnostics(), revision),
-            (ContextProjectionKind::post_edit_impact(), revision),
-            (ContextProjectionKind::affected_tests(), revision),
-            (ContextProjectionKind::test_run_results(), revision),
-        ]),
-        ..Default::default()
-    };
-    (
-        admitted_providers
-            .iter()
-            .map(|provider| provider.language.clone())
-            .collect(),
-        gateway_capabilities,
-    )
-}
-
 async fn register_production_advisory_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -3209,12 +3194,14 @@ mod tests {
     }
 
     #[test]
-    fn absent_analyzer_still_mounts_graph_and_managed_lsp_capabilities() {
+    fn production_registration_mounts_dynamic_workspace_diagnostics_without_analyzer() {
         let admitted = [admitted("rust", false)];
         let (languages, gateway) = production_lsp_registration(&admitted);
 
         assert_eq!(languages, vec!["rust"]);
+        assert!(gateway.supports_document_diagnostics);
         assert!(gateway.supports_managed_diagnostics);
+        assert!(gateway.supports_workspace_diagnostics);
         assert_eq!(gateway.semantic, graph_semantic_capabilities());
     }
 

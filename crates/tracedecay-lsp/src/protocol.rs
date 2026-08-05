@@ -131,7 +131,7 @@ where
         // the dynamic-registration acknowledgement path.
         self.reconcile_dynamic_diagnostics();
         let before = self.outbound.queue.len();
-        let backpressured_before = self.outbound.queued_bytes >= MAX_QUEUED_OUTBOUND_BYTES;
+        let backpressured_before = !self.has_client_frame_outbound_capacity();
         if payload.len() > MAX_LSP_FRAME_BYTES {
             self.enqueue_value(error_response(
                 Value::Null,
@@ -172,8 +172,7 @@ where
         self.flush_context_changes();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
-            backpressured: backpressured_before
-                || self.outbound.queued_bytes >= MAX_QUEUED_OUTBOUND_BYTES,
+            backpressured: backpressured_before || !self.has_client_frame_outbound_capacity(),
             closed: matches!(
                 self.lifecycle.control.lifecycle(),
                 SessionLifecycle::Exited | SessionLifecycle::Expired
@@ -194,7 +193,7 @@ where
         self.flush_context_changes();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
-            backpressured: self.outbound.queued_bytes >= MAX_QUEUED_OUTBOUND_BYTES,
+            backpressured: !self.has_client_frame_outbound_capacity(),
             closed: matches!(
                 self.lifecycle.control.lifecycle(),
                 SessionLifecycle::Exited | SessionLifecycle::Expired
