@@ -126,6 +126,9 @@ impl DaemonInvocationService {
             tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Pending(
                 pending,
             ) => pending,
+            tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Prepared(
+                _,
+            ) => return None,
         };
         if coordinator != next {
             return None;
@@ -195,7 +198,7 @@ impl DaemonInvocationService {
                 tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Pending(
                     pending,
                 )
-                | tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Applied(
+                | tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Prepared(
                     pending,
                 ) if pending == next => {}
                 _ => return None,
@@ -251,15 +254,15 @@ impl DaemonInvocationService {
             }
         }
         for (_, _, _, storage) in &replicas {
-            let tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Applied(
-                applied,
+            let tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Prepared(
+                prepared,
             ) = storage
                 .complete_durable_replica(idempotency_key, &command_digest)
                 .ok()?
             else {
                 return None;
             };
-            if applied != next {
+            if prepared != next {
                 return None;
             }
         }
@@ -288,6 +291,9 @@ impl DaemonInvocationService {
             tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Pending(_) => {
                 None
             }
+            tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Prepared(
+                _,
+            ) => None,
         }
     }
 }

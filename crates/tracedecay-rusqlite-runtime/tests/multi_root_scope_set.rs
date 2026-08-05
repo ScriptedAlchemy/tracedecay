@@ -675,7 +675,7 @@ fn durable_scope_set_cas_hides_prepares_and_preserves_readable_state_on_conflict
             .storage
             .complete_durable_replica(idempotency_key, &command_digest)
             .unwrap(),
-        AuthorizedScopeSetDurableCasV1::Applied(next.clone())
+        AuthorizedScopeSetDurableCasV1::Prepared(next.clone())
     );
     assert!(matches!(
         coordinator
@@ -698,7 +698,7 @@ fn durable_scope_set_cas_hides_prepares_and_preserves_readable_state_on_conflict
             .storage
             .prepare_durable_replica(idempotency_key, &command_digest, &next)
             .unwrap(),
-        AuthorizedScopeSetDurableCasV1::Applied(next.clone())
+        AuthorizedScopeSetDurableCasV1::Prepared(next.clone())
     );
 
     let second = scope_set_for_actor(2, "actor.owner");
@@ -728,7 +728,7 @@ fn durable_scope_set_cas_hides_prepares_and_preserves_readable_state_on_conflict
             .storage
             .complete_durable_replica(second_key, &second_digest)
             .unwrap(),
-        AuthorizedScopeSetDurableCasV1::Applied(second.clone())
+        AuthorizedScopeSetDurableCasV1::Prepared(second.clone())
     );
     assert_eq!(replica.storage.read(second.scope_set_id()).unwrap(), None);
 

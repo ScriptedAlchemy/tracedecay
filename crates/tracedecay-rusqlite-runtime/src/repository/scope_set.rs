@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS authorized_scope_sets_v1 (
 CREATE TABLE IF NOT EXISTS authorized_scope_set_transactions_v1 (
     idempotency_key TEXT PRIMARY KEY NOT NULL,
     command_digest TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'conflict')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'prepared', 'applied', 'conflict')),
     next_payload BLOB NOT NULL,
     result_payload BLOB
 ) STRICT;
@@ -166,6 +166,7 @@ pub struct AuthorizedScopeSetSqliteStorage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthorizedScopeSetDurableCasV1 {
     Pending(AuthorizedScopeSet),
+    Prepared(AuthorizedScopeSet),
     Applied(AuthorizedScopeSet),
     Conflict(Option<AuthorizedScopeSet>),
 }
@@ -341,10 +342,10 @@ impl AuthorizedScopeSetSqliteStorage {
                 "scope-set durable CAS journal is missing".to_owned(),
             ));
         };
-        if matches!(state, AuthorizedScopeSetDurableCasV1::Conflict(_)) {
+        if !matches!(state, AuthorizedScopeSetDurableCasV1::Pending(_)) {
             transaction.rollback()?;
             return Err(AuthorizedScopeSetStoreError::InvalidData(
-                "scope-set conflict cannot accept replica receipts".to_owned(),
+                "scope-set terminal journal cannot accept replica receipts".to_owned(),
             ));
         }
         transaction.execute(ExactSqlStatement::new(
@@ -391,6 +392,12 @@ impl AuthorizedScopeSetSqliteStorage {
             ));
         };
         match state {
+            AuthorizedScopeSetDurableCasV1::Prepared(_) => {
+                transaction.rollback()?;
+                return Err(AuthorizedScopeSetStoreError::InvalidData(
+                    "scope-set coordinator journal contains a participant prepare".to_owned(),
+                ));
+            }
             AuthorizedScopeSetDurableCasV1::Applied(_)
             | AuthorizedScopeSetDurableCasV1::Conflict(_) => {
                 transaction.rollback()?;
@@ -514,13 +521,13 @@ impl AuthorizedScopeSetSqliteStorage {
         };
         transaction.execute(ExactSqlStatement::new(
             "UPDATE authorized_scope_set_transactions_v1
-             SET status = 'applied', result_payload = next_payload
+             SET status = 'prepared', result_payload = next_payload
              WHERE idempotency_key = ?1 AND status = 'pending'"
                 .to_owned(),
             vec![ExactSqlValue::Text(idempotency_key.to_owned())],
         )?)?;
         transaction.commit()?;
-        Ok(AuthorizedScopeSetDurableCasV1::Applied(next))
+        Ok(AuthorizedScopeSetDurableCasV1::Prepared(next))
     }
 
     /// Remove a non-terminal replica prepare after the canonical coordinator
@@ -569,6 +576,12 @@ impl AuthorizedScopeSetSqliteStorage {
             ));
         };
         match state {
+            AuthorizedScopeSetDurableCasV1::Prepared(_) => {
+                transaction.rollback()?;
+                Err(AuthorizedScopeSetStoreError::InvalidData(
+                    "scope-set coordinator journal contains a participant prepare".to_owned(),
+                ))
+            }
             AuthorizedScopeSetDurableCasV1::Applied(_)
             | AuthorizedScopeSetDurableCasV1::Conflict(_) => {
                 transaction.rollback()?;
@@ -630,6 +643,7 @@ fn read_durable_cas(
     let next = decode_scope_set_payload(next_payload)?;
     match status.as_str() {
         "pending" => Ok(Some(AuthorizedScopeSetDurableCasV1::Pending(next))),
+        "prepared" => Ok(Some(AuthorizedScopeSetDurableCasV1::Prepared(next))),
         "applied" => Ok(Some(AuthorizedScopeSetDurableCasV1::Applied(next))),
         "conflict" => {
             let current = match result_payload {
