@@ -4,9 +4,11 @@
 //! file-backed [`crate::runtime::source`] drivers and the Hermes `SQLite` sweep
 //! both depend on them so they do not need to import from each other.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -154,8 +156,36 @@ pub fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
-pub fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
+pub fn path_belongs_to_project(path: &Path, project_root: &Path) -> ProjectMembership {
     ProjectRootMatcher::new(project_root).contains(path)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectMembership {
+    Match,
+    NoMatch,
+    Unknown(tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown),
+}
+
+impl ProjectMembership {
+    pub fn definitive(self) -> Option<bool> {
+        match self {
+            Self::Match => Some(true),
+            Self::NoMatch => Some(false),
+            Self::Unknown(_) => None,
+        }
+    }
+}
+
+type GitIdentityResolver =
+    fn(&Path) -> tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome;
+
+pub const PROJECT_MEMBERSHIP_UNKNOWN_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct ProjectRootMatcherCacheEntry {
+    matcher: Arc<ProjectRootMatcher>,
+    unknown_retry_after: Mutex<Option<Instant>>,
 }
 
 /// A project root with its git worktree/common-dir resolutions computed once,
@@ -163,48 +193,198 @@ pub fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
 /// re-run `git_worktree_root`/`git_common_dir` on the fixed project side. A
 /// single [`ProjectRootMatcher::contains`] call is exactly equivalent to
 /// [`path_belongs_to_project`], which is a thin wrapper over it.
+#[derive(Debug)]
 pub struct ProjectRootMatcher {
     root: PathBuf,
-    worktree: Option<PathBuf>,
-    common_dir: Option<PathBuf>,
+    identity: tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome,
+    identity_resolver: GitIdentityResolver,
+    path_membership: Mutex<HashMap<PathBuf, ProjectMembershipCacheEntry>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProjectMembershipCacheEntry {
+    membership: ProjectMembership,
+    unknown_retry_after: Option<Instant>,
 }
 
 impl ProjectRootMatcher {
     /// Resolve the fixed project-side git identity once.
     pub fn new(project_root: &Path) -> Self {
+        Self::new_with_identity_resolver(
+            project_root,
+            tracedecay_runtime_core::git_discovery::discover_repository_identity_bounded,
+        )
+    }
+
+    fn new_with_identity_resolver(
+        project_root: &Path,
+        identity_resolver: GitIdentityResolver,
+    ) -> Self {
         Self {
             root: project_root.to_path_buf(),
-            worktree: tracedecay_runtime_core::worktree::git_worktree_root(project_root),
-            common_dir: tracedecay_runtime_core::worktree::git_common_dir(project_root),
+            identity: identity_resolver(project_root),
+            identity_resolver,
+            path_membership: Mutex::new(HashMap::new()),
         }
     }
 
     /// True when `path` belongs to this project: it is the root, shares the
     /// project's git worktree or common dir, or discovers back to the root.
     /// Only the varying `path` side is git-resolved here.
-    pub fn contains(&self, path: &Path) -> bool {
+    pub fn contains(&self, path: &Path) -> ProjectMembership {
+        self.contains_at(path, Instant::now())
+    }
+
+    fn contains_at(&self, path: &Path, now: Instant) -> ProjectMembership {
+        let cached = self
+            .path_membership
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)
+            .copied();
+        if let Some(cached) = cached
+            && cached
+                .unknown_retry_after
+                .is_none_or(|retry_after| now < retry_after)
+        {
+            return cached.membership;
+        }
+        let membership = self.contains_uncached(path);
+        self.path_membership
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                path.to_path_buf(),
+                ProjectMembershipCacheEntry {
+                    membership,
+                    unknown_retry_after: matches!(membership, ProjectMembership::Unknown(_))
+                        .then_some(now + PROJECT_MEMBERSHIP_UNKNOWN_RETRY_COOLDOWN),
+                },
+            );
+        membership
+    }
+
+    fn contains_uncached(&self, path: &Path) -> ProjectMembership {
         if paths_equal(path, &self.root) {
-            return true;
+            return ProjectMembership::Match;
         }
 
-        if let (Some(path_worktree), Some(project_worktree)) = (
-            tracedecay_runtime_core::worktree::git_worktree_root(path).as_ref(),
-            self.worktree.as_ref(),
-        ) {
-            if paths_equal(path_worktree, project_worktree) {
-                return true;
+        use tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome as Identity;
+        let project_identity = &self.identity;
+        if let Identity::Unknown(reason) = project_identity {
+            return ProjectMembership::Unknown(*reason);
+        }
+        let path_identity = (self.identity_resolver)(path);
+        match (project_identity, path_identity) {
+            (Identity::Resolved(project), Identity::Resolved(candidate)) => {
+                if paths_equal(&candidate.worktree_root, &project.worktree_root)
+                    || paths_equal(&candidate.common_dir, &project.common_dir)
+                {
+                    ProjectMembership::Match
+                } else {
+                    ProjectMembership::NoMatch
+                }
             }
-            return tracedecay_runtime_core::worktree::git_common_dir(path)
-                .as_ref()
-                .zip(self.common_dir.as_ref())
-                .is_some_and(|(path_common, project_common)| {
-                    paths_equal(path_common, project_common)
-                });
+            (_, Identity::Unknown(reason)) => ProjectMembership::Unknown(reason),
+            (Identity::NotRepository, Identity::NotRepository) => {
+                if tracedecay_runtime_core::config::discover_project_root(path)
+                    .as_ref()
+                    .is_some_and(|discovered| paths_equal(discovered, &self.root))
+                {
+                    ProjectMembership::Match
+                } else {
+                    ProjectMembership::NoMatch
+                }
+            }
+            (Identity::Resolved(_), Identity::NotRepository)
+            | (Identity::NotRepository, Identity::Resolved(_)) => ProjectMembership::NoMatch,
+            (Identity::Unknown(reason), _) => ProjectMembership::Unknown(*reason),
         }
+    }
+}
 
-        tracedecay_runtime_core::config::discover_project_root(path)
-            .as_ref()
-            .is_some_and(|discovered| paths_equal(discovered, &self.root))
+/// Source-lifetime cache of repository identities and definitive memberships.
+#[derive(Clone, Debug)]
+pub struct ProjectRootMatcherCache {
+    matchers: Arc<Mutex<HashMap<PathBuf, Arc<ProjectRootMatcherCacheEntry>>>>,
+    identity_resolver: GitIdentityResolver,
+}
+
+impl Default for ProjectRootMatcherCache {
+    fn default() -> Self {
+        Self {
+            matchers: Arc::default(),
+            identity_resolver:
+                tracedecay_runtime_core::git_discovery::discover_repository_identity_bounded,
+        }
+    }
+}
+
+impl ProjectRootMatcherCache {
+    #[cfg(test)]
+    pub(crate) fn with_identity_resolver(identity_resolver: GitIdentityResolver) -> Self {
+        Self {
+            identity_resolver,
+            ..Self::default()
+        }
+    }
+
+    pub fn membership(&self, path: &Path, project_root: &Path) -> ProjectMembership {
+        self.membership_at(path, project_root, Instant::now())
+    }
+
+    fn membership_at(&self, path: &Path, project_root: &Path, now: Instant) -> ProjectMembership {
+        self.matcher_at(project_root, now).contains_at(path, now)
+    }
+
+    fn matcher_at(&self, project_root: &Path, now: Instant) -> Arc<ProjectRootMatcher> {
+        let key = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        loop {
+            let entry = self
+                .matchers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(key.clone())
+                .or_insert_with(|| {
+                    Arc::new(ProjectRootMatcherCacheEntry {
+                        matcher: Arc::new(ProjectRootMatcher::new_with_identity_resolver(
+                            project_root,
+                            self.identity_resolver,
+                        )),
+                        unknown_retry_after: Mutex::new(None),
+                    })
+                })
+                .clone();
+            if !matches!(
+                entry.matcher.identity,
+                tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(_)
+            ) {
+                return entry.matcher.clone();
+            }
+
+            let should_retry = {
+                let mut retry_after = entry
+                    .unknown_retry_after
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let retry_after =
+                    retry_after.get_or_insert(now + PROJECT_MEMBERSHIP_UNKNOWN_RETRY_COOLDOWN);
+                now >= *retry_after
+            };
+            if !should_retry {
+                return entry.matcher.clone();
+            }
+
+            let mut matchers = self.matchers.lock().unwrap_or_else(PoisonError::into_inner);
+            if matchers
+                .get(&key)
+                .is_some_and(|cached| Arc::ptr_eq(cached, &entry))
+            {
+                matchers.remove(&key);
+            }
+        }
     }
 }
 
@@ -225,24 +405,49 @@ impl ProjectRootMatcher {
 /// [`path_belongs_to_project`] call re-runs `git_worktree_root` and
 /// `git_common_dir` against the same unchanging root for every record.
 pub enum TranscriptScopeMatcher {
-    Project(ProjectRootMatcher),
-    Profile(Vec<ProjectRootMatcher>),
+    Project {
+        project_root: PathBuf,
+        cache: ProjectRootMatcherCache,
+    },
+    Profile {
+        registered_roots: Vec<PathBuf>,
+        cache: ProjectRootMatcherCache,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptScopeRouting {
+    Accepted,
+    Rejected,
+    Deferred(tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown),
 }
 
 impl TranscriptScopeMatcher {
     /// Project scope over a single root.
     pub fn project(project_root: &Path) -> Self {
-        Self::Project(ProjectRootMatcher::new(project_root))
+        Self::project_with_cache(project_root, ProjectRootMatcherCache::default())
+    }
+
+    pub fn project_with_cache(project_root: &Path, cache: ProjectRootMatcherCache) -> Self {
+        Self::Project {
+            project_root: project_root.to_path_buf(),
+            cache,
+        }
     }
 
     /// Profile scope over every registered project root.
     pub fn profile(registered_roots: &[PathBuf]) -> Self {
-        Self::Profile(
-            registered_roots
-                .iter()
-                .map(|root| ProjectRootMatcher::new(root))
-                .collect(),
-        )
+        Self::profile_with_cache(registered_roots, ProjectRootMatcherCache::default())
+    }
+
+    pub fn profile_with_cache(
+        registered_roots: &[PathBuf],
+        cache: ProjectRootMatcherCache,
+    ) -> Self {
+        Self::Profile {
+            registered_roots: registered_roots.to_vec(),
+            cache,
+        }
     }
 
     /// Profile scope when `registered_roots` is present, project scope
@@ -252,12 +457,52 @@ impl TranscriptScopeMatcher {
         registered_roots.map_or_else(|| Self::project(project_root), Self::profile)
     }
 
-    /// True when a record with this working directory belongs to the scope.
-    pub fn accepts(&self, cwd: Option<&Path>) -> bool {
+    pub fn for_scope_with_cache(
+        project_root: &Path,
+        registered_roots: Option<&[PathBuf]>,
+        cache: ProjectRootMatcherCache,
+    ) -> Self {
+        if let Some(roots) = registered_roots {
+            Self::profile_with_cache(roots, cache)
+        } else {
+            Self::project_with_cache(project_root, cache)
+        }
+    }
+
+    /// Classify a record without collapsing temporarily unknown membership.
+    pub fn route(&self, cwd: Option<&Path>) -> TranscriptScopeRouting {
         match self {
-            Self::Project(project) => cwd.is_some_and(|cwd| project.contains(cwd)),
-            Self::Profile(registered) => {
-                cwd.is_none_or(|cwd| !registered.iter().any(|root| root.contains(cwd)))
+            Self::Project {
+                project_root,
+                cache,
+            } => match cwd.map(|cwd| cache.membership(cwd, project_root)) {
+                Some(ProjectMembership::Match) => TranscriptScopeRouting::Accepted,
+                Some(ProjectMembership::NoMatch) | None => TranscriptScopeRouting::Rejected,
+                Some(ProjectMembership::Unknown(reason)) => {
+                    TranscriptScopeRouting::Deferred(reason)
+                }
+            },
+            Self::Profile {
+                registered_roots,
+                cache,
+            } => {
+                let Some(cwd) = cwd else {
+                    return TranscriptScopeRouting::Accepted;
+                };
+                let mut unknown = None;
+                for root in registered_roots {
+                    match cache.membership(cwd, root) {
+                        ProjectMembership::Match => return TranscriptScopeRouting::Rejected,
+                        ProjectMembership::NoMatch => {}
+                        ProjectMembership::Unknown(reason) => {
+                            unknown.get_or_insert(reason);
+                        }
+                    };
+                }
+                unknown.map_or(
+                    TranscriptScopeRouting::Accepted,
+                    TranscriptScopeRouting::Deferred,
+                )
             }
         }
     }
@@ -469,10 +714,13 @@ pub fn append_location_metadata(
         keys.cwd.to_string(),
         Value::String(cwd.to_string_lossy().to_string()),
     );
-    if let Some(worktree) = tracedecay_runtime_core::worktree::git_worktree_root(cwd) {
+    if let tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+        identity,
+    ) = tracedecay_runtime_core::git_discovery::discover_repository_identity_bounded(cwd)
+    {
         map.insert(
             keys.worktree.to_string(),
-            Value::String(worktree.to_string_lossy().to_string()),
+            Value::String(identity.worktree_root.to_string_lossy().to_string()),
         );
     }
     map.insert(
@@ -615,10 +863,168 @@ pub fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<String> 
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
     use serde_json::json;
 
     use super::one_line_truncated;
     use super::usage_counters_from;
+    use super::{
+        PROJECT_MEMBERSHIP_UNKNOWN_RETRY_COOLDOWN, ProjectMembership, ProjectRootMatcherCache,
+        TranscriptScopeMatcher, TranscriptScopeRouting,
+    };
+    use tracedecay_runtime_core::git_discovery::{
+        GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
+    };
+
+    static IDENTITY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static IDENTITY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn unknown_then_resolved(path: &Path) -> GitRepositoryIdentityOutcome {
+        match IDENTITY_CALLS.fetch_add(1, Ordering::SeqCst) {
+            0 => GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded),
+            _ => GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
+                worktree_root: path.to_path_buf(),
+                git_dir: path.join(".git"),
+                common_dir: path.join(".git"),
+            }),
+        }
+    }
+
+    fn resolved_by_repository(path: &Path) -> GitRepositoryIdentityOutcome {
+        let worktree_root = path
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "member"))
+            .unwrap_or(path)
+            .to_path_buf();
+        let common_dir = if worktree_root.ends_with("member") {
+            PathBuf::from("/shared/member.git")
+        } else {
+            PathBuf::from("/shared/other.git")
+        };
+        GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
+            git_dir: worktree_root.join(".git"),
+            worktree_root,
+            common_dir,
+        })
+    }
+
+    fn resolved_then_unknown_then_resolved(path: &Path) -> GitRepositoryIdentityOutcome {
+        let call = IDENTITY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if call == 1 {
+            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
+        }
+        GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
+            worktree_root: path.to_path_buf(),
+            git_dir: path.join(".git"),
+            common_dir: PathBuf::from("/shared/member.git"),
+        })
+    }
+
+    #[test]
+    fn matcher_caches_definitive_membership_but_retries_unknown_after_cooldown() {
+        let _guard = IDENTITY_TEST_LOCK.lock().expect("identity test lock");
+        let fixture = tempfile::TempDir::new().expect("fixture");
+        let root = fixture.path().join("member");
+        std::fs::create_dir_all(&root).expect("project root");
+        IDENTITY_CALLS.store(0, Ordering::SeqCst);
+        let cache = ProjectRootMatcherCache::with_identity_resolver(unknown_then_resolved);
+        let now = Instant::now();
+
+        assert_eq!(
+            cache.membership_at(&root.join("src"), &root, now),
+            ProjectMembership::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+        assert_eq!(
+            cache.membership_at(
+                &root.join("src"),
+                &root,
+                now + PROJECT_MEMBERSHIP_UNKNOWN_RETRY_COOLDOWN / 2,
+            ),
+            ProjectMembership::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+        assert_eq!(IDENTITY_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cache.membership_at(
+                &root.join("src"),
+                &root,
+                now + PROJECT_MEMBERSHIP_UNKNOWN_RETRY_COOLDOWN,
+            ),
+            ProjectMembership::Match
+        );
+        assert_eq!(IDENTITY_CALLS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn project_and_profile_scopes_defer_the_same_unknown_membership() {
+        let _guard = IDENTITY_TEST_LOCK.lock().expect("identity test lock");
+        let fixture = tempfile::TempDir::new().expect("fixture");
+        let root = fixture.path().join("member");
+        let cwd = root.join("src");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        IDENTITY_CALLS.store(0, Ordering::SeqCst);
+        let cache = ProjectRootMatcherCache::with_identity_resolver(unknown_then_resolved);
+
+        let project = TranscriptScopeMatcher::project_with_cache(&root, cache.clone());
+        let profile = TranscriptScopeMatcher::profile_with_cache(&[root], cache);
+        assert_eq!(
+            project.route(Some(&cwd)),
+            TranscriptScopeRouting::Deferred(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+        assert_eq!(
+            profile.route(Some(&cwd)),
+            TranscriptScopeRouting::Deferred(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+    }
+
+    #[test]
+    fn matcher_retries_unknown_candidate_identity_after_cooldown() {
+        let _guard = IDENTITY_TEST_LOCK.lock().expect("identity test lock");
+        let fixture = tempfile::TempDir::new().expect("fixture");
+        let root = fixture.path().join("member");
+        let cwd = root.join("src");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        IDENTITY_CALLS.store(0, Ordering::SeqCst);
+        let cache =
+            ProjectRootMatcherCache::with_identity_resolver(resolved_then_unknown_then_resolved);
+        let now = Instant::now();
+
+        assert_eq!(
+            cache.membership_at(&cwd, &root, now),
+            ProjectMembership::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+        assert_eq!(
+            cache.membership_at(
+                &cwd,
+                &root,
+                now + PROJECT_MEMBERSHIP_UNKNOWN_RETRY_COOLDOWN / 2,
+            ),
+            ProjectMembership::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+        assert_eq!(IDENTITY_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            cache.membership_at(&cwd, &root, now + PROJECT_MEMBERSHIP_UNKNOWN_RETRY_COOLDOWN,),
+            ProjectMembership::Match
+        );
+        assert_eq!(IDENTITY_CALLS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn repository_identity_distinguishes_member_and_nonmember() {
+        let fixture = tempfile::TempDir::new().expect("fixture");
+        let root = fixture.path().join("member");
+        let member = root.join("src");
+        let other = fixture.path().join("other/src");
+        std::fs::create_dir_all(&member).expect("member");
+        std::fs::create_dir_all(&other).expect("other");
+        let cache = ProjectRootMatcherCache::with_identity_resolver(resolved_by_repository);
+
+        assert_eq!(cache.membership(&member, &root), ProjectMembership::Match);
+        assert_eq!(cache.membership(&other, &root), ProjectMembership::NoMatch);
+    }
 
     #[test]
     fn one_line_truncated_collapses_and_clips() {

@@ -13,7 +13,7 @@ use tracedecay_domain::ProjectId;
 
 use crate::admission::DEFAULT_MAX_RECORDS;
 use crate::host_ports::parse_timestamp;
-use crate::runtime::shared::ProjectRootMatcher;
+use crate::runtime::shared::{ProjectMembership, ProjectRootMatcher};
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
 };
@@ -98,8 +98,17 @@ pub async fn ingest_workflow_runs_with_sink<S: WorkflowIngestSink>(
         // this store's watermark could push it past a still-changing target run
         // and strand that run (e.g. a Running run never re-ingested once it
         // completes).
-        if !run_belongs_to_project(&run, &project_matcher) {
-            continue;
+        match run_membership(&run, &project_matcher) {
+            ProjectMembership::Match => {}
+            ProjectMembership::NoMatch => continue,
+            ProjectMembership::Unknown(reason) => {
+                tracing::debug!(
+                    run_id = %run.run_id,
+                    ?reason,
+                    "deferring workflow run with unknown repository membership"
+                );
+                continue;
+            }
         }
         if run_mtime > max_mtime {
             max_mtime = run_mtime;
@@ -224,11 +233,11 @@ fn file_mtime(path: &Path) -> i64 {
 /// Decide whether a run's owning session began inside the project described by
 /// `project_matcher`, from the `cwd` recorded in the parent transcript
 /// (preferred) or any agent transcript.
-fn run_belongs_to_project(run: &DiscoveredRun, project_matcher: &ProjectRootMatcher) -> bool {
+fn run_membership(run: &DiscoveredRun, project_matcher: &ProjectRootMatcher) -> ProjectMembership {
     let Some(cwd) = run_cwd(run) else {
         // No resolvable cwd: refuse rather than mis-attribute a run to a
         // project it may not belong to. ClaudeSource makes the same choice.
-        return false;
+        return ProjectMembership::NoMatch;
     };
     project_matcher.contains(&cwd)
 }

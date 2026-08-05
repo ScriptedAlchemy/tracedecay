@@ -14,7 +14,7 @@ use tracedecay_domain::{
 use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::observation::{CaptureObservationRequest, ObservationCancellation};
-use crate::runtime::shared::path_belongs_to_project;
+use crate::runtime::shared::{ProjectMembership, path_belongs_to_project};
 use tracedecay_runtime_core::privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
     parse_normalized_observation_record_v1,
@@ -50,7 +50,13 @@ pub(super) fn project_projection_metadata(
         "session_cwd" => row.session_cwd.as_deref().map(Path::new),
         _ => None,
     }
-    .filter(|path| path.is_absolute() && path_belongs_to_project(path, authority_project_root))
+    .filter(|path| {
+        path.is_absolute()
+            && matches!(
+                path_belongs_to_project(path, authority_project_root),
+                ProjectMembership::Match
+            )
+    })
     .unwrap_or(authority_project_root);
     HermesProjectionMetadata {
         project_path: Some(authority_project_root.to_string_lossy().into_owned()),

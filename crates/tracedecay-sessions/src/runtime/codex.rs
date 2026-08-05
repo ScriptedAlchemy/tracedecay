@@ -76,13 +76,15 @@ pub use observation::{
 };
 pub use usage::{CodexTurnUsage, flush_turn_usage, merge_usage_counters};
 
-use crate::runtime::jsonl_observation_admission::{
-    namespace_replacement_message_ids, preflight_and_parse_new,
+use crate::runtime::jsonl_observation_admission::namespace_replacement_message_ids;
+use crate::runtime::shared::{
+    ProjectRootMatcherCache, StoredCursor, TranscriptScopeMatcher, TranscriptScopeRouting,
+    title_from_messages,
 };
-use crate::runtime::shared::{StoredCursor, TranscriptScopeMatcher, title_from_messages};
 use crate::runtime::source::{
     FileDiscoveryReport, ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds,
-    TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, stream_new_jsonl,
+    TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
+    collect_files_with_ext_bounded, preflight_strict_jsonl, stream_new_jsonl,
 };
 
 const PROVIDER: &str = "codex";
@@ -94,6 +96,7 @@ pub struct CodexSource {
     sessions_dir: PathBuf,
     archived_sessions_dir: PathBuf,
     user_scope: Option<UserCodexScope>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 struct UserCodexScope {
@@ -116,6 +119,7 @@ impl CodexSource {
             sessions_dir: codex_home.join("sessions"),
             archived_sessions_dir: codex_home.join("archived_sessions"),
             user_scope: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -186,249 +190,6 @@ impl TranscriptSource for CodexSource {
         live
     }
 
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        // `session_meta` (line 1) is authoritative for session identity and the
-        // initial cwd. Later context records can move one rollout between scopes.
-        let meta = session_meta(path)?;
-        if self
-            .user_scope
-            .as_ref()
-            .and_then(|scope| scope.session_id.as_deref())
-            .is_some_and(|session_id| session_id != meta.session_id)
-        {
-            return None;
-        }
-
-        let new = stream_new_jsonl(path, prev, max_new_bytes)?;
-        let mut messages = Vec::new();
-        let mut turn_usage = CodexTurnUsage::default();
-        // Collapses identical consecutive goal states within this parse pass:
-        // `thread_goal_updated` fires on every token/time tick, so only an
-        // objective- or status-change opens a new `goal` row.
-        let mut last_goal_key: Option<(String, Option<String>)> = None;
-        let mut structured = events::CodexStructuredState::new();
-        let replayed_from_start =
-            prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
-        let mut context_state = if prev.position > 0 && !replayed_from_start {
-            CodexContextState::scan_prior(path, prev.position, &meta)
-        } else {
-            CodexContextState::from_meta(&meta)
-        };
-        let scope_matcher = TranscriptScopeMatcher::for_scope(
-            project_root,
-            self.user_scope
-                .as_ref()
-                .map(|scope| scope.registered_roots.as_slice()),
-        );
-        let mut last_in_scope_cwd = None;
-        let mut last_in_scope_git = None;
-        for line in &new.lines {
-            let is_context_record = context_state.observe_context_record(&line.value, path, &meta);
-            let in_scope = scope_matcher.accepts(context_state.cwd.as_deref());
-            if !in_scope {
-                if compacted_summary_from_line(
-                    &line.value,
-                    &meta,
-                    context_state.model.as_deref(),
-                    path,
-                    line.offset,
-                    context_state.compaction_depth + 1,
-                )
-                .is_some()
-                {
-                    context_state.compaction_depth += 1;
-                }
-                continue;
-            }
-            last_in_scope_cwd.clone_from(&context_state.cwd);
-            last_in_scope_git.clone_from(&context_state.git);
-            // Non-consuming: harvest session-level policy/effort/rate-limit
-            // summary before the line is routed to its owning handler below.
-            structured.observe_summary(&line.value);
-            if is_context_record {
-                continue;
-            }
-            if turn_usage.observe(&line.value) {
-                continue;
-            }
-            if let Some(rows) = structured.event_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                for mut message in rows {
-                    context::annotate_message(
-                        &mut message,
-                        context_state.cwd.as_deref(),
-                        context_state.git.as_ref(),
-                    );
-                    messages.push(message);
-                }
-                continue;
-            }
-            if let Some(event) = codex_goal_event_from_line(&line.value) {
-                let key = event.dedup_key();
-                if last_goal_key.as_ref() == Some(&key) {
-                    continue;
-                }
-                last_goal_key = Some(key);
-                let mut message = goal_event_message(
-                    &meta,
-                    context_state.model.as_deref(),
-                    path,
-                    line.offset,
-                    timestamp_from_record(&line.value),
-                    &event,
-                );
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                );
-                messages.push(message);
-                continue;
-            }
-            if let Some(mut message) = response_item_goal_context_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                );
-                messages.push(message);
-                continue;
-            }
-            if let Some(mut message) = response_item_tool_event_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                );
-                messages.push(message);
-                continue;
-            }
-            if let Some(mut message) = compacted_summary_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-                context_state.compaction_depth + 1,
-            ) {
-                flush_turn_usage(&mut messages, &mut turn_usage);
-                context_state.compaction_depth += 1;
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                );
-                messages.push(message);
-                continue;
-            }
-            if let Some(mut message) = goal_context_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                );
-                messages.push(message);
-                continue;
-            }
-            if let Some(mut message) = message_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                // A new user prompt closes the previous turn: attach that
-                // turn's summed API-call usage to its assistant reply.
-                if message.role == "user" {
-                    flush_turn_usage(&mut messages, &mut turn_usage);
-                }
-                context::annotate_message(
-                    &mut message,
-                    context_state.cwd.as_deref(),
-                    context_state.git.as_ref(),
-                );
-                messages.push(message);
-            }
-        }
-        // The final turn's trailing token_count(s) arrive after its
-        // agent_message; flush them onto it.
-        flush_turn_usage(&mut messages, &mut turn_usage);
-        // Emit any `exec_command` calls whose paired output never arrived in
-        // this pass so the tool call is not silently dropped.
-        for mut message in structured.flush_pending(&meta, path) {
-            context::annotate_message(
-                &mut message,
-                last_in_scope_cwd.as_deref(),
-                last_in_scope_git.as_ref(),
-            );
-            messages.push(message);
-        }
-
-        // A truncate-and-rewrite can reuse every byte offset from the previous
-        // file generation. Legacy projection keys are offset-based, so keep
-        // replacement rows distinct instead of overwriting retained history.
-        if replayed_from_start {
-            namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
-        }
-
-        let project = self.user_scope.as_ref().map_or_else(
-            || project_root.to_string_lossy().to_string(),
-            |_| "user".to_string(),
-        );
-        let draft = SessionDraft {
-            session_id: meta.session_id.clone(),
-            project_key: project.clone(),
-            project_path: project,
-            title: title_from_messages(&messages),
-            // The summary is session-wide and may include evidence observed
-            // after Codex changed cwd into a registered project. User scope
-            // stores only the filtered message rows, never that mixed summary.
-            metadata_json: context::session_metadata_json(
-                &meta,
-                self.user_scope.is_none().then_some(&structured.summary),
-            ),
-            parent_session_id: meta.parent_session_id.clone(),
-            is_subagent: meta.is_subagent,
-            agent_id: meta.agent_id.clone(),
-            parent_tool_use_id: None,
-        };
-
-        Some(ParsedTranscript {
-            draft,
-            messages,
-            new_cursor: new.new_cursor,
-        })
-    }
-
     fn try_parse_new(
         &self,
         path: &Path,
@@ -436,8 +197,270 @@ impl TranscriptSource for CodexSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_and_parse_new(PROVIDER, path, prev, max_new_bytes, || {
-            self.parse_new(path, prev, project_root, max_new_bytes)
-        })
+        preflight_strict_jsonl(PROVIDER, path, prev, max_new_bytes)?;
+        let mut routing_deferred = None;
+        let parsed = (|| {
+            // `session_meta` (line 1) is authoritative for session identity and the
+            // initial cwd. Later context records can move one rollout between scopes.
+            let meta = session_meta(path)?;
+            if self
+                .user_scope
+                .as_ref()
+                .and_then(|scope| scope.session_id.as_deref())
+                .is_some_and(|session_id| session_id != meta.session_id)
+            {
+                return None;
+            }
+
+            let new = stream_new_jsonl(path, prev, max_new_bytes)?;
+            let mut messages = Vec::new();
+            let mut turn_usage = CodexTurnUsage::default();
+            // Collapses identical consecutive goal states within this parse pass:
+            // `thread_goal_updated` fires on every token/time tick, so only an
+            // objective- or status-change opens a new `goal` row.
+            let mut last_goal_key: Option<(String, Option<String>)> = None;
+            let mut structured = events::CodexStructuredState::new();
+            let replayed_from_start =
+                prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
+            let mut context_state = if prev.position > 0 && !replayed_from_start {
+                CodexContextState::scan_prior(path, prev.position, &meta)
+            } else {
+                CodexContextState::from_meta(&meta)
+            };
+            let scope_matcher = TranscriptScopeMatcher::for_scope_with_cache(
+                project_root,
+                self.user_scope
+                    .as_ref()
+                    .map(|scope| scope.registered_roots.as_slice()),
+                self.project_matchers.clone(),
+            );
+            let mut last_in_scope_cwd = None;
+            let mut last_in_scope_git = None;
+            for line in &new.lines {
+                let is_context_record =
+                    context_state.observe_context_record(&line.value, path, &meta);
+                match scope_matcher.route(context_state.cwd.as_deref()) {
+                    TranscriptScopeRouting::Accepted => {}
+                    TranscriptScopeRouting::Deferred(reason) => {
+                        routing_deferred = Some(reason);
+                        return None;
+                    }
+                    TranscriptScopeRouting::Rejected => {
+                        if compacted_summary_from_line(
+                            &line.value,
+                            &meta,
+                            context_state.model.as_deref(),
+                            path,
+                            line.offset,
+                            context_state.compaction_depth + 1,
+                        )
+                        .is_some()
+                        {
+                            context_state.compaction_depth += 1;
+                        }
+                        continue;
+                    }
+                }
+                last_in_scope_cwd.clone_from(&context_state.cwd);
+                last_in_scope_git.clone_from(&context_state.git);
+                // Non-consuming: harvest session-level policy/effort/rate-limit
+                // summary before the line is routed to its owning handler below.
+                structured.observe_summary(&line.value);
+                if is_context_record {
+                    continue;
+                }
+                if turn_usage.observe(&line.value) {
+                    continue;
+                }
+                if let Some(rows) = structured.event_from_line(
+                    &line.value,
+                    &meta,
+                    context_state.model.as_deref(),
+                    path,
+                    line.offset,
+                ) {
+                    for mut message in rows {
+                        context::annotate_message(
+                            &mut message,
+                            context_state.cwd.as_deref(),
+                            context_state.git.as_ref(),
+                        );
+                        messages.push(message);
+                    }
+                    continue;
+                }
+                if let Some(event) = codex_goal_event_from_line(&line.value) {
+                    let key = event.dedup_key();
+                    if last_goal_key.as_ref() == Some(&key) {
+                        continue;
+                    }
+                    last_goal_key = Some(key);
+                    let mut message = goal_event_message(
+                        &meta,
+                        context_state.model.as_deref(),
+                        path,
+                        line.offset,
+                        timestamp_from_record(&line.value),
+                        &event,
+                    );
+                    context::annotate_message(
+                        &mut message,
+                        context_state.cwd.as_deref(),
+                        context_state.git.as_ref(),
+                    );
+                    messages.push(message);
+                    continue;
+                }
+                if let Some(mut message) = response_item_goal_context_from_line(
+                    &line.value,
+                    &meta,
+                    context_state.model.as_deref(),
+                    path,
+                    line.offset,
+                ) {
+                    context::annotate_message(
+                        &mut message,
+                        context_state.cwd.as_deref(),
+                        context_state.git.as_ref(),
+                    );
+                    messages.push(message);
+                    continue;
+                }
+                if let Some(mut message) = response_item_tool_event_from_line(
+                    &line.value,
+                    &meta,
+                    context_state.model.as_deref(),
+                    path,
+                    line.offset,
+                ) {
+                    context::annotate_message(
+                        &mut message,
+                        context_state.cwd.as_deref(),
+                        context_state.git.as_ref(),
+                    );
+                    messages.push(message);
+                    continue;
+                }
+                if let Some(mut message) = compacted_summary_from_line(
+                    &line.value,
+                    &meta,
+                    context_state.model.as_deref(),
+                    path,
+                    line.offset,
+                    context_state.compaction_depth + 1,
+                ) {
+                    flush_turn_usage(&mut messages, &mut turn_usage);
+                    context_state.compaction_depth += 1;
+                    context::annotate_message(
+                        &mut message,
+                        context_state.cwd.as_deref(),
+                        context_state.git.as_ref(),
+                    );
+                    messages.push(message);
+                    continue;
+                }
+                if let Some(mut message) = goal_context_from_line(
+                    &line.value,
+                    &meta,
+                    context_state.model.as_deref(),
+                    path,
+                    line.offset,
+                ) {
+                    context::annotate_message(
+                        &mut message,
+                        context_state.cwd.as_deref(),
+                        context_state.git.as_ref(),
+                    );
+                    messages.push(message);
+                    continue;
+                }
+                if let Some(mut message) = message_from_line(
+                    &line.value,
+                    &meta,
+                    context_state.model.as_deref(),
+                    path,
+                    line.offset,
+                ) {
+                    // A new user prompt closes the previous turn: attach that
+                    // turn's summed API-call usage to its assistant reply.
+                    if message.role == "user" {
+                        flush_turn_usage(&mut messages, &mut turn_usage);
+                    }
+                    context::annotate_message(
+                        &mut message,
+                        context_state.cwd.as_deref(),
+                        context_state.git.as_ref(),
+                    );
+                    messages.push(message);
+                }
+            }
+            // The final turn's trailing token_count(s) arrive after its
+            // agent_message; flush them onto it.
+            flush_turn_usage(&mut messages, &mut turn_usage);
+            // Emit any `exec_command` calls whose paired output never arrived in
+            // this pass so the tool call is not silently dropped.
+            for mut message in structured.flush_pending(&meta, path) {
+                context::annotate_message(
+                    &mut message,
+                    last_in_scope_cwd.as_deref(),
+                    last_in_scope_git.as_ref(),
+                );
+                messages.push(message);
+            }
+
+            // A truncate-and-rewrite can reuse every byte offset from the previous
+            // file generation. Legacy projection keys are offset-based, so keep
+            // replacement rows distinct instead of overwriting retained history.
+            if replayed_from_start {
+                namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
+            }
+
+            let project = self.user_scope.as_ref().map_or_else(
+                || project_root.to_string_lossy().to_string(),
+                |_| "user".to_string(),
+            );
+            let draft = SessionDraft {
+                session_id: meta.session_id.clone(),
+                project_key: project.clone(),
+                project_path: project,
+                title: title_from_messages(&messages),
+                // The summary is session-wide and may include evidence observed
+                // after Codex changed cwd into a registered project. User scope
+                // stores only the filtered message rows, never that mixed summary.
+                metadata_json: context::session_metadata_json(
+                    &meta,
+                    self.user_scope.is_none().then_some(&structured.summary),
+                ),
+                parent_session_id: meta.parent_session_id.clone(),
+                is_subagent: meta.is_subagent,
+                agent_id: meta.agent_id.clone(),
+                parent_tool_use_id: None,
+            };
+
+            Some(ParsedTranscript {
+                draft,
+                messages,
+                new_cursor: new.new_cursor,
+            })
+        })();
+        if let Some(reason) = routing_deferred {
+            return Err(TranscriptIngestError::RoutingDeferred {
+                provider: PROVIDER,
+                reason,
+            });
+        }
+        Ok(parsed)
+    }
+
+    fn parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> Option<ParsedTranscript> {
+        self.try_parse_new(path, prev, project_root, max_new_bytes)
+            .ok()
+            .flatten()
     }
 }

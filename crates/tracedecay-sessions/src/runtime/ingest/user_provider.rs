@@ -128,7 +128,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         ProviderRunOutcome::bounded(
             outcome.stats,
             outcome.bytes_consumed,
-            outcome.deferred_by_byte_cap,
+            outcome.deferred_by_byte_cap || outcome.routing_deferred,
         )
     }
 

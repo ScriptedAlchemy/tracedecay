@@ -280,7 +280,7 @@ impl<'a> ProjectProviderRun<'a> {
                 messages_upserted: composer.messages_upserted,
             },
             composer.bytes_consumed,
-            composer.deferred_by_byte_cap,
+            composer.deferred_by_byte_cap || composer.routing_deferred,
         );
         if self.cancellation.is_cancelled() {
             return outcome;
@@ -329,7 +329,9 @@ impl<'a> ProjectProviderRun<'a> {
         ProviderRunOutcome::bounded(
             outcome.stats,
             outcome.bytes_consumed,
-            outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
+            outcome.deferred_by_byte_cap
+                || outcome.routing_deferred
+                || outcome.bytes_consumed > self.max_new_bytes,
         )
     }
 }

@@ -153,7 +153,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
                 messages_upserted: composer.messages_upserted,
             },
             bytes_consumed: composer.bytes_consumed,
-            deferred_by_byte_cap: composer.deferred_by_byte_cap,
+            deferred_by_byte_cap: composer.deferred_by_byte_cap || composer.routing_deferred,
         });
     }
     let remaining = max_new_bytes.map(|limit| limit.saturating_sub(composer.bytes_consumed));
@@ -175,7 +175,9 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
                 .saturating_add(sweep.messages_upserted),
         },
         bytes_consumed: composer.bytes_consumed.saturating_add(sweep.bytes_consumed),
-        deferred_by_byte_cap: composer.deferred_by_byte_cap || sweep.source_deferred,
+        deferred_by_byte_cap: composer.deferred_by_byte_cap
+            || composer.routing_deferred
+            || sweep.source_deferred,
     })
 }
 

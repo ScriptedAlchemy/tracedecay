@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocationMetadataKeys, TranscriptScopeMatcher,
+    ProjectRootMatcherCache, StoredCursor, TranscriptLocationMetadataKeys, TranscriptScopeMatcher,
+    TranscriptScopeRouting,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -111,6 +112,7 @@ pub const CWD_PROBE_LINES: usize = 8;
 pub struct ClaudeSource {
     projects_dir: PathBuf,
     user_scope: Option<UserClaudeScope>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 struct UserClaudeScope {
@@ -131,6 +133,7 @@ impl ClaudeSource {
         Self {
             projects_dir: home.join(".claude").join("projects"),
             user_scope: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -156,7 +159,7 @@ impl ClaudeSource {
         &self,
         scan: &mut ClaudeSourceFrameScan,
         project_root: &Path,
-    ) -> Option<Vec<ClaudeSkippedFrame>> {
+    ) -> crate::runtime::source::TranscriptIngestResult<Option<Vec<ClaudeSkippedFrame>>> {
         if matches!(
             scan.coverage,
             ClaudeFrameCoverage::Deferred {
@@ -164,26 +167,32 @@ impl ClaudeSource {
                 ..
             }
         ) {
-            return None;
+            return Ok(None);
         }
         let subagent = claude_subagent_identity(&scan.identity.source_path);
-        let expected_session_id = self
+        let expected_session_id = match self
             .user_scope
             .as_ref()
             .and_then(|scope| scope.session_id.as_deref())
             .map(protect_sensitive_structural_id)
             .transpose()
-            .ok()?;
-        let parent_session_id = subagent
+        {
+            Ok(session_id) => session_id,
+            Err(_) => return Ok(None),
+        };
+        let parent_session_id = match subagent
             .as_ref()
             .map(|info| protect_sensitive_structural_id(&info.parent_session_id))
             .transpose()
-            .ok()?;
+        {
+            Ok(session_id) => session_id,
+            Err(_) => return Ok(None),
+        };
         if expected_session_id.is_some_and(|expected| {
             expected != scan.identity.session_id
                 && parent_session_id.as_deref() != Some(expected.as_str())
         }) {
-            return None;
+            return Ok(None);
         }
 
         let scan_start = match scan.coverage {
@@ -208,27 +217,34 @@ impl ClaudeSource {
                     .as_ref()
                     .and_then(|info| transcript_cwd(&info.parent_transcript_path))
             });
-        let scope_matcher = TranscriptScopeMatcher::for_scope(
+        let scope_matcher = TranscriptScopeMatcher::for_scope_with_cache(
             project_root,
             self.user_scope
                 .as_ref()
                 .map(|scope| scope.registered_roots.as_slice()),
+            self.project_matchers.clone(),
         );
         let mut retained = Vec::with_capacity(scan.frames.len());
         let mut excluded = Vec::new();
         for frame in scan.frames.drain(..) {
             let record = frame.scope_value();
             let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
-            let include = scope_matcher.accepts(line_cwd.as_deref());
-            if include {
-                retained.push(frame);
-            } else {
-                excluded.push(ClaudeSkippedFrame {
+            match scope_matcher.route(line_cwd.as_deref()) {
+                TranscriptScopeRouting::Accepted => retained.push(frame),
+                TranscriptScopeRouting::Rejected => excluded.push(ClaudeSkippedFrame {
                     offset: frame.offset,
                     end_offset: frame.end_offset,
                     resume_fingerprint: frame.resume_fingerprint,
                     reason: ClaudeSkippedFrameReason::OutOfScope,
-                });
+                }),
+                TranscriptScopeRouting::Deferred(reason) => {
+                    return Err(
+                        crate::runtime::source::TranscriptIngestError::RoutingDeferred {
+                            provider: PROVIDER,
+                            reason,
+                        },
+                    );
+                }
             }
         }
         scan.frames = retained;
@@ -236,7 +252,7 @@ impl ClaudeSource {
         scan.scope = Some(frames::ClaudeFrameScope {
             project_root: project_root.to_path_buf(),
         });
-        Some(excluded)
+        Ok(Some(excluded))
     }
 }
 

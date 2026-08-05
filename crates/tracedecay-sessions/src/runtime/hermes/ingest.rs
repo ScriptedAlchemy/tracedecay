@@ -9,7 +9,8 @@ use crate::admission::HostAdmission;
 use crate::host_ports::hermes_profile_pin::resolve as read_config_pinned_project_root;
 use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
-use crate::runtime::shared::{TranscriptIngestStats, path_belongs_to_project};
+use crate::runtime::shared::{ProjectMembership, TranscriptIngestStats, path_belongs_to_project};
+use tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome;
 
 use super::DEFAULT_HERMES_SWEEP_BYTES;
 use super::coverage::{
@@ -17,8 +18,8 @@ use super::coverage::{
     drain_hermes_projections_with_admission_and_cancellation,
 };
 use super::state_db::{
-    try_ingest_state_db_bounded_with_admission, try_ingest_state_db_for_projects,
-    try_ingest_user_state_db_bounded_with_admission,
+    HermesStateDbIngestError, try_ingest_state_db_bounded_with_admission,
+    try_ingest_state_db_for_projects, try_ingest_user_state_db_bounded_with_admission,
 };
 
 fn new_sweep_budget(max_new_bytes: Option<u64>) -> IngestByteBudget {
@@ -31,6 +32,7 @@ pub struct HermesSweepOutcome {
     pub stats: TranscriptIngestStats,
     pub bytes_consumed: u64,
     pub deferred_by_byte_cap: bool,
+    pub routing_deferred: bool,
 }
 
 /// Ingests Hermes sessions proven to belong to `project_root` into the
@@ -137,10 +139,20 @@ pub async fn ingest_homes_for_projects(
         }
         let eligible = destinations
             .iter()
-            .filter(|destination| {
-                source_is_candidate_for_project(&source, destination.project_root)
+            .filter_map(|destination| {
+                match source_project_membership(&source, destination.project_root) {
+                    ProjectMembership::Match => Some((*destination).clone()),
+                    ProjectMembership::NoMatch => None,
+                    ProjectMembership::Unknown(reason) => {
+                        tracing::debug!(
+                            state_db = %source.state_db.display(),
+                            ?reason,
+                            "retaining Hermes destination for deferred membership retry"
+                        );
+                        Some((*destination).clone())
+                    }
+                }
             })
-            .cloned()
             .collect::<Vec<_>>();
         if eligible.is_empty() {
             continue;
@@ -149,7 +161,7 @@ pub async fn ingest_homes_for_projects(
             Ok(source_stats) => stats = stats.merge(source_stats),
             Err(error) => tracing::debug!(
                 state_db = %source.state_db.display(),
-                error,
+                error = %error,
                 "skipping shared Hermes transcript source"
             ),
         }
@@ -248,11 +260,21 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
         .await
         {
             Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
-            Err(error) => tracing::debug!(
-                state_db = %source.state_db.display(),
-                error,
-                "skipping Hermes transcript source"
-            ),
+            Err(HermesStateDbIngestError::RoutingDeferred(reason)) => {
+                outcome.routing_deferred = true;
+                tracing::debug!(
+                    state_db = %source.state_db.display(),
+                    ?reason,
+                    "deferring Hermes transcript source routing"
+                );
+            }
+            Err(error) => {
+                tracing::debug!(
+                    state_db = %source.state_db.display(),
+                    error = %error,
+                    "skipping Hermes transcript source"
+                );
+            }
         }
     }
     let scope = ObservationScopeV1::Project { project_id };
@@ -361,11 +383,21 @@ async fn ingest_user_homes_capped_with_admission(
         .await
         {
             Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
-            Err(error) => tracing::debug!(
-                state_db = %source.state_db.display(),
-                error,
-                "skipping projectless Hermes transcript source"
-            ),
+            Err(HermesStateDbIngestError::RoutingDeferred(reason)) => {
+                outcome.routing_deferred = true;
+                tracing::debug!(
+                    state_db = %source.state_db.display(),
+                    ?reason,
+                    "deferring projectless Hermes transcript source routing"
+                );
+            }
+            Err(error) => {
+                tracing::debug!(
+                    state_db = %source.state_db.display(),
+                    error = %error,
+                    "skipping projectless Hermes transcript source"
+                );
+            }
         }
     }
     if !cancellation.is_cancelled()
@@ -424,7 +456,8 @@ pub async fn ingest_legacy_pinned_profile(
         &mut budget,
         &ObservationCancellation::default(),
     )
-    .await?;
+    .await
+    .map_err(|error| error.to_string())?;
     if budget.deferred() {
         return Err(format!(
             "legacy Hermes state store '{}' exceeded the bounded import sweep",
@@ -481,9 +514,9 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
 fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<HermesProfileSource> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let project_is_real = tracedecay_runtime_core::worktree::git_worktree_root(project_root)
-        .is_some()
-        || tracedecay_runtime_core::config::has_project_database(project_root);
+    let project_identity =
+        tracedecay_runtime_core::git_discovery::discover_repository_identity_bounded(project_root);
+    let project_has_database = tracedecay_runtime_core::config::has_project_database(project_root);
     for home in hermes_homes {
         let mut candidates: Vec<(PathBuf, Option<String>)> = vec![(home.clone(), None)];
         if let Ok(entries) = std::fs::read_dir(home.join("profiles")) {
@@ -506,12 +539,20 @@ fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<Her
             let legacy_project_pin =
                 read_config_pinned_project_root(&profile_dir.join("config.yaml"))
                     .map(PathBuf::from);
-            if legacy_project_pin
-                .as_deref()
-                .is_some_and(|pin| !path_belongs_to_project(pin, project_root))
-                || (legacy_project_pin.is_none() && !project_is_real)
-            {
-                continue;
+            if let Some(pin) = legacy_project_pin.as_deref() {
+                if matches!(
+                    path_belongs_to_project(pin, project_root),
+                    ProjectMembership::NoMatch
+                ) {
+                    continue;
+                }
+            } else {
+                match &project_identity {
+                    GitRepositoryIdentityOutcome::Resolved(_) => {}
+                    GitRepositoryIdentityOutcome::NotRepository if project_has_database => {}
+                    GitRepositoryIdentityOutcome::Unknown(_) => {}
+                    GitRepositoryIdentityOutcome::NotRepository => continue,
+                }
             }
             let state_db = profile_dir.join("state.db");
             if state_db.is_file() && seen.insert(state_db.clone()) {
@@ -526,17 +567,24 @@ fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<Her
     out
 }
 
-fn source_is_candidate_for_project(source: &HermesProfileSource, project_root: &Path) -> bool {
-    if source
-        .legacy_project_pin
-        .as_deref()
-        .is_some_and(|pin| !path_belongs_to_project(pin, project_root))
-    {
-        return false;
+fn source_project_membership(
+    source: &HermesProfileSource,
+    project_root: &Path,
+) -> ProjectMembership {
+    if let Some(pin) = source.legacy_project_pin.as_deref() {
+        return path_belongs_to_project(pin, project_root);
     }
-    source.legacy_project_pin.is_some()
-        || tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some()
-        || tracedecay_runtime_core::config::has_project_database(project_root)
+    match tracedecay_runtime_core::git_discovery::discover_repository_identity_bounded(project_root)
+    {
+        GitRepositoryIdentityOutcome::Resolved(_) => ProjectMembership::Match,
+        GitRepositoryIdentityOutcome::NotRepository
+            if tracedecay_runtime_core::config::has_project_database(project_root) =>
+        {
+            ProjectMembership::Match
+        }
+        GitRepositoryIdentityOutcome::NotRepository => ProjectMembership::NoMatch,
+        GitRepositoryIdentityOutcome::Unknown(reason) => ProjectMembership::Unknown(reason),
+    }
 }
 
 #[cfg(test)]

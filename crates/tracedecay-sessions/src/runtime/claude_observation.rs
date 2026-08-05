@@ -529,7 +529,7 @@ where
     }
     let retained = context
         .source_adapter
-        .retain_scoped_frames(&mut scan, context.project_root);
+        .retain_scoped_frames(&mut scan, context.project_root)?;
     scan.coverage = coverage;
     if retained.is_none() {
         return Ok(SourcePreparation::Finished(deferred_source_stats(

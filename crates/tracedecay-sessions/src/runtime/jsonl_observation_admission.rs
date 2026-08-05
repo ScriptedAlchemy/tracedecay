@@ -86,6 +86,7 @@ pub(super) enum JsonlFrameAdmission {
         native_record_id: ObservationId,
     },
     NonDurable(ObservationCoverageReason),
+    Deferred,
 }
 
 impl JsonlFrameAdmission {
@@ -101,6 +102,10 @@ impl JsonlFrameAdmission {
 
     pub(super) fn non_durable(reason: ObservationCoverageReason) -> Self {
         Self::NonDurable(reason)
+    }
+
+    pub(super) const fn deferred() -> Self {
+        Self::Deferred
     }
 }
 
@@ -477,6 +482,10 @@ pub(super) async fn admit_jsonl_observations<State>(
                         .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
                         .await?;
                     continue;
+                }
+                JsonlFrameAdmission::Deferred => {
+                    progress.source_deferred = true;
+                    break;
                 }
             };
         active

@@ -13,14 +13,28 @@ use super::observation::{
     CodexObservationAdmission, codex_native_record_id, normalize_codex_observation,
 };
 use super::records::response_item_tool_metadata;
-use crate::runtime::shared::StoredCursor;
-use crate::runtime::source::TranscriptSource;
+use crate::runtime::shared::{ProjectRootMatcherCache, StoredCursor, TranscriptScopeRouting};
+use crate::runtime::source::{TranscriptIngestError, TranscriptSource};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod goal_event_tests {
     use super::*;
     use serde_json::json;
+    use tracedecay_runtime_core::git_discovery::{
+        GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
+    };
+
+    fn unknown_codex_identity(path: &std::path::Path) -> GitRepositoryIdentityOutcome {
+        if path.ends_with("unknown") {
+            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
+        }
+        GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
+            worktree_root: path.to_path_buf(),
+            git_dir: path.join(".git"),
+            common_dir: std::path::PathBuf::from("/shared/project.git"),
+        })
+    }
 
     fn goal_event_line(objective: &str, status: &str) -> Value {
         json!({
@@ -174,19 +188,74 @@ mod goal_event_tests {
             project_id,
         };
         assert_eq!(project.scope(), linked.scope());
-        assert!(project.scope_matcher().accepts(Some(&project_src)));
-        assert!(!project.scope_matcher().accepts(Some(&other)));
+        assert_eq!(
+            project.scope_matcher().route(Some(&project_src)),
+            TranscriptScopeRouting::Accepted
+        );
+        assert_eq!(
+            project.scope_matcher().route(Some(&other)),
+            TranscriptScopeRouting::Rejected
+        );
 
         let registered = vec![project_root];
         let profile = CodexObservationAdmission::Profile {
             session_id: Some("session-1"),
             registered_roots: &registered,
         };
-        assert!(!profile.scope_matcher().accepts(Some(&project_src)));
-        assert!(profile.scope_matcher().accepts(Some(&other)));
-        assert!(profile.scope_matcher().accepts(None));
+        assert_eq!(
+            profile.scope_matcher().route(Some(&project_src)),
+            TranscriptScopeRouting::Rejected
+        );
+        assert_eq!(
+            profile.scope_matcher().route(Some(&other)),
+            TranscriptScopeRouting::Accepted
+        );
+        assert_eq!(
+            profile.scope_matcher().route(None),
+            TranscriptScopeRouting::Accepted
+        );
         assert!(profile.accepts_session("session-1"));
         assert!(!profile.accepts_session("session-2"));
+    }
+
+    #[test]
+    fn codex_unknown_repository_membership_is_a_typed_retryable_error() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        let unknown = temp.path().join("unknown");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&unknown).unwrap();
+        let path = temp.path().join("rollout.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                json!({
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "unknown-routing",
+                        "cwd": unknown,
+                    }
+                }),
+                json!({
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "must be retried"}
+                }),
+            ),
+        )
+        .unwrap();
+        let mut source = CodexSource::with_home(temp.path());
+        source.project_matchers =
+            ProjectRootMatcherCache::with_identity_resolver(unknown_codex_identity);
+
+        let result = source.try_parse_new(&path, StoredCursor::default(), &project, None);
+        assert!(matches!(
+            result,
+            Err(TranscriptIngestError::RoutingDeferred {
+                provider: "codex",
+                reason: GitDiscoveryUnknown::DeadlineExceeded,
+            })
+        ));
     }
 
     #[test]

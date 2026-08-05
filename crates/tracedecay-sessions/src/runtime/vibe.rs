@@ -30,9 +30,10 @@ use crate::runtime::jsonl_observation_admission::{
     admit_jsonl_observations,
 };
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, TranscriptScopeMatcher,
-    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
-    content_storage_text_and_tools, title_from_messages,
+    ProjectRootMatcherCache, StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys,
+    TranscriptScopeMatcher, TranscriptScopeRouting, append_location_metadata,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -60,6 +61,7 @@ const VIBE_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMet
 pub struct VibeSource {
     session_root: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,6 +89,7 @@ impl VibeSource {
         Self {
             session_root: vibe_home.join("logs").join("session"),
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -96,14 +99,33 @@ impl VibeSource {
         self
     }
 
-    fn scoped_meta(&self, path: &Path, project_root: &Path) -> Option<VibeMeta> {
-        let meta = read_meta(&path.parent()?.join("meta.json"))?;
-        if !TranscriptScopeMatcher::for_scope(project_root, self.user_registered_roots.as_deref())
-            .accepts(Some(&meta.working_directory))
+    fn scoped_meta(
+        &self,
+        path: &Path,
+        project_root: &Path,
+    ) -> TranscriptIngestResult<Option<VibeMeta>> {
+        let Some(parent) = path.parent() else {
+            return Ok(None);
+        };
+        let Some(meta) = read_meta(&parent.join("meta.json")) else {
+            return Ok(None);
+        };
+        match TranscriptScopeMatcher::for_scope_with_cache(
+            project_root,
+            self.user_registered_roots.as_deref(),
+            self.project_matchers.clone(),
+        )
+        .route(Some(&meta.working_directory))
         {
-            return None;
+            TranscriptScopeRouting::Accepted => Ok(Some(meta)),
+            TranscriptScopeRouting::Rejected => Ok(None),
+            TranscriptScopeRouting::Deferred(reason) => {
+                Err(TranscriptIngestError::RoutingDeferred {
+                    provider: PROVIDER,
+                    reason,
+                })
+            }
         }
-        Some(meta)
     }
 
     /// Eligible `messages.jsonl` only, newest-first under `max_files`, with
@@ -162,9 +184,36 @@ impl TranscriptSource for VibeSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
-        let meta = self.scoped_meta(path, project_root)?;
+        self.parse_scoped_new(path, prev, project_root, max_new_bytes)
+            .ok()
+            .flatten()
+    }
 
-        let new = stream_new_jsonl(path, prev, max_new_bytes)?;
+    fn try_parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        self.parse_scoped_new(path, prev, project_root, max_new_bytes)
+    }
+}
+
+impl VibeSource {
+    fn parse_scoped_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        let Some(meta) = self.scoped_meta(path, project_root)? else {
+            return Ok(None);
+        };
+        let Some(new) = stream_new_jsonl(path, prev, max_new_bytes) else {
+            return Ok(None);
+        };
         let mut messages = Vec::new();
         for line in &new.lines {
             if let Some(message) = message_from_line(&line.value, &meta, path, line.offset) {
@@ -188,11 +237,11 @@ impl TranscriptSource for VibeSource {
             parent_tool_use_id: None,
         };
 
-        Some(ParsedTranscript {
+        Ok(Some(ParsedTranscript {
             draft,
             messages,
             new_cursor: new.new_cursor,
-        })
+        }))
     }
 }
 
@@ -250,7 +299,7 @@ async fn capture_vibe_path(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<JsonlObservationAdmissionProgress> {
-    let Some(meta) = source.scoped_meta(path, project_root) else {
+    let Some(meta) = source.scoped_meta(path, project_root)? else {
         return Ok(JsonlObservationAdmissionProgress {
             bytes_consumed: 0,
             source_deferred: false,

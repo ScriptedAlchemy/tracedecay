@@ -25,9 +25,9 @@ use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::observation::ObservationCancellation;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
+    TranscriptLocationMetadataKeys, append_location_metadata, append_tool_calls_metadata,
+    append_usage_metadata, content_storage_text_and_tools, title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
@@ -76,6 +76,7 @@ pub struct ClineLikeSource {
     provider: &'static str,
     storage_roots: Vec<PathBuf>,
     user_registered_roots: Option<Vec<PathBuf>>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,6 +157,7 @@ impl ClineLikeSource {
                     .join("User/globalStorage/saoudrizwan.claude-dev/tasks"),
             ],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -167,6 +169,7 @@ impl ClineLikeSource {
                     .join("User/globalStorage/rooveterinaryinc.roo-cline/tasks"),
             ],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -179,6 +182,7 @@ impl ClineLikeSource {
                 home.join(".kilocode/cli/global/tasks"),
             ],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -204,7 +208,7 @@ impl TranscriptSource for ClineLikeSource {
             out.extend(
                 collect_task_api_paths(root)
                     .into_iter()
-                    .filter(|path| self.snapshot_location(path, project_root).is_some())
+                    .filter(|path| !matches!(self.snapshot_location(path, project_root), Ok(None)))
                     .take(remaining),
             );
         }
@@ -235,8 +239,17 @@ impl TranscriptSource for ClineLikeSource {
 }
 
 impl ClineLikeSource {
-    fn snapshot_location(&self, path: &Path, project_root: &Path) -> Option<PathBuf> {
-        let metadata = read_task_metadata(self.provider, path.parent()?)?;
+    fn snapshot_location(
+        &self,
+        path: &Path,
+        project_root: &Path,
+    ) -> Result<Option<PathBuf>, tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown> {
+        let Some(task_dir) = path.parent() else {
+            return Ok(None);
+        };
+        let Some(metadata) = read_task_metadata(self.provider, task_dir) else {
+            return Ok(None);
+        };
         self.snapshot_location_from_metadata(&metadata, project_root)
     }
 
@@ -244,20 +257,40 @@ impl ClineLikeSource {
         &self,
         metadata: &Value,
         project_root: &Path,
-    ) -> Option<PathBuf> {
+    ) -> Result<Option<PathBuf>, tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown> {
         let paths = metadata_project_paths(metadata);
         if let Some(roots) = &self.user_registered_roots {
-            if paths
-                .iter()
-                .any(|path| roots.iter().any(|root| path_belongs_to_project(path, root)))
-            {
-                return None;
+            let mut unknown = None;
+            for path in &paths {
+                for root in roots {
+                    match self.project_matchers.membership(path, root) {
+                        ProjectMembership::Match => return Ok(None),
+                        ProjectMembership::NoMatch => {}
+                        ProjectMembership::Unknown(reason) => {
+                            unknown.get_or_insert(reason);
+                        }
+                    }
+                }
             }
-            paths.into_iter().next()
+            match unknown {
+                Some(reason) => Err(reason),
+                None => Ok(paths.into_iter().next()),
+            }
         } else {
-            paths
-                .into_iter()
-                .find(|path| path_belongs_to_project(path, project_root))
+            let mut unknown = None;
+            for path in paths {
+                match self.project_matchers.membership(&path, project_root) {
+                    ProjectMembership::Match => return Ok(Some(path)),
+                    ProjectMembership::NoMatch => {}
+                    ProjectMembership::Unknown(reason) => {
+                        unknown.get_or_insert(reason);
+                    }
+                }
+            }
+            match unknown {
+                Some(reason) => Err(reason),
+                None => Ok(None),
+            }
         }
     }
 
@@ -285,9 +318,15 @@ impl ClineLikeSource {
         let Some(metadata) = read_task_metadata(self.provider, task_dir) else {
             return Ok(None);
         };
-        let Some(location_cwd) = self.snapshot_location_from_metadata(&metadata, project_root)
-        else {
-            return Ok(None);
+        let location_cwd = match self.snapshot_location_from_metadata(&metadata, project_root) {
+            Ok(Some(path)) => path,
+            Ok(None) => return Ok(None),
+            Err(reason) => {
+                return Err(TranscriptIngestError::RoutingDeferred {
+                    provider: self.provider,
+                    reason,
+                });
+            }
         };
 
         let document: Value = match serde_json::from_str(&changed.contents) {
@@ -901,6 +940,88 @@ fn message_metadata(provider: &str, entry: &Value, location_cwd: &Path) -> Value
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+    use tracedecay_runtime_core::git_discovery::{
+        GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
+    };
+
+    fn unknown_auxiliary_identity(path: &Path) -> GitRepositoryIdentityOutcome {
+        if path.ends_with("unknown") {
+            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
+        }
+        GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
+            worktree_root: path.to_path_buf(),
+            git_dir: path.join(".git"),
+            common_dir: PathBuf::from("/shared/project.git"),
+        })
+    }
+
+    fn source_with_identity_resolver(registered_roots: Option<Vec<PathBuf>>) -> ClineLikeSource {
+        ClineLikeSource {
+            provider: "cline",
+            storage_roots: Vec::new(),
+            user_registered_roots: registered_roots,
+            project_matchers: ProjectRootMatcherCache::with_identity_resolver(
+                unknown_auxiliary_identity,
+            ),
+        }
+    }
+
+    #[test]
+    fn definitive_cline_location_wins_over_unknown_auxiliary_path() {
+        let fixture = tempfile::TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let matching = fixture.path().join("matching");
+        let unknown = fixture.path().join("unknown");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::create_dir_all(&matching).expect("matching");
+        std::fs::create_dir_all(&unknown).expect("unknown");
+        let metadata = serde_json::json!({
+            "workspacePaths": [unknown, matching]
+        });
+
+        assert_eq!(
+            source_with_identity_resolver(None)
+                .snapshot_location_from_metadata(&metadata, &project),
+            Ok(Some(fixture.path().join("matching")))
+        );
+    }
+
+    #[test]
+    fn definitive_registered_project_match_wins_over_unknown_profile_path() {
+        let fixture = tempfile::TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let matching = fixture.path().join("matching");
+        let unknown = fixture.path().join("unknown");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::create_dir_all(&matching).expect("matching");
+        std::fs::create_dir_all(&unknown).expect("unknown");
+        let metadata = serde_json::json!({
+            "workspacePaths": [unknown, matching]
+        });
+
+        assert_eq!(
+            source_with_identity_resolver(Some(vec![project.clone()]))
+                .snapshot_location_from_metadata(&metadata, &project),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn unknown_only_cline_location_defers_routing() {
+        let fixture = tempfile::TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let unknown = fixture.path().join("unknown");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::create_dir_all(&unknown).expect("unknown");
+
+        assert_eq!(
+            source_with_identity_resolver(None).snapshot_location_from_metadata(
+                &serde_json::json!({"workspacePath": unknown}),
+                &project,
+            ),
+            Err(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+    }
 
     fn write_checked_in_native_task(tasks: &Path, project: &Path, api_filename: &str) -> PathBuf {
         let task = tasks.join("checked-in-native");
@@ -954,6 +1075,7 @@ mod observation_tests {
                 provider,
                 storage_roots: vec![tasks],
                 user_registered_roots: None,
+                project_matchers: ProjectRootMatcherCache::default(),
             };
             let admission = MemoryHostAdmission::default();
 
@@ -1113,6 +1235,7 @@ mod observation_tests {
             provider: "cline",
             storage_roots: vec![tasks],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
 
         let paths = source.transcript_paths(&project);
@@ -1156,6 +1279,7 @@ mod observation_tests {
             provider: "cline",
             storage_roots: vec![first_tasks, second_tasks.clone()],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
         let paths = source.transcript_paths(&project);
         assert_eq!(paths.len(), 2);
@@ -1182,6 +1306,7 @@ mod observation_tests {
             provider: "cline",
             storage_roots: vec![second_tasks],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
         let err = capture_cline_like_snapshot_observations(
             &admission,
@@ -1225,6 +1350,7 @@ mod observation_tests {
             provider: "cline",
             storage_roots: vec![temp.path().join("tasks")],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();

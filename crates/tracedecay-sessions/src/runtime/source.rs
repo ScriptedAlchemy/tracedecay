@@ -96,6 +96,11 @@ pub enum TranscriptIngestError {
     },
     #[error("transcript cursor key mismatch: expected {expected}, found {actual}")]
     CursorKeyMismatch { expected: String, actual: String },
+    #[error("{provider} routing deferred because repository membership is unknown: {reason:?}")]
+    RoutingDeferred {
+        provider: &'static str,
+        reason: tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown,
+    },
 }
 
 impl TranscriptIngestError {

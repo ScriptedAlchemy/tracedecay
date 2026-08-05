@@ -33,9 +33,10 @@ use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::observation::ObservationCancellation;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, TranscriptScopeMatcher,
-    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
-    content_storage_text_and_tools, title_from_messages,
+    ProjectRootMatcherCache, StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys,
+    TranscriptScopeMatcher, TranscriptScopeRouting, append_location_metadata,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
@@ -78,6 +79,7 @@ pub struct KiroSource {
     agent_dir: PathBuf,
     workspace_storage_dir: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +138,7 @@ impl KiroSource {
             agent_dir: data_dir.join("User/globalStorage/kiro.kiroagent"),
             workspace_storage_dir: data_dir.join("User/workspaceStorage"),
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -156,11 +159,13 @@ impl TranscriptSource for KiroSource {
             let mut out = collect_user_workspace_session_files(
                 &self.agent_dir.join("workspace-sessions"),
                 registered_roots,
+                self.project_matchers.clone(),
             );
             out.extend(collect_user_agent_storage_files(
                 &self.agent_dir,
                 &self.workspace_storage_dir,
                 registered_roots,
+                self.project_matchers.clone(),
             ));
             out.sort();
             out.truncate(MAX_TRANSCRIPTS_PER_PASS);
@@ -170,11 +175,13 @@ impl TranscriptSource for KiroSource {
         out.extend(collect_workspace_session_files(
             &self.agent_dir.join("workspace-sessions"),
             project_root,
+            self.project_matchers.clone(),
         ));
         out.extend(collect_agent_storage_files(
             &self.agent_dir,
             &self.workspace_storage_dir,
             project_root,
+            self.project_matchers.clone(),
         ));
         out.sort();
         out.truncate(MAX_TRANSCRIPTS_PER_PASS);
@@ -215,10 +222,21 @@ impl KiroSource {
         let Some(location_cwd) = transcript_location_path(path, &self.workspace_storage_dir) else {
             return Ok(None);
         };
-        if !TranscriptScopeMatcher::for_scope(project_root, self.user_registered_roots.as_deref())
-            .accepts(Some(&location_cwd))
+        match TranscriptScopeMatcher::for_scope_with_cache(
+            project_root,
+            self.user_registered_roots.as_deref(),
+            self.project_matchers.clone(),
+        )
+        .route(Some(&location_cwd))
         {
-            return Ok(None);
+            TranscriptScopeRouting::Accepted => {}
+            TranscriptScopeRouting::Rejected => return Ok(None),
+            TranscriptScopeRouting::Deferred(reason) => {
+                return Err(TranscriptIngestError::RoutingDeferred {
+                    provider: PROVIDER,
+                    reason,
+                });
+            }
         }
 
         let byte_cap = max_new_bytes
@@ -276,11 +294,13 @@ impl KiroSource {
 fn collect_user_workspace_session_files(
     sessions_root: &Path,
     registered_roots: &[PathBuf],
+    project_matchers: ProjectRootMatcherCache,
 ) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
         return Vec::new();
     };
-    let scope_matcher = TranscriptScopeMatcher::profile(registered_roots);
+    let scope_matcher =
+        TranscriptScopeMatcher::profile_with_cache(registered_roots, project_matchers);
     let mut workspace_dirs: Vec<(u64, PathBuf)> = entries
         .flatten()
         .filter_map(|entry| {
@@ -290,8 +310,9 @@ fn collect_user_workspace_session_files(
             }
             let workspace =
                 decode_kiro_workspace_path(entry.file_name().to_string_lossy().as_ref())?;
-            if !scope_matcher.accepts(Some(&workspace)) {
-                return None;
+            match scope_matcher.route(Some(&workspace)) {
+                TranscriptScopeRouting::Accepted | TranscriptScopeRouting::Deferred(_) => {}
+                TranscriptScopeRouting::Rejected => return None,
             }
             let mtime = entry
                 .metadata()
@@ -383,11 +404,15 @@ fn non_durable(path: &Path, reason: &'static str) -> TranscriptIngestError {
     non_durable_snapshot_record(PROVIDER, path, reason)
 }
 
-fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) -> Vec<PathBuf> {
+fn collect_workspace_session_files(
+    sessions_root: &Path,
+    project_root: &Path,
+    project_matchers: ProjectRootMatcherCache,
+) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
         return Vec::new();
     };
-    let scope_matcher = TranscriptScopeMatcher::project(project_root);
+    let scope_matcher = TranscriptScopeMatcher::project_with_cache(project_root, project_matchers);
     let mut out = Vec::new();
     let mut matching_workspaces = 0usize;
     for entry in entries.flatten() {
@@ -400,8 +425,9 @@ fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) ->
         else {
             continue;
         };
-        if !scope_matcher.accepts(Some(&workspace)) {
-            continue;
+        match scope_matcher.route(Some(&workspace)) {
+            TranscriptScopeRouting::Accepted | TranscriptScopeRouting::Deferred(_) => {}
+            TranscriptScopeRouting::Rejected => continue,
         }
         if matching_workspaces >= MAX_WORKSPACE_DIRS {
             break;
@@ -426,12 +452,13 @@ fn collect_agent_storage_files(
     agent_dir: &Path,
     workspace_storage_dir: &Path,
     project_root: &Path,
+    project_matchers: ProjectRootMatcherCache,
 ) -> Vec<PathBuf> {
     let mut workspace_dirs: Vec<(u64, PathBuf, PathBuf)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(agent_dir) else {
         return Vec::new();
     };
-    let scope_matcher = TranscriptScopeMatcher::project(project_root);
+    let scope_matcher = TranscriptScopeMatcher::project_with_cache(project_root, project_matchers);
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -445,8 +472,9 @@ fn collect_agent_storage_files(
         let Some(workspace) = workspace_path_from_hash(workspace_storage_dir, &name) else {
             continue;
         };
-        if !scope_matcher.accepts(Some(&workspace)) {
-            continue;
+        match scope_matcher.route(Some(&workspace)) {
+            TranscriptScopeRouting::Accepted | TranscriptScopeRouting::Deferred(_) => {}
+            TranscriptScopeRouting::Rejected => continue,
         }
         let mtime = entry
             .metadata()
@@ -487,11 +515,13 @@ fn collect_user_agent_storage_files(
     agent_dir: &Path,
     workspace_storage_dir: &Path,
     registered_roots: &[PathBuf],
+    project_matchers: ProjectRootMatcherCache,
 ) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(agent_dir) else {
         return Vec::new();
     };
-    let scope_matcher = TranscriptScopeMatcher::profile(registered_roots);
+    let scope_matcher =
+        TranscriptScopeMatcher::profile_with_cache(registered_roots, project_matchers);
     let mut workspace_dirs: Vec<(u64, PathBuf)> = entries
         .flatten()
         .filter_map(|entry| {
@@ -506,8 +536,9 @@ fn collect_user_agent_storage_files(
                 return None;
             }
             let workspace = workspace_path_from_hash(workspace_storage_dir, &name)?;
-            if !scope_matcher.accepts(Some(&workspace)) {
-                return None;
+            match scope_matcher.route(Some(&workspace)) {
+                TranscriptScopeRouting::Accepted | TranscriptScopeRouting::Deferred(_) => {}
+                TranscriptScopeRouting::Rejected => return None,
             }
             let mtime = entry
                 .metadata()
@@ -1058,6 +1089,7 @@ mod observation_tests {
             agent_dir,
             workspace_storage_dir,
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
         let paths = source.transcript_paths(&project);
         assert_eq!(paths, vec![first_path.clone(), second_path.clone()]);
@@ -1132,6 +1164,7 @@ mod observation_tests {
             agent_dir,
             workspace_storage_dir,
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
@@ -1189,6 +1222,7 @@ mod observation_tests {
             agent_dir,
             workspace_storage_dir,
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
         let paths = source.transcript_paths(&project);
         assert_eq!(paths.len(), 2);
@@ -1271,6 +1305,7 @@ mod observation_tests {
             agent_dir: temp.path().join("agent"),
             workspace_storage_dir,
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
 
         assert_eq!(source.snapshot_input_bytes(&transcript).unwrap(), 7);

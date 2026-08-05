@@ -25,7 +25,7 @@ use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
     admit_jsonl_observations,
 };
-use crate::runtime::shared::TranscriptScopeMatcher;
+use crate::runtime::shared::{TranscriptScopeMatcher, TranscriptScopeRouting};
 use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
@@ -268,15 +268,23 @@ async fn try_admit_codex_jsonl_observations(
         |context_state, bytes, range, _| {
             let mut stable_record_id = None;
             let mut non_durable_reason = None;
+            let mut routing_deferred = false;
             let parsed = parse_normalized_observation_record_v1(
                 bytes,
                 range,
                 ObservationOrderingDomainV1::FileBytes,
                 |native| {
                     context_state.observe_context_record(&native, path, &meta);
-                    if !scope_matcher.accepts(context_state.cwd.as_deref()) {
-                        non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
-                        return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                    match scope_matcher.route(context_state.cwd.as_deref()) {
+                        TranscriptScopeRouting::Accepted => {}
+                        TranscriptScopeRouting::Rejected => {
+                            non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
+                            return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                        }
+                        TranscriptScopeRouting::Deferred(_) => {
+                            routing_deferred = true;
+                            return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                        }
                     }
                     if !codex_observation_record_supported(&native) {
                         non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
@@ -307,6 +315,7 @@ async fn try_admit_codex_jsonl_observations(
                     stable_record_id
                         .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?,
                 )),
+                Err(_) if routing_deferred => Ok(JsonlFrameAdmission::deferred()),
                 Err(_) => Ok(JsonlFrameAdmission::non_durable(
                     non_durable_reason.unwrap_or(ObservationCoverageReason::MalformedFrame),
                 )),

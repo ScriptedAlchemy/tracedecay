@@ -25,6 +25,31 @@ use super::routing::{
 use super::rows::{HermesPageRead, HermesRow, hermes_budget_bytes, hermes_page_row_charge};
 use super::{CHUNK_ROWS, MAX_HERMES_IDENTITY_BYTES, MAX_HERMES_PAGE_BYTES, MAX_HERMES_VALUE_BYTES};
 
+#[derive(Debug)]
+pub(super) enum HermesStateDbIngestError {
+    RoutingDeferred(tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown),
+    Other(String),
+}
+
+impl std::fmt::Display for HermesStateDbIngestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RoutingDeferred(reason) => {
+                write!(formatter, "repository membership unknown: {reason:?}")
+            }
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for HermesStateDbIngestError {}
+
+impl From<String> for HermesStateDbIngestError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
 /// Column names of the `messages` table — `active` (v12 rewind soft-delete)
 /// and `reasoning` arrived in later Hermes schema revisions, so the sweep
 /// probes before selecting to stay readable on legacy stores.
@@ -374,9 +399,9 @@ async fn ingest_bounded_pages<F, R>(
     budget: &mut IngestByteBudget,
     mut route_page: F,
     cancellation: &ObservationCancellation,
-) -> Result<TranscriptIngestStats, String>
+) -> Result<TranscriptIngestStats, HermesStateDbIngestError>
 where
-    F: FnMut(&[HermesRow]) -> R,
+    F: FnMut(&[HermesRow]) -> Result<R, super::routing::HermesRoutingDeferred>,
     R: Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
 {
     let mut read_cursor = StoredCursor::default();
@@ -399,7 +424,8 @@ where
             return Ok(stats);
         }
         let bounded = &new.items[..bounded_count];
-        let route = route_page(bounded);
+        let route = route_page(bounded)
+            .map_err(|deferred| HermesStateDbIngestError::RoutingDeferred(deferred.reason))?;
         let admitted = admit_rows_with_admission_and_cancellation(
             admission,
             bounded,
@@ -440,13 +466,14 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
     admission: &dyn HostAdmission,
     budget: &mut IngestByteBudget,
     cancellation: &ObservationCancellation,
-) -> Result<TranscriptIngestStats, String> {
+) -> Result<TranscriptIngestStats, HermesStateDbIngestError> {
     if cancellation.is_cancelled() {
         return Ok(TranscriptIngestStats::default());
     }
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
     let scope = ObservationScopeV1::Project { project_id };
+    let project_matcher = ProjectRootMatcher::new(project_root);
     ingest_bounded_pages(
         admission,
         &conn,
@@ -457,12 +484,12 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
         resume_fingerprint,
         budget,
         |bounded| {
-            let locations = turn_project_locations(bounded, project_root, source);
-            move |row: &HermesRow| {
+            let locations = turn_project_locations(bounded, &project_matcher, source)?;
+            Ok(move |row: &HermesRow| {
                 locations.get(&row.id).copied().map(|provenance| {
                     project_projection_metadata(row, source, project_root, provenance)
                 })
-            }
+            })
         },
         cancellation,
     )
@@ -476,7 +503,7 @@ pub(super) async fn try_ingest_state_db_for_projects(
     source: &HermesProfileSource,
     destinations: &[ProjectIngestDestination<'_>],
     budget: &mut IngestByteBudget,
-) -> Result<TranscriptIngestStats, String> {
+) -> Result<TranscriptIngestStats, HermesStateDbIngestError> {
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
     let scopes = destinations
@@ -513,7 +540,8 @@ pub(super) async fn try_ingest_state_db_for_projects(
             &destination_matchers,
             source,
             &mut destination_routes,
-        );
+        )
+        .map_err(|deferred| HermesStateDbIngestError::RoutingDeferred(deferred.reason))?;
         for (index, destination) in destinations.iter().enumerate() {
             let admitted = admit_rows_with_admission(
                 destination.admission,
@@ -564,15 +592,19 @@ pub(super) async fn try_ingest_state_db_for_projects(
 pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
     admission: &dyn HostAdmission,
     source: &HermesProfileSource,
-    _registered_roots: &[PathBuf],
+    registered_roots: &[PathBuf],
     budget: &mut IngestByteBudget,
     cancellation: &ObservationCancellation,
-) -> Result<TranscriptIngestStats, String> {
+) -> Result<TranscriptIngestStats, HermesStateDbIngestError> {
     if cancellation.is_cancelled() {
         return Ok(TranscriptIngestStats::default());
     }
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
+    let destination_matchers = registered_roots
+        .par_iter()
+        .map(|root| ProjectRootMatcher::new(root))
+        .collect::<Vec<_>>();
     ingest_bounded_pages(
         admission,
         &conn,
@@ -583,13 +615,24 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
         resume_fingerprint,
         budget,
         |bounded| {
-            let locations = user_turn_locations(bounded, source);
+            let mut locations = user_turn_locations(bounded, source);
+            let mut destination_routes = HashMap::new();
+            for destination in turn_project_locations_for_destinations(
+                bounded,
+                &destination_matchers,
+                source,
+                &mut destination_routes,
+            )? {
+                for row_id in destination.by_row_id.keys() {
+                    locations.remove(row_id);
+                }
+            }
             let profile = source.profile.clone();
             let fallback_provenance = source
                 .legacy_project_pin
                 .as_ref()
                 .map_or("session_cwd", |_| "profile_pin");
-            move |row: &HermesRow| {
+            Ok(move |row: &HermesRow| {
                 locations
                     .contains(&row.id)
                     .then(|| HermesProjectionMetadata {
@@ -598,7 +641,7 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
                         profile: profile.clone(),
                         location_provenance: Some(fallback_provenance),
                     })
-            }
+            })
         },
         cancellation,
     )

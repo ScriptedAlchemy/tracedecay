@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::runtime::shared::ProjectRootMatcher;
+use crate::runtime::shared::{ProjectMembership, ProjectRootMatcher};
 
 use super::ingest::HermesProfileSource;
 use super::rows::HermesRow;
@@ -52,21 +52,24 @@ fn assign_user_turn(rows: &[&HermesRow], has_fallback: bool, locations: &mut Has
     locations.extend(rows.iter().map(|row| row.id));
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct HermesRoutingDeferred {
+    pub reason: tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown,
+}
+
 pub(super) fn turn_project_locations(
     rows: &[HermesRow],
-    project_root: &Path,
+    project_matcher: &ProjectRootMatcher,
     source: &HermesProfileSource,
-) -> HashMap<i64, &'static str> {
+) -> Result<HashMap<i64, &'static str>, HermesRoutingDeferred> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
     for row in rows {
         by_session.entry(&row.session_id).or_default().push(row);
     }
-    let project_matcher = ProjectRootMatcher::new(project_root);
     let mut locations = HashMap::new();
     for session_rows in by_session.into_values() {
-        let has_fallback = session_rows
-            .iter()
-            .any(|row| session_is_candidate_for_project(row, &project_matcher, source));
+        let has_fallback =
+            session_membership(&session_rows, project_matcher, source)?.definitive() == Some(true);
         let fallback_provenance = source
             .legacy_project_pin
             .as_ref()
@@ -76,24 +79,24 @@ pub(super) fn turn_project_locations(
             if row.role == "user" && !turn.is_empty() {
                 assign_turn_location(
                     &turn,
-                    &project_matcher,
+                    project_matcher,
                     has_fallback,
                     fallback_provenance,
                     &mut locations,
-                );
+                )?;
                 turn.clear();
             }
             turn.push(row);
         }
         assign_turn_location(
             &turn,
-            &project_matcher,
+            project_matcher,
             has_fallback,
             fallback_provenance,
             &mut locations,
-        );
+        )?;
     }
-    locations
+    Ok(locations)
 }
 
 pub(super) struct DestinationTurnLocations {
@@ -105,7 +108,7 @@ pub(super) fn turn_project_locations_for_destinations(
     destination_matchers: &[ProjectRootMatcher],
     source: &HermesProfileSource,
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
-) -> Vec<DestinationTurnLocations> {
+) -> Result<Vec<DestinationTurnLocations>, HermesRoutingDeferred> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
     for row in rows {
         by_session.entry(&row.session_id).or_default().push(row);
@@ -135,7 +138,7 @@ pub(super) fn turn_project_locations_for_destinations(
         let mut fallbacks = vec![false; destination_matchers.len()];
         for cwd in fallback_candidates {
             for destination_index in
-                matching_destinations(&cwd, destination_matchers, destination_routes)
+                matching_destinations(&cwd, destination_matchers, destination_routes)?
             {
                 fallbacks[destination_index] = true;
             }
@@ -150,7 +153,7 @@ pub(super) fn turn_project_locations_for_destinations(
                     fallback_provenance,
                     &mut locations,
                     destination_routes,
-                );
+                )?;
                 turn.clear();
             }
             turn.push(row);
@@ -162,9 +165,9 @@ pub(super) fn turn_project_locations_for_destinations(
             fallback_provenance,
             &mut locations,
             destination_routes,
-        );
+        )?;
     }
-    locations
+    Ok(locations)
 }
 
 fn assign_turn_locations_for_destinations(
@@ -174,7 +177,7 @@ fn assign_turn_locations_for_destinations(
     fallback_provenance: &'static str,
     locations: &mut [DestinationTurnLocations],
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
-) {
+) -> Result<(), HermesRoutingDeferred> {
     let explicit_paths = rows
         .iter()
         .rev()
@@ -185,7 +188,7 @@ fn assign_turn_locations_for_destinations(
     if has_explicit_paths {
         for path in explicit_paths {
             for destination_index in
-                matching_destinations(&path, destination_matchers, destination_routes)
+                matching_destinations(&path, destination_matchers, destination_routes)?
             {
                 selected[destination_index] = true;
             }
@@ -205,23 +208,27 @@ fn assign_turn_locations_for_destinations(
                 .extend(rows.iter().map(|row| (row.id, provenance)));
         }
     }
+    Ok(())
 }
 
 fn matching_destinations(
     path: &Path,
     destination_matchers: &[ProjectRootMatcher],
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, HermesRoutingDeferred> {
     if let Some(indices) = destination_routes.get(path) {
-        return indices.clone();
+        return Ok(indices.clone());
     }
-    let indices = destination_matchers
-        .iter()
-        .enumerate()
-        .filter_map(|(index, matcher)| matcher.contains(path).then_some(index))
-        .collect::<Vec<_>>();
+    let mut indices = Vec::new();
+    for (index, matcher) in destination_matchers.iter().enumerate() {
+        match matcher.contains(path) {
+            ProjectMembership::Match => indices.push(index),
+            ProjectMembership::NoMatch => {}
+            ProjectMembership::Unknown(reason) => return Err(HermesRoutingDeferred { reason }),
+        }
+    }
     destination_routes.insert(path.to_path_buf(), indices.clone());
-    indices
+    Ok(indices)
 }
 
 fn assign_turn_location(
@@ -230,16 +237,17 @@ fn assign_turn_location(
     has_fallback: bool,
     fallback_provenance: &'static str,
     locations: &mut HashMap<i64, &'static str>,
-) {
+) -> Result<(), HermesRoutingDeferred> {
     let explicit_paths = rows
         .iter()
         .rev()
         .flat_map(|row| structured_tool_project_paths(row))
         .collect::<Vec<_>>();
-    let explicit = !explicit_paths.is_empty()
-        && explicit_paths
-            .iter()
-            .any(|path| project_matcher.contains(path));
+    let explicit = if explicit_paths.is_empty() {
+        false
+    } else {
+        definitive_match(explicit_paths.iter().map(PathBuf::as_path), project_matcher)?
+    };
     if explicit || (explicit_paths.is_empty() && has_fallback) {
         let provenance = if explicit {
             "tool_project_path"
@@ -248,6 +256,7 @@ fn assign_turn_location(
         };
         locations.extend(rows.iter().map(|row| (row.id, provenance)));
     }
+    Ok(())
 }
 
 fn structured_tool_project_paths(row: &HermesRow) -> Vec<PathBuf> {
@@ -292,14 +301,49 @@ fn structured_tool_project_paths(row: &HermesRow) -> Vec<PathBuf> {
     paths
 }
 
-fn session_is_candidate_for_project(
-    row: &HermesRow,
+fn session_membership(
+    rows: &[&HermesRow],
     project_matcher: &ProjectRootMatcher,
     source: &HermesProfileSource,
-) -> bool {
-    source.legacy_project_pin.is_some()
-        || row.session_cwd.as_deref().is_some_and(|cwd| {
-            let cwd = Path::new(cwd.trim());
-            cwd.is_absolute() && project_matcher.contains(cwd)
-        })
+) -> Result<ProjectMembership, HermesRoutingDeferred> {
+    if source.legacy_project_pin.is_some() {
+        return Ok(ProjectMembership::Match);
+    }
+    definitive_membership(
+        rows.iter().filter_map(|row| {
+            let cwd = Path::new(row.session_cwd.as_deref()?.trim());
+            cwd.is_absolute().then_some(cwd)
+        }),
+        project_matcher,
+    )
+}
+
+fn definitive_match<'a>(
+    paths: impl Iterator<Item = &'a Path>,
+    project_matcher: &ProjectRootMatcher,
+) -> Result<bool, HermesRoutingDeferred> {
+    Ok(matches!(
+        definitive_membership(paths, project_matcher)?,
+        ProjectMembership::Match
+    ))
+}
+
+fn definitive_membership<'a>(
+    paths: impl Iterator<Item = &'a Path>,
+    project_matcher: &ProjectRootMatcher,
+) -> Result<ProjectMembership, HermesRoutingDeferred> {
+    let mut unknown = None;
+    for path in paths {
+        match project_matcher.contains(path) {
+            ProjectMembership::Match => return Ok(ProjectMembership::Match),
+            ProjectMembership::NoMatch => {}
+            ProjectMembership::Unknown(reason) => {
+                unknown.get_or_insert(reason);
+            }
+        }
+    }
+    match unknown {
+        Some(reason) => Err(HermesRoutingDeferred { reason }),
+        None => Ok(ProjectMembership::NoMatch),
+    }
 }

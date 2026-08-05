@@ -17,7 +17,9 @@ use tracedecay_store::observation::ObservationCoverageReason;
 use crate::admission::HostAdmission;
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
-use crate::runtime::shared::TranscriptScopeMatcher;
+use crate::runtime::shared::{
+    ProjectRootMatcherCache, TranscriptScopeMatcher, TranscriptScopeRouting,
+};
 
 use super::PROVIDER;
 use super::capture::{
@@ -53,6 +55,7 @@ struct ComposerIngestContext<'facade, 'root> {
     scope: ObservationScopeV1,
     project_root: Option<&'root Path>,
     registered_roots: &'root [PathBuf],
+    project_matchers: ProjectRootMatcherCache,
     cancellation: &'root ObservationCancellation,
 }
 
@@ -61,8 +64,13 @@ impl ComposerIngestContext<'_, '_> {
     /// envelope and per workspace directory.
     fn scope_matcher(&self) -> TranscriptScopeMatcher {
         self.project_root.map_or_else(
-            || TranscriptScopeMatcher::profile(self.registered_roots),
-            TranscriptScopeMatcher::project,
+            || {
+                TranscriptScopeMatcher::profile_with_cache(
+                    self.registered_roots,
+                    self.project_matchers.clone(),
+                )
+            },
+            |root| TranscriptScopeMatcher::project_with_cache(root, self.project_matchers.clone()),
         )
     }
 
@@ -147,6 +155,8 @@ pub struct CursorComposerSweepOutcome {
     pub bytes_consumed: u64,
     /// At least one new observation was deferred by the aggregate byte cap.
     pub deferred_by_byte_cap: bool,
+    /// At least one source was deferred because repository membership was unknown.
+    pub routing_deferred: bool,
     /// Bounded set of composer session ids observed during the sweep. The
     /// JSONL sweep skips these so the two Cursor sources do not double-ingest
     /// the same session within the bounded discovery window.
@@ -164,6 +174,7 @@ impl CursorComposerSweepOutcome {
 pub struct CursorComposerSource {
     state_db_path: PathBuf,
     chats_dir: PathBuf,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 impl CursorComposerSource {
@@ -184,6 +195,7 @@ impl CursorComposerSource {
                 .join("globalStorage")
                 .join("state.vscdb"),
             chats_dir: home.join(".cursor").join("chats"),
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -243,6 +255,7 @@ impl CursorComposerSource {
             scope: ObservationScopeV1::Project { project_id },
             project_root: Some(project_root),
             registered_roots: &[],
+            project_matchers: self.project_matchers.clone(),
             cancellation,
         };
         self.ingest_with_context(&context, envelope_cap, max_new_bytes)
@@ -296,6 +309,7 @@ impl CursorComposerSource {
             scope: ObservationScopeV1::Profile,
             project_root: None,
             registered_roots,
+            project_matchers: self.project_matchers.clone(),
             cancellation,
         };
         self.ingest_with_context(&context, envelope_cap, max_new_bytes)
@@ -470,8 +484,13 @@ impl CursorComposerSource {
                         byte_budget.defer();
                     }
                 }
-                if !scope_matcher.accepts(Some(Path::new(&project.path))) {
-                    continue;
+                match scope_matcher.route(Some(Path::new(&project.path))) {
+                    TranscriptScopeRouting::Accepted => {}
+                    TranscriptScopeRouting::Rejected => continue,
+                    TranscriptScopeRouting::Deferred(_) => {
+                        outcome.routing_deferred = true;
+                        continue;
+                    }
                 }
                 let selected_project = ComposerProject {
                     path: context.scoped_project_label(&project.path),
@@ -786,8 +805,13 @@ impl CursorComposerSource {
             let Some(path) = workspace_paths.get(&ws_hash) else {
                 continue;
             };
-            if !scope_matcher.accepts(Some(Path::new(path))) {
-                continue;
+            match scope_matcher.route(Some(Path::new(path))) {
+                TranscriptScopeRouting::Accepted => {}
+                TranscriptScopeRouting::Rejected => continue,
+                TranscriptScopeRouting::Deferred(_) => {
+                    outcome.routing_deferred = true;
+                    continue;
+                }
             }
             let project_path = context.scoped_project_label(path);
             let Ok(agent_entries) = std::fs::read_dir(ws_entry.path()) else {

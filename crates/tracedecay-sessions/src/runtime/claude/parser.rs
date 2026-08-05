@@ -225,7 +225,7 @@ pub(super) fn try_parse_claude_transcript(
             end_offset: covered_through,
         };
     }
-    let retained = source_adapter.retain_scoped_frames(&mut scan, project_root);
+    let retained = source_adapter.retain_scoped_frames(&mut scan, project_root)?;
     scan.coverage = coverage;
     if retained.is_none() {
         return Ok(None);

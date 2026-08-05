@@ -286,6 +286,9 @@ pub fn classify_transcript_ingest_failure(
         source::TranscriptIngestError::ScanGenerationChanged { .. } => {
             ("transcript_source_generation_changed", true)
         }
+        source::TranscriptIngestError::RoutingDeferred { .. } => {
+            ("transcript_repository_membership_unknown", true)
+        }
         source::TranscriptIngestError::Privacy(_) => ("transcript_privacy_rejected", false),
         source::TranscriptIngestError::NonDurableRecord { .. } => unreachable!(),
         source::TranscriptIngestError::Domain(_)
@@ -437,5 +440,30 @@ pub fn classify_claude_observation_failure(
             reason_code: first_reason_code,
             retryable: *first_retryable,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_transcript_ingest_failure;
+    use crate::runtime::source::TranscriptIngestError;
+    use tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown;
+
+    #[test]
+    fn unknown_repository_membership_is_retryable() {
+        let failure = classify_transcript_ingest_failure(
+            "codex",
+            "observation",
+            &TranscriptIngestError::RoutingDeferred {
+                provider: "codex",
+                reason: GitDiscoveryUnknown::DeadlineExceeded,
+            },
+        );
+
+        assert_eq!(
+            failure.reason_code,
+            "transcript_repository_membership_unknown"
+        );
+        assert!(failure.retryable);
     }
 }
