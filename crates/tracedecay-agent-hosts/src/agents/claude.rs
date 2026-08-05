@@ -400,7 +400,15 @@ fn claude_loaded_cache_matches_rendered_bundle(
     let Some(cache) = super::observed_bundle_content_digest(&cache_root, &relatives)? else {
         return Ok(false);
     };
-    Ok(source == cache && expected.is_none_or(|expected| source == expected))
+    if source != cache || expected.is_some_and(|expected| source != expected) {
+        return Ok(false);
+    }
+    super::observed_bundle_discovery_matches(
+        &source_root,
+        &cache_root,
+        &relatives,
+        &[".claude-plugin", "agents", "commands", "hooks", "skills"],
+    )
 }
 
 fn claude_native_install_action(staged_dir: Option<&Path>) -> DeferredUserAction {

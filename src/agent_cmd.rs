@@ -14,6 +14,7 @@ use tracedecay::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
     apply_project_config_patch, load_project_config, project_config_path,
 };
+use tracedecay::user_config::UserConfig;
 
 /// How `install --agent codex --automation` should configure the daemon loop.
 #[derive(Debug, Clone, Copy)]
@@ -892,6 +893,12 @@ fn apply_default_canonical_component_set_with_dashboard(
         dashboard,
     )?;
     Ok(())
+}
+
+fn load_host_lifecycle_user_config() -> tracedecay::errors::Result<UserConfig> {
+    UserConfig::load_strict().map_err(|error| tracedecay::errors::TraceDecayError::Config {
+        message: format!("failed to load host lifecycle policy: {error}"),
+    })
 }
 
 fn apply_project_local_component_set(
@@ -2261,8 +2268,7 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
     let lifecycle = rollback.into_lifecycle();
     let writer = lifecycle.into_storage();
 
-    let dashboard =
-        tracedecay::user_config::UserConfig::load().dashboard_enabled_for_agent(&state.agent_id);
+    let dashboard = load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(&state.agent_id);
     let context = tracedecay::agents::InstallContext {
         home: home.clone(),
         tracedecay_bin: tracedecay::agents::which_tracedecay()
@@ -2591,8 +2597,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
     persist_feedback_state(state_path, &lifecycle_root, &state)?;
     let lifecycle = rollback.into_lifecycle();
     let writer = lifecycle.into_storage();
-    let dashboard =
-        tracedecay::user_config::UserConfig::load().dashboard_enabled_for_agent(&state.agent_id);
+    let dashboard = load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(&state.agent_id);
     let context = tracedecay::agents::InstallContext {
         home,
         tracedecay_bin: tracedecay::agents::which_tracedecay()
@@ -3025,7 +3030,7 @@ pub(crate) async fn handle_install_command(
         return Ok(());
     }
 
-    let mut user_cfg = tracedecay::user_config::UserConfig::load();
+    let mut user_cfg = load_host_lifecycle_user_config()?;
 
     let mut installed_names: Vec<String> = Vec::new();
     let mut removed_names: Vec<String> = Vec::new();
@@ -3156,7 +3161,7 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
             message: "tracedecay not found on PATH".to_string(),
         }
     })?;
-    let mut user_cfg = tracedecay::user_config::UserConfig::load();
+    let mut user_cfg = load_host_lifecycle_user_config()?;
 
     if user_cfg.installed_agents.is_empty() {
         eprintln!("No installed agents found. Run `tracedecay install` first.");
@@ -3213,7 +3218,7 @@ pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result
             message: "tracedecay not found on PATH".to_string(),
         }
     })?;
-    let user_cfg = tracedecay::user_config::UserConfig::load();
+    let user_cfg = load_host_lifecycle_user_config()?;
 
     for id in &user_cfg.installed_agents {
         let integration = tracedecay::agents::get_integration(id)?;
@@ -3242,13 +3247,12 @@ pub(crate) fn handle_reinstall_preflight_command() -> tracedecay::errors::Result
             message: "could not determine home directory".to_string(),
         }
     })?;
-    let tracedecay_bin = std::env::current_exe()
-        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
-            message: format!("could not resolve the preflight binary: {error}"),
-        })?
-        .to_string_lossy()
-        .into_owned();
-    let user_config = tracedecay::user_config::UserConfig::load();
+    let tracedecay_bin = tracedecay::agents::which_tracedecay().ok_or_else(|| {
+        tracedecay::errors::TraceDecayError::Config {
+            message: "could not resolve the canonical preflight binary".to_string(),
+        }
+    })?;
+    let user_config = load_host_lifecycle_user_config()?;
     let agent_ids = user_config.installed_agents.clone();
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let health_context = tracedecay::agents::HealthcheckContext {
@@ -3418,14 +3422,8 @@ pub(crate) async fn reinstall_agent_integrations(
     home: &Path,
     tracedecay_bin: &str,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
-    let user_config = tracedecay::user_config::UserConfig::load();
-    reinstall_agent_integrations_with_dashboard_policies(
-        agent_ids,
-        home,
-        tracedecay_bin,
-        &user_config.agent_dashboard_enabled,
-    )
-    .await
+    reinstall_agent_integrations_with_persisted_dashboard_policies(agent_ids, home, tracedecay_bin)
+        .await
 }
 
 /// Reinstalls tracked integrations while reusing lifecycle authority already
@@ -3437,7 +3435,32 @@ pub(crate) async fn reinstall_agent_integrations_under_lease(
     lifecycle: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
     let _ = lifecycle;
-    let user_config = tracedecay::user_config::UserConfig::load();
+    reinstall_agent_integrations_with_persisted_dashboard_policies(agent_ids, home, tracedecay_bin)
+        .await
+}
+
+async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
+    agent_ids: &[String],
+    home: &Path,
+    tracedecay_bin: &str,
+) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
+    let user_config = match load_host_lifecycle_user_config() {
+        Ok(config) => config,
+        Err(error) => {
+            let message = error.to_string();
+            return agent_ids
+                .iter()
+                .map(|id| {
+                    (
+                        id.clone(),
+                        Err(tracedecay::errors::TraceDecayError::Config {
+                            message: message.clone(),
+                        }),
+                    )
+                })
+                .collect();
+        }
+    };
     reinstall_agent_integrations_with_dashboard_policies(
         agent_ids,
         home,
@@ -3504,7 +3527,7 @@ pub(crate) async fn handle_uninstall_command(
             message: "could not determine home directory".to_string(),
         }
     })?;
-    let mut user_cfg = tracedecay::user_config::UserConfig::load();
+    let mut user_cfg = load_host_lifecycle_user_config()?;
 
     if let Some(id) = agent {
         apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)?;
@@ -5404,7 +5427,7 @@ mod tests {
             .join(tracedecay_agent_hosts::PRODUCT_VERSION);
         let cache_manifest = cache_root.join(".codex-plugin/plugin.json");
         std::fs::create_dir_all(&cache_root).unwrap();
-        copy_test_bundle(&home.path().join("plugins/tracedecay"), &cache_root);
+        copy_test_bundle(&home.path().join(".codex/plugins/tracedecay"), &cache_root);
 
         let results =
             reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
@@ -5437,7 +5460,7 @@ mod tests {
         );
         std::fs::copy(
             home.path()
-                .join("plugins/tracedecay/.codex-plugin/plugin.json"),
+                .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json"),
             &cache_manifest,
         )
         .unwrap();
@@ -5462,7 +5485,7 @@ mod tests {
                 .unwrap();
         let source_manifest = home
             .path()
-            .join("plugins/tracedecay/.codex-plugin/plugin.json");
+            .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json");
         let marketplace = home.path().join(".agents/plugins/marketplace.json");
         std::fs::create_dir_all(marketplace.parent().unwrap()).unwrap();
         std::fs::write(
@@ -5473,7 +5496,7 @@ mod tests {
                     "name": "tracedecay",
                     "source": {
                         "source": "local",
-                        "path": "./plugins/tracedecay",
+                        "path": "./.codex/plugins/tracedecay",
                     }
                 }]
             })
@@ -5501,7 +5524,7 @@ mod tests {
             .filter_map(|artifact| {
                 artifact
                     .relative_path
-                    .strip_prefix("plugins/tracedecay/")
+                    .strip_prefix(".codex/plugins/tracedecay/")
                     .map(|relative| (relative, &artifact.bytes))
             })
         {

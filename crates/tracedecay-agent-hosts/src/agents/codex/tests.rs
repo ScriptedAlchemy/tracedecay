@@ -450,6 +450,21 @@ fn write_exact_native_activation(home: &Path, tracedecay_bin: &str) {
 fn native_activation_binds_enabled_key_to_exact_marketplace_and_cache() {
     let home = tempfile::tempdir().unwrap();
     write_exact_native_activation(home.path(), TEST_BIN);
+    assert_eq!(
+        codex_plugin_install_dir(home.path()),
+        home.path().join(".codex/plugins/tracedecay")
+    );
+    assert!(!home.path().join("plugins/tracedecay").exists());
+    let marketplace: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(codex_personal_marketplace_path(home.path())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        marketplace
+            .pointer("/plugins/0/source/path")
+            .and_then(serde_json::Value::as_str),
+        Some("./.codex/plugins/tracedecay")
+    );
     assert!(codex_plugin_activation_state(home.path(), Some(TEST_BIN)).unwrap());
 
     std::fs::write(
@@ -500,6 +515,24 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
         tracedecay_bin: old_bin.to_string(),
         ..old_ctx
     };
+    assert!(matches!(
+        CodexIntegration
+            .preflight_non_interactive_install(&old_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::Ready
+    ));
+
+    let retired_skill =
+        codex_plugin_current_cached_install_dir(home.path()).join("skills/retired/SKILL.md");
+    std::fs::create_dir_all(retired_skill.parent().unwrap()).unwrap();
+    std::fs::write(&retired_skill, "# stale auto-discovered skill\n").unwrap();
+    assert!(matches!(
+        CodexIntegration
+            .preflight_non_interactive_install(&old_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::DeferredUserAction(_)
+    ));
+    std::fs::remove_file(retired_skill).unwrap();
     assert!(matches!(
         CodexIntegration
             .preflight_non_interactive_install(&old_ctx)
