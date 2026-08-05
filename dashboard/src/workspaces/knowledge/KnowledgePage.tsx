@@ -6,14 +6,14 @@ import {
   InspectorPanel,
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { FigureRail, Meter, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { formatCount, splitCount } from '../../ui/format.ts';
 import { cn } from '../../ui/cn';
-import { useLegacy } from '../../data/query/useLegacy.ts';
+import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import {
   type MemoryCategoryCountV1,
   MemoryFactDetailPayloadV1Schema,
@@ -41,7 +41,7 @@ const BASE = '/api/plugins/holographic';
 export function KnowledgePage() {
   const [query, setQuery] = useState('');
   const [applied, setApplied] = useState('');
-  const overview = useLegacy(
+  const overview = useEnvelope(
     ['memory', 'overview', applied],
     `${BASE}/?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ''}`,
     MemoryOverviewPayloadV1Schema,
@@ -50,10 +50,9 @@ export function KnowledgePage() {
   // store (see trust.ts). This route reports the same distribution in four
   // coarser bands and is correct, so it is read as the fallback source rather
   // than leaving the plate empty. Cheap — ~0.1s against a live daemon.
-  const status = useLegacy(['memory', 'status'], `${BASE}/status`, MemoryStatusPayloadV1Schema);
-  const statusBands =
-    status.data?.outcome === 'ok' ? status.data.data.memory : undefined;
-  const overviewData = overview.data?.outcome === 'ok' ? overview.data.data : undefined;
+  const status = useEnvelope(['memory', 'status'], `${BASE}/status`, MemoryStatusPayloadV1Schema);
+  const statusBands = envelopePayload(status.data)?.memory;
+  const overviewData = envelopePayload(overview.data);
   // One distribution for the two plates that draw it.
   //
   // The rail and the list are separate boundaries on purpose — a failed read
@@ -68,14 +67,13 @@ export function KnowledgePage() {
     overviewData?.holographic.facts,
   );
   const [selected, setSelected] = useState<MemoryFactRowV1 | null>(null);
-  const detail = useLegacy(
+  const detail = useEnvelope(
     ['memory', 'fact', String(selected?.fact_id ?? '')],
     `${BASE}/fact/${encodeURIComponent(String(selected?.fact_id ?? ''))}`,
     MemoryFactDetailPayloadV1Schema,
     { enabled: selected != null },
   );
-  const selectedDetail =
-    detail.data?.outcome === 'ok' && detail.data.data.fact ? detail.data.data.fact : selected;
+  const selectedDetail = envelopePayload(detail.data)?.fact ?? selected;
 
   return (
     <ExplorerSplit
@@ -85,12 +83,16 @@ export function KnowledgePage() {
         </div>
       }
       filters={
-        <LegacyBoundary
+        <ReadSection
           title="Memory"
-          pending={overview.isPending}
-          result={overview.data}
+          state={envelopeReadState(overview.isPending, overview.data, {
+            loading: 'loading memory overview',
+            unknown: 'memory overview has not answered',
+          })}
+          chrome="centered"
         >
-          {(data) => {
+          {(envelope) => {
+            const data = envelope.payload;
             const stats = data.holographic.overview;
             // Ranked by count so the rail's length is a real ordering, not an
             // accident of whatever order the producer emitted rows in.
@@ -175,15 +177,19 @@ export function KnowledgePage() {
               </div>
             );
           }}
-        </LegacyBoundary>
+        </ReadSection>
       }
       list={
-        <LegacyBoundary
+        <ReadSection
           title="Facts"
-          pending={overview.isPending}
-          result={overview.data}
+          state={envelopeReadState(overview.isPending, overview.data, {
+            loading: 'loading facts',
+            unknown: 'memory facts have not answered',
+          })}
+          chrome="centered"
         >
-          {(data) => {
+          {(envelope) => {
+            const data = envelope.payload;
             const facts = data.holographic.facts ?? [];
             const factsRead = data.holographic.reads?.facts;
             if (data.holographic.error) {
@@ -234,7 +240,7 @@ export function KnowledgePage() {
               />
             );
           }}
-        </LegacyBoundary>
+        </ReadSection>
       }
       inspector={
         selectedDetail ? (
@@ -242,7 +248,7 @@ export function KnowledgePage() {
             <div className="flex flex-col gap-3">
               {detail.isPending ? (
                 <p className="text-2xs text-text-muted">Loading canonical fact detail…</p>
-              ) : detail.data?.outcome !== 'ok' ? (
+              ) : detail.data?.outcome !== 'envelope' ? (
                 <p className="text-2xs text-state-partial">
                   Canonical detail is unavailable; this is the bounded overview row.
                 </p>

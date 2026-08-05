@@ -23,6 +23,7 @@ import {
   readOnlyScopeRefusal,
   reconciledLabel,
   requestScopeKey,
+  scopedQueryKey,
   scopeKey,
   scopeWritable,
   scopedUrl,
@@ -403,6 +404,9 @@ describe('scopedUrl and scopeKey', () => {
       '/api/projects/proj_a/observatory',
     );
     expect(scopedUrl(project('proj_a', 'selected'), '/api/projects')).toBe('/api/projects');
+    expect(scopedUrl(project('proj_a', 'selected'), '/api/projects/proj_b')).toBe(
+      '/api/projects/proj_b',
+    );
   });
 });
 
@@ -444,5 +448,26 @@ describe('requestScopeKey', () => {
 
   it('treats a non-API url as carrying no project', () => {
     expect(requestScopeKey(project('proj_a', 'active'), '/health')).toBe(UNSCOPED_CACHE_KEY);
+  });
+});
+
+describe('scopedQueryKey', () => {
+  it('shares daemon-wide registry entries across selected projects', () => {
+    const key = ['projects', 'entry', 'proj_b'];
+    expect(scopedQueryKey(project('proj_a', 'active'), key, '/api/projects/proj_b')).toEqual([
+      ...key,
+      UNSCOPED_CACHE_KEY,
+    ]);
+    expect(scopedQueryKey(project('proj_c', 'selected'), key, '/api/projects/proj_b')).toEqual([
+      ...key,
+      UNSCOPED_CACHE_KEY,
+    ]);
+  });
+
+  it('keeps project-gateway reads isolated by their selected project', () => {
+    const key = ['brain', 'graph-overview'];
+    expect(
+      scopedQueryKey(project('proj_a', 'active'), key, '/api/plugins/graph/overview'),
+    ).not.toEqual(scopedQueryKey(project('proj_b', 'selected'), key, '/api/plugins/graph/overview'));
   });
 });

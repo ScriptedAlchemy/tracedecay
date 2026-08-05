@@ -26,9 +26,9 @@
 import { useMemo } from 'react';
 import { useQueries } from '@tanstack/react-query';
 
-import { fetchLegacy, type LegacyResult } from '../../data/query/legacy.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
-import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
+import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
+import { scopedQueryKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { TRACE_BUDGET } from '../../viz/trace/model.ts';
 import {
   GraphNeighborsPayloadV1Schema,
@@ -75,7 +75,7 @@ export interface TraceNeighborhood {
   /** The focus's own hop-1 read has not answered yet. */
   readonly pending: boolean;
   /** Its outcome, or `undefined` before the first response. */
-  readonly result: LegacyResult<GraphNeighborsPayloadV1> | undefined;
+  readonly result: EnvelopeResult<GraphNeighborsPayloadV1> | undefined;
   /**
    * Hop-1 payloads of the expanded neighbours, keyed by neighbour id. A
    * neighbour that failed is simply absent, which the model counts.
@@ -93,22 +93,22 @@ export interface TraceNeighborhood {
  */
 export function useTraceNeighborhood(focusId: string): TraceNeighborhood {
   const scope = useScope((s) => s.scope);
-  const root = useLegacy(
+  const root = useEnvelope(
     ['graph', 'neighbors', focusId],
     neighborsUrl(focusId),
     GraphNeighborsPayloadV1Schema,
   );
 
-  const hop1 = useMemo<readonly string[]>(
-    () => (root.data?.outcome === 'ok' ? expansionTargets(root.data.data, focusId) : []),
-    [root.data, focusId],
-  );
+  const hop1 = useMemo<readonly string[]>(() => {
+    const payload = envelopePayload(root.data);
+    return payload ? expansionTargets(payload, focusId) : [];
+  }, [root.data, focusId]);
 
   const expansions = useQueries({
     queries: hop1.map((id) => ({
-      queryKey: ['graph', 'neighbors', id, scopeKey(scope)],
-      queryFn: () =>
-        fetchLegacy(scopedUrl(scope, neighborsUrl(id)), GraphNeighborsPayloadV1Schema),
+      queryKey: scopedQueryKey(scope, ['graph', 'neighbors', id], neighborsUrl(id)),
+      queryFn: ({ signal }) =>
+        fetchEnvelope(scopedUrl(scope, neighborsUrl(id)), GraphNeighborsPayloadV1Schema, { signal }),
       staleTime: 60_000,
     })),
   });
@@ -121,8 +121,10 @@ export function useTraceNeighborhood(focusId: string): TraceNeighborhood {
   const expanded = useMemo(() => {
     const out = new Map<string, GraphNeighborsPayloadV1>();
     hop1.forEach((id, i) => {
-      const result = expansions[i]?.data as LegacyResult<GraphNeighborsPayloadV1> | undefined;
-      if (result?.outcome === 'ok') out.set(id, result.data);
+      const payload = envelopePayload(
+        expansions[i]?.data as EnvelopeResult<GraphNeighborsPayloadV1> | undefined,
+      );
+      if (payload) out.set(id, payload);
     });
     return out;
   }, [signature]);

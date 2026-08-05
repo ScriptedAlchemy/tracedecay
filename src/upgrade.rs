@@ -151,7 +151,7 @@ fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
 }
 
 fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
-    let actual = format!("{:x}", Sha256::digest(bytes));
+    let actual = hex::encode(Sha256::digest(bytes));
     if actual == expected {
         return Ok(());
     }
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn release_archive_checksum_must_match_before_extraction() {
         let bytes = b"verified archive bytes";
-        let digest = format!("{:x}", Sha256::digest(bytes));
+        let digest = hex::encode(Sha256::digest(bytes));
 
         assert!(verify_sha256(bytes, &digest, "archive.tar.gz").is_ok());
         assert!(verify_sha256(b"tampered", &digest, "archive.tar.gz").is_err());

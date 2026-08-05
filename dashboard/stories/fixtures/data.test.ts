@@ -24,7 +24,7 @@
  * outside this gate by omission.
  */
 import { describe, expect, it } from 'vitest';
-import type { ZodType } from 'zod';
+import { z, type ZodType } from 'zod';
 
 import { FIXTURES, FIXTURE_PREFIXES, resolveFixture } from './data.ts';
 import {
@@ -39,8 +39,6 @@ import {
   GraphOverviewPayloadV1Schema,
   GraphSearchPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
-  LcmSessionPayloadV1Schema,
-  LcmTimelinePayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   MemoryStatusPayloadV1Schema,
   ObservatoryReadModelV1Schema,
@@ -81,7 +79,7 @@ function expectValue(schema: ZodType<unknown>, value: unknown, what: string): vo
  * (route bindings in `src/dashboard/mod.rs`).
  */
 const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
-  '/api/projects': ProjectsPayloadV1Schema,
+  '/api/projects': DashboardEnvelopeV1Schema(ProjectsPayloadV1Schema),
   '/api/storage/telemetry': DashboardEnvelopeV1Schema(StorageTelemetryPayloadV1Schema),
   '/api/storage/findings': DashboardEnvelopeV1Schema(StorageFindingsPayloadV1Schema),
   '/api/doctor/findings': DashboardEnvelopeV1Schema(DoctorFindingsPayloadV1Schema),
@@ -89,18 +87,18 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   // `memory_api::overview` is bound at both the trailing-slash and bare paths.
   // The `/overview` key is a fixture convenience with no route behind it; it
   // holds the same payload, so it is held to the same contract.
-  '/api/plugins/holographic/': MemoryOverviewPayloadV1Schema,
-  '/api/plugins/holographic': MemoryOverviewPayloadV1Schema,
-  '/api/plugins/holographic/overview': MemoryOverviewPayloadV1Schema,
-  '/api/plugins/holographic/status': MemoryStatusPayloadV1Schema,
-  '/api/plugins/hermes-lcm/timeline': LcmTimelinePayloadV1Schema,
-  '/api/plugins/graph/overview': GraphOverviewPayloadV1Schema,
-  '/api/plugins/graph/search': GraphSearchPayloadV1Schema,
-  '/api/plugins/graph/subgraph': GraphSubgraphPayloadV1Schema,
-  '/api/plugins/savings/overview': SavingsOverviewPayloadV1Schema,
+  '/api/plugins/holographic/': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
+  '/api/plugins/holographic': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
+  '/api/plugins/holographic/overview': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
+  '/api/plugins/holographic/status': DashboardEnvelopeV1Schema(MemoryStatusPayloadV1Schema),
+  '/api/plugins/hermes-lcm/timeline': DashboardEnvelopeV1Schema(z.null()),
+  '/api/plugins/graph/overview': DashboardEnvelopeV1Schema(GraphOverviewPayloadV1Schema),
+  '/api/plugins/graph/search': DashboardEnvelopeV1Schema(GraphSearchPayloadV1Schema),
+  '/api/plugins/graph/subgraph': DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema),
+  '/api/plugins/savings/overview': DashboardEnvelopeV1Schema(SavingsOverviewPayloadV1Schema),
   '/api/plugins/savings/sessions': SavingsSessionsPayloadV1Schema,
-  '/api/plugins/analytics/overview': AnalyticsOverviewPayloadV1Schema,
-  '/api/plugins/analytics/usage': AnalyticsUsageSummaryV1Schema,
+  '/api/plugins/analytics/overview': DashboardEnvelopeV1Schema(AnalyticsOverviewPayloadV1Schema),
+  '/api/plugins/analytics/usage': DashboardEnvelopeV1Schema(AnalyticsUsageSummaryV1Schema),
   '/api/automation/scheduler/status': AutomationSchedulerStatusV1Schema,
   '/api/observatory': DashboardEnvelopeV1Schema(ObservatoryReadModelV1Schema),
   '/api/costs': DashboardEnvelopeV1Schema(CostsReadModelV1Schema),
@@ -135,8 +133,10 @@ const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
 
 const UNCONTRACTED: Readonly<Record<string, string>> = {
   '/api/capabilities': 'mod.rs `capabilities` builds the bundle with `json!`',
-  '/api/plugins/hermes-lcm/overview': 'lcm_api::overview answers with a bare Value',
-  '/api/plugins/hermes-lcm/search': 'lcm_api::search answers with a bare Value',
+  '/api/plugins/hermes-lcm/overview':
+    'temporal retrieval is not mounted, so the canonical envelope has no payload',
+  '/api/plugins/hermes-lcm/search':
+    'temporal retrieval is not mounted, so the canonical envelope has no payload',
   '/api/plugins/analytics/hints': 'analytics_api::hints answers with a bare Value',
   '/api/plugins/analytics/underused': 'analytics_api::underused answers with a bare Value',
   '/api/plugins/analytics/diagnostics':
@@ -161,28 +161,28 @@ const DYNAMIC: ReadonlyArray<{
   {
     label: 'projects::context',
     pathname: '/api/projects/tracedecay',
-    schema: ProjectContextPayloadV1Schema,
+    schema: DashboardEnvelopeV1Schema(ProjectContextPayloadV1Schema),
   },
   {
     label: 'project-scoped gateway rewrite',
     pathname: '/api/projects/tracedecay/plugins/graph/subgraph',
-    schema: GraphSubgraphPayloadV1Schema,
+    schema: DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema),
   },
   {
     label: 'lcm_api::session',
     pathname: '/api/plugins/hermes-lcm/session/035c8f3c-d4e6-4176-afea-6f52e770501e',
-    schema: LcmSessionPayloadV1Schema,
+    schema: DashboardEnvelopeV1Schema(z.null()),
   },
   {
     label: 'graph_api::neighbors',
     pathname: '/api/plugins/graph/node/sym-0/neighbors',
-    schema: GraphNeighborsPayloadV1Schema,
+    schema: DashboardEnvelopeV1Schema(GraphNeighborsPayloadV1Schema),
   },
   {
     label: 'graph_api::subgraph seeded',
     pathname: '/api/plugins/graph/subgraph',
     search: '?node_id=sym-0',
-    schema: GraphSubgraphPayloadV1Schema,
+    schema: DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema),
   },
 ];
 
@@ -245,12 +245,6 @@ describe('fixtures parse against the generated contract for their route', () => 
           return false;
         }
       });
-      // The LCM session transcript is the one prefix with no exact route of
-      // its own; it is parsed above as a dynamic route instead.
-      if (prefix === '/api/plugins/hermes-lcm/session/') {
-        expect(matched).toBe(false);
-        continue;
-      }
       expect(matched, `prefix ${prefix} serves a payload no exact route gates`).toBe(true);
     }
   });

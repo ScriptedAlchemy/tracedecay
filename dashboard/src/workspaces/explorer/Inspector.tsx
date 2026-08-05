@@ -165,14 +165,16 @@ function SessionContextDetails({
     );
   }
   if (!sizePayload && !contextPayload) {
-    const offline =
-      size?.outcome === 'transport' && size.state === 'offline'
-        ? true
-        : readContext?.outcome === 'transport' && readContext.state === 'offline';
+    const blocked =
+      size?.outcome === 'transport'
+        ? size
+        : readContext?.outcome === 'transport'
+          ? readContext
+          : undefined;
     return (
       <section className="flex flex-col gap-1.5">
         <MetaLabel>Session context</MetaLabel>
-        <StateChip kind={offline ? 'offline' : 'error'} detail={sessionId} />
+        <StateChip kind={blocked?.state ?? 'error'} detail={blocked?.detail ?? sessionId} />
       </section>
     );
   }

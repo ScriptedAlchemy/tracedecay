@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import {
+  DashboardEnvelopeV1Schema,
   GraphNeighborsPayloadV1Schema,
   type GraphNeighborsPayloadV1,
 } from '../../contracts/generated.ts';
@@ -23,9 +24,9 @@ import { TRACE_BUDGET } from '../../viz/trace/model.ts';
 import { expansionTargets } from './traceNeighborhood.ts';
 
 function neighbors(id: string): GraphNeighborsPayloadV1 {
-  return GraphNeighborsPayloadV1Schema.parse(
+  return DashboardEnvelopeV1Schema(GraphNeighborsPayloadV1Schema).parse(
     resolveFixture(`/api/plugins/graph/node/${id}/neighbors`),
-  );
+  ).payload;
 }
 
 /** First appearance across both arms, callers first — the endpoint's order. */

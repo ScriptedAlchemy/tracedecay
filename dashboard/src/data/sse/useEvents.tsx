@@ -19,6 +19,7 @@ import type { SseBatch, SseReducerStats } from './types.ts';
 import {
   projectRegistryInvalidationKey,
   useProjectRegistry,
+  projectRegistryPayload,
 } from '../query/projectRegistry.ts';
 import {
   workProjectInvalidationKeys,
@@ -79,10 +80,8 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
   const clock = useMemo(() => createRenderClock(connection), [connection]);
   const queryClient = useQueryClient();
   const registry = useProjectRegistry();
-  const activeProjectId =
-    registry.data?.outcome === 'ok' && registry.data.data.status === 'ok'
-      ? registry.data.data.active_project_id
-      : null;
+  const listing = projectRegistryPayload(registry.data);
+  const activeProjectId = listing?.status === 'ok' ? listing.active_project_id : null;
   useEffect(
     () => () => {
       clock.stop();
