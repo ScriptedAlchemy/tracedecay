@@ -121,7 +121,9 @@ pub(super) async fn open_project_for_handshake_with_health_mode(
     };
     match open_result {
         Ok(cg) => {
-            let deferred_post_open_health = defer_post_open_health.then(|| cg.db().clone());
+            let deferred_post_open_health = defer_post_open_health
+                .then(|| cg.retained_project_store_db())
+                .transpose()?;
             Ok((cg, deferred_post_open_health))
         }
         Err(open_err) if defer_post_open_health && is_readonly_database_error(&open_err) => {

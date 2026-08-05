@@ -26,6 +26,7 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
     .unwrap();
     main.index_all().await.unwrap();
     let main_store = main.store_layout().data_root.clone();
+    let main_database = main.store_layout().graph_db_path.clone();
     main.close();
     drop(database_scope);
     drop(lifecycle);
@@ -63,28 +64,19 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
         &worktree_cg.store_layout().sessions_db_path,
         main_store.join("sessions.db"),
     );
-    assert!(
-        !worktree_cg
-            .search("worktree_only", 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "opening a linked worktree should auto-track and sync its branch DB"
-    );
+    assert_path_eq(worktree_cg.db_path(), &main_database);
     assert!(
         !worktree.join(".tracedecay").exists(),
         "automatic worktree support must not require or create a per-worktree marker"
     );
-
-    let meta = branch_meta::load_branch_meta(&main_store).unwrap();
     assert!(
-        meta.is_tracked("feature/worktree-auto"),
-        "linked worktree branch should be tracked in the shared store"
+        fs::read_dir(main_store.join("branches")).is_err(),
+        "worktree/ref identity is snapshot provenance and must not create a branch database"
     );
 }
 
 #[tokio::test]
-async fn detached_linked_worktree_uses_repository_identity_and_isolated_graph_scope() {
+async fn detached_linked_worktree_uses_repository_identity_and_exact_route() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
@@ -113,6 +105,7 @@ async fn detached_linked_worktree_uses_repository_identity_and_isolated_graph_sc
         .clone()
         .expect("main checkout has a project identity");
     let main_store = main.store_layout().data_root.clone();
+    let main_database = main.store_layout().graph_db_path.clone();
     main.close();
     drop(database_scope);
     drop(lifecycle);
@@ -145,116 +138,32 @@ async fn detached_linked_worktree_uses_repository_identity_and_isolated_graph_sc
     assert_eq!(detached.store_layout().data_root, main_store);
     assert_eq!(detached.active_branch(), None);
     assert_eq!(detached.serving_branch(), None);
-    assert!(
-        !detached
-            .search("detached_only", 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "detached worktree should read its isolated graph scope"
-    );
+    assert_eq!(detached.project_root(), worktree);
+    assert_path_eq(detached.db_path(), main_database);
 }
 
 #[tokio::test]
-async fn worktree_profile_stores_prefer_the_exact_manifest_root() {
+async fn linked_worktree_ignores_local_enrollment_that_would_shard_shared_store() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
     let worktree = dir.path().join("repo-wt");
-    let profile_root = dir.path().join("profile");
-    let global_db_path = profile_root.join("global.db");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn main_root() {}\n").unwrap();
-    init_repo_with_commit(&project);
-    git(
-        &project,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "feature/exact-manifest-root",
-            worktree.to_str().unwrap(),
-        ],
-    );
-
-    for (project_id, manifest_root) in [
-        ("proj_main_worktree", project.as_path()),
-        ("proj_linked_worktree", worktree.as_path()),
-    ] {
-        let data_root = profile_root.join(format!("projects/{project_id}"));
-        fs::create_dir_all(&data_root).unwrap();
-        fs::write(data_root.join("tracedecay.db"), project_id).unwrap();
-        fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
-        branch_meta::save_branch_meta(&data_root, &BranchMeta::new_for_dir(&data_root, "main"))
-            .unwrap();
-        write_store_manifest_to_path(
-            &data_root.join(STORE_MANIFEST_FILENAME),
-            &StoreManifest {
-                schema_version: STORE_MANIFEST_SCHEMA_VERSION,
-                project_id: Some(project_id.to_string()),
-                store_kind: StoreKind::CodeProject,
-                storage_mode: StorageMode::ProfileSharded,
-                project_root: manifest_root.to_path_buf(),
-                data_root,
-                graph_db_relpath: "tracedecay.db".into(),
-                sessions_db_relpath: "sessions.db".into(),
-                branch_meta_relpath: "branch-meta.json".into(),
-            },
-        )
-        .unwrap();
-    }
-
-    for (root, expected_project_id) in [
-        (project.as_path(), "proj_main_worktree"),
-        (worktree.as_path(), "proj_linked_worktree"),
-    ] {
-        let layout = TraceDecay::resolve_store_layout_for_identity_with_options(
-            root,
-            &TraceDecayOpenOptions {
-                profile_root: Some(profile_root.clone()),
-                global_db_path: Some(global_db_path.clone()),
-            },
-        )
-        .await
-        .expect("the manifest whose project_root exactly matches must win");
-
-        assert_eq!(
-            layout.identity.project_id.as_deref(),
-            Some(expected_project_id)
-        );
-    }
-}
-
-#[tokio::test]
-async fn linked_worktree_exact_manifest_overrides_healthy_shared_identity_store() {
-    let _guard = HOME_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    let worktree = dir.path().join("repo-wt");
-    let candidate_source = dir.path().join("candidate-source");
     let home = test_home(&dir);
     let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     let _home_guard = HomeGuard::set(&home);
-
-    for root in [&project, &candidate_source] {
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("src/lib.rs"), "pub fn indexed() {}\n").unwrap();
-        init_repo_with_commit(root);
-    }
+    init_repo_with_commit(&project);
 
     let main = init_with_maintenance(&project).await.unwrap();
-    let lifecycle = acquire_fixture_maintenance();
-    let database_scope = tracedecay::db::enter_maintenance_database_scope(
-        &lifecycle,
-        &profile_root,
-        "seed shared worktree store",
-    )
-    .unwrap();
-    main.index_all().await.unwrap();
-    let main_project_id = main.store_layout().identity.project_id.clone().unwrap();
+    let main_project_id = main
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("primary checkout has a project identity");
+    let main_store = main.store_layout().data_root.clone();
     main.close();
-    drop(database_scope);
-    drop(lifecycle);
 
     git(
         &project,
@@ -262,35 +171,22 @@ async fn linked_worktree_exact_manifest_overrides_healthy_shared_identity_store(
             "worktree",
             "add",
             "-b",
-            "feature/exact-over-shared",
+            "feature/local-enrollment",
             worktree.to_str().unwrap(),
         ],
     );
 
-    let candidate = init_with_maintenance(&candidate_source).await.unwrap();
-    let lifecycle = acquire_fixture_maintenance();
-    let database_scope = tracedecay::db::enter_maintenance_database_scope(
-        &lifecycle,
-        &profile_root,
-        "seed exact worktree store",
+    let stale_project_id = "proj_local_linked_worktree";
+    let stale_data_root = profile_root.join(format!("projects/{stale_project_id}"));
+    fs::create_dir_all(&stale_data_root).unwrap();
+    write_enrollment_marker(
+        &worktree,
+        &EnrollmentMarker {
+            project_id: stale_project_id.to_owned(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
     )
     .unwrap();
-    candidate.index_all().await.unwrap();
-    let candidate_root = candidate.store_layout().data_root.clone();
-    candidate.close();
-    drop(database_scope);
-    drop(lifecycle);
-
-    let exact_project_id = "proj_linked_exact_over_shared";
-    let exact_root = profile_root.join(format!("projects/{exact_project_id}"));
-    relocate_store_as_legacy(&candidate_root, &exact_root, &worktree, exact_project_id);
-    assert_eq!(
-        read_repository_identity_marker(&worktree)
-            .unwrap()
-            .unwrap()
-            .project_id,
-        main_project_id
-    );
 
     let layout = TraceDecay::resolve_store_layout_for_identity_with_options(
         &worktree,
@@ -300,17 +196,19 @@ async fn linked_worktree_exact_manifest_overrides_healthy_shared_identity_store(
         },
     )
     .await
-    .expect("the healthy exact-root worktree shard must override the healthy shared shard");
+    .expect("linked worktree must resolve its repository's store");
 
-    assert_ne!(
+    assert_eq!(
         layout.identity.project_id.as_deref(),
         Some(main_project_id.as_str())
     );
-    assert_eq!(
+    assert_path_eq(&layout.data_root, &main_store);
+    assert_path_eq(&layout.project_root, &worktree);
+    assert_ne!(
         layout.identity.project_id.as_deref(),
-        Some(exact_project_id)
+        Some(stale_project_id),
+        "a linked worktree marker must not create a second project store"
     );
-    assert_path_eq(&layout.data_root, &exact_root);
 }
 
 #[tokio::test]

@@ -769,7 +769,7 @@ pub(super) async fn run_branch_compaction(
     let Some(meta) = crate::branch_meta::load_branch_meta(&layout.data_root) else {
         return true;
     };
-    let active_db_path = cg.db_path();
+    let active_db_path = layout.graph_db_path.clone();
     let candidates = crate::retention::branch_compaction::select_branch_db_candidates(
         &layout.data_root,
         &meta,

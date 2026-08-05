@@ -449,13 +449,9 @@ pub fn remove_enrollment_marker(project_root: &Path, project_id: &str) -> Result
 /// The repository-wide identity marker shared by every checkout of a
 /// repository, including detached linked worktrees.
 ///
-/// Detached worktrees were once excluded here so they could not be served
-/// another checkout's index. That protection belongs to the graph-scope axis,
-/// not the identity axis: a detached HEAD in the *primary* checkout already
-/// shares the repository store and is served the default-branch index with an
-/// explicit fallback warning (see `TraceDecay::resolve_db_for_branch`).
-/// Excluding only the worktree case bought no extra safety and cost a
-/// duplicate project store per detached worktree.
+/// Detached worktrees share repository identity with the primary checkout.
+/// Worktree/ref/snapshot identity is retained as query and generation
+/// provenance; it never selects a second mutable project database.
 pub fn repository_identity_path(project_root: &Path) -> Option<PathBuf> {
     crate::worktree::git_common_dir(project_root)
         .map(|common_dir| common_dir.join(REPOSITORY_IDENTITY_FILENAME))
@@ -727,31 +723,38 @@ pub fn resolve_persisted_layout(
     project_root: &Path,
     profile_root: &Path,
 ) -> Result<Option<StoreLayout>> {
-    if let Some(marker) = read_enrollment_marker(project_root)? {
+    // A linked worktree has its own checkout root but shares the repository
+    // identity stored in Git's common directory. That authority must win over
+    // any stale marker left inside an individual worktree, or one repository
+    // can acquire two project stores and two mutable writer lanes.
+    if let Some(marker) = read_repository_identity_marker(project_root)? {
+        return profile_sharded_layout(
+            project_root,
+            profile_root,
+            &EnrollmentMarker {
+                project_id: marker.project_id,
+                storage_mode: StorageMode::ProfileSharded,
+            },
+        )
+        .map(Some);
+    }
+
+    let enrollment_root = crate::worktree::repository_identity_root(project_root)
+        .unwrap_or_else(|| project_root.to_path_buf());
+    if let Some(marker) = read_enrollment_marker(&enrollment_root)? {
         if marker.storage_mode != StorageMode::ProfileSharded {
             return Err(TraceDecayError::Config {
                 message: format!(
                     "unsupported storage_mode={:?} in enrollment marker for '{}'; \
-                     run TraceDecay migration to move this project into the user profile store",
+                     reset the project store before reopening it",
                     marker.storage_mode,
-                    project_root.display()
+                    enrollment_root.display()
                 ),
             });
         }
         return profile_sharded_layout(project_root, profile_root, &marker).map(Some);
     }
-    let Some(marker) = read_repository_identity_marker(project_root)? else {
-        return Ok(None);
-    };
-    profile_sharded_layout(
-        project_root,
-        profile_root,
-        &EnrollmentMarker {
-            project_id: marker.project_id,
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .map(Some)
+    Ok(None)
 }
 
 pub fn default_profile_root() -> Result<PathBuf> {
@@ -1726,6 +1729,78 @@ mod tests {
             sentinel.is_file(),
             "the selected existing store must stay intact"
         );
+    }
+
+    #[test]
+    fn linked_worktree_repository_identity_outranks_stale_local_enrollment() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary");
+        let linked = dir.path().join("linked");
+        let profile_root = dir.path().join("profile");
+        fs::create_dir_all(&primary).unwrap();
+        for args in [
+            ["init", "--quiet"].as_slice(),
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "TraceDecay Test"].as_slice(),
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&primary)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        fs::write(primary.join("file.rs"), "pub fn shared() {}\n").unwrap();
+        for args in [["add", "."].as_slice(), ["commit", "-m", "seed"].as_slice()] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&primary)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        assert!(
+            std::process::Command::new("git")
+                .args(["worktree", "add", "-b", "linked"])
+                .arg(&linked)
+                .current_dir(&primary)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let project_id = "proj_primary_store";
+        write_enrollment_marker(
+            &primary,
+            &EnrollmentMarker {
+                project_id: project_id.to_owned(),
+                storage_mode: StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        assert!(write_repository_identity_marker(&primary, project_id).unwrap());
+        write_enrollment_marker(
+            &linked,
+            &EnrollmentMarker {
+                project_id: "proj_stale_linked_store".to_owned(),
+                storage_mode: StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+
+        let layout = resolve_persisted_layout(&linked, &profile_root)
+            .unwrap()
+            .expect("repository identity resolves the canonical project store");
+        assert_eq!(layout.identity.project_id.as_deref(), Some(project_id));
+        assert_eq!(
+            layout.data_root,
+            profile_root.join("projects").join(project_id)
+        );
+        assert_eq!(layout.project_root, linked);
     }
 
     #[test]

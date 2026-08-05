@@ -173,14 +173,6 @@ impl TraceDecay {
         allow_default_identity: bool,
     ) -> Result<StoreLayout> {
         let profile_root = open_options.resolved_profile_root()?;
-        if storage::read_enrollment_marker(project_root)?.is_some() {
-            return storage::resolve_persisted_layout(project_root, &profile_root)?.ok_or_else(
-                || TraceDecayError::Config {
-                    message: "enrollment marker did not resolve a profile store".to_string(),
-                },
-            );
-        }
-
         let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
         // Every linked worktree resolves through its repository, attached or
         // not; suppressing this for detached worktrees dropped them onto the
