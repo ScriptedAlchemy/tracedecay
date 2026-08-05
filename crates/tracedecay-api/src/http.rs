@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, CancellationSignal,
-    Deadline, OpaqueCursor, PageRequest, ProblemOwningLayer, RequestId, ResultContractRef,
-    RetryDirective, SafeDiagnostic,
+    Deadline, OpaqueCursor, ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective,
+    SafeDiagnostic,
 };
 use tracedecay_tool_catalog::{
     BindingSurface, CancellationContract, CapabilityId, CatalogSnapshotV1, DeadlineContract,
@@ -28,7 +28,6 @@ mod manifest;
 pub use manifest::{HttpManifestContract, HttpManifestContractError};
 
 pub(crate) const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
-const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
 
 /// Define the handlers that name one fixed operation.
 ///
@@ -86,14 +85,10 @@ pub(crate) use constant_operation_handlers;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HttpPageQuery {
-    #[serde(default = "default_http_page_size")]
-    page_size: u32,
+    #[serde(default)]
+    page_size: Option<u32>,
     #[serde(default)]
     cursor: Option<OpaqueCursor>,
-}
-
-const fn default_http_page_size() -> u32 {
-    DEFAULT_HTTP_PAGE_SIZE
 }
 
 pub use tracedecay_application::{
@@ -227,7 +222,8 @@ pub struct HttpApplicationControls {
 pub struct HttpApplicationRequest {
     pub operation: HttpApplicationOperation,
     pub request_id: RequestId,
-    pub page: PageRequest,
+    pub requested_page_size: Option<u32>,
+    pub cursor: Option<OpaqueCursor>,
     pub deadline: Option<Deadline>,
     pub cancellation: CancellationSignal,
     pub body: Value,
@@ -574,16 +570,6 @@ where
             );
         }
     };
-    let page = match PageRequest::new(page.page_size, page.cursor) {
-        Ok(page) => page,
-        Err(_) => {
-            return invalid_request_response(
-                request_id,
-                "http.invalid_page",
-                "The requested HTTP page is invalid",
-            );
-        }
-    };
     let Json(body) = match body {
         Ok(body) => body,
         Err(_) => {
@@ -599,7 +585,8 @@ where
     let request = HttpApplicationRequest {
         operation,
         request_id,
-        page,
+        requested_page_size: page.page_size,
+        cursor: page.cursor,
         deadline: Some(controls.deadline),
         cancellation: controls.cancellation,
         body,

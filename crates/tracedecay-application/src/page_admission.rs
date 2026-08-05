@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use thiserror::Error;
-use tracedecay_domain::ManifestDigest;
+use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::BindingId;
 
 use crate::{ApplicationWireOperation, PageRequest, RequestContext};
@@ -13,6 +13,7 @@ pub struct PageAdmissionRequest {
     binding_id: BindingId,
     operation: ApplicationWireOperation,
     context: RequestContext,
+    observed_at: UtcMicros,
     operation_scope_digest: ManifestDigest,
     body_digest: ManifestDigest,
     page: PageRequest,
@@ -23,11 +24,15 @@ impl PageAdmissionRequest {
         binding_id: BindingId,
         operation: ApplicationWireOperation,
         context: RequestContext,
+        observed_at: UtcMicros,
         operation_scope_digest: ManifestDigest,
         body_digest: ManifestDigest,
         page: PageRequest,
     ) -> Result<Self, PageAdmissionError> {
         context.validate().map_err(|_| PageAdmissionError::Denied)?;
+        if context.admission_at(observed_at) != crate::RequestAdmission::Admitted {
+            return Err(PageAdmissionError::Denied);
+        }
         operation_scope_digest
             .validate()
             .map_err(|_| PageAdmissionError::InvalidRequest)?;
@@ -41,6 +46,7 @@ impl PageAdmissionRequest {
             binding_id,
             operation,
             context,
+            observed_at,
             operation_scope_digest,
             body_digest,
             page,
@@ -57,6 +63,10 @@ impl PageAdmissionRequest {
 
     pub fn context(&self) -> &RequestContext {
         &self.context
+    }
+
+    pub const fn observed_at(&self) -> UtcMicros {
+        self.observed_at
     }
 
     pub fn operation_scope_digest(&self) -> &ManifestDigest {
@@ -89,6 +99,10 @@ impl AdmittedPageRequest {
 
     pub fn context(&self) -> &RequestContext {
         self.request.context()
+    }
+
+    pub const fn observed_at(&self) -> UtcMicros {
+        self.request.observed_at()
     }
 
     pub fn operation_scope_digest(&self) -> &ManifestDigest {
@@ -233,6 +247,7 @@ mod tests {
             binding_id.clone(),
             ApplicationWireOperation::CodeSymbolSearch,
             context.clone(),
+            UtcMicros(1_000),
             context.scope().scope_digest.clone(),
             body_digest.clone(),
             PageRequest::first(25).unwrap(),
@@ -255,7 +270,24 @@ mod tests {
             BindingId::new("binding.http.code-symbol-search.v1").unwrap(),
             ApplicationWireOperation::CodeSymbolSearch,
             context,
+            UtcMicros(1_000),
             ManifestDigest::new(format!("sha256:{}", "3".repeat(64))).unwrap(),
+            ManifestDigest::new(format!("sha256:{}", "2".repeat(64))).unwrap(),
+            PageRequest::first(25).unwrap(),
+        );
+
+        assert_eq!(request, Err(PageAdmissionError::Denied));
+    }
+
+    #[test]
+    fn admission_rejects_an_elapsed_context() {
+        let context = context();
+        let request = PageAdmissionRequest::new(
+            BindingId::new("binding.http.code-symbol-search.v1").unwrap(),
+            ApplicationWireOperation::CodeSymbolSearch,
+            context.clone(),
+            context.deadline().expires_at,
+            context.scope().scope_digest.clone(),
             ManifestDigest::new(format!("sha256:{}", "2".repeat(64))).unwrap(),
             PageRequest::first(25).unwrap(),
         );

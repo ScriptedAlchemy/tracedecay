@@ -428,7 +428,8 @@ async fn http_git_read_routes_preserve_the_canonical_typed_request() {
             owner_seen.lock().expect("capture Git read").push((
                 request.operation,
                 request.request_id.clone(),
-                request.page.clone(),
+                request.requested_page_size,
+                request.cursor.clone(),
                 request.cancellation.clone(),
                 request.body.clone(),
             ));
@@ -504,12 +505,18 @@ async fn http_git_read_routes_preserve_the_canonical_typed_request() {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         let captured = seen.lock().expect("captured Git reads");
-        let (actual_operation, actual_request_id, page, actual_cancellation, body) =
-            captured.last().expect("one captured Git read");
+        let (
+            actual_operation,
+            actual_request_id,
+            requested_page_size,
+            cursor,
+            actual_cancellation,
+            body,
+        ) = captured.last().expect("one captured Git read");
         assert_eq!(*actual_operation, operation);
         assert_eq!(actual_request_id, &request_id);
-        assert_eq!(page.page_size, 7);
-        assert!(page.cursor.is_none());
+        assert_eq!(*requested_page_size, Some(7));
+        assert!(cursor.is_none());
         assert_eq!(
             actual_cancellation.context().token_id,
             cancellation.context().token_id

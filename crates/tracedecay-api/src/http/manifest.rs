@@ -192,6 +192,32 @@ impl HttpManifestContract {
             .map_err(|_| HttpManifestContractError::InvalidPage)
     }
 
+    /// Validate transport page controls without claiming cursor admission.
+    ///
+    /// The returned request remains unadmitted. An application
+    /// [`tracedecay_application::PageAdmissionPort`] must authenticate it
+    /// against the operation owner before invocation.
+    pub fn unadmitted_page_request(
+        &self,
+        requested_page_size: Option<u32>,
+        cursor: Option<OpaqueCursor>,
+    ) -> Result<Option<PageRequest>, HttpManifestContractError> {
+        let Some(pagination) = self.capability.pagination() else {
+            return if requested_page_size.is_none() && cursor.is_none() {
+                Ok(None)
+            } else {
+                Err(HttpManifestContractError::PaginationUnsupported)
+            };
+        };
+        let page_size = requested_page_size.unwrap_or(pagination.default_page_size());
+        if page_size > pagination.maximum_page_size() {
+            return Err(HttpManifestContractError::InvalidPage);
+        }
+        PageRequest::new(page_size, cursor)
+            .map(Some)
+            .map_err(|_| HttpManifestContractError::InvalidPage)
+    }
+
     pub fn cancellation(&self) -> &CancellationContract {
         self.capability.cancellation()
     }

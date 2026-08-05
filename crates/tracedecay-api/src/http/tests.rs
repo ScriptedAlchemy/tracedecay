@@ -1,14 +1,14 @@
 use super::{
-    DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
-    is_http_exposed, parse_callable_code_operation, parse_configuration_operation,
-    parse_context_scout_operation, parse_feedback_read_operation, parse_git_read_operation,
+    HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery, is_http_exposed,
+    parse_callable_code_operation, parse_configuration_operation, parse_context_scout_operation,
+    parse_feedback_read_operation, parse_git_read_operation,
 };
 
 #[test]
-fn omitted_http_page_query_uses_the_canonical_default() {
+fn omitted_http_page_query_defers_to_the_manifest() {
     let query: HttpPageQuery = serde_json::from_value(serde_json::json!({}))
-        .expect("empty HTTP query uses adapter defaults");
-    assert_eq!(query.page_size, DEFAULT_HTTP_PAGE_SIZE);
+        .expect("empty HTTP query defers adapter defaults");
+    assert_eq!(query.page_size, None);
     assert!(query.cursor.is_none());
 }
 

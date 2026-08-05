@@ -20,8 +20,8 @@ use thiserror::Error;
 use tokio_stream::StreamExt;
 use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationInvocationFuture,
-    HttpApplicationOperation, HttpApplicationRequest, WorkOperation, WorkflowOperation,
-    application_problem_response, sse_response,
+    HttpApplicationOperation, HttpApplicationRequest, HttpManifestContract, WorkOperation,
+    WorkflowOperation, application_problem_response, sse_response,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
@@ -114,7 +114,6 @@ use wire_schema::{build_application_wire_schema_registry, validate_application_o
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
-const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 const APPLICATION_PROTOCOL_REVISION: u32 = 1;
 const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
 const MAX_REQUEST_HANDLE_BYTES: usize = 256;
@@ -1067,10 +1066,6 @@ async fn application_http_context(
     else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let Ok(observed_at) = current_micros() else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let default_expires_at = observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS);
     let caller_expires_at = match request.headers().get(HTTP_DEADLINE_HEADER) {
         Some(value) => match value
             .to_str()
@@ -1080,7 +1075,7 @@ async fn application_http_context(
             Some(expires_at) => expires_at,
             None => return StatusCode::BAD_REQUEST.into_response(),
         },
-        None => default_expires_at,
+        None => return StatusCode::BAD_REQUEST.into_response(),
     };
     let Ok(deadline) = Deadline::new(UtcMicros(caller_expires_at)) else {
         return StatusCode::BAD_REQUEST.into_response();
@@ -2715,9 +2710,9 @@ pub async fn execute_application_surface(
     let delivery_route = plan26_delivery_route(dispatched.surface);
     let (invocation, requested_format) = dispatched.invocation.into_application_invocation();
     let observed_at = current_micros()?;
-    let deadline = invocation.deadline.unwrap_or(Deadline::new(UtcMicros(
-        observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS),
-    ))?);
+    let deadline = invocation
+        .deadline
+        .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
     let cancellation = invocation.cancellation;
     let cancellation_context = cancellation.context();
     let request_deadline = deadline.clone();
@@ -3475,14 +3470,109 @@ async fn invoke_application_adapter_request(
     catalog: &CatalogSnapshotV1,
 ) -> CanonicalInvocationResult<Value> {
     let operation = request.operation;
+    let request_id = request.request_id;
     let resolver = CatalogBindingResolver::new(catalog);
     let binding = resolve_application_binding(&resolver, surface, operation).unwrap_or_else(|| {
         panic!("surface bindings are validated before the application router is mounted")
     });
     let binding_id = binding.binding_id;
     let result_contract = ResultContractRef::from_schema(&binding.result_schema);
-    let request_id = request.request_id;
-    let body = apply_http_page_to_surface_body(operation, request.body, &request.page);
+    let profile_id = match ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID) {
+        Ok(profile_id) => profile_id,
+        Err(error) => {
+            return CanonicalInvocationResult::new(
+                binding_id,
+                Err(http_adapter_problem(
+                    result_contract,
+                    request_id,
+                    error.into(),
+                )),
+            );
+        }
+    };
+    let operation_name = match SurfaceOperationName::new(operation.as_str()) {
+        Ok(operation) => operation,
+        Err(error) => {
+            return CanonicalInvocationResult::new(
+                binding_id,
+                Err(http_adapter_problem(
+                    result_contract,
+                    request_id,
+                    error.into(),
+                )),
+            );
+        }
+    };
+    let Some(contract) = HttpManifestContract::resolve(
+        catalog,
+        &profile_id,
+        surface,
+        &operation_name,
+        APPLICATION_PROTOCOL_REVISION,
+        &application_negotiated_features(),
+    ) else {
+        return CanonicalInvocationResult::new(
+            binding_id,
+            Err(http_adapter_problem(
+                result_contract,
+                request_id,
+                ApplicationSurfaceAdapterError::UnknownOrNotAuthorized,
+            )),
+        );
+    };
+    let observed_at = match current_micros() {
+        Ok(observed_at) => observed_at,
+        Err(error) => {
+            return CanonicalInvocationResult::new(
+                binding_id,
+                Err(http_adapter_problem(
+                    result_contract,
+                    request_id,
+                    error.into(),
+                )),
+            );
+        }
+    };
+    let deadline = match contract.effective_deadline(observed_at, request.deadline.as_ref()) {
+        Ok(deadline) => deadline,
+        Err(_) => {
+            return CanonicalInvocationResult::new(
+                binding_id,
+                Err(http_adapter_problem(
+                    result_contract,
+                    request_id,
+                    ApplicationSurfaceAdapterError::InvalidSurfaceRequest,
+                )),
+            );
+        }
+    };
+    let page = match contract.unadmitted_page_request(request.requested_page_size, request.cursor) {
+        Ok(Some(page)) => page,
+        Ok(None) => match PageRequest::first(1) {
+            Ok(page) => page,
+            Err(error) => {
+                return CanonicalInvocationResult::new(
+                    binding_id,
+                    Err(http_adapter_problem(
+                        result_contract,
+                        request_id,
+                        error.into(),
+                    )),
+                );
+            }
+        },
+        Err(_) => {
+            return CanonicalInvocationResult::new(
+                binding_id,
+                Err(http_adapter_problem(
+                    result_contract,
+                    request_id,
+                    ApplicationSurfaceAdapterError::InvalidSurfaceRequest,
+                )),
+            );
+        }
+    };
+    let body = apply_http_page_to_surface_body(operation, request.body, &page);
     let application_request = match parse_application_surface_request(operation, body) {
         Ok(request) => request,
         Err(error) => {
@@ -3504,8 +3594,8 @@ async fn invoke_application_adapter_request(
         operation,
         request_id.clone(),
         application_request,
-        request.page,
-        request.deadline,
+        page,
+        Some(deadline.clone()),
         request.cancellation,
         RequestedOutputFormat::Json,
     ) {
@@ -3544,7 +3634,27 @@ async fn invoke_application_adapter_request(
         }
     };
     match execute_application_surface(operation, dispatched, Some(executor)).await {
-        Ok(result) => CanonicalInvocationResult::new(result.binding_id, result.result),
+        Ok(result)
+            if result.result.as_ref().is_ok_and(|envelope| {
+                contract
+                    .validate_outcome(&envelope.outcome, &deadline)
+                    .is_ok()
+            }) || result.result.is_err() =>
+        {
+            CanonicalInvocationResult::new(result.binding_id, result.result)
+        }
+        Ok(result) => CanonicalInvocationResult::new(
+            result.binding_id,
+            Err(ApplicationProblemEnvelope::new(
+                result_contract,
+                request_id,
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "application.surface.manifest-mismatch".to_owned(),
+                    message: "The application result did not match its admitted manifest contract"
+                        .to_owned(),
+                }),
+            )),
+        ),
         Err(error) => CanonicalInvocationResult::new(
             binding_id,
             Err(http_adapter_problem(result_contract, request_id, error)),

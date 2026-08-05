@@ -486,18 +486,21 @@ fn unsupported_pagination_rejects_http_page_controls() {
 #[test]
 fn opaque_cursor_requires_authenticated_ttl_authority() {
     let contract = contract();
+    let cursor = tracedecay_application::OpaqueCursor::new("opaque.cursor").unwrap();
 
     assert_eq!(
         contract
-            .page_request(
-                Some(12),
-                Some(tracedecay_application::OpaqueCursor::new("opaque.cursor").unwrap()),
-            )
+            .page_request(Some(12), Some(cursor.clone()))
             .unwrap_err(),
         HttpManifestContractError::CursorAuthorityRequired {
             cursor_ttl_millis: 60_000,
         }
     );
+    let unadmitted = contract
+        .unadmitted_page_request(Some(12), Some(cursor.clone()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(unadmitted.cursor, Some(cursor));
 }
 
 #[test]

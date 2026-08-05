@@ -20,18 +20,20 @@ use tokio_stream::Stream;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemEnvelope, CancellationContext, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, InvocationTarget, LegalAction,
-    OpaqueCursor, OperationReceipt, OperationTermination, PageRequest, ProblemOwningLayer,
-    RequestContext, RequestId, ResolvedScope, ResultContractRef, ResumeToken, RetryDirective,
-    SafeDiagnostic, StreamEvent, StreamEventKind, StreamFrontier, StreamGap, StreamTermination,
+    ApplicationProblem, ApplicationProblemEnvelope, ApplicationWireOperation, CancellationContext,
+    CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, InvocationTarget,
+    LegalAction, OpaqueCursor, OperationReceipt, OperationTermination, PageAdmissionError,
+    PageAdmissionFuture, PageAdmissionPort, PageAdmissionRequest, PageAdmissionSeal, PageRequest,
+    ProblemOwningLayer, RequestContext, RequestId, ResolvedScope, ResultContractRef, ResumeToken,
+    RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
+    StreamTermination,
 };
 use tracedecay_domain::{
-    ActorId, CodeGenerationId, CommitId, ContentDigest, ProjectId, RetrievalGrainV1,
-    SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
-    UtcMicros, canonical_sha256,
+    ActorId, CodeGenerationId, CommitId, ContentDigest, ManifestDigest, ProjectId,
+    RetrievalGrainV1, SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId,
+    SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
 };
-use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
+use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, UseCaseId};
 
 pub use tracedecay_application::OperationCancelOutcome;
 
@@ -484,6 +486,62 @@ impl CanonicalManagedTestRunReader {
                 ManagedTestRunUnavailableReason::AuthorityFailure,
             ),
         }
+    }
+}
+
+/// Exact application admission adapter for retained managed test-result pages.
+///
+/// The adapter binds the catalog identity and canonical body digest before
+/// delegating cursor verification to the operation-event authority that issued
+/// the continuation.
+pub(crate) struct ManagedTestResultPageAdmission {
+    reader: CanonicalManagedTestRunReader,
+    current: ManagedTestRunCurrentScope,
+    binding_id: BindingId,
+    body_digest: ManifestDigest,
+}
+
+impl ManagedTestResultPageAdmission {
+    pub(crate) fn new(
+        reader: CanonicalManagedTestRunReader,
+        current: ManagedTestRunCurrentScope,
+        binding_id: BindingId,
+        body_digest: ManifestDigest,
+    ) -> Self {
+        Self {
+            reader,
+            current,
+            binding_id,
+            body_digest,
+        }
+    }
+}
+
+impl PageAdmissionPort for ManagedTestResultPageAdmission {
+    fn admit<'a>(
+        &'a self,
+        request: PageAdmissionRequest,
+        seal: PageAdmissionSeal,
+    ) -> PageAdmissionFuture<'a> {
+        Box::pin(async move {
+            if request.operation() != ApplicationWireOperation::TestResults {
+                return Err(PageAdmissionError::Unsupported);
+            }
+            if request.binding_id() != &self.binding_id
+                || request.body_digest() != &self.body_digest
+            {
+                return Err(PageAdmissionError::BindingMismatch);
+            }
+            match self
+                .reader
+                .latest_current_page(&self.current, request.page())
+                .await
+            {
+                ManagedTestRunReadOutcome::Current(_) => Ok(seal.admit(request)),
+                ManagedTestRunReadOutcome::Stale(_) => Err(PageAdmissionError::Stale),
+                ManagedTestRunReadOutcome::Unavailable(_) => Err(PageAdmissionError::Unavailable),
+            }
+        })
     }
 }
 
