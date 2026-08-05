@@ -202,7 +202,7 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
     assert!(cg.db_path().is_file());
     assert_eq!(
         schema_version(&cg.db_path()),
-        tracedecay::db::migrations::SCHEMA_VERSION
+        tracedecay::db::schema::SCHEMA_VERSION
     );
     assert!(
         !shard_root.join("config.json").exists(),
@@ -233,7 +233,7 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
     let db_path = initialized.db_path().to_path_buf();
     drop(initialized);
 
-    let incompatible_version = tracedecay::db::migrations::SCHEMA_VERSION - 1;
+    let incompatible_version = tracedecay::db::schema::SCHEMA_VERSION - 1;
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     connection
         .pragma_update(None, "user_version", incompatible_version)

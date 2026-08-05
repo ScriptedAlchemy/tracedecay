@@ -447,7 +447,7 @@ impl TraceDecay {
     /// by an incompatible binary, so the only remedy is a fresh one.
     pub async fn ensure_schema_current(&self) -> Result<()> {
         let current = Self::schema_version(&self.db, "ensure_schema_current").await?;
-        let supported = crate::db::migrations::SCHEMA_VERSION;
+        let supported = crate::db::schema::SCHEMA_VERSION;
         if current != supported {
             return Err(TraceDecayError::Config {
                 message: format!(

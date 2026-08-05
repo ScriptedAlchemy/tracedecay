@@ -379,13 +379,13 @@ impl TraceDecay {
         let Some(encoded) = self.db.get_metadata(GRAPH_REBUILD_STATE_KEY).await? else {
             let generation_is_current = self
                 .db
-                .get_metadata(crate::db::migrations::GRAPH_GENERATION_SCHEMA_KEY)
+                .get_metadata(crate::db::schema::GRAPH_GENERATION_SCHEMA_KEY)
                 .await?
                 .and_then(|value| value.parse::<u32>().ok())
-                == Some(crate::db::migrations::SCHEMA_VERSION);
+                == Some(crate::db::schema::SCHEMA_VERSION);
             if !generation_is_current {
                 return Ok(GraphRebuildStatusV1::Indexing {
-                    schema_version: crate::db::migrations::SCHEMA_VERSION,
+                    schema_version: crate::db::schema::SCHEMA_VERSION,
                     completed_files: 0,
                     total_files: None,
                     availability: self.graph_rebuild_availability().await?,
@@ -398,14 +398,14 @@ impl TraceDecay {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0);
             return Ok(GraphRebuildStatusV1::Current {
-                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
                 completed_at,
             });
         };
         match serde_json::from_str(&encoded) {
             Ok(status) => Ok(status),
             Err(_) => Ok(GraphRebuildStatusV1::Failed {
-                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
                 availability: self.graph_rebuild_availability().await?,
                 retryable: true,
                 reason: "stored graph rebuild state is unreadable".to_owned(),
@@ -469,7 +469,7 @@ impl TraceDecay {
         let total = u64::try_from(self.scan_files().len()).unwrap_or(u64::MAX);
         if let Err(error) = self
             .write_graph_rebuild_status(&GraphRebuildStatusV1::Indexing {
-                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
                 completed_files: 0,
                 total_files: Some(total),
                 availability,
@@ -504,7 +504,7 @@ impl TraceDecay {
             Err(error) => {
                 eprintln!("[tracedecay] background graph rebuild failed: {error}");
                 let status = GraphRebuildStatusV1::Failed {
-                    schema_version: crate::db::migrations::SCHEMA_VERSION,
+                    schema_version: crate::db::schema::SCHEMA_VERSION,
                     availability,
                     retryable: true,
                     reason: error.to_string(),
@@ -592,7 +592,7 @@ impl TraceDecay {
                 completed.insert(entry.file_path.clone(), entry);
             }
             self.write_graph_rebuild_status(&GraphRebuildStatusV1::Indexing {
-                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
                 completed_files: u64::try_from(completed.len()).unwrap_or(u64::MAX),
                 total_files: Some(u64::try_from(files.len()).unwrap_or(u64::MAX)),
                 availability,
@@ -661,7 +661,7 @@ impl TraceDecay {
                     continue;
                 }
             };
-            if batch.schema_version != crate::db::migrations::SCHEMA_VERSION {
+            if batch.schema_version != crate::db::schema::SCHEMA_VERSION {
                 continue;
             }
             sequence = sequence.max(
@@ -685,7 +685,7 @@ impl TraceDecay {
         entries: &[GraphRebuildCheckpointEntryV1],
     ) -> Result<()> {
         let batch = GraphRebuildCheckpointBatchV1 {
-            schema_version: crate::db::migrations::SCHEMA_VERSION,
+            schema_version: crate::db::schema::SCHEMA_VERSION,
             entries: entries.to_vec(),
         };
         let bytes = serde_json::to_vec(&batch).map_err(|error| TraceDecayError::Database {
@@ -939,13 +939,13 @@ impl TraceDecay {
         self.db
             .set_metadata_unguarded(
                 &transaction,
-                crate::db::migrations::GRAPH_GENERATION_SCHEMA_KEY,
-                &crate::db::migrations::SCHEMA_VERSION.to_string(),
+                crate::db::schema::GRAPH_GENERATION_SCHEMA_KEY,
+                &crate::db::schema::SCHEMA_VERSION.to_string(),
             )
             .await?;
         if rebuild_availability.is_some() {
             let status = serde_json::to_string(&GraphRebuildStatusV1::Current {
-                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
                 completed_at: now,
             })
             .map_err(|error| TraceDecayError::Database {

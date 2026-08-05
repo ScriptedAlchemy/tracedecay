@@ -324,7 +324,7 @@ impl Database {
             TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing
                 if graph_shard =>
             {
-                crate::db::migrations::ensure_schema_current(&database).await?;
+                crate::db::schema::ensure_schema_current(&database).await?;
             }
             _ => {}
         }

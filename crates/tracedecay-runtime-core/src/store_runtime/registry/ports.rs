@@ -338,7 +338,7 @@ async fn migrate_before_publication(
         StoreShardScopeV1::Code { .. }
         | StoreShardScopeV1::ProfileMemory
         | StoreShardScopeV1::Project { .. } => {
-            crate::db::migrations::create_schema_connection(&connection)
+            crate::db::schema::create_schema_connection(&connection)
                 .await
                 .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "create initialized graph schema",

@@ -149,7 +149,7 @@ async fn existing_profile_memory_is_schema_verified_before_exposure() {
         .expect("durable profile identity");
     let memory_path = crate::memory::user::user_memory_db_path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
-    crate::db::migrations::create_schema_connection(&seed)
+    crate::db::schema::create_schema_connection(&seed)
         .await
         .expect("create the profile memory fixture at the production schema");
     drop(seed);

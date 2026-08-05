@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn final_database(path: &Path) {
@@ -7,7 +6,7 @@ fn final_database(path: &Path) {
         .pragma_update(
             None,
             "user_version",
-            tracedecay_runtime_core::db::migrations::SCHEMA_VERSION,
+            tracedecay_runtime_core::db::schema::SCHEMA_VERSION,
         )
         .unwrap();
 }

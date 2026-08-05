@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tracedecay::global_db::profile_archive::{
-    export_final_profile, rehearse_final_profile_restore,
-    set_rehearsal_publication_fault_for_test,
+    export_final_profile, rehearse_final_profile_restore, set_rehearsal_publication_fault_for_test,
 };
 use tracedecay::storage::{
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
@@ -21,11 +20,7 @@ struct FinalProfileFixture {
 fn seed_final_database(path: &Path) {
     let connection = rusqlite::Connection::open(path).unwrap();
     connection
-        .pragma_update(
-            None,
-            "user_version",
-            tracedecay::db::migrations::SCHEMA_VERSION,
-        )
+        .pragma_update(None, "user_version", tracedecay::db::schema::SCHEMA_VERSION)
         .unwrap();
 }
 

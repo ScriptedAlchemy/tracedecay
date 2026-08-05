@@ -96,7 +96,7 @@ async fn database() -> (TestConnection, TempDir) {
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")
         .await
         .unwrap();
-    crate::db::migrations::create_schema_connection(&conn)
+    crate::db::schema::create_schema_connection(&conn)
         .await
         .unwrap();
     (conn, dir)
@@ -170,7 +170,7 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
         optional_i64(&conn, "PRAGMA user_version", ())
             .await
             .unwrap(),
-        Some(i64::from(super::super::migrations::SCHEMA_VERSION))
+        Some(i64::from(super::super::schema::SCHEMA_VERSION))
     );
     assert!(
         table_exists(&conn, "memory_v2_compatibility_banks")

@@ -13,7 +13,6 @@ mod maintenance;
 mod memory_connection;
 mod memory_v2;
 mod metadata;
-pub mod migrations;
 mod nodes;
 #[cfg(test)]
 mod oversized_scan_tests;
@@ -21,6 +20,7 @@ mod redundancy_pairs;
 mod retrieval_anchor_authority;
 pub mod retrieval_anchor_schema;
 mod rows;
+pub mod schema;
 mod search;
 mod sql;
 mod stats;

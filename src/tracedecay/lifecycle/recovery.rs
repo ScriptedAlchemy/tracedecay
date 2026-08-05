@@ -290,7 +290,7 @@ impl TraceDecay {
             }
             Err(e) => return Err(e),
         };
-        crate::db::migrations::ensure_schema_current(&db).await?;
+        crate::db::schema::ensure_schema_current(&db).await?;
 
         // Validation before Database::open cannot observe FTS damage on a
         // retained shared handle because the open reuses that connection.

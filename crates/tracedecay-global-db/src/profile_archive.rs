@@ -210,11 +210,11 @@ fn validate_exact_final_database(path: &Path) -> Result<(), String> {
     let version = connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
         .map_err(|error| format!("read final database schema '{}': {error}", path.display()))?;
-    if version != tracedecay_runtime_core::db::migrations::SCHEMA_VERSION {
+    if version != tracedecay_runtime_core::db::schema::SCHEMA_VERSION {
         return Err(format!(
             "ResetRequired: database '{}' has schema v{version}; expected exact final schema v{}",
             path.display(),
-            tracedecay_runtime_core::db::migrations::SCHEMA_VERSION
+            tracedecay_runtime_core::db::schema::SCHEMA_VERSION
         ));
     }
     Ok(())

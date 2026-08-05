@@ -147,7 +147,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .await?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
-        crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
+        crate::db::schema::ensure_schema_current(database.as_ref()).await?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
     }
@@ -248,7 +248,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .await?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
-        crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
+        crate::db::schema::ensure_schema_current(database.as_ref()).await?;
         mounted.insert(project_id, Arc::clone(&database));
         Ok(database)
     }
