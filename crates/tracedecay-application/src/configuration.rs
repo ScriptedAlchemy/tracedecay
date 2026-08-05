@@ -5,8 +5,11 @@
 //! application feature without importing a transport or persistence adapter.
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::ManifestDigest;
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
+    ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+    ConfigurationRevisionId, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
+    ProtectedChange, RollbackModeV1, SettingKey,
 };
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
@@ -29,6 +32,10 @@ use crate::retrieval::catalog::{
 
 /// Typed input for the first configuration read migrated through the daemon
 /// invocation boundary.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationListRequestV1 {}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationGetRequestV1 {
@@ -44,6 +51,99 @@ pub struct ConfigurationSetRequestV1 {
     pub key: SettingKey,
     pub value: ConfigurationValueV1,
     pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "operation")]
+pub enum ConfigurationDirectMutationRequestV1 {
+    Set {
+        layer: ConfigurationLayerIdV1,
+        key: SettingKey,
+        value: ConfigurationValueV1,
+    },
+    Unset {
+        layer: ConfigurationLayerIdV1,
+        key: SettingKey,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationUnsetRequestV1 {
+    pub layer: ConfigurationLayerIdV1,
+    pub key: SettingKey,
+    pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationBatchRequestV1 {
+    pub mutations: Vec<ConfigurationDirectMutationRequestV1>,
+    pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationWriteCredentialRequestV1 {
+    pub expected_reference_id: Option<CredentialReferenceId>,
+    pub kind: CredentialKindV1,
+    pub write_handle: String,
+    pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationObservedStateRequestV1 {}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationProtectedPreviewRequestV1 {
+    pub change: ProtectedChange,
+    pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationProtectedApplyRequestV1 {
+    pub plan_id: ChangePlanId,
+    pub expected_base_revision_id: ConfigurationRevisionId,
+    pub operation_digest: ManifestDigest,
+    pub idempotency_key: ConfigurationIdempotencyKey,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationRollbackPreviewRequestV1 {
+    pub target_revision_id: ConfigurationRevisionId,
+    pub mode: RollbackModeV1,
+}
+
+pub type ConfigurationRollbackApplyRequestV1 = ConfigurationProtectedApplyRequestV1;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationAuditRequestV1 {
+    #[serde(default)]
+    pub after_event_id: Option<ConfigurationAuditEventId>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation", content = "request")]
+pub enum ConfigurationWireRequestV1 {
+    List(ConfigurationListRequestV1),
+    Explain(ConfigurationGetRequestV1),
+    Get(ConfigurationGetRequestV1),
+    Set(ConfigurationSetRequestV1),
+    Unset(ConfigurationUnsetRequestV1),
+    Batch(ConfigurationBatchRequestV1),
+    WriteCredential(ConfigurationWriteCredentialRequestV1),
+    ObservedState(ConfigurationObservedStateRequestV1),
+    ProtectedPreview(ConfigurationProtectedPreviewRequestV1),
+    ProtectedApply(ConfigurationProtectedApplyRequestV1),
+    RollbackPreview(ConfigurationRollbackPreviewRequestV1),
+    RollbackApply(ConfigurationRollbackApplyRequestV1),
+    Audit(ConfigurationAuditRequestV1),
 }
 
 struct ConfigurationSurfaceSpec {
@@ -238,8 +338,8 @@ fn capability(
             spec.description,
             vec![spec.example.to_owned()],
         )?,
-        request_schema: schema(spec.name, "request")?,
-        result_schema: schema(spec.name, "result")?,
+        request_schema: configuration_surface_request_schema(spec.name)?,
+        result_schema: configuration_surface_result_schema(spec.name)?,
         effect,
         scope: ScopeRequirement::new(vec![
             ScopeDimension::ConfigurationLayer,
@@ -350,10 +450,10 @@ fn capability(
 fn handler_descriptor(
     spec: &ConfigurationSurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
-    let result_schema = schema(spec.name, "result")?;
+    let result_schema = configuration_surface_result_schema(spec.name)?;
     ApplicationHandlerDescriptor::new(
         application_operation(spec)?,
-        schema(spec.name, "request")?,
+        configuration_surface_request_schema(spec.name)?,
         result_schema,
     )
 }
@@ -361,7 +461,7 @@ fn handler_descriptor(
 fn application_operation(
     spec: &ConfigurationSurfaceSpec,
 ) -> Result<ApplicationOperation, ApplicationContractError> {
-    let result_schema = schema(spec.name, "result")?;
+    let result_schema = configuration_surface_result_schema(spec.name)?;
     Ok(ApplicationOperation::new(
         CapabilityId::new(capability_id(spec.name))?,
         UseCaseId::new(use_case_id(spec.name))?,
@@ -370,7 +470,27 @@ fn application_operation(
     ))
 }
 
-fn schema(operation: &str, direction: &str) -> Result<SchemaRef, ApplicationContractError> {
+pub fn configuration_surface_request_schema(
+    operation: &str,
+) -> Result<SchemaRef, ApplicationContractError> {
+    configuration_surface_schema(operation, "request")
+}
+
+pub fn configuration_surface_result_schema(
+    operation: &str,
+) -> Result<SchemaRef, ApplicationContractError> {
+    configuration_surface_schema(operation, "result")
+}
+
+fn configuration_surface_schema(
+    operation: &str,
+    direction: &str,
+) -> Result<SchemaRef, ApplicationContractError> {
+    if !CONFIGURATION_SURFACE_OPERATION_NAMES.contains(&operation) {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "configuration surface operation",
+        });
+    }
     Ok(SchemaRef::new(
         SchemaId::new(format!(
             "schema.application.configuration.{operation}.{direction}"
@@ -490,5 +610,28 @@ mod tests {
             set.value,
             tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true)
         ));
+    }
+
+    #[test]
+    fn empty_configuration_requests_reject_transport_arguments() {
+        assert!(
+            serde_json::from_value::<ConfigurationListRequestV1>(
+                serde_json::json!({"format": "json"})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ConfigurationObservedStateRequestV1>(
+                serde_json::json!({"page_size": 10})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn configuration_schema_refs_reject_unknown_operations() {
+        assert!(configuration_surface_request_schema("configuration_get").is_ok());
+        assert!(configuration_surface_result_schema("configuration_get").is_ok());
+        assert!(configuration_surface_request_schema("configuration_unknown").is_err());
     }
 }
