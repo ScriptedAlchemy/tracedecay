@@ -507,23 +507,23 @@ fn capability(
         })?,
         availability: AvailabilityContract::Available,
         binding_ids,
-        profile_eligibility: application_profile_ids(
-            if matches!(
-                spec.name,
-                "configuration_list"
-                    | "configuration_explain"
-                    | "configuration_get"
-                    | "configuration_observed_state"
-                    | "configuration_audit"
-            ) {
-                &[
-                    APPLICATION_DEFAULT_PROFILE_ID,
-                    APPLICATION_ADMINISTRATIVE_PROFILE_ID,
-                ]
-            } else {
-                &[APPLICATION_DEFAULT_PROFILE_ID]
-            },
-        )?,
+        profile_eligibility: application_profile_ids(if spec.name == "configuration_reset" {
+            &[APPLICATION_ADMINISTRATIVE_PROFILE_ID]
+        } else if matches!(
+            spec.name,
+            "configuration_list"
+                | "configuration_explain"
+                | "configuration_get"
+                | "configuration_observed_state"
+                | "configuration_audit"
+        ) {
+            &[
+                APPLICATION_DEFAULT_PROFILE_ID,
+                APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+            ]
+        } else {
+            &[APPLICATION_DEFAULT_PROFILE_ID]
+        })?,
         required_features: Vec::new(),
     })?)
 }
@@ -666,6 +666,13 @@ mod tests {
     #[test]
     fn configuration_reset_is_cli_only() {
         let contribution = configuration_surface_catalog_contribution().expect("contribution");
+        let reset_capability = contribution
+            .capabilities()
+            .iter()
+            .find(|capability| {
+                capability.capability_id().as_str() == "capability.application.configuration.reset"
+            })
+            .expect("reset capability");
         let reset = contribution
             .bindings()
             .iter()
@@ -673,6 +680,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(reset.len(), 1);
         assert_eq!(reset[0].surface(), BindingSurface::Cli);
+        assert_eq!(
+            reset_capability.profile_eligibility(),
+            &[
+                tracedecay_tool_catalog::ProfileId::new(APPLICATION_ADMINISTRATIVE_PROFILE_ID)
+                    .expect("profile ID")
+            ]
+        );
     }
 
     #[test]
