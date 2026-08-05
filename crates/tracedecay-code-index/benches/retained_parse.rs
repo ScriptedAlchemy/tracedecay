@@ -9,7 +9,7 @@ use std::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::{
-    LanguageExtractor, RustExtractor,
+    RustExtractor,
     incremental::{ParseCompleteness, ParseDocumentIdentity, ParseLimits, ParseReport, ParseReuse},
     parsed_extraction::{ParsedExtraction, ParsedExtractionDisposition},
 };
