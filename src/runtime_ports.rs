@@ -50,8 +50,17 @@ fn register_session_ports() {
     host_ports::hermes_profile_pin::register(
         tracedecay_agent_hosts::agents::hermes::read_config_pinned_project_root,
     );
-    host_ports::session_review::register(crate::hooks::schedule_user_session_review);
+    host_ports::session_review::register(schedule_user_session_review);
     host_ports::unregistered_admission::register(unregistered_admission);
+}
+
+fn schedule_user_session_review<'a>(
+    provider: &'a str,
+    session_id: Option<&'a str>,
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    Box::pin(crate::hooks::schedule_user_session_review(
+        provider, session_id,
+    ))
 }
 
 /// Builds an admission facade with no durable authority behind it.

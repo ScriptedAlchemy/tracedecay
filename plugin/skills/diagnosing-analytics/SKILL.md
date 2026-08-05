@@ -1,6 +1,6 @@
 ---
 name: diagnosing-analytics
-description: 'Use when checking TraceDecay adoption or telemetry health — usage analytics, silent hooks, stale hook logs, or empty analytics tables. Uses the analytics, doctor, and sessions CLI, never raw database queries.'
+description: 'Use when checking TraceDecay adoption or telemetry health — usage analytics, silent hooks, stale hook logs, or empty analytics tables. Uses the analytics, doctor, and sessions CLI, never private store files.'
 ---
 
 # Diagnosing TraceDecay analytics
@@ -64,8 +64,8 @@ store databases directly.
 - A zero-row `analytics_events` table inside a project store is not evidence
   that telemetry is broken — durable events live in the user-level store. Run
   `tracedecay analytics diagnostics` before concluding anything is dead.
-- Never query store databases with sqlite3 or scripts; schemas are internal.
-  The diagnostics JSON already merges every relevant source.
+- Never inspect private store files directly; their schemas are internal. The
+  diagnostics JSON already merges every relevant source.
 - If the MCP transport is down, every command above still works — they are
   plain CLI subcommands (see `tracedecay:using-the-cli`).
 

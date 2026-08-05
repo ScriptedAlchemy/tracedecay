@@ -1,6 +1,6 @@
 //! Intersection contract for the single shared `plugin/skills/` tree.
 //!
-//! Host-specific install parity stays in `plugin_skill_contract_test.rs`; this
+//! Host-specific install parity stays in the receipt-backed lifecycle suite; this
 //! file owns per-skill frontmatter, body, hygiene, and support-file rules.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

@@ -166,7 +166,8 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
         ),
     ] {
         for (order, call) in [first_call, latest_call].into_iter().enumerate() {
-            let identity = crate::hooks::NativeContextScoutLifecycleV1::new(session, call).unwrap();
+            let identity =
+                crate::hooks::NativeContextScoutLifecycleV1::new(session, call, [1; 16]).unwrap();
             let range = ObservationSourceRangeV1::new(
                 u64::try_from(order).unwrap() + 1,
                 u64::try_from(order).unwrap() + 2,

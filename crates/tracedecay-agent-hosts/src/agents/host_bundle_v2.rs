@@ -642,7 +642,7 @@ pub struct HostComponentSetLifecyclePreviewV1 {
     pub current_registration_revision: [u8; 32],
     pub artifact_state_revision: [u8; 32],
     pub component_plans: Vec<HostBundleMutationPlanV1>,
-    /// Third-party extensions the registration adapter found already claiming
+    /// Third-party extensions the registration authority found already claiming
     /// a surface this component set would register, ordered by extension id.
     pub competing_extension_claims: Vec<CompetingHostExtensionClaimV1>,
     pub confirmation_required: bool,
@@ -926,7 +926,7 @@ impl<'a> HostComponentSetTransactionV1<'a> {
 
     /// Recover whichever single component-set journal is outstanding. Callers
     /// that know the host should prefer [`Self::recover_host`], which never
-    /// hands another host's journal to this registration adapter.
+    /// hands another host's journal to this registration authority.
     pub fn recover<R: HostComponentSetRegistrationV1>(
         &mut self,
         registration: &mut R,
@@ -2691,7 +2691,7 @@ impl HostBundleWriterV1 {
     /// Execute a complete canonical host component set under one aggregate
     /// journal. Every component is preflighted and staged before any owned
     /// file is moved; receipts are published only after all artifacts and the
-    /// host registration adapter verify successfully.
+    /// host registration authority verify successfully.
     pub fn execute_component_set<
         V: HostBundleVerificationAdapterV1,
         R: HostComponentSetRegistrationV1,
@@ -3208,11 +3208,10 @@ impl HostBundleWriterV1 {
     /// Restore one journal entry to its pre-transaction state.
     ///
     /// Rollback must be able to CONVERGE when a second writer touched a
-    /// deployed path after this transaction wrote it. The compatibility
-    /// registration adapter re-runs a legacy installer over the same paths
-    /// during `apply`, so a post-apply failure routinely leaves live bytes that
-    /// are neither the backup nor this transaction's cataloged output. Before
-    /// the convergence rules below, that state was unrecoverable: rollback
+    /// deployed path after this transaction wrote it. A post-apply fault can
+    /// leave live bytes that are neither the backup nor this transaction's
+    /// cataloged output. Before the convergence rules below, that state was
+    /// unrecoverable: rollback
     /// returned `RecoveryRequired` forever, the journal stayed behind, and
     /// every later host transaction failed up front.
     ///
@@ -5661,10 +5660,9 @@ mod tests {
         );
     }
 
-    /// Stand-in for the compatibility registration adapter, which re-runs a
-    /// legacy installer over the very paths the transaction just wrote. It
-    /// rewrites one deployed path during `apply`, so artifact verification
-    /// fails afterwards and rollback has to cope with a second writer's bytes.
+    /// Stand-in for a concurrent second writer. It rewrites one deployed path
+    /// during `apply`, so artifact verification fails afterwards and rollback
+    /// has to cope with the foreign bytes.
     struct SecondWriterRegistration {
         artifact_root: PathBuf,
         relative_path: &'static str,
@@ -5693,7 +5691,7 @@ mod tests {
     }
 
     /// Install the two-component `OpenCode` set, then attempt a repair whose
-    /// registration adapter rewrites `plugins/core.json` with `second_bytes`.
+    /// registration authority rewrites `plugins/core.json` with `second_bytes`.
     /// Returns the repair outcome plus the writer for further assertions.
     fn wedge_repair_with_second_writer(
         root: &Path,

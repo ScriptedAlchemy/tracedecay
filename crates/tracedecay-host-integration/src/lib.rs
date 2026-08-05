@@ -688,6 +688,8 @@ macro_rules! host_bundle_stale_preview {
 pub enum HostBundleError {
     #[error("host capability is unsupported and must not be emulated")]
     UnsupportedCapability,
+    #[error("host-native plugin cache update is required before this lifecycle can complete")]
+    NativeUpdateRequired,
     #[error("bundle manifest schema version is unsupported")]
     UnsupportedManifestVersion,
     #[error("bundle manifest is structurally invalid")]

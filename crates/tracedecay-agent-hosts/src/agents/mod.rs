@@ -1,12 +1,12 @@
 // Rust guideline compliant 2025-10-17
 //! Agent integration layer for CLI tools (Claude Code, `OpenCode`, Codex, etc.).
 //!
-//! Each supported agent implements the [`AgentIntegration`] trait which provides
-//! `install`, `uninstall`, and `healthcheck` operations. The MCP server
-//! itself is agent-agnostic; this module handles the per-agent config
-//! plumbing (registering the MCP server, permissions, hooks, prompt rules).
+//! Each supported agent implements the [`AgentIntegration`] trait for native
+//! registration, health, and managed exports. Receipt-backed catalog
+//! transactions own installation and removal.
 
 pub mod antigravity;
+mod bundle_identity;
 pub mod claude;
 pub mod cline;
 pub mod codex;
@@ -36,9 +36,7 @@ pub mod vibe;
 pub mod zed;
 
 use std::cell::RefCell;
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -49,6 +47,10 @@ use crate::errors::TraceDecayError;
 use crate::ports::mcp_tools::advertised_tools;
 
 pub use antigravity::AntigravityIntegration;
+pub(crate) use bundle_identity::{
+    is_auto_discovered_entrypoint, observed_bundle_content_digest,
+    observed_bundle_discovery_matches, rendered_bundle_content_digest,
+};
 pub use claude::ClaudeIntegration;
 pub use cline::ClineIntegration;
 pub use codex::CodexIntegration;
@@ -93,6 +95,11 @@ pub(crate) fn remove_managed_skill_prompt_index(
     )
 }
 
+pub(crate) fn managed_memory_digest_targets_path(profile_home: &Path) -> PathBuf {
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    crate::automation::memory_digest::digest_targets_path(&profile_root)
+}
+
 /// Per-agent outcome of a managed-skill export refresh, keyed by agent id.
 /// `error` carries the failure message when the refresh failed; `exports`
 /// lists the destinations that were (re)written on success.
@@ -111,7 +118,7 @@ pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> boo
 /// Re-runs the managed-skill overlay/prompt-index export for every agent
 /// integration that already has tracedecay installed under `home`, so a
 /// lifecycle change (approve/disable/archive/restore) deploys without
-/// waiting for the next `tracedecay install` / `update-plugin`.
+/// waiting for the next catalog lifecycle or `update-plugin` pass.
 ///
 /// Failures are collected per agent instead of aborting the sweep: a broken
 /// export for one host must not block the others (or the lifecycle action
@@ -192,53 +199,14 @@ pub trait AgentIntegration {
     /// CLI identifier used in `--agent <id>` (e.g. "claude").
     fn id(&self) -> &'static str;
 
-    /// Register MCP server, permissions, hooks, and prompt rules.
-    fn install(&self, ctx: &InstallContext) -> Result<()>;
-
     /// Returns true when this agent supports project-local configuration.
     fn supports_local_install(&self) -> bool {
         false
     }
 
-    /// Register MCP server, permissions, hooks, and prompt rules under a
-    /// project/workspace directory instead of the user's global config.
-    fn install_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
-        Err(TraceDecayError::Config {
-            message: format!(
-                "{} does not support `tracedecay install --local` yet. \
-                 Run `tracedecay install --agent {}` for a global install.",
-                self.name(),
-                self.id()
-            ),
-        })
-    }
-
-    /// Remove only the project-local registration and generated assets owned
-    /// by [`AgentIntegration::install_local`].
-    fn uninstall_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
-        Err(TraceDecayError::Config {
-            message: format!("{} does not support project-local uninstall", self.name()),
-        })
-    }
-
-    /// Optional hook run after a successful [`AgentIntegration::install`] or
-    /// [`AgentIntegration::install_local`]. The default is a no-op.
-    ///
-    /// Agents that need to react to their own installation override this — for
-    /// example, Cursor registers the project's current git branch for
-    /// tracedecay indexing. Keeping per-agent post-install behavior behind the
-    /// trait means the `install` / `reinstall` command flow never has to
-    /// special-case individual agents by id.
-    fn post_install<'a>(
-        &'a self,
-        _project_path: Option<&'a Path>,
-    ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
-        Box::pin(std::future::ready(()))
-    }
-
     /// Validate non-interactive install readiness without changing host state.
     ///
-    /// This is the pre-migration counterpart to
+    /// This is the read-only counterpart to
     /// [`AgentIntegration::prepare_non_interactive_install`]. Hosts that need
     /// manual activation report the same typed deferral without staging files.
     fn preflight_non_interactive_install(
@@ -297,8 +265,8 @@ pub trait AgentIntegration {
     /// empty list for agents that either do not distribute managed skills
     /// or have no detected tracedecay installation under `home`.
     ///
-    /// Implementors must never create a new installation here — only
-    /// refresh artifacts that `install` already wrote.
+    /// Implementors must never create a new installation here — only refresh
+    /// artifacts already owned by a catalog receipt.
     fn export_managed_skills(
         &self,
         _home: &Path,
@@ -307,9 +275,9 @@ pub trait AgentIntegration {
         Ok(Vec::new())
     }
 
-    /// Re-export active managed skills into destinations created by
-    /// [`AgentIntegration::install_local`] under a project/workspace. The
-    /// default is a no-op for agents without project-local skill exports.
+    /// Re-export active managed skills into receipt-owned destinations under a
+    /// project/workspace. The default is a no-op for agents without
+    /// project-local skill exports.
     fn export_managed_skills_local(
         &self,
         _project_root: &Path,
@@ -317,9 +285,6 @@ pub trait AgentIntegration {
     ) -> Result<Vec<SkillInstallSummary>> {
         Ok(Vec::new())
     }
-
-    /// Remove everything installed by [`AgentIntegration::install`].
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()>;
 
     /// Verify installation health (replaces agent-specific doctor checks).
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext);
@@ -347,6 +312,18 @@ pub trait AgentIntegration {
         host_bundle_v2::HostBundleRegistrationStateV1::Missing
     }
 
+    /// Registration state for a concrete lifecycle policy. Most hosts ignore
+    /// install policy; Hermes uses it to distinguish dashboard-enabled and
+    /// dashboard-disabled registrations without weakening doctor readback.
+    fn host_component_registration_for_lifecycle(
+        &self,
+        component: host_bundle_v2::HostBundleComponentV1,
+        health: &HealthcheckContext,
+        _install: &InstallContext,
+    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
+        self.host_component_registration(component, health)
+    }
+
     /// Returns true if this agent appears to be installed on the system
     /// (its config directory exists).
     fn is_detected(&self, _home: &Path) -> bool {
@@ -359,8 +336,8 @@ pub trait AgentIntegration {
         false
     }
 
-    /// The single config file this agent rewrites on install / uninstall, if
-    /// any. Returning `Some(path)` lets tests (and any future external tool)
+    /// The primary native config file this agent's catalog registration
+    /// projection owns, if any. Returning `Some(path)` lets tests and lifecycle tools
     /// ask the integration for its own path instead of re-deriving it via
     /// `#[cfg(target_os = ...)]`, which is how the v4.3.15 zed regression
     /// test silently disagreed with the Windows install path. Implementors
@@ -373,7 +350,7 @@ pub trait AgentIntegration {
 
     /// Every mutable host registration/configuration path participating in an
     /// aggregate component-set lifecycle. The transaction stages backups for
-    /// all returned paths before invoking the host registration adapter.
+    /// all returned paths before invoking the host registration authority.
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
         self.primary_config_path(home).into_iter().collect()
     }
@@ -389,13 +366,33 @@ pub trait AgentIntegration {
         self.host_registration_paths(home)
     }
 
-    fn host_component_registration_paths_at(
+    /// Fallible exact registration inventory used by the transaction backup.
+    ///
+    /// Hosts whose paths depend on validated profile data override this rather
+    /// than silently dropping files from rollback ownership.
+    fn host_component_registration_paths_checked(
         &self,
         components: &[host_bundle_v2::HostBundleComponentV1],
         home: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(self.host_component_registration_paths(components, home))
+    }
+
+    /// Exact project-scoped paths the catalog registration projection may
+    /// create, replace, or remove. The aggregate transaction snapshots this
+    /// complete set before invoking the projection.
+    fn project_host_component_registration_paths(
+        &self,
+        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _home: &Path,
         _project_path: &Path,
-    ) -> Vec<PathBuf> {
-        self.host_component_registration_paths(components, home)
+    ) -> Result<Vec<PathBuf>> {
+        Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "{} has no catalog-backed project registration projection",
+                self.name()
+            ),
+        })
     }
 
     /// Re-activate host-native registration for already-deployed component
@@ -405,8 +402,8 @@ pub trait AgentIntegration {
     }
 
     /// Re-activate only the native registration owned by the selected
-    /// receipt-backed components. The default keeps compatibility for hosts
-    /// whose only registered component is Core.
+    /// receipt-backed components. The default forwards Core to the host's
+    /// deployed registration boundary.
     fn activate_deployed_host_component_registration(
         &self,
         components: &[host_bundle_v2::HostBundleComponentV1],
@@ -438,6 +435,40 @@ pub trait AgentIntegration {
         } else {
             Ok(())
         }
+    }
+
+    /// Apply only this host's project-scoped registration projection.
+    ///
+    /// The component-set transaction calls this boundary after it has staged
+    /// exact registration backups. Implementations must mutate only bounded
+    /// project registration paths; they must not install global assets.
+    fn activate_project_host_component_registration(
+        &self,
+        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _ctx: &InstallContext,
+        _project_path: &Path,
+    ) -> Result<()> {
+        Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "{} has no catalog-backed project registration projection",
+                self.name()
+            ),
+        })
+    }
+
+    /// Remove only this host's project-scoped registration projection.
+    fn deactivate_project_host_component_registration(
+        &self,
+        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _ctx: &InstallContext,
+        _project_path: &Path,
+    ) -> Result<()> {
+        Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "{} has no catalog-backed project registration projection",
+                self.name()
+            ),
+        })
     }
 }
 
@@ -476,7 +507,7 @@ pub enum UpdatePluginOutcome {
     DeferredUserAction(DeferredUserAction),
 }
 
-/// Context passed to [`AgentIntegration::install`] and [`AgentIntegration::uninstall`].
+/// Context passed to catalog-backed host registration and refresh operations.
 pub struct InstallContext {
     pub home: PathBuf,
     pub tracedecay_bin: String,
@@ -1570,9 +1601,9 @@ Pass schema fields inside the JSON object; never invent per-key flags or enum va
 Fall back to that CLI instead of querying `.tracedecay` databases directly or abandoning tracedecay."
 );
 
-/// True when a `SKILL.md`'s contents carry a tracedecay authorship marker,
-/// marking the skill dir as tracedecay-owned (and therefore safe to sweep when
-/// retired). Shared by the Cursor and Codex plugin-dir sweeps.
+/// True when a `SKILL.md` carries a TraceDecay authorship marker. Retired
+/// plugin artifacts use this narrow check so same-name user workflows remain
+/// outside TraceDecay's cleanup authority.
 pub(crate) fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
     contents.lines().map(str::trim).any(|line| {
         line.starts_with("name: tracedecay:")
@@ -2022,151 +2053,6 @@ pub fn copilot_cli_dir(home: &Path) -> PathBuf {
 /// Canonical copy lives in `tracedecay_sessions::host_ports` (lower in the
 /// dependency graph; see SEAMS.md).
 pub use tracedecay_sessions::host_ports::kiro_data_dir;
-
-/// Returns agent IDs that have tracedecay configured under `home` but are
-/// absent from `current`. Pure — does no I/O on the config file.
-pub fn detect_missing_installed_agents(home: &Path, current: &[String]) -> Vec<String> {
-    let mut additions = Vec::new();
-    for ag in all_integrations() {
-        let id = ag.id().to_string();
-        if ag.has_tracedecay(home) && !current.contains(&id) {
-            additions.push(id);
-        }
-    }
-    additions
-}
-
-/// The tracked-agent list this crate backfills, as a port over
-/// `tracedecay_usecases::user_config::UserConfig`.
-///
-/// `UserConfig` stays in `tracedecay-usecases` — it is the whole user-level
-/// profile, most of which host detection has no business seeing. The
-/// backfill below needs exactly three operations, so it takes them as a port
-/// rather than the concrete type.
-///
-/// This crate implements the port for `UserConfig` directly below (it
-/// already depends on `tracedecay-usecases`); the root crate's
-/// `user_config::UserConfig` is a re-export of the same type, so the impl
-/// applies there too without any root-side wiring.
-pub trait InstalledAgentsConfig {
-    /// Agent ids currently recorded as installed.
-    fn installed_agents(&self) -> &[String];
-
-    /// Appends newly detected agent ids to the tracked list.
-    fn extend_installed_agents(&mut self, additions: Vec<String>);
-
-    /// Persists the config. Failures are logged, never fatal: a lost backfill
-    /// is retried on the next run.
-    fn save(&self) -> Result<()>;
-}
-
-impl InstalledAgentsConfig for tracedecay_usecases::user_config::UserConfig {
-    fn installed_agents(&self) -> &[String] {
-        &self.installed_agents
-    }
-
-    fn extend_installed_agents(&mut self, additions: Vec<String>) {
-        self.installed_agents.extend(additions);
-    }
-
-    fn save(&self) -> Result<()> {
-        tracedecay_usecases::user_config::UserConfig::save(self).map_err(|error| {
-            TraceDecayError::Config {
-                message: error.to_string(),
-            }
-        })
-    }
-}
-
-/// Backfill `installed_agents` for users upgrading from older versions.
-///
-/// Always scans every agent and adds any that have tracedecay configured
-/// (e.g. an `~/.claude.json` MCP server entry) but are absent from
-/// `installed_agents`. Without the additive scan, a user who installed
-/// agent A first and agent B later would have only A in the list, so
-/// `tracedecay reinstall` would silently skip B and its tool permissions
-/// would never be refreshed when new tools ship.
-pub fn migrate_installed_agents(home: &Path, config: &mut dyn InstalledAgentsConfig) {
-    let additions = detect_missing_installed_agents(home, config.installed_agents());
-    if additions.is_empty() {
-        return;
-    }
-    config.extend_installed_agents(additions);
-    if let Err(err) = config.save() {
-        tracing::warn!(%err, "could not save tracedecay config");
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod migrate_tests {
-    use super::*;
-    use std::fs;
-
-    /// Writes a minimal `~/.claude.json` so `ClaudeIntegration::has_tracedecay`
-    /// returns true for the given fake home.
-    fn install_claude_marker(home: &Path) {
-        let claude_json = home.join(".claude.json");
-        fs::write(
-            &claude_json,
-            r#"{"mcpServers":{"tracedecay":{"command":"tracedecay","args":["serve"]}}}"#,
-        )
-        .unwrap();
-    }
-
-    /// Regression test for the bug where `tracedecay reinstall` skipped Claude
-    /// when another agent (e.g. copilot) was already in `installed_agents`.
-    /// `migrate_installed_agents` previously returned early as soon as the
-    /// list was non-empty, so Claude never got tracked and its tool perms
-    /// never refreshed.
-    #[test]
-    fn detects_claude_when_another_agent_already_tracked() {
-        let dir = tempfile::tempdir().unwrap();
-        install_claude_marker(dir.path());
-
-        let current = vec!["copilot".to_string()];
-        let additions = detect_missing_installed_agents(dir.path(), &current);
-
-        assert!(
-            additions.iter().any(|id| id == "claude"),
-            "claude must be detected even when copilot is already in the list, got {additions:?}"
-        );
-    }
-
-    #[test]
-    fn detects_claude_when_list_is_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        install_claude_marker(dir.path());
-
-        let additions = detect_missing_installed_agents(dir.path(), &[]);
-
-        assert!(additions.iter().any(|id| id == "claude"));
-    }
-
-    #[test]
-    fn no_additions_when_claude_already_tracked() {
-        let dir = tempfile::tempdir().unwrap();
-        install_claude_marker(dir.path());
-
-        let current = vec!["claude".to_string()];
-        let additions = detect_missing_installed_agents(dir.path(), &current);
-
-        assert!(
-            !additions.contains(&"claude".to_string()),
-            "claude is already tracked; must not be re-added, got {additions:?}"
-        );
-    }
-
-    #[test]
-    fn empty_home_yields_no_additions() {
-        let dir = tempfile::tempdir().unwrap();
-        let additions = detect_missing_installed_agents(dir.path(), &[]);
-        assert!(
-            additions.is_empty(),
-            "no agent files in home → no additions, got {additions:?}"
-        );
-    }
-}
 
 /// Interactively pick which agents to install/uninstall.
 ///

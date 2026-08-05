@@ -138,6 +138,27 @@ pub struct HookReplayBatchV1 {
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum HookSpoolResetReasonV1 {
+    #[error("metadata revision {found} does not match final revision {expected}")]
+    MetadataVersion { found: u16, expected: u16 },
+    #[error("metadata does not match the exact final shape")]
+    MetadataShape,
+    #[error(
+        "frame format {found_magic:?}/{found_version} does not match final format {expected_magic:?}/{expected_version}"
+    )]
+    FrameFormat {
+        found_magic: [u8; 4],
+        found_version: u16,
+        expected_magic: [u8; 4],
+        expected_version: u16,
+    },
+    #[error("envelope revision {found} does not match final revision {expected}")]
+    EnvelopeVersion { found: u16, expected: u16 },
+    #[error("envelope does not match the exact final shape")]
+    EnvelopeShape,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum HookSpoolError {
     #[error("hook spool filesystem operation failed")]
     Io,
@@ -151,8 +172,8 @@ pub enum HookSpoolError {
     WriterLeaseHeld,
     #[error("hook spool writer lease was lost or expired")]
     WriterLeaseLost,
-    #[error("hook spool format version is unsupported")]
-    UnsupportedVersion,
+    #[error("hook spool must be reset or recreated: {reason}")]
+    ResetRequired { reason: HookSpoolResetReasonV1 },
     #[error("hook spool metadata is malformed or internally inconsistent")]
     MetadataCorrupted,
     #[error("hook spool publication was interrupted; reopen is required before another mutation")]

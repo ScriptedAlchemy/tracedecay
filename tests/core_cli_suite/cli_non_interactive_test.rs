@@ -602,7 +602,7 @@ fn install_codex_automation_enables_tracedecay_daemon_loop_noninteractively() {
 
     assert!(
         home.path()
-            .join("plugins/tracedecay/.codex-plugin/plugin.json")
+            .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json")
             .is_file(),
         "install --agent codex should still install the Codex plugin bundle"
     );
