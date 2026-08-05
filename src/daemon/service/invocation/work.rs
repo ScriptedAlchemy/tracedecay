@@ -19,196 +19,19 @@ pub(super) fn concealed_application_problem(request_id: String) -> DaemonInvocat
     )
 }
 
-pub(super) fn execute_work_application(
-    registered: RegisteredWorkRuntime,
-    request_id: String,
-    request: WorkApplicationInvocationV1,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-    cancellation: CancellationContext,
-) -> DaemonInvocationResponse {
-    let operation_key = request.operation_key();
-    let Some((_, capability, use_case)) = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
-        .iter()
-        .find(|(operation, _, _)| *operation == operation_key)
-    else {
-        return DaemonInvocationResponse::problem(
-            request_id,
-            DaemonInvocationProblem::InvalidRequest,
-        );
-    };
-    let (context, canonical_request_id, use_case) = match work_request_context(
-        &registered,
-        &request_id,
-        capability,
-        use_case,
-        observed_at,
-        deadline.clone(),
-        cancellation,
-    ) {
-        Ok(context) => context,
-        Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
-    };
-    let input_digest = match canonical_sha256(&request) {
-        Ok(digest) => digest,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::InvalidRequest,
-            );
-        }
-    };
-    let services = match registered.database.work_application_services() {
-        Ok(services) => services,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        }
-    };
-    match request {
-        WorkApplicationInvocationV1::Snapshot(request) => complete_work_read(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services
-                .projections()
-                .snapshot(&context, request.page_size)
-                .map_err(work_projection_problem),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::Snapshot,
-        ),
-        WorkApplicationInvocationV1::Delta(request) => complete_work_read(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services
-                .projections()
-                .delta(&context, &request.cursor, request.page_size)
-                .map_err(work_projection_problem),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::Delta,
-        ),
-        WorkApplicationInvocationV1::Create(command) => complete_work_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services.commands().create(&context, command),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::Create,
-        ),
-        WorkApplicationInvocationV1::ReplanDependencies(command) => complete_work_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services.commands().replan_dependencies(&context, command),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::ReplanDependencies,
-        ),
-        WorkApplicationInvocationV1::ReviewProposal(request) => complete_work_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services.commands().review_proposal(&context, request),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::ReviewProposal,
-        ),
-        WorkApplicationInvocationV1::AcceptProposal(command) => complete_work_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services.commands().accept_proposal(&context, command),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::AcceptProposal,
-        ),
-        WorkApplicationInvocationV1::AdmitExecution(command) => complete_work_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services.commands().admit_execution(&context, command),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::AdmitExecution,
-        ),
-        WorkApplicationInvocationV1::AttachRuntimeEvidence(command) => complete_work_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services
-                .commands()
-                .attach_runtime_evidence(&context, command),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::AttachRuntimeEvidence,
-        ),
-        WorkApplicationInvocationV1::AcceptTask(command) => complete_work_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services.commands().accept_task(&context, command),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::AcceptTask,
-        ),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_workflow_application(
     registered: RegisteredWorkRuntime,
-    project_root: &Path,
     request_id: String,
-    request: WorkflowApplicationInvocationV1,
-    observed_at: UtcMicros,
+    request: WorkflowApplicationInvocation,
+    _observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
+    let observed_at = crate::daemon_client::invocation_now_micros();
     let operation_key = request.operation_key();
     let Some((_, capability, use_case)) =
-        tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS_V1
+        tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS
             .iter()
             .find(|(operation, _, _)| *operation == operation_key)
     else {
@@ -240,16 +63,39 @@ pub(super) async fn execute_workflow_application(
     };
     let services = match registered.database.workflow_application_services() {
         Ok(services) => services,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
+        Err(error) => {
+            return DaemonInvocationResponse::problem(request_id, workflow_storage_problem(&error));
         }
     };
 
     match request {
-        WorkflowApplicationInvocationV1::RegisterDefinition(request) => complete_workflow_effect(
+        WorkflowApplicationInvocation::RegisterDefinition(request) => {
+            let prepared =
+                match prepare_workflow_definition_registration(&context, request.definition) {
+                    Ok(definition) => WorkflowEffectPreparedV1::register_definition(
+                        input_digest.clone(),
+                        definition,
+                    ),
+                    Err(error) => WorkflowEffectPreparedV1::problem(
+                        input_digest.clone(),
+                        workflow_effect_problem(workflow_coordination_problem(error)),
+                    ),
+                };
+            execute_journaled_workflow_effect(
+                &registered,
+                services.effects(),
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                prepared,
+                observed_at,
+                deadline,
+            )
+        }
+        WorkflowApplicationInvocation::ValidateDefinition(request) => complete_workflow_read(
             &registered,
             request_id,
             &context,
@@ -259,13 +105,13 @@ pub(super) async fn execute_workflow_application(
             input_digest,
             services
                 .definitions()
-                .register(request.definition)
+                .validate(request.definition)
                 .map_err(workflow_coordination_problem),
             observed_at,
             deadline,
-            WorkflowApplicationOutcomeV1::RegisterDefinition,
+            WorkflowApplicationOutcome::ValidateDefinition,
         ),
-        WorkflowApplicationInvocationV1::ActivateDefinition(request) => complete_workflow_effect(
+        WorkflowApplicationInvocation::GetDefinition(request) => complete_workflow_read(
             &registered,
             request_id,
             &context,
@@ -275,106 +121,123 @@ pub(super) async fn execute_workflow_application(
             input_digest,
             services
                 .definitions()
-                .activate(
+                .get(&request.definition_id, request.definition_version)
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::GetDefinition,
+        ),
+        WorkflowApplicationInvocation::ListDefinitions(_) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .list()
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::ListDefinitions,
+        ),
+        WorkflowApplicationInvocation::DefinitionHistory(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .history(&request.definition_id)
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::DefinitionHistory,
+        ),
+        WorkflowApplicationInvocation::DiffDefinition(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .diff(
                     &request.definition_id,
-                    request.expected_active_version,
-                    request.replacement_version,
+                    request.from_version,
+                    request.to_version,
                 )
                 .map_err(workflow_coordination_problem),
             observed_at,
             deadline,
-            WorkflowApplicationOutcomeV1::ActivateDefinition,
+            WorkflowApplicationOutcome::DiffDefinition,
         ),
-        WorkflowApplicationInvocationV1::ExecuteFanOut(request) => {
-            let request = *request;
-            if request.provider.deadline > deadline.expires_at {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-            let result = execute_canonical_workflow(
-                &registered.database,
-                &registered.runtime,
-                &context,
-                project_root,
-                request,
-            )
-            .await
-            .map_err(workflow_runtime_problem);
-            complete_workflow_effect(
+        WorkflowApplicationInvocation::HandoffIssue(request) => {
+            let prepared = match TaskHandoffToken::new(request.secret).and_then(|token| {
+                prepare_task_handoff_issue(&context, request.scope, &token, observed_at)
+            }) {
+                Ok(grant) => WorkflowEffectPreparedV1::handoff_issue(input_digest.clone(), grant),
+                Err(error) => WorkflowEffectPreparedV1::problem(
+                    input_digest.clone(),
+                    workflow_effect_problem(task_handoff_problem(error)),
+                ),
+            };
+            execute_journaled_workflow_effect(
                 &registered,
+                services.effects(),
                 request_id,
                 &context,
                 canonical_request_id,
                 operation_key,
                 use_case,
                 input_digest,
-                result,
+                prepared,
                 observed_at,
                 deadline,
-                WorkflowApplicationOutcomeV1::ExecuteFanOut,
             )
         }
-        WorkflowApplicationInvocationV1::HandoffIssue(request) => {
-            let result = TaskHandoffToken::new(request.secret)
-                .map_err(task_handoff_problem)
-                .and_then(|token| {
-                    services
-                        .handoffs()
-                        .issue(
-                            &request.issuer,
-                            request.scope,
-                            &token,
-                            request.expires_at,
-                            request.issued_at,
-                        )
-                        .map_err(task_handoff_problem)
-                });
-            complete_workflow_effect(
-                &registered,
-                request_id,
-                &context,
-                canonical_request_id,
-                operation_key,
-                use_case,
-                input_digest,
-                result,
-                observed_at,
-                deadline,
-                WorkflowApplicationOutcomeV1::HandoffIssue,
-            )
-        }
-        WorkflowApplicationInvocationV1::HandoffRedeem(request) => {
+        WorkflowApplicationInvocation::HandoffRedeem(request) => {
             let scope = request.expected_scope;
-            let result = TaskHandoffToken::new(request.secret)
-                .map_err(task_handoff_problem)
-                .and_then(|token| {
-                    services
-                        .handoffs()
-                        .redeem(&token, &scope, &request.redeemer, request.consumed_at)
-                        .map_err(task_handoff_problem)
-                })
-                .map(|()| TaskHandoffRedeemedV1 { scope });
-            complete_workflow_effect(
+            let prepared = match TaskHandoffToken::new(request.secret)
+                .and_then(|token| prepare_task_handoff_redeem(&context, &token, &scope))
+            {
+                Ok(token_digest) => WorkflowEffectPreparedV1::handoff_redeem(
+                    input_digest.clone(),
+                    token_digest,
+                    scope,
+                    observed_at,
+                ),
+                Err(error) => WorkflowEffectPreparedV1::problem(
+                    input_digest.clone(),
+                    workflow_effect_problem(task_handoff_problem(error)),
+                ),
+            };
+            execute_journaled_workflow_effect(
                 &registered,
+                services.effects(),
                 request_id,
                 &context,
                 canonical_request_id,
                 operation_key,
                 use_case,
                 input_digest,
-                result,
+                prepared,
                 observed_at,
                 deadline,
-                WorkflowApplicationOutcomeV1::HandoffRedeem,
             )
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn complete_workflow_effect<T>(
+fn complete_workflow_read<T>(
     registered: &RegisteredWorkRuntime,
     request_id: String,
     context: &RequestContext,
@@ -385,7 +248,7 @@ fn complete_workflow_effect<T>(
     result: Result<T, DaemonInvocationProblem>,
     observed_at: UtcMicros,
     deadline: Deadline,
-    wrap: fn(ApplicationOutcome<T>) -> WorkflowApplicationOutcomeV1,
+    wrap: fn(ApplicationOutcome<T>) -> WorkflowApplicationOutcome,
 ) -> DaemonInvocationResponse
 where
     T: Serialize,
@@ -394,7 +257,7 @@ where
         Ok(result) => result,
         Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
     };
-    let outcome = match work_effect(
+    let outcome = match work_evidence_packet(
         registered,
         context,
         canonical_request_id,
@@ -405,7 +268,7 @@ where
         observed_at,
         deadline,
     ) {
-        Ok(outcome) => wrap(outcome),
+        Ok(evidence) => wrap(ApplicationOutcome::Evidence(evidence)),
         Err(_) => {
             return DaemonInvocationResponse::problem(
                 request_id,
@@ -422,16 +285,305 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_journaled_workflow_effect(
+    registered: &RegisteredWorkRuntime,
+    authority: &impl WorkflowEffectAuthorityPortV1,
+    request_id: String,
+    context: &RequestContext,
+    canonical_request_id: RequestId,
+    operation_key: &str,
+    use_case: UseCaseId,
+    input_digest: ManifestDigest,
+    prepared: WorkflowEffectPreparedV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+) -> DaemonInvocationResponse {
+    let operation = match workflow_effect_operation(operation_key) {
+        Some(operation) => operation,
+        None => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::InvalidRequest,
+            );
+        }
+    };
+    let receipt_context = match workflow_effect_receipt_context(
+        registered,
+        context,
+        operation_key,
+        use_case,
+        &input_digest,
+        observed_at,
+    ) {
+        Ok(receipt_context) => receipt_context,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    let receipt_binding_digest = match receipt_context.binding_digest() {
+        Ok(digest) => digest,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    let idempotency_digest = match canonical_sha256(&(
+        "tracedecay.daemon.workflow-effect-idempotency.v1",
+        operation_key,
+        &input_digest,
+        context.actor(),
+        context.scope(),
+        receipt_binding_digest,
+    )) {
+        Ok(digest) => digest,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    let suffix = match idempotency_digest.as_str().strip_prefix("sha256:") {
+        Some(suffix) => suffix,
+        None => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    let idempotency_key = match IdempotencyKey::new(format!("workflow.{operation_key}.{suffix}")) {
+        Ok(key) => key,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    let identity = match WorkflowEffectIdentityV1::new(
+        operation,
+        idempotency_key,
+        canonical_request_id,
+        context.actor().clone(),
+        context.scope().clone(),
+        input_digest,
+        observed_at,
+        deadline,
+        receipt_context,
+    ) {
+        Ok(identity) => identity,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    let prepared = if identity.deadline().is_elapsed_at(current_micros()) {
+        WorkflowEffectPreparedV1::problem(
+            identity.input_digest().clone(),
+            WorkflowEffectProblemV1::TimedOut,
+        )
+    } else {
+        prepared
+    };
+    let record = match authority.execute_effect(&identity, &prepared, current_micros()) {
+        Ok(record) => record,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    let Some(terminal) = record.terminal() else {
+        return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
+    };
+    let outcome = match workflow_effect_outcome(terminal) {
+        Ok(outcome) => outcome,
+        Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+    };
+    DaemonInvocationResponse::with_outcome(
+        request_id,
+        DaemonInvocationOutcome::WorkflowApplication {
+            scope: context.scope().clone(),
+            outcome,
+        },
+    )
+}
+
+fn workflow_effect_receipt_context(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    operation_key: &str,
+    use_case: UseCaseId,
+    input_digest: &ManifestDigest,
+    observed_at: UtcMicros,
+) -> Result<WorkflowEffectReceiptContextV1, ApplicationContractError> {
+    let policy_digest = canonical_sha256(&(
+        "tracedecay.daemon.work-policy.v1",
+        &registered.policy_digest,
+        &registered.grant.digest,
+        operation_key,
+        &use_case,
+    ))?;
+    let policy = PolicyDecisionRef::new(
+        format!("policy.daemon.work.{operation_key}.v1"),
+        1,
+        policy_digest,
+        ComponentVersion::new("tracedecay.daemon.work-policy.v1").map_err(|_| {
+            ApplicationContractError::Inconsistent {
+                field: "Work policy evaluator",
+            }
+        })?,
+    )?;
+    let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
+    let suffix = input_digest.as_str().strip_prefix("sha256:").ok_or(
+        ApplicationContractError::Inconsistent {
+            field: "Work input digest",
+        },
+    )?;
+    let expected_state = canonical_sha256(&(
+        "tracedecay.work.expected-state.v1",
+        operation_key,
+        input_digest,
+    ))
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "Work expected state",
+    })?;
+    let catalog_digest =
+        canonical_sha256(&("tracedecay.work.catalog.v1", operation_key)).map_err(|_| {
+            ApplicationContractError::Inconsistent {
+                field: "Work catalog digest",
+            }
+        })?;
+    let privacy_digest = canonical_sha256(&(
+        "tracedecay.work.privacy.v1",
+        context.scope(),
+        context.grant().disclosure,
+    ))
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "Work privacy digest",
+    })?;
+    Ok(WorkflowEffectReceiptContextV1::new(
+        use_case,
+        EffectId::new(format!("effect.work.{operation_key}.{suffix}"))?,
+        authority,
+        expected_state,
+        registered.configuration_digest.clone(),
+        catalog_digest,
+        privacy_digest,
+    ))
+}
+
+fn workflow_effect_operation(operation_key: &str) -> Option<WorkflowEffectOperationV1> {
+    match operation_key {
+        "register_definition" => Some(WorkflowEffectOperationV1::RegisterDefinition),
+        "handoff_issue" => Some(WorkflowEffectOperationV1::HandoffIssue),
+        "handoff_redeem" => Some(WorkflowEffectOperationV1::HandoffRedeem),
+        _ => None,
+    }
+}
+
+fn workflow_storage_problem(error: &crate::errors::TraceDecayError) -> DaemonInvocationProblem {
+    match error {
+        crate::errors::TraceDecayError::ResetRequired { authority, .. }
+            if authority == "workflow" =>
+        {
+            DaemonInvocationProblem::ResetRequired
+        }
+        _ => DaemonInvocationProblem::Unavailable,
+    }
+}
+
+fn workflow_effect_problem(problem: DaemonInvocationProblem) -> WorkflowEffectProblemV1 {
+    match problem {
+        DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+            WorkflowEffectProblemV1::NotFoundOrNotAuthorized
+        }
+        DaemonInvocationProblem::InvalidRequest
+        | DaemonInvocationProblem::UnsupportedRevision
+        | DaemonInvocationProblem::ResetRequired => WorkflowEffectProblemV1::InvalidRequest,
+        DaemonInvocationProblem::Unavailable => WorkflowEffectProblemV1::Conflict,
+    }
+}
+
+fn workflow_effect_daemon_problem(problem: WorkflowEffectProblemV1) -> DaemonInvocationProblem {
+    match problem {
+        WorkflowEffectProblemV1::NotFoundOrNotAuthorized => {
+            DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+        WorkflowEffectProblemV1::InvalidRequest
+        | WorkflowEffectProblemV1::Conflict
+        | WorkflowEffectProblemV1::TimedOut => DaemonInvocationProblem::InvalidRequest,
+    }
+}
+
+fn workflow_effect_outcome(
+    terminal: &WorkflowEffectTerminalV1,
+) -> Result<WorkflowApplicationOutcome, DaemonInvocationProblem> {
+    match terminal.outcome() {
+        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::TimedOut) => {
+            let termination = EffectTermination::TimedOut;
+            match terminal.identity().operation() {
+                WorkflowEffectOperationV1::RegisterDefinition => work_effect::<
+                    tracedecay_domain::WorkflowDefinition,
+                >(
+                    terminal, None, termination
+                )
+                .map(WorkflowApplicationOutcome::RegisterDefinition)
+                .map_err(|_| DaemonInvocationProblem::Unavailable),
+                WorkflowEffectOperationV1::HandoffIssue => {
+                    work_effect::<TaskHandoffGrant>(terminal, None, termination)
+                        .map(WorkflowApplicationOutcome::HandoffIssue)
+                        .map_err(|_| DaemonInvocationProblem::Unavailable)
+                }
+                WorkflowEffectOperationV1::HandoffRedeem => {
+                    work_effect::<TaskHandoffRedeemed>(terminal, None, termination)
+                        .map(WorkflowApplicationOutcome::HandoffRedeem)
+                        .map_err(|_| DaemonInvocationProblem::Unavailable)
+                }
+            }
+        }
+        WorkflowEffectOutcomeV1::Problem(problem) => Err(workflow_effect_daemon_problem(*problem)),
+        WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(result)) => {
+            work_effect(terminal, Some(result.clone()), EffectTermination::Completed)
+                .map(WorkflowApplicationOutcome::RegisterDefinition)
+                .map_err(|_| DaemonInvocationProblem::Unavailable)
+        }
+        WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(result)) => {
+            work_effect(terminal, Some(result.clone()), EffectTermination::Completed)
+                .map(WorkflowApplicationOutcome::HandoffIssue)
+                .map_err(|_| DaemonInvocationProblem::Unavailable)
+        }
+        WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffRedeemed(result)) => {
+            work_effect(terminal, Some(result.clone()), EffectTermination::Completed)
+                .map(WorkflowApplicationOutcome::HandoffRedeem)
+                .map_err(|_| DaemonInvocationProblem::Unavailable)
+        }
+    }
+}
+
 fn workflow_coordination_problem(error: WorkflowCoordinationError) -> DaemonInvocationProblem {
     match error {
         WorkflowCoordinationError::AuthorityUnavailable(_) => DaemonInvocationProblem::Unavailable,
         WorkflowCoordinationError::DefinitionNotFound => {
             DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
+        WorkflowCoordinationError::ScopeMismatch => {
+            DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
         WorkflowCoordinationError::InvalidDefinition
-        | WorkflowCoordinationError::ImmutableDefinitionConflict
-        | WorkflowCoordinationError::UnsupportedOperation
-        | WorkflowCoordinationError::StaleActivation => DaemonInvocationProblem::InvalidRequest,
+        | WorkflowCoordinationError::ImmutableDefinitionConflict => {
+            DaemonInvocationProblem::InvalidRequest
+        }
     }
 }
 
@@ -451,17 +603,8 @@ fn task_handoff_problem(error: TaskHandoffError) -> DaemonInvocationProblem {
     }
 }
 
-fn workflow_runtime_problem(error: WorkflowFanOutRuntimeError) -> DaemonInvocationProblem {
-    match error {
-        WorkflowFanOutRuntimeError::AuthorityUnavailable(_)
-        | WorkflowFanOutRuntimeError::ChildUnavailable(_) => DaemonInvocationProblem::Unavailable,
-        WorkflowFanOutRuntimeError::StaleFence => DaemonInvocationProblem::NotFoundOrNotAuthorized,
-        _ => DaemonInvocationProblem::InvalidRequest,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
-fn work_request_context(
+pub(super) fn work_request_context(
     registered: &RegisteredWorkRuntime,
     request_id: &str,
     capability: &str,
@@ -490,217 +633,6 @@ fn work_request_context(
         return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
     }
     Ok((context, canonical_request_id, use_case))
-}
-
-fn work_projection_problem(error: WorkProjectionApplicationError) -> ApplicationProblem {
-    match error {
-        WorkProjectionApplicationError::Admission(problem) => problem,
-        WorkProjectionApplicationError::InvalidPageSize => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "work.invalid_page_size".to_owned(),
-                message: "The Work projection page size is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
-        },
-        WorkProjectionApplicationError::Port(
-            tracedecay_application::WorkProjectionPortError::StaleCursor,
-        ) => ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.stale_cursor".to_owned(),
-            message: "The Work projection cursor is stale".to_owned(),
-        }),
-        WorkProjectionApplicationError::Port(
-            tracedecay_application::WorkProjectionPortError::Unavailable,
-        ) => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "work.projection_unavailable".to_owned(),
-            message: "The Work projection authority is unavailable".to_owned(),
-        }),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn complete_work_read<T>(
-    registered: &RegisteredWorkRuntime,
-    request_id: String,
-    context: &RequestContext,
-    canonical_request_id: RequestId,
-    operation_key: &str,
-    use_case: UseCaseId,
-    input_digest: ManifestDigest,
-    result: Result<T, ApplicationProblem>,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-    wrap: fn(ApplicationOutcome<T>) -> WorkApplicationOutcomeV1,
-) -> DaemonInvocationResponse
-where
-    T: Serialize,
-{
-    let result = match result {
-        Ok(result) => result,
-        Err(problem) => return application_problem(request_id, problem),
-    };
-    let outcome = match work_evidence_packet(
-        registered,
-        context,
-        canonical_request_id,
-        operation_key,
-        use_case,
-        input_digest,
-        result,
-        observed_at,
-        deadline,
-    ) {
-        Ok(evidence) => wrap(ApplicationOutcome::Evidence(evidence)),
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        }
-    };
-    DaemonInvocationResponse::with_outcome(
-        request_id,
-        DaemonInvocationOutcome::WorkApplication {
-            scope: context.scope().clone(),
-            outcome,
-        },
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn complete_work_effect<T>(
-    registered: &RegisteredWorkRuntime,
-    request_id: String,
-    context: &RequestContext,
-    canonical_request_id: RequestId,
-    operation_key: &str,
-    use_case: UseCaseId,
-    input_digest: ManifestDigest,
-    result: Result<T, ApplicationProblem>,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-    wrap: fn(ApplicationOutcome<T>) -> WorkApplicationOutcomeV1,
-) -> DaemonInvocationResponse
-where
-    T: Serialize,
-{
-    let result = match result {
-        Ok(result) => result,
-        Err(problem) => return application_problem(request_id, problem),
-    };
-    let outcome = match work_effect(
-        registered,
-        context,
-        canonical_request_id,
-        operation_key,
-        use_case,
-        input_digest,
-        result,
-        observed_at,
-        deadline,
-    ) {
-        Ok(effect) => wrap(effect),
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        }
-    };
-    DaemonInvocationResponse::with_outcome(
-        request_id,
-        DaemonInvocationOutcome::WorkApplication {
-            scope: context.scope().clone(),
-            outcome,
-        },
-    )
-}
-
-fn work_execution_problem(error: &WorkExecutionError) -> DaemonInvocationProblem {
-    match error {
-        WorkExecutionError::NotFound
-        | WorkExecutionError::AlreadyExists
-        | WorkExecutionError::StaleLease
-        | WorkExecutionError::TerminalConflict => DaemonInvocationProblem::NotFoundOrNotAuthorized,
-        WorkExecutionError::Contract(_) => DaemonInvocationProblem::InvalidRequest,
-        WorkExecutionError::Persistence(_) => DaemonInvocationProblem::Unavailable,
-        WorkExecutionError::Provider(
-            tracedecay_application::WorkProviderExecutionError::Unavailable(_),
-        ) => DaemonInvocationProblem::Unavailable,
-        WorkExecutionError::Provider(
-            tracedecay_application::WorkProviderExecutionError::Rejected(_),
-        ) => DaemonInvocationProblem::InvalidRequest,
-    }
-}
-
-pub(super) async fn execute_work_attempt(
-    registered: RegisteredWorkRuntime,
-    request_id: String,
-    request: WorkAttemptInvocationV1,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-    cancellation: CancellationContext,
-) -> DaemonInvocationResponse {
-    let operation_key = request.operation_key();
-    let Some((_, capability, use_case)) = tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1
-        .iter()
-        .find(|(operation, _, _)| *operation == operation_key)
-    else {
-        return DaemonInvocationResponse::problem(
-            request_id,
-            DaemonInvocationProblem::InvalidRequest,
-        );
-    };
-    let (context, canonical_request_id, use_case) = match work_request_context(
-        &registered,
-        &request_id,
-        capability,
-        use_case,
-        observed_at,
-        deadline.clone(),
-        cancellation,
-    ) {
-        Ok(context) => context,
-        Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
-    };
-    let input_digest = match canonical_sha256(&request) {
-        Ok(digest) => digest,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::InvalidRequest,
-            );
-        }
-    };
-    let result = match registered.runtime.dispatch(request).await {
-        Ok(result) => result,
-        Err(error) => {
-            return DaemonInvocationResponse::problem(request_id, work_execution_problem(&error));
-        }
-    };
-    let outcome = work_effect(
-        &registered,
-        &context,
-        canonical_request_id,
-        operation_key,
-        use_case,
-        input_digest,
-        result,
-        observed_at,
-        deadline,
-    );
-    match outcome {
-        Ok(outcome) => DaemonInvocationResponse::with_outcome(
-            request_id,
-            DaemonInvocationOutcome::WorkAttempt {
-                scope: context.scope().clone(),
-                outcome: Box::new(outcome),
-            },
-        ),
-        Err(_) => {
-            DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -775,104 +707,75 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn work_effect<T>(
-    registered: &RegisteredWorkRuntime,
-    context: &RequestContext,
-    request_id: RequestId,
-    operation_key: &str,
-    use_case: UseCaseId,
-    input_digest: ManifestDigest,
-    result: T,
-    observed_at: UtcMicros,
-    deadline: Deadline,
+    terminal: &WorkflowEffectTerminalV1,
+    result: Option<T>,
+    termination: EffectTermination,
 ) -> Result<ApplicationOutcome<T>, ApplicationContractError>
 where
     T: Serialize,
 {
-    let policy_digest = canonical_sha256(&(
-        "tracedecay.daemon.work-policy.v1",
-        &registered.policy_digest,
-        &registered.grant.digest,
-        operation_key,
-        &use_case,
-    ))?;
-    let policy = PolicyDecisionRef::new(
-        format!("policy.daemon.work.{operation_key}.v1"),
-        1,
-        policy_digest,
-        ComponentVersion::new("tracedecay.daemon.work-policy.v1").map_err(|_| {
-            ApplicationContractError::Inconsistent {
-                field: "Work policy evaluator",
-            }
-        })?,
-    )?;
-    let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
-    let suffix = input_digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "Work input digest",
-        })?
-        .to_owned();
-    let idempotency_key = IdempotencyKey::new(format!("work.{operation_key}.{suffix}"))?;
-    let expected_state = canonical_sha256(&(
-        "tracedecay.work.expected-state.v1",
-        operation_key,
-        &input_digest,
-    ))
-    .map_err(|_| ApplicationContractError::Inconsistent {
-        field: "Work expected state",
-    })?;
-    let committed_state =
-        canonical_sha256(&("tracedecay.work.committed-state.v1", operation_key, &result)).map_err(
-            |_| ApplicationContractError::Inconsistent {
+    let identity = terminal.identity();
+    let receipt_context = identity.receipt_context();
+    let committed_state = result
+        .as_ref()
+        .map(|result| {
+            canonical_sha256(&(
+                "tracedecay.work.committed-state.v1",
+                identity.operation().as_str(),
+                result,
+            ))
+            .map_err(|_| ApplicationContractError::Inconsistent {
                 field: "Work committed state",
-            },
-        )?;
-    let execution = OperationReceipt::completed(
-        observed_at,
-        current_micros(),
-        deadline,
-        OperationBudgetUsage::default(),
-    )?;
+            })
+        })
+        .transpose()?;
+    let execution = OperationReceipt {
+        started_at: identity.started_at(),
+        ended_at: terminal.ended_at(),
+        effective_deadline: identity.deadline().clone(),
+        cancellation: workflow_effect_terminal_observation(termination, terminal.ended_at()),
+        budget: OperationBudgetUsage::default(),
+        termination: termination.into(),
+    };
+    execution.validate()?;
     let receipt = EffectReceipt {
-        operation: use_case,
-        request_id,
-        actor: registered.actor.clone(),
-        scope: context.scope().clone(),
+        operation: receipt_context.operation().clone(),
+        request_id: identity.request_id().clone(),
+        actor: identity.actor().clone(),
+        scope: identity.scope().clone(),
         effect_class: EffectClass::Administrative,
-        idempotency_key: idempotency_key.clone(),
-        input_digest,
-        expected_state: expected_state.clone(),
-        policy_digest: authority.policy.digest.clone(),
-        configuration_digest: registered.configuration_digest.clone(),
-        catalog_digest: canonical_sha256(&("tracedecay.work.catalog.v1", operation_key)).map_err(
-            |_| ApplicationContractError::Inconsistent {
-                field: "Work catalog digest",
-            },
-        )?,
-        privacy_digest: canonical_sha256(&(
-            "tracedecay.work.privacy.v1",
-            context.scope(),
-            context.grant().disclosure,
-        ))
-        .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "Work privacy digest",
-        })?,
-        outcome: EffectTermination::Completed,
-        committed_state: Some(committed_state),
+        idempotency_key: identity.idempotency_key().clone(),
+        input_digest: identity.input_digest().clone(),
+        expected_state: receipt_context.expected_state().clone(),
+        policy_digest: receipt_context.authority().policy.digest.clone(),
+        configuration_digest: receipt_context.configuration_digest().clone(),
+        catalog_digest: receipt_context.catalog_digest().clone(),
+        privacy_digest: receipt_context.privacy_digest().clone(),
+        outcome: termination,
+        committed_state,
         external_proof: None,
     };
     Ok(ApplicationOutcome::Effect(EffectResult::new(
-        EffectId::new(format!("effect.work.{operation_key}.{suffix}"))?,
+        receipt_context.effect_id().clone(),
         EffectClass::Administrative,
-        idempotency_key,
-        authority,
-        expected_state,
+        identity.idempotency_key().clone(),
+        receipt_context.authority().clone(),
+        receipt_context.expected_state().clone(),
         execution,
         ReconciliationState::Reconciled,
         receipt,
-        Some(result),
+        result,
     )?))
+}
+
+fn workflow_effect_terminal_observation(
+    termination: EffectTermination,
+    observed_at: UtcMicros,
+) -> Option<CancellationObservation> {
+    (termination == EffectTermination::TimedOut).then_some(CancellationObservation {
+        stage: CancellationStage::BeforeEffect,
+        observed_at,
+    })
 }
 
 impl DaemonInvocationService {
@@ -881,5 +784,36 @@ impl DaemonInvocationService {
         project_root: Option<&Path>,
     ) -> Option<RegisteredWorkRuntime> {
         self.project_runtimes.get(project_root?).await
+    }
+}
+
+#[cfg(test)]
+mod workflow_effect_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn deadline_before_mutation_is_not_labeled_in_flight() {
+        let observed_at = UtcMicros(42);
+        assert_eq!(
+            workflow_effect_terminal_observation(EffectTermination::TimedOut, observed_at),
+            Some(CancellationObservation {
+                stage: CancellationStage::BeforeEffect,
+                observed_at,
+            })
+        );
+        assert_eq!(
+            workflow_effect_terminal_observation(EffectTermination::Completed, observed_at),
+            None
+        );
+    }
+
+    #[test]
+    fn workflow_reset_refusal_remains_a_daemon_reset_problem() {
+        let error =
+            crate::errors::TraceDecayError::reset_required("workflow", "partial workflow schema");
+        assert_eq!(
+            workflow_storage_problem(&error),
+            DaemonInvocationProblem::ResetRequired
+        );
     }
 }

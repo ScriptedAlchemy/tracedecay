@@ -202,13 +202,11 @@ pub(crate) async fn handle_status(
                                 })
                             });
                         // `session_ingest` stays cursor-scoped so it keeps matching the
-                        // doctor-owned `cursor_session_ingest` signal, but a stalled
-                        // backlog on any provider still starves recall, so the warning
-                        // is measured across every tracked transcript.
-                        if let Some(warning) =
-                            stalled_session_ingest_warning(db, cg.project_root()).await
-                        {
-                            output["session_ingest_warning"] = json!(warning);
+                        // doctor-owned signal. Historical catch-up is measured across
+                        // providers and remains explicitly partial while the retained
+                        // daemon authority drains its bounded backlog.
+                        if let Some(catch_up) = historical_session_catch_up(db).await {
+                            output["session_history_catch_up"] = catch_up;
                         }
                     }
                     Err(error) => {
@@ -260,34 +258,79 @@ pub(crate) async fn handle_status(
     ))
 }
 
-/// Warns when any provider's transcript backlog has outgrown what automatic
-/// catch-up drains, so recall gaps are reported instead of read as healthy.
-async fn stalled_session_ingest_warning(
-    db: &RegisteredGlobalDb,
-    project_root: &Path,
-) -> Option<String> {
-    const THRESHOLD: u64 = crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
+/// Reports daemon-owned historical warming when any provider's backlog exceeds
+/// the ordinary catch-up threshold, so partial recall is never read as current.
+async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Option<Value> {
     match db.session_ingest_health_for_provider(None).await {
-        Ok(ingest) => (ingest.max_transcript_pending_bytes > THRESHOLD)
-            .then(|| session_ingest_warning(&ingest, project_root)),
-        Err(error) => Some(format!(
-            "session transcript ingest backlog could not be measured across providers: {error}"
-        )),
+        Ok(ingest) => historical_session_catch_up_state(&ingest),
+        Err(error) => Some(json!({
+            "status": "unavailable",
+            "coverage": "unknown",
+            "authority": "daemon",
+            "reason": "historical_backlog_measurement_failed",
+            "message": error,
+        })),
     }
 }
 
-fn session_ingest_warning(ingest: &SessionIngestHealth, project_root: &Path) -> String {
-    format!(
-        "session transcript ingest looks stalled: a transcript has {} \
-         un-ingested bytes ({} total across {} transcript(s)), exceeding \
-         the automatic catch-up warning threshold — session recall is missing \
-         those turns. Run `tracedecay sessions import --project-path {}` \
-         to schedule bounded convergence.",
-        ingest.max_transcript_pending_bytes,
-        ingest.pending_bytes,
-        ingest.pending_transcripts,
-        project_root.display()
-    )
+fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Value> {
+    const THRESHOLD: u64 = crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
+    let warming = ingest.max_transcript_pending_bytes > THRESHOLD;
+    let observed = &ingest.observed_providers;
+    let expected = crate::sessions::SessionProvider::ALL.map(|provider| provider.id());
+    let unobserved = expected
+        .iter()
+        .copied()
+        .filter(|provider| !observed.iter().any(|observed| observed == provider))
+        .collect::<Vec<_>>();
+    let all_providers_complete = expected.iter().all(|provider| {
+        ingest.provider_coverage.iter().any(|coverage| {
+            coverage.provider == *provider
+                && coverage.state == crate::global_db::SessionProviderCoverageState::Complete
+        })
+    });
+    let any_provider_available = ingest.provider_coverage.iter().any(|coverage| {
+        coverage.state != crate::global_db::SessionProviderCoverageState::Unavailable
+    });
+    let source_unavailable = observed.is_empty() && !any_provider_available;
+    let coverage_incomplete = !all_providers_complete;
+    Some(json!({
+        "status": if source_unavailable {
+            "unavailable"
+        } else if warming || coverage_incomplete {
+            "warming"
+        } else {
+            "current"
+        },
+        "coverage": if source_unavailable || warming || coverage_incomplete {
+            "partial"
+        } else {
+            "complete"
+        },
+        "authority": "daemon",
+        "reason": if source_unavailable {
+            "historical_sources_unobserved"
+        } else if warming {
+            "historical_transcript_backlog"
+        } else if coverage_incomplete {
+            "historical_provider_coverage_incomplete"
+        } else {
+            "historical_catch_up_current"
+        },
+        "providers": observed,
+        "provider_coverage": ingest.provider_coverage,
+        "unobserved_providers": unobserved,
+        "max_transcript_pending_bytes": ingest.max_transcript_pending_bytes,
+        "pending_bytes": ingest.pending_bytes,
+        "pending_transcripts": ingest.pending_transcripts,
+        "message": if source_unavailable {
+            "No durable historical source rows or provider frontiers are currently observable."
+        } else if warming || coverage_incomplete {
+            "Historical session recall is partially available while the daemon continues bounded background catch-up."
+        } else {
+            "Historical session recall catch-up is current."
+        },
+    }))
 }
 
 fn render_status_md(value: &Value) -> String {
@@ -332,6 +375,105 @@ fn render_status_md(value: &Value) -> String {
         }
     }
     md.render()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::global_db::{
+        SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
+    };
+
+    use super::historical_session_catch_up_state;
+
+    #[test]
+    fn historical_backlog_is_typed_daemon_owned_warming() {
+        let state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["cursor".into()],
+            pending_transcripts: 2,
+            pending_bytes: 12_000_000,
+            max_transcript_pending_bytes:
+                crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES + 1,
+            ..SessionIngestHealth::default()
+        })
+        .expect("backlog exceeds threshold");
+
+        assert_eq!(state["status"], "warming");
+        assert_eq!(state["coverage"], "partial");
+        assert_eq!(state["authority"], "daemon");
+        assert!(!state.to_string().contains("sessions ingest"));
+    }
+
+    #[test]
+    fn historical_status_names_database_and_discovery_backed_providers() {
+        let state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["kimi".into(), "opencode".into()],
+            ..SessionIngestHealth::default()
+        })
+        .expect("incomplete historical coverage remains visible");
+        let providers = state["providers"].as_array().unwrap();
+
+        assert!(providers.iter().any(|provider| provider == "kimi"));
+        assert!(providers.iter().any(|provider| provider == "opencode"));
+        assert_eq!(state["status"], "warming");
+        assert_eq!(state["coverage"], "partial");
+        assert_eq!(state["reason"], "historical_provider_coverage_incomplete");
+    }
+
+    #[test]
+    fn historical_status_is_current_only_after_every_provider_sweep_completes() {
+        let provider_coverage = crate::sessions::SessionProvider::ALL
+            .iter()
+            .map(|provider| SessionProviderCoverage {
+                provider: provider.id().to_owned(),
+                state: SessionProviderCoverageState::Complete,
+                deferred_units: 0,
+            })
+            .collect();
+        let state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["kimi".into()],
+            provider_coverage,
+            ..SessionIngestHealth::default()
+        })
+        .expect("complete provider coverage remains visible");
+
+        assert_eq!(state["status"], "current");
+        assert_eq!(state["coverage"], "complete");
+    }
+
+    #[test]
+    fn explicit_partial_provider_sweep_never_reports_current() {
+        let provider_coverage = crate::sessions::SessionProvider::ALL
+            .iter()
+            .map(|provider| SessionProviderCoverage {
+                provider: provider.id().to_owned(),
+                state: if provider.id() == "opencode" {
+                    SessionProviderCoverageState::Partial
+                } else {
+                    SessionProviderCoverageState::Complete
+                },
+                deferred_units: u64::from(provider.id() == "opencode"),
+            })
+            .collect();
+        let state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["opencode".into()],
+            provider_coverage,
+            ..SessionIngestHealth::default()
+        })
+        .expect("partial provider coverage remains visible");
+
+        assert_eq!(state["status"], "warming");
+        assert_eq!(state["coverage"], "partial");
+    }
+
+    #[test]
+    fn historical_status_does_not_fabricate_provider_readiness() {
+        let state = historical_session_catch_up_state(&SessionIngestHealth::default())
+            .expect("missing historical authority remains visible");
+
+        assert_eq!(state["status"], "unavailable");
+        assert_eq!(state["coverage"], "partial");
+        assert!(state["providers"].as_array().unwrap().is_empty());
+    }
 }
 fn active_project_context(
     cg: &TraceDecay,

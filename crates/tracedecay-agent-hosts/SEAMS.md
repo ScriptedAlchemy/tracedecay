@@ -38,7 +38,7 @@ surface by exactly the set the root crate already depended on.
 | `agents::CLI_FALLBACK_PROMPT_RULES` | `src/hooks/steering.rs:141` |
 | `agents::context_scout_owner::lookup_registered_context_scout_owners` | `src/daemon/service/invocation.rs:2862` |
 | `agents::cursor::cursor_plugin_install_dir` | `src/hooks/memory_inject.rs` (4 sites) |
-| `agents::hermes::read_config_pinned_project_root` (+ its `hermes/profile_config.rs` definition) | `src/migrate/hermes.rs`, `src/migrate/hermes/resolution.rs`, `src/sessions/hermes/ingest.rs` |
+| `agents::hermes::read_config_pinned_project_root` (+ its `hermes/profile_config.rs` definition) | `src/runtime_ports.rs`, `crates/tracedecay-sessions/src/runtime/hermes/ingest.rs` |
 | `automation::config_error` | `src/mcp/tools/handlers/hook_runtime.rs:8` |
 | `automation::run_ledger::read_published_artifact_chain` | `src/dashboard/automation_run_api.rs:19` |
 | `automation::runner::registered_project_automation_retrieval` (+ its `runner/retrieval.rs` definition) | `src/daemon/scheduler.rs:1260,1475` |
@@ -163,7 +163,6 @@ before command dispatch.
 
 | Trait | Root implements for |
 |---|---|
-| `agents::InstalledAgentsConfig` | `user_config::UserConfig` |
 | `ports::session_store::AutomationSessionStore` | `global_db::RegisteredGlobalDb` (converting the analytics query/record field-for-field) |
 
 ### Downward moves (root deletes its copy and re-exports)

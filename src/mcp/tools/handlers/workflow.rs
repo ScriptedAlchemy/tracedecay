@@ -40,10 +40,13 @@ mod affected_test_failure;
 mod test_request;
 mod test_runner;
 
-use test_request::{MAX_TEST_TIMEOUT_SECS, RunAffectedArgs, TestProfile};
+#[cfg(test)]
+use test_request::MAX_TEST_TIMEOUT_SECS;
+use test_request::{RunAffectedArgs, TestProfile};
+#[cfg(test)]
+use test_runner::cargo_test_args;
 use test_runner::{
-    TestRunControl, TestRunFailure, TestRunOutput, cargo_test_args, parse_libtest_output,
-    run_cargo_tests,
+    TestRunControl, TestRunFailure, TestRunOutput, parse_libtest_output, run_cargo_tests,
 };
 
 /// Maximum exact test identities admitted to one managed foreground request.

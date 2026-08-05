@@ -170,6 +170,7 @@ pub struct RepositoryStateSnapshotV1 {
     pub index: RepositoryIndexSnapshotV1,
     pub working_tree: RepositoryWorkingTreeSnapshotV1,
     pub operation_state: GitOperationStateV1,
+    pub configuration_digest: Option<ManifestDigest>,
     pub attributes_digest: Option<ManifestDigest>,
     pub sparse_digest: Option<ManifestDigest>,
     pub submodule_digest: Option<ManifestDigest>,
@@ -190,6 +191,7 @@ impl RepositoryStateSnapshotV1 {
         index: RepositoryIndexSnapshotV1,
         working_tree: RepositoryWorkingTreeSnapshotV1,
         operation_state: GitOperationStateV1,
+        configuration_digest: Option<ManifestDigest>,
         attributes_digest: Option<ManifestDigest>,
         sparse_digest: Option<ManifestDigest>,
         submodule_digest: Option<ManifestDigest>,
@@ -211,6 +213,7 @@ impl RepositoryStateSnapshotV1 {
             index,
             working_tree,
             operation_state,
+            configuration_digest,
             attributes_digest,
             sparse_digest,
             submodule_digest,
@@ -254,6 +257,7 @@ impl RepositoryStateSnapshotV1 {
         self.git_version.is_some()
             && self.adapter_revision.is_some()
             && self.refs_digest.is_some()
+            && self.configuration_digest.is_some()
             && self.attributes_digest.is_some()
             && self.sparse_digest.is_some()
             && self.submodule_digest.is_some()
@@ -323,6 +327,9 @@ impl RepositoryStateSnapshotV1 {
         }
         self.index.validate(self.object_format)?;
         self.working_tree.validate()?;
+        self.configuration_digest
+            .as_ref()
+            .map_or(Ok(()), ManifestDigest::validate)?;
         self.attributes_digest
             .as_ref()
             .map_or(Ok(()), ManifestDigest::validate)?;
@@ -353,6 +360,7 @@ impl RepositoryStateSnapshotV1 {
             index: &'a RepositoryIndexSnapshotV1,
             working_tree: &'a RepositoryWorkingTreeSnapshotV1,
             operation_state: GitOperationStateV1,
+            configuration_digest: Option<&'a ManifestDigest>,
             attributes_digest: Option<&'a ManifestDigest>,
             sparse_digest: Option<&'a ManifestDigest>,
             submodule_digest: Option<&'a ManifestDigest>,
@@ -376,6 +384,7 @@ impl RepositoryStateSnapshotV1 {
                 index: &self.index,
                 working_tree: &self.working_tree,
                 operation_state: self.operation_state,
+                configuration_digest: self.configuration_digest.as_ref(),
                 attributes_digest: self.attributes_digest.as_ref(),
                 sparse_digest: self.sparse_digest.as_ref(),
                 submodule_digest: self.submodule_digest.as_ref(),
@@ -413,6 +422,7 @@ impl<'de> Deserialize<'de> for RepositoryStateSnapshotV1 {
             index: RepositoryIndexSnapshotV1,
             working_tree: RepositoryWorkingTreeSnapshotV1,
             operation_state: GitOperationStateV1,
+            configuration_digest: Option<ManifestDigest>,
             attributes_digest: Option<ManifestDigest>,
             sparse_digest: Option<ManifestDigest>,
             submodule_digest: Option<ManifestDigest>,
@@ -432,6 +442,7 @@ impl<'de> Deserialize<'de> for RepositoryStateSnapshotV1 {
             wire.index,
             wire.working_tree,
             wire.operation_state,
+            wire.configuration_digest,
             wire.attributes_digest,
             wire.sparse_digest,
             wire.submodule_digest,

@@ -23,6 +23,8 @@ pub mod feedback;
 pub use tracedecay_domain::framed_log;
 pub mod git;
 pub mod handlers;
+pub mod handoff;
+pub mod handoff_catalog;
 pub mod hint_outcomes;
 pub mod historical_query;
 mod identity;
@@ -41,6 +43,7 @@ pub mod session_sync;
 pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
+pub mod wire;
 pub mod work;
 pub mod work_catalog;
 pub mod work_dispatch;
@@ -48,6 +51,9 @@ pub mod work_execution;
 pub mod work_read;
 pub mod workflow_catalog;
 pub mod workflow_coordination;
+pub mod workflow_effect;
+pub mod workflow_provider;
+pub mod workflow_run;
 pub mod workflow_runtime;
 
 mod error;
@@ -64,9 +70,15 @@ pub use authorization::{
 };
 pub use clock::now_micros;
 pub use configuration::{
-    ConfigurationGetRequestV1, ConfigurationSetRequestV1,
-    configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
-    configuration_surface_operation,
+    ConfigurationAuditRequestV1, ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1,
+    ConfigurationGetRequestV1, ConfigurationListRequestV1, ConfigurationObservedStateRequestV1,
+    ConfigurationProtectedApplyRequestV1, ConfigurationProtectedPreviewRequestV1,
+    ConfigurationResetConfirmationV1, ConfigurationResetOutcomeV1, ConfigurationResetRequestV1,
+    ConfigurationRollbackApplyRequestV1, ConfigurationRollbackPreviewRequestV1,
+    ConfigurationSetRequestV1, ConfigurationUnsetRequestV1, ConfigurationWireRequestV1,
+    ConfigurationWriteCredentialRequestV1, configuration_surface_catalog_contribution,
+    configuration_surface_handler_descriptors, configuration_surface_operation,
+    configuration_surface_request_schema, configuration_surface_result_schema,
 };
 pub use context::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId,
@@ -137,6 +149,8 @@ pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
     application_handler_descriptors,
 };
+pub use handoff::*;
+pub use handoff_catalog::*;
 pub use hint_outcomes::*;
 pub use invocation::{
     ApplicationInvocation, ApplicationInvocationBinding, ApplicationInvocationContext,
@@ -151,11 +165,12 @@ pub use memory::{
     converge_derived_memory,
 };
 pub use multi_root::{
-    AuthorizedMultiRootQueryService, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
-    AuthorizedScopeSetError, MultiRootContinuationV1, MultiRootExecuteRequestV1,
-    MultiRootOperationV1, MultiRootQueryError, MultiRootQueryPageV1, MultiRootQueryPort,
-    MultiRootQueryRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
-    MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
+    AuthorizedMultiRootQueryService, AuthorizedRoot, AuthorizedRootAdmission, AuthorizedScopeSet,
+    AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootContinuationV1,
+    MultiRootExecuteRequestV1, MultiRootOperationV1, MultiRootQueryError, MultiRootQueryPageV1,
+    MultiRootQueryPort, MultiRootQueryRequestV1, MultiRootScopeSetCasRequestV1,
+    MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
+    RegisteredRootLocatorV1, RegisteredRootSelectorV1, SharedProfileStoreLocatorV1,
 };
 pub use observability::*;
 pub use policy::{
@@ -238,6 +253,10 @@ pub use tracedecay_domain::framed_log::{
     read_bounded, replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
     truncate_file, validate_regular_or_missing, with_owned_temp_publish,
 };
+pub use wire::{
+    ApplicationOwnerKind, ApplicationWireOperation, ApplicationWireSchemaRegistryV1,
+    ApplicationWireSchemaV1,
+};
 pub use work::*;
 pub use work_catalog::*;
 pub use work_dispatch::*;
@@ -245,4 +264,7 @@ pub use work_execution::*;
 pub use work_read::*;
 pub use workflow_catalog::*;
 pub use workflow_coordination::*;
+pub use workflow_effect::*;
+pub use workflow_provider::*;
+pub use workflow_run::*;
 pub use workflow_runtime::*;

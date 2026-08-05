@@ -40,6 +40,7 @@ where
         return ProjectOpenTaskClaim::Failed(ProjectOpenFailure {
             message: "daemon is draining before project warm-up".to_string(),
             retry_at: None,
+            typed: None,
         });
     }
     tasks

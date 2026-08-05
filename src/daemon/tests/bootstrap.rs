@@ -1755,7 +1755,7 @@ fn commit_production_composition_project(project: &std::path::Path) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn production_composition_harness_wires_query_search_authority() {
+async fn production_composition_mounts_core_query_without_optional_stage_evaluation() {
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source dir");
@@ -1794,7 +1794,7 @@ async fn production_composition_harness_wires_query_search_authority() {
         }
     })
     .await
-    .expect("production query authority did not become ready");
+    .expect("core query authority did not become ready");
     let candidate = payload["results"]
         .as_array()
         .and_then(|matches| {
@@ -1803,7 +1803,7 @@ async fn production_composition_harness_wires_query_search_authority() {
             })
         })
         .unwrap_or_else(|| {
-            panic!("production query search authority did not return the indexed symbol: {payload}")
+            panic!("core query authority did not return the indexed symbol: {payload}")
         });
     let node_id = candidate["node_id"]
         .as_str()
@@ -1822,7 +1822,7 @@ async fn production_composition_harness_wires_query_search_authority() {
         impact_payload["node_count"]
             .as_u64()
             .is_some_and(|count| count > 0),
-        "impact must consume the graph identity returned by production search: {impact_payload}"
+        "impact must consume the graph identity returned by core search: {impact_payload}"
     );
     harness.shutdown().await;
 }

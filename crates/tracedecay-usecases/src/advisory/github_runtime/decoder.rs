@@ -795,7 +795,7 @@ mod tests {
         )
         .unwrap();
         let fixture: Value = serde_json::from_str(include_str!(
-            "../fixtures/pr13_branch_pr/review_comment.json"
+            "../fixtures/provider_branch_review/review_comment.json"
         ))
         .unwrap();
         let first = fixture["response"].clone();

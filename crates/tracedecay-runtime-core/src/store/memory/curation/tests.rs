@@ -4,7 +4,10 @@ use crate::store::memory::DatabaseFactStore;
 use crate::store::memory::primitives::{OwnerKey, storage_message};
 use tempfile::tempdir;
 use tracedecay_domain::{Confidence, FactId, FactOwnerV1, ProjectId, UtcMicros};
-use tracedecay_store::{FactCompatibilityResult, FactCompatibilityStoreError, FactStoreError};
+use tracedecay_store::{
+    CompatibilityRelationProvenanceV1, FactCompatibilityResult, FactCompatibilityStoreError,
+    FactStoreError,
+};
 
 async fn seed_fact(db: &crate::db::Database, owner: &FactOwnerV1, fact_id: &FactId) {
     let key = OwnerKey::new(owner).unwrap();
@@ -102,9 +105,19 @@ async fn curated_correction_provenance_is_exact_owner_scoped_and_replay_safe() {
             row.get::<String>(3).unwrap(),
             "compatibility_curation_normalize_tags"
         );
+        let provenance = serde_json::from_str::<CompatibilityRelationProvenanceV1>(
+            &row.get::<String>(4).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&row.get::<String>(4).unwrap()).unwrap(),
-            serde_json::json!({"actor_id": null, "operation": "normalize_tags"})
+            provenance.metadata(),
+            &serde_json::json!({"actor_id": null, "operation": "normalize_tags"})
+        );
+        assert_eq!(
+            provenance.sanitization_receipt().payload(),
+            Some(
+                &tracedecay_domain::PayloadReferenceV1::for_payload(provenance.metadata()).unwrap()
+            )
         );
         assert_eq!(row.get::<String>(5).unwrap(), expected_evidence);
         assert_eq!(row.get::<i64>(6).unwrap(), 77);

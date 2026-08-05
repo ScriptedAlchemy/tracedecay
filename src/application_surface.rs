@@ -19,9 +19,9 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio_stream::StreamExt;
 use tracedecay_api::{
-    CanonicalInvocationResult, HttpApplicationControls, HttpApplicationInvocationFuture,
-    HttpApplicationOperation, HttpApplicationRequest, WorkOperation, WorkflowOperation,
-    application_problem_response, sse_response,
+    CanonicalInvocationResult, HandoffOperation, HttpApplicationControls,
+    HttpApplicationInvocationFuture, HttpApplicationOperation, HttpApplicationRequest,
+    WorkOperation, WorkflowOperation, application_problem_response, sse_response,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
@@ -46,10 +46,24 @@ use tracedecay_application::{
     WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
     WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
-use tracedecay_domain::configuration::{
-    ConfigurationAuditEventId, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationValueV1, CredentialKindV1, CredentialReferenceId, RollbackModeV1, SettingKey,
+pub use tracedecay_application::{
+    ConfigurationAuditRequestV1 as ConfigurationAuditSurfaceRequest,
+    ConfigurationBatchRequestV1 as ConfigurationBatchSurfaceRequest,
+    ConfigurationDirectMutationRequestV1 as ConfigurationDirectMutationSurfaceRequest,
+    ConfigurationGetRequestV1 as ConfigurationKeySurfaceRequest,
+    ConfigurationListRequestV1 as ConfigurationListSurfaceRequest,
+    ConfigurationObservedStateRequestV1 as ConfigurationObservedStateSurfaceRequest,
+    ConfigurationProtectedApplyRequestV1 as ConfigurationProtectedApplySurfaceRequest,
+    ConfigurationProtectedPreviewRequestV1 as ConfigurationProtectedPreviewSurfaceRequest,
+    ConfigurationResetOutcomeV1, ConfigurationResetRequestV1 as ConfigurationResetSurfaceRequest,
+    ConfigurationRollbackApplyRequestV1 as ConfigurationRollbackApplySurfaceRequest,
+    ConfigurationRollbackPreviewRequestV1 as ConfigurationRollbackPreviewSurfaceRequest,
+    ConfigurationSetRequestV1 as ConfigurationSetSurfaceRequest,
+    ConfigurationUnsetRequestV1 as ConfigurationUnsetSurfaceRequest,
+    ConfigurationWireRequestV1 as ConfigurationSurfaceRequest,
+    ConfigurationWriteCredentialRequestV1 as ConfigurationWriteCredentialSurfaceRequest,
 };
+use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 use tracedecay_domain::{
     ExactTechnicalTermKindV1, GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexPreviewV1,
@@ -60,9 +74,6 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, CatalogSnapshotV1, CatalogValidationError, FeatureId,
     IdentifierError, ProfileId, RouteExposureV1, SchemaId, SurfaceOperationName, UseCaseId,
-};
-pub use tracedecay_usecases::application_surface::{
-    ConfigurationProtectedApplySurfaceRequest, ConfigurationProtectedPreviewSurfaceRequest,
 };
 
 use crate::application::feedback::observations::{
@@ -94,8 +105,15 @@ use crate::daemon_contract::{
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
+mod configuration_wire;
+mod handoff;
 mod workflow;
 
+use configuration_wire::{
+    build_configuration_wire_schema_registry, is_configuration_operation,
+    validate_configuration_outcome,
+};
+use handoff::router_with_executor as handoff_application_router_with_executor;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
@@ -111,7 +129,7 @@ pub use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 
 /// Compatibility export for existing callers. The array is the canonical
 /// operation authority's list, not a second root-owned registry.
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 66] =
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 67] =
     tracedecay_api::HttpApplicationOperation::ALL;
 
 /// Transport keys every surface adapter accepts but no reviewed application
@@ -534,93 +552,6 @@ pub enum CallableCodeSurfaceRequest {
     References(CodeNavigationSurfaceRequest),
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationListSurfaceRequest {}
-
-pub type ConfigurationKeySurfaceRequest =
-    tracedecay_application::configuration::ConfigurationGetRequestV1;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "operation")]
-pub enum ConfigurationDirectMutationSurfaceRequest {
-    Set {
-        layer: ConfigurationLayerIdV1,
-        key: SettingKey,
-        value: ConfigurationValueV1,
-    },
-    Unset {
-        layer: ConfigurationLayerIdV1,
-        key: SettingKey,
-    },
-}
-
-pub type ConfigurationSetSurfaceRequest =
-    tracedecay_application::configuration::ConfigurationSetRequestV1;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationUnsetSurfaceRequest {
-    pub layer: ConfigurationLayerIdV1,
-    pub key: SettingKey,
-    pub expected_revision: ConfigurationRevisionId,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationBatchSurfaceRequest {
-    pub mutations: Vec<ConfigurationDirectMutationSurfaceRequest>,
-    pub expected_revision: ConfigurationRevisionId,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationWriteCredentialSurfaceRequest {
-    pub expected_reference_id: Option<CredentialReferenceId>,
-    pub kind: CredentialKindV1,
-    pub write_handle: String,
-    pub expected_revision: ConfigurationRevisionId,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationObservedStateSurfaceRequest {}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationRollbackPreviewSurfaceRequest {
-    pub target_revision_id: ConfigurationRevisionId,
-    pub mode: RollbackModeV1,
-}
-
-pub type ConfigurationRollbackApplySurfaceRequest = ConfigurationProtectedApplySurfaceRequest;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationAuditSurfaceRequest {
-    #[serde(default)]
-    pub after_event_id: Option<ConfigurationAuditEventId>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "operation", content = "request")]
-pub enum ConfigurationSurfaceRequest {
-    List(ConfigurationListSurfaceRequest),
-    Explain(ConfigurationKeySurfaceRequest),
-    Get(ConfigurationKeySurfaceRequest),
-    Set(ConfigurationSetSurfaceRequest),
-    Unset(ConfigurationUnsetSurfaceRequest),
-    Batch(ConfigurationBatchSurfaceRequest),
-    WriteCredential(ConfigurationWriteCredentialSurfaceRequest),
-    ObservedState(ConfigurationObservedStateSurfaceRequest),
-    ProtectedPreview(ConfigurationProtectedPreviewSurfaceRequest),
-    ProtectedApply(ConfigurationProtectedApplySurfaceRequest),
-    RollbackPreview(ConfigurationRollbackPreviewSurfaceRequest),
-    RollbackApply(ConfigurationRollbackApplySurfaceRequest),
-    Audit(ConfigurationAuditSurfaceRequest),
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutClaimWindowSurfaceV1 {
@@ -862,18 +793,41 @@ fn application_invoker_for_surface(
         }
     })?);
     let resolver = CatalogBindingResolver::new(composition.snapshot());
+    let configuration_schemas = (surface == BindingSurface::Http
+        || required_operations
+            .iter()
+            .copied()
+            .any(is_configuration_operation))
+    .then(|| build_configuration_wire_schema_registry(composition.snapshot()))
+    .transpose()?;
     if surface == BindingSurface::Http {
         for operation in HttpApplicationOperation::ALL {
             if !operation.is_http_exposed() {
                 continue;
             }
-            if resolve_application_binding(&resolver, surface, operation).is_none() {
+            let Some(binding) = resolve_application_binding(&resolver, surface, operation) else {
+                return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+            };
+            if is_configuration_operation(operation)
+                && configuration_schemas
+                    .as_ref()
+                    .and_then(|schemas| schemas.get(&binding.binding_id))
+                    .is_none()
+            {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             }
         }
     } else {
         for operation in required_operations {
-            if resolve_application_binding(&resolver, surface, *operation).is_none() {
+            let Some(binding) = resolve_application_binding(&resolver, surface, *operation) else {
+                return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+            };
+            if is_configuration_operation(*operation)
+                && configuration_schemas
+                    .as_ref()
+                    .and_then(|schemas| schemas.get(&binding.binding_id))
+                    .is_none()
+            {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             }
         }
@@ -1096,15 +1050,15 @@ async fn invoke_work_operation(
     }
 }
 
-/// Refuse a Work request that never reached dispatch, in the canonical envelope.
+/// Refuse a registered request that never reached dispatch in the canonical envelope.
 ///
 /// Everything before the executor call is adapter territory: the catalog would
 /// not build, the operation is not advertised, or its binding carries no public
-/// route. A bare status here would answer a Work route with an empty body no
+/// route. A bare status here would answer a registered route with an empty body no
 /// client can read a code, a retry directive or a request id out of, so these
 /// failures are reported as the same `ApplicationProblemEnvelope` the dispatched
 /// path returns, owned by the adapter layer rather than the runtime.
-fn work_adapter_unavailable(request_id: RequestId, code: &str, message: &str) -> Response {
+fn registered_adapter_unavailable(request_id: RequestId, code: &str, message: &str) -> Response {
     let Ok(schema_id) = SchemaId::new("schema.tracedecay.http.adapter-problem.v1") else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -1124,7 +1078,7 @@ fn work_adapter_unavailable(request_id: RequestId, code: &str, message: &str) ->
     )
 }
 
-/// Dispatch one Work operation and encode its canonical result.
+/// Dispatch one registered operation and encode its canonical result.
 ///
 /// Core and attempt operations differ only in which daemon payload carries them
 /// and which outcome they answer with, so both arrive here: one binding lookup,
@@ -1132,6 +1086,8 @@ fn work_adapter_unavailable(request_id: RequestId, code: &str, message: &str) ->
 trait RegisteredHttpOperation: Copy {
     fn operation_id_str(self) -> &'static str;
     fn is_read_only(self) -> bool;
+    fn problem_family(self) -> &'static str;
+    fn display_family(self) -> &'static str;
     fn registry(
         self,
     ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError>;
@@ -1144,6 +1100,14 @@ impl RegisteredHttpOperation for WorkOperation {
 
     fn is_read_only(self) -> bool {
         WorkOperation::is_read_only(self)
+    }
+
+    fn problem_family(self) -> &'static str {
+        "work"
+    }
+
+    fn display_family(self) -> &'static str {
+        "Work"
     }
 
     fn registry(
@@ -1162,10 +1126,42 @@ impl RegisteredHttpOperation for WorkflowOperation {
         false
     }
 
+    fn problem_family(self) -> &'static str {
+        "workflow"
+    }
+
+    fn display_family(self) -> &'static str {
+        "Workflow"
+    }
+
     fn registry(
         self,
     ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError> {
         tracedecay_application::workflow_executable_binding_registry()
+    }
+}
+
+impl RegisteredHttpOperation for HandoffOperation {
+    fn operation_id_str(self) -> &'static str {
+        HandoffOperation::operation_id_str(self)
+    }
+
+    fn is_read_only(self) -> bool {
+        false
+    }
+
+    fn problem_family(self) -> &'static str {
+        "handoff"
+    }
+
+    fn display_family(self) -> &'static str {
+        "handoff-open"
+    }
+
+    fn registry(
+        self,
+    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError> {
+        tracedecay_application::handoff_executable_binding_registry()
     }
 }
 
@@ -1186,13 +1182,15 @@ where
     T: Serialize,
     O: RegisteredHttpOperation,
 {
+    let problem_code = |suffix: &str| format!("{}.{}", operation.problem_family(), suffix);
+    let family = operation.display_family();
     let registry = match operation.registry() {
         Ok(registry) => registry,
         Err(_) => {
-            return work_adapter_unavailable(
+            return registered_adapter_unavailable(
                 request_id,
-                "work.catalog_unavailable",
-                "The Work capability catalog is unavailable",
+                &problem_code("catalog_unavailable"),
+                &format!("The {family} capability catalog is unavailable"),
             );
         }
     };
@@ -1200,10 +1198,10 @@ where
         match tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned()) {
             Ok(operation_id) => operation_id,
             Err(_) => {
-                return work_adapter_unavailable(
+                return registered_adapter_unavailable(
                     request_id,
-                    "work.operation_identity_unavailable",
-                    "The Work operation identity is unavailable",
+                    &problem_code("operation_identity_unavailable"),
+                    &format!("The {family} operation identity is unavailable"),
                 );
             }
         };
@@ -1211,17 +1209,17 @@ where
         .get(&operation_id)
         .and_then(|availability| availability.binding())
     else {
-        return work_adapter_unavailable(
+        return registered_adapter_unavailable(
             request_id,
-            "work.binding_unavailable",
-            "The Work operation is not advertised by this build",
+            &problem_code("binding_unavailable"),
+            &format!("The {family} operation is not advertised by this build"),
         );
     };
     let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
-        return work_adapter_unavailable(
+        return registered_adapter_unavailable(
             request_id,
-            "work.route_unavailable",
-            "The Work operation binding carries no public route",
+            &problem_code("route_unavailable"),
+            &format!("The {family} operation binding carries no public route"),
         );
     };
     let result_contract = match ResultContractRef::new(
@@ -1230,10 +1228,10 @@ where
     ) {
         Ok(contract) => contract,
         Err(_) => {
-            return work_adapter_unavailable(
+            return registered_adapter_unavailable(
                 request_id,
-                "work.result_contract_unavailable",
-                "The Work operation result contract is unavailable",
+                &problem_code("result_contract_unavailable"),
+                &format!("The {family} operation result contract is unavailable"),
             );
         }
     };
@@ -1256,8 +1254,8 @@ where
                 | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
                     ApplicationProblem::InvalidRequest {
                         diagnostic: SafeDiagnostic {
-                            code: "work.invalid_request".to_owned(),
-                            message: "The Work application request is invalid".to_owned(),
+                            code: problem_code("invalid_request"),
+                            message: format!("The {family} application request is invalid"),
                         },
                         retry: RetryDirective::Never,
                         legal_actions: vec![LegalAction::CorrectRequest],
@@ -1266,10 +1264,16 @@ where
                 crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
                 }
+                crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "work.reset_required".to_owned(),
+                        message: "The Work store requires an explicit reset".to_owned(),
+                    })
+                }
                 crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                     ApplicationProblem::unavailable(SafeDiagnostic {
-                        code: "work.unavailable".to_owned(),
-                        message: "The Work application runtime is unavailable".to_owned(),
+                        code: problem_code("unavailable"),
+                        message: format!("The {family} application runtime is unavailable"),
                     })
                 }
             },
@@ -1287,8 +1291,8 @@ where
                     .into_http_response();
                 }
                 None => ApplicationProblem::unavailable(SafeDiagnostic {
-                    code: "work.protocol_unavailable".to_owned(),
-                    message: "The Work application protocol is unavailable".to_owned(),
+                    code: problem_code("protocol_unavailable"),
+                    message: format!("The {family} application protocol is unavailable"),
                 }),
             },
         },
@@ -1303,8 +1307,8 @@ where
             | DaemonInvocationError::Backpressured { .. }
             | DaemonInvocationError::Unavailable,
         ) => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "work.transport_unavailable".to_owned(),
-            message: "The Work application transport is unavailable".to_owned(),
+            code: problem_code("transport_unavailable"),
+            message: format!("The {family} application transport is unavailable"),
         }),
     };
     CanonicalInvocationResult::<T>::new(
@@ -1369,6 +1373,7 @@ pub fn http_application_router_with_executor(
     let event_executor = Arc::clone(&executor);
     let work_router = work_application_router_with_executor(Arc::clone(&executor))?;
     let workflow_router = workflow_application_router_with_executor(Arc::clone(&executor))?;
+    let handoff_router = handoff_application_router_with_executor(Arc::clone(&executor))?;
     Ok(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
@@ -1377,6 +1382,7 @@ pub fn http_application_router_with_executor(
         )?)
         .merge(work_router)
         .merge(workflow_router)
+        .merge(handoff_router)
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cancellations),
             application_http_context,
@@ -2599,6 +2605,10 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::ConfigurationAudit
                 )
                 | (
+                    Self::Configuration(ConfigurationSurfaceRequest::Reset(_)),
+                    ApplicationSurfaceOperation::ConfigurationReset
+                )
+                | (
                     Self::ContextScout(ContextScoutSurfaceRequest::Status(_)),
                     ApplicationSurfaceOperation::ContextScoutStatus
                 )
@@ -3027,6 +3037,10 @@ pub fn parse_application_surface_request(
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationAudit => serde_json::from_value(value)
             .map(ConfigurationSurfaceRequest::Audit)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationReset => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::Reset)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutStatus => serde_json::from_value(value)
@@ -3462,12 +3476,23 @@ pub async fn execute_application_surface(
             ))
         }
         crate::daemon_contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
-            Ok(ApplicationEnvelope {
-                contract: result_contract.clone(),
-                request_id: request_id.clone(),
-                scope,
-                outcome,
-            })
+            if validate_configuration_outcome(operation, &outcome) {
+                Ok(ApplicationEnvelope {
+                    contract: result_contract.clone(),
+                    request_id: request_id.clone(),
+                    scope,
+                    outcome,
+                })
+            } else {
+                Err(ApplicationProblemEnvelope::new(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    ApplicationProblem::unavailable(SafeDiagnostic::new(
+                        "application.surface.invalid_configuration_response",
+                        "The daemon returned a configuration result that did not match its wire contract",
+                    )?),
+                ))
+            }
         }
         crate::daemon_contract::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
             Ok(ApplicationEnvelope {
@@ -3577,6 +3602,7 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
         | ApplicationSurfaceOperation::ConfigurationRollbackPreview
         | ApplicationSurfaceOperation::ConfigurationRollbackApply
         | ApplicationSurfaceOperation::ConfigurationAudit
+        | ApplicationSurfaceOperation::ConfigurationReset
         | ApplicationSurfaceOperation::ContextScoutStatus
         | ApplicationSurfaceOperation::ContextScoutRecent
         | ApplicationSurfaceOperation::ContextScoutExplain
@@ -4105,6 +4131,12 @@ fn invocation_problem(
         }
         crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+        }
+        crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+            ApplicationProblem::unavailable(SafeDiagnostic::new(
+                "application.surface.reset_required",
+                "The application store requires an explicit reset",
+            )?)
         }
         crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic::new(

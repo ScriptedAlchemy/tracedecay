@@ -1,17 +1,23 @@
 use std::path::Path;
 
 use serde_json::{Map, Value as JsonValue, json};
+use tracedecay_domain::{ComponentVersion, SanitizationReceiptV1, SanitizerDispositionV1};
 
 pub use crate::compatibility::derived_text_for_index;
 pub use crate::compatibility::derived_text_for_snippet;
 use crate::compatibility::projected_content_hash;
 use crate::runtime::SessionMessageRecord;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
-use tracedecay_runtime_core::privacy::detector_kernel::{
-    JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, visit_sensitive_json_mut,
+use tracedecay_runtime_core::privacy::{
+    LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, PrivacyDetectorV1,
+    bind_sanitized_lcm_payload_text, quarantine_lcm_payload_text, sanitize_lcm_payload_text,
+    sanitize_provider_metadata_json, verify_sanitized_json_payload,
 };
 
-use super::{LcmError, LcmPayloadRef, LcmRawMessage, LcmStorageKind, payload, security};
+use super::{
+    LcmError, LcmPayloadRef, LcmRawMessage, LcmRawMessageMetadata, LcmStorageKind, payload,
+    security,
+};
 
 pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
@@ -22,17 +28,12 @@ pub const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
                     timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
                     '' AS snippet_text, legacy_source, legacy_truncated, metadata_json";
 
-pub fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
+pub fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata, LcmError> {
     let storage_kind_text: String = row.get(9)?;
-    let content: Option<String> = row.get(7)?;
-    let snippet_text: String = row.get(11)?;
+    let content_hash: String = row.get(8)?;
     let storage_kind = LcmStorageKind::from_db(&storage_kind_text)
         .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {storage_kind_text}")))?;
-    let content = match storage_kind {
-        LcmStorageKind::Inline => content.unwrap_or_default(),
-        LcmStorageKind::External => content.unwrap_or(snippet_text),
-    };
-    Ok(LcmRawMessage {
+    Ok(LcmRawMessageMetadata {
         provider: row.get(0)?,
         message_id: row.get(1)?,
         session_id: row.get(2)?,
@@ -40,14 +41,101 @@ pub fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
         role: row.get(4)?,
         ordinal: row.get(5)?,
         timestamp: row.get(6)?,
-        content,
-        content_hash: row.get(8)?,
+        content_hash,
         storage_kind,
         payload_ref: row.get(10)?,
-        legacy_source: row.get::<i64>(12).unwrap_or(0) != 0,
-        legacy_truncated: row.get::<i64>(13).unwrap_or(0) != 0,
+        legacy_source: row.get::<i64>(12)? != 0,
+        legacy_truncated: row.get::<i64>(13)? != 0,
         metadata_json: row.get(14)?,
     })
+}
+
+fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
+    let metadata = message
+        .metadata_json
+        .as_deref()
+        .ok_or_else(|| LcmError::Db("missing LCM sanitization receipt".to_owned()))?;
+    let metadata = serde_json::from_str::<JsonValue>(metadata)
+        .map_err(|_| LcmError::Db("invalid LCM sanitization metadata".to_owned()))?;
+    let receipt = metadata
+        .get("ingest_protection")
+        .and_then(|protection| protection.get("sanitization_receipt"))
+        .ok_or_else(|| LcmError::Db("missing LCM sanitization receipt".to_owned()))?;
+    let receipt: SanitizationReceiptV1 = serde_json::from_value(receipt.clone())
+        .map_err(|_| LcmError::Db("invalid LCM sanitization receipt".to_owned()))?;
+    let expected_revision = ComponentVersion::new(LCM_PAYLOAD_SANITIZER_VERSION_V1)
+        .map_err(|_| LcmError::Db("invalid canonical LCM sanitizer revision".to_owned()))?;
+    if message.storage_kind == LcmStorageKind::Inline {
+        verify_sanitized_json_payload(
+            &JsonValue::String(message.content.clone()),
+            &receipt,
+            &expected_revision,
+        )
+        .map_err(|error| LcmError::Db(format!("invalid LCM sanitization receipt: {error}")))?;
+    } else {
+        let quarantined = metadata
+            .get("ingest_protection")
+            .and_then(|protection| protection.get("kind"))
+            .and_then(JsonValue::as_str)
+            == Some("quarantined_assistant_output");
+        let disposition_is_valid = matches!(
+            receipt.disposition(),
+            SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted
+        ) || (quarantined
+            && receipt.disposition() == SanitizerDispositionV1::Quarantined
+            && receipt.payload().is_none());
+        if receipt.receipt().sanitizer_version() != &expected_revision || !disposition_is_valid {
+            return Err(LcmError::Db(
+                "invalid LCM sanitization receipt for external payload".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn verified_raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
+    let inline_content: Option<String> = row.get(7)?;
+    let snippet_text: String = row.get(11)?;
+    let metadata = raw_message_metadata_from_row(row)?;
+    let message = match metadata.storage_kind {
+        LcmStorageKind::Inline => {
+            let inline_content = inline_content.ok_or(LcmError::PayloadIntegrityMismatch)?;
+            metadata.with_verified_content(inline_content)?
+        }
+        // External rows hash the owning payload, while the raw-message
+        // projection is the non-secret inline placeholder.
+        LcmStorageKind::External => metadata.with_external_placeholder(snippet_text)?,
+    };
+    verify_raw_message_receipt(&message)?;
+    Ok(message)
+}
+
+pub async fn load_raw_message_by_identity(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+) -> Result<Option<LcmRawMessage>, LcmError> {
+    let sql = format!(
+        "SELECT {RAW_MESSAGE_SELECT_COLUMNS}
+         FROM lcm_raw_messages
+         WHERE provider = ?1 AND session_id = ?2 AND message_id = ?3
+         ORDER BY store_id
+         LIMIT 2"
+    );
+    let mut rows = conn
+        .query(&sql, params![provider, session_id, message_id])
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let message = verified_raw_message_from_row(&row)?;
+    if rows.next().await?.is_some() {
+        return Err(LcmError::Db(
+            "duplicate raw messages for exact provider/session/message identity".to_string(),
+        ));
+    }
+    Ok(Some(message))
 }
 
 pub async fn load_raw_message_by_store_id(
@@ -64,7 +152,7 @@ pub async fn load_raw_message_by_store_id(
         .next()
         .await?
         .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-    raw_message_from_row(&row)
+    verified_raw_message_from_row(&row)
 }
 
 pub struct RawMessageUpsert {
@@ -72,29 +160,23 @@ pub struct RawMessageUpsert {
     pub projection_metadata_json: Option<String>,
 }
 
-#[derive(Default)]
-struct IngestProtection {
-    nested_external_payloads: usize,
-    redacted: bool,
-    // `lossy` is reserved for irreversible redaction. Hermes quarantine and
-    // payload externalization keep recoverable content refs, so they are not
-    // lossy unless a sensitive value was actually redacted.
-    lossy: bool,
-    redaction_patterns: Vec<String>,
-    quarantine_reason: Option<String>,
-    quarantine_kind: Option<String>,
-}
-
 struct PreparedMessage {
     text: String,
     metadata_json: Option<String>,
     external_kind: Option<String>,
-    protection: IngestProtection,
+    sanitization: LcmPayloadSanitizationV1,
+    quarantine_receipt: Option<SanitizationReceiptV1>,
+    nested_external_payloads: usize,
+    quarantine_reason: Option<String>,
+    quarantine_kind: Option<String>,
 }
 
-struct IngestConfig {
-    sensitive_patterns_enabled: bool,
-    sensitive_patterns: Vec<String>,
+impl PreparedMessage {
+    fn receipt(&self) -> &SanitizationReceiptV1 {
+        self.quarantine_receipt
+            .as_ref()
+            .unwrap_or_else(|| self.sanitization.receipt())
+    }
 }
 
 struct PayloadExternalizer<'a> {
@@ -156,7 +238,7 @@ async fn upsert_inline_raw_message(
     message: &SessionMessageRecord,
     text: &str,
     metadata_json: Option<&str>,
-) -> bool {
+) -> Result<(), LcmError> {
     let snippet = derived_text_for_snippet(text);
     let index = derived_text_for_index(text);
     let content_hash = projected_content_hash(text);
@@ -196,14 +278,14 @@ async fn upsert_inline_raw_message(
             metadata_json,
         ],
     )
-    .await
-    .is_ok()
+    .await?;
+    Ok(())
 }
 
 fn externalized_payload_metadata(
     payload_ref: &LcmPayloadRef,
-    protection: &IngestProtection,
-) -> String {
+    prepared: &PreparedMessage,
+) -> Result<String, LcmError> {
     let mut metadata = json!({
         "external_payload": true,
         "payload_ref": payload_ref.payload_ref,
@@ -212,8 +294,8 @@ fn externalized_payload_metadata(
         "char_count": payload_ref.char_count,
         "sha256": payload_ref.content_hash,
     });
-    add_ingest_protection_metadata(&mut metadata, protection);
-    metadata.to_string()
+    add_sanitization_metadata(&mut metadata, prepared, None)?;
+    Ok(metadata.to_string())
 }
 
 pub async fn upsert_raw_message_with_payload_tracked(
@@ -226,32 +308,20 @@ pub async fn upsert_raw_message_with_payload_tracked(
         storage_root,
         rollback,
     };
-    let prepared = prepare_message(
-        conn,
-        message,
-        &mut externalizer,
-        &IngestProtectionDefaults::from_profile(),
-    )
-    .await?;
+    let prepared = prepare_message(conn, message, &mut externalizer).await?;
     if !security::should_externalize(&message.role, message.kind.as_deref(), &prepared.text) {
         let projection_text = derived_text_for_index(&prepared.text);
-        return if upsert_inline_raw_message(
+        upsert_inline_raw_message(
             conn,
             message,
             &prepared.text,
             prepared.metadata_json.as_deref(),
         )
-        .await
-        {
-            Ok(RawMessageUpsert {
-                projection_text,
-                projection_metadata_json: prepared.metadata_json,
-            })
-        } else {
-            Err(LcmError::Db(
-                "failed to upsert inline raw message".to_string(),
-            ))
-        };
+        .await?;
+        return Ok(RawMessageUpsert {
+            projection_text,
+            projection_metadata_json: prepared.metadata_json,
+        });
     }
 
     let kind = prepared
@@ -263,16 +333,16 @@ pub async fn upsert_raw_message_with_payload_tracked(
         message,
         kind,
         &prepared.text,
-        payload_metadata_json(&prepared.protection),
+        payload_metadata_json(&prepared)?,
     )?;
     payload::upsert_payload_metadata(conn, &payload_ref).await?;
 
     let placeholder = externalized_payload_placeholder(
         &payload_ref,
         "content",
-        prepared.protection.quarantine_reason.as_deref(),
+        prepared.quarantine_reason.as_deref(),
     );
-    let metadata_json = externalized_payload_metadata(&payload_ref, &prepared.protection);
+    let metadata_json = externalized_payload_metadata(&payload_ref, &prepared)?;
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
@@ -331,27 +401,12 @@ pub async fn protect_replay_field_value_tracked(
         storage_root,
         rollback,
     };
-    let config = ingest_config(
-        message.metadata_json.as_deref(),
-        &IngestProtectionDefaults::from_profile(),
-    );
-    let mut protected = value.clone();
-
-    if config.sensitive_patterns_enabled {
-        match &mut protected {
-            JsonValue::Object(_) | JsonValue::Array(_) => {
-                let mut patterns = Vec::new();
-                let _ = redact_sensitive_json_values(&mut protected, &config, &mut patterns);
-            }
-            JsonValue::String(text) => {
-                let redacted = redact_sensitive_text(text, &config);
-                if redacted.redacted {
-                    *text = redacted.text;
-                }
-            }
-            _ => {}
-        }
-    }
+    let encoded = serde_json::to_string(value)
+        .map_err(|error| LcmError::Db(format!("replay privacy encoding failed: {error}")))?;
+    let initial = sanitize_lcm_payload_text(&encoded)
+        .map_err(|error| LcmError::Db(format!("replay privacy sanitization failed: {error}")))?;
+    let mut protected = serde_json::from_str(initial.sanitized_text())
+        .map_err(|error| LcmError::Db(format!("replay privacy decoding failed: {error}")))?;
 
     let mut payloads = Vec::new();
     protect_json_media_payloads(
@@ -364,44 +419,34 @@ pub async fn protect_replay_field_value_tracked(
     for payload_ref in &payloads {
         payload::upsert_payload_metadata(conn, payload_ref).await?;
     }
-    Ok(protected)
+    let serialized = serde_json::to_string(&protected)
+        .map_err(|error| LcmError::Db(format!("replay privacy encoding failed: {error}")))?;
+    let sanitized = bind_sanitized_lcm_payload_text(&encoded, &serialized)
+        .map_err(|error| LcmError::Db(format!("replay privacy receipt failed: {error}")))?;
+    serde_json::from_str(sanitized.sanitized_text())
+        .map_err(|error| LcmError::Db(format!("replay privacy decoding failed: {error}")))
 }
 
 async fn prepare_message(
     conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
     externalizer: &mut PayloadExternalizer<'_>,
-    defaults: &IngestProtectionDefaults,
 ) -> Result<PreparedMessage, LcmError> {
-    let config = ingest_config(message.metadata_json.as_deref(), defaults);
-    let mut protection = IngestProtection::default();
-    let redacted = redact_sensitive_text(&message.text, &config);
-    let mut text = redacted.text;
-    if redacted.redacted {
-        protection.redacted = true;
-        protection.lossy = true;
-        protection.redaction_patterns = redacted.patterns;
-    }
+    let initial = sanitize_lcm_payload_text(&message.text)
+        .map_err(|error| LcmError::Db(format!("LCM privacy sanitization failed: {error}")))?;
+    let mut text = initial.sanitized_text().to_owned();
+    let quarantine_reason =
+        security::quarantine_reason(&message.role, message.kind.as_deref(), &text)
+            .map(str::to_owned);
+    let mut nested_external_payloads = 0usize;
 
     let mut handled_as_structured = false;
-    if let Ok(mut value) = serde_json::from_str::<JsonValue>(&text)
+    if quarantine_reason.is_none()
+        && let Ok(mut value) = serde_json::from_str::<JsonValue>(&text)
         && matches!(value, JsonValue::Object(_) | JsonValue::Array(_))
     {
         handled_as_structured = true;
-        // Hermes `_protect_value` redacts the structure before
-        // externalizing payload substrings (ingest_protection.py:663-677).
         let mut json_changed = false;
-        if config.sensitive_patterns_enabled {
-            let mut key_patterns = Vec::new();
-            if redact_sensitive_json_values(&mut value, &config, &mut key_patterns) {
-                protection.redacted = true;
-                protection.lossy = true;
-                protection.redaction_patterns.extend(key_patterns);
-                protection.redaction_patterns.sort();
-                protection.redaction_patterns.dedup();
-                json_changed = true;
-            }
-        }
         let mut nested_payloads = Vec::new();
         protect_json_media_payloads(
             &mut value,
@@ -414,7 +459,7 @@ async fn prepare_message(
             for payload_ref in &nested_payloads {
                 payload::upsert_payload_metadata(conn, payload_ref).await?;
             }
-            protection.nested_external_payloads = nested_payloads.len();
+            nested_external_payloads = nested_payloads.len();
             json_changed = true;
         }
         if json_changed {
@@ -429,7 +474,8 @@ async fn prepare_message(
     // still wins when there is no inline scaffold worth keeping or when a
     // whole-message reason (quarantine, binary-ish, oversized tool output)
     // applies.
-    if !handled_as_structured
+    if quarantine_reason.is_none()
+        && !handled_as_structured
         && !security::prefers_whole_message_externalization(
             &message.role,
             message.kind.as_deref(),
@@ -444,25 +490,34 @@ async fn prepare_message(
             for payload_ref in &span_payloads {
                 payload::upsert_payload_metadata(conn, payload_ref).await?;
             }
-            protection.nested_external_payloads += span_payloads.len();
+            nested_external_payloads += span_payloads.len();
             text = protected;
         }
     }
 
-    if let Some(reason) = security::quarantine_reason(&message.role, message.kind.as_deref(), &text)
-    {
-        protection.quarantine_reason = Some(reason.to_string());
-        protection.quarantine_kind = Some("quarantined_assistant_output".to_string());
-    }
-
-    let external_kind = protection.quarantine_kind.clone();
-    let metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &protection);
-    Ok(PreparedMessage {
+    let sanitization = bind_sanitized_lcm_payload_text(&message.text, &text)
+        .map_err(|error| LcmError::Db(format!("LCM privacy receipt failed: {error}")))?;
+    text = sanitization.sanitized_text().to_owned();
+    let quarantine_receipt = quarantine_reason
+        .as_ref()
+        .map(|_| quarantine_lcm_payload_text(&message.text))
+        .transpose()
+        .map_err(|error| LcmError::Db(format!("LCM quarantine receipt failed: {error}")))?;
+    let quarantine_kind = quarantine_reason
+        .as_ref()
+        .map(|_| "quarantined_assistant_output".to_owned());
+    let mut prepared = PreparedMessage {
         text,
-        metadata_json,
-        external_kind,
-        protection,
-    })
+        metadata_json: None,
+        external_kind: quarantine_kind.clone(),
+        sanitization,
+        quarantine_receipt,
+        nested_external_payloads,
+        quarantine_reason,
+        quarantine_kind,
+    };
+    prepared.metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &prepared)?;
+    Ok(prepared)
 }
 
 fn protect_json_media_payloads(
@@ -601,15 +656,22 @@ fn externalize_spans(
     for &(start, end) in spans {
         protected.push_str(&text[cursor..start]);
         let span = &text[start..end];
+        let sanitization = sanitize_lcm_payload_text(span)
+            .map_err(|error| LcmError::Db(format!("LCM payload sanitization failed: {error}")))?;
         let metadata_json = Some(
             json!({
                 "ingest_payload": true,
                 "field_path": field_path,
-                "lossless": true,
+                "sanitization_receipt": sanitization.receipt(),
             })
             .to_string(),
         );
-        let payload_ref = externalizer.write(message, "ingest_payload", span, metadata_json)?;
+        let payload_ref = externalizer.write(
+            message,
+            "ingest_payload",
+            sanitization.sanitized_text(),
+            metadata_json,
+        )?;
         protected.push_str(&ingest_payload_placeholder(&payload_ref, field_path));
         payloads.push(payload_ref);
         cursor = end;
@@ -651,537 +713,102 @@ fn safe_placeholder_metadata(value: &str) -> String {
     }
 }
 
-struct RedactionOutcome {
-    text: String,
-    redacted: bool,
-    patterns: Vec<String>,
-}
-
-const SENSITIVE_REDACTION_PREFIX: &str = "[LCM sensitive redaction:";
-
-fn sensitive_pattern_active(config: &IngestConfig, name: &str) -> bool {
-    config
-        .sensitive_patterns
-        .iter()
-        .any(|pattern| pattern == name || pattern == "all" || pattern == "default")
-}
-
-// Policy adapter for hermes-lcm `_sensitive_pattern_for_key`
-// (ingest_protection.py:252-268). The shared kernel normalizes each key once.
-struct LcmSensitiveKeyPolicy<'a>(&'a IngestConfig);
-
-impl SensitiveKeyPolicy for LcmSensitiveKeyPolicy<'_> {
-    type Match = &'static str;
-
-    fn classify(&self, key: &NormalizedSensitiveKey) -> Option<Self::Match> {
-        let normalized = key.separated();
-        let compact = key.compact();
-        let config = self.0;
-        if sensitive_pattern_active(config, "api_key")
-            && (matches!(
-                compact,
-                "apikey" | "apitoken" | "accesstoken" | "secretkey" | "clientsecret"
-            ) || (normalized.contains("api") && normalized.contains("key"))
-                || (normalized.contains("access") && normalized.contains("token"))
-                || (normalized.contains("secret") && normalized.contains("key")))
-        {
-            return Some("api_key");
-        }
-        if sensitive_pattern_active(config, "bearer_token")
-            && matches!(
-                compact,
-                "authorization" | "authtoken" | "bearertoken" | "token"
-            )
-        {
-            return Some("bearer_token");
-        }
-        if sensitive_pattern_active(config, "password_assignment")
-            && matches!(compact, "password" | "passwd" | "pwd" | "passphrase")
-        {
-            return Some("password_assignment");
-        }
-        None
-    }
-}
-
-// Port of hermes-lcm `redact_sensitive_value` (ingest_protection.py:291-323):
-// fully redact string values under sensitive keys, recursing through the
-// structure. Values the flat text scan already redacted (placeholder present)
-// are left untouched, matching `_redact_entire_sensitive_string`.
-fn redact_sensitive_json_values(
-    value: &mut JsonValue,
-    config: &IngestConfig,
-    patterns: &mut Vec<String>,
-) -> bool {
-    visit_sensitive_json_mut(
-        value,
-        &LcmSensitiveKeyPolicy(config),
-        |visit, _path| match visit {
-            JsonVisitMut::SensitiveValue(JsonValue::String(text), pattern)
-                if !text.is_empty() && !text.contains(SENSITIVE_REDACTION_PREFIX) =>
-            {
-                *text = sensitive_placeholder(pattern, text.as_str());
-                patterns.push(pattern.to_string());
-                true
-            }
-            JsonVisitMut::SensitiveValue(_, _) | JsonVisitMut::String(_) => false,
-        },
-    )
-}
-
-/// The redactors [`redact_sensitive_text`] knows how to run.
-const BUILT_IN_SENSITIVE_PATTERNS: [&str; 4] = [
-    "api_key",
-    "bearer_token",
-    "password_assignment",
-    "private_key",
-];
-
-/// Profile-level ingest-protection defaults, resolved from the user
-/// configuration once per ingest call.
-///
-/// Sensitive-value redaction is irreversible, so LCM keeps raw payloads
-/// lossless unless an owner opts in through
-/// `lcm_sensitive_redaction_enabled`. Without this, the redactors in this
-/// module could only ever be reached by a per-message metadata key that no
-/// production producer writes.
-#[derive(Clone, Debug, Default)]
-struct IngestProtectionDefaults {
-    sensitive_patterns_enabled: bool,
-    sensitive_patterns: Option<Vec<String>>,
-}
-
-impl IngestProtectionDefaults {
-    fn from_profile() -> Self {
-        Self::from_policy(&crate::host_ports::lcm_redaction::resolve())
-    }
-
-    fn from_policy(policy: &crate::host_ports::LcmRedactionPolicy) -> Self {
-        let patterns: Vec<String> = policy
-            .patterns
-            .iter()
-            .map(|pattern| pattern.to_ascii_lowercase())
-            .collect();
-        Self {
-            sensitive_patterns_enabled: policy.enabled,
-            sensitive_patterns: (!patterns.is_empty()).then_some(patterns),
-        }
-    }
-}
-
-fn ingest_config(metadata_json: Option<&str>, defaults: &IngestProtectionDefaults) -> IngestConfig {
-    let mut config = IngestConfig {
-        sensitive_patterns_enabled: defaults.sensitive_patterns_enabled,
-        sensitive_patterns: defaults.sensitive_patterns.clone().unwrap_or_else(|| {
-            BUILT_IN_SENSITIVE_PATTERNS
-                .iter()
-                .map(|pattern| (*pattern).to_string())
-                .collect()
-        }),
-    };
-    let Some(metadata_json) = metadata_json else {
-        return config;
-    };
-    let Ok(value) = serde_json::from_str::<JsonValue>(metadata_json) else {
-        return config;
-    };
-    let ingest = value
-        .get("lcm_ingest")
-        .or_else(|| value.get("ingest_protection"))
-        .unwrap_or(&value);
-    // A per-message key still overrides the profile default in either
-    // direction; its absence leaves the owner's configured default in place.
-    if let Some(enabled) = ingest
-        .get("sensitive_patterns_enabled")
-        .and_then(JsonValue::as_bool)
-    {
-        config.sensitive_patterns_enabled = enabled;
-    }
-    if let Some(patterns) = ingest
-        .get("sensitive_patterns")
-        .and_then(JsonValue::as_array)
-    {
-        config.sensitive_patterns = patterns
-            .iter()
-            .filter_map(JsonValue::as_str)
-            .map(str::to_ascii_lowercase)
-            .collect();
-    }
-    config
-}
-
-fn redact_api_keys(text: &str) -> String {
-    redact_assignments(
-        text,
-        &[
-            "apikey",
-            "api_key",
-            "api-key",
-            "apitoken",
-            "api token",
-            "api_token",
-            "access_token",
-            "access-token",
-            "secret_key",
-            "secret-key",
-            "client_secret",
-            "client-secret",
-        ],
-        "api_key",
-        12,
-    )
-}
-
-fn redact_password_assignments(text: &str) -> String {
-    redact_assignments(
-        text,
-        &["password", "passwd", "pwd", "passphrase"],
-        "password_assignment",
-        6,
-    )
-}
-
-type TextRedactor = fn(&str) -> String;
-
-fn redact_sensitive_text(text: &str, config: &IngestConfig) -> RedactionOutcome {
-    if !config.sensitive_patterns_enabled {
-        return RedactionOutcome {
-            text: text.to_string(),
-            redacted: false,
-            patterns: Vec::new(),
-        };
-    }
-    let mut protected = text.to_string();
-    let mut patterns = Vec::new();
-    let redactors: [(&str, TextRedactor); 4] = [
-        ("api_key", redact_api_keys),
-        ("bearer_token", redact_bearer_tokens),
-        ("password_assignment", redact_password_assignments),
-        ("private_key", redact_private_keys),
-    ];
-    for (name, redactor) in redactors {
-        if config
-            .sensitive_patterns
-            .iter()
-            .any(|pattern| pattern == name || pattern == "all" || pattern == "default")
-        {
-            let next = redactor(&protected);
-            if next != protected {
-                protected = next;
-                patterns.push(name.to_string());
-            }
-        }
-    }
-    patterns.sort();
-    patterns.dedup();
-    RedactionOutcome {
-        redacted: protected != text,
-        text: protected,
-        patterns,
-    }
-}
-
-fn redact_assignments(
-    text: &str,
-    keys: &[&str],
-    pattern_name: &str,
-    min_secret_len: usize,
-) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut out = String::new();
-    let mut cursor = 0usize;
-    while cursor < text.len() {
-        let Some((key_start, key_len)) = find_next_key(&lower, cursor, keys) else {
-            out.push_str(&text[cursor..]);
-            break;
-        };
-        let mut pos = key_start + key_len;
-        pos = skip_chars(text, pos, |ch| {
-            ch.is_whitespace() || matches!(ch, '"' | '\'')
-        });
-        if !text[pos..]
-            .chars()
-            .next()
-            .is_some_and(|ch| matches!(ch, '=' | ':'))
-        {
-            out.push_str(&text[cursor..pos.min(text.len())]);
-            cursor = pos.min(text.len());
-            continue;
-        }
-        pos += 1;
-        pos = skip_chars(text, pos, char::is_whitespace);
-        let mut secret_start = pos;
-        let (secret_end, consumed_to) = if let Some(quote) = text[pos..]
-            .chars()
-            .next()
-            .filter(|ch| matches!(*ch, '"' | '\''))
-        {
-            pos += quote.len_utf8();
-            secret_start = pos;
-            while pos < text.len() {
-                let Some(ch) = text[pos..].chars().next() else {
-                    break;
-                };
-                if ch == quote || matches!(ch, '\r' | '\n' | ']' | '}') {
-                    break;
-                }
-                pos += ch.len_utf8();
-            }
-            let secret_end = pos;
-            if text[pos..].chars().next().is_some_and(|ch| ch == quote) {
-                pos += quote.len_utf8();
-            }
-            (secret_end, pos)
-        } else {
-            pos = skip_chars(text, pos, |ch| {
-                !ch.is_whitespace() && !matches!(ch, ',' | '"' | '\'' | ']' | '}')
-            });
-            (pos, pos)
-        };
-        let secret = &text[secret_start..secret_end];
-        if secret.chars().count() < min_secret_len || secret.starts_with(SENSITIVE_REDACTION_PREFIX)
-        {
-            out.push_str(&text[cursor..consumed_to]);
-            cursor = consumed_to;
-            continue;
-        }
-        out.push_str(&text[cursor..secret_start]);
-        out.push_str(&sensitive_placeholder(pattern_name, secret));
-        out.push_str(&text[secret_end..consumed_to]);
-        cursor = consumed_to;
-    }
-    out
-}
-
-fn redact_bearer_tokens(text: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut out = String::new();
-    let mut cursor = 0usize;
-    while let Some(relative) = lower[cursor..].find("bearer ") {
-        let start = cursor + relative;
-        let secret_start = start + "bearer ".len();
-        let secret_end = skip_chars(text, secret_start, |ch| {
-            !ch.is_whitespace() && !matches!(ch, ',' | '"' | '\'' | ']' | '}')
-        });
-        let secret = &text[secret_start..secret_end];
-        if secret.chars().count() < 12 {
-            out.push_str(&text[cursor..secret_end]);
-        } else {
-            out.push_str(&text[cursor..secret_start]);
-            out.push_str(&sensitive_placeholder("bearer_token", secret));
-        }
-        cursor = secret_end;
-    }
-    out.push_str(&text[cursor..]);
-    out
-}
-
-fn redact_private_keys(text: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut out = String::new();
-    let mut cursor = 0usize;
-    let mut search = 0usize;
-    while let Some((block_start, block_end)) = find_next_private_key_block(text, &lower, search) {
-        out.push_str(&text[cursor..block_start]);
-        out.push_str(&sensitive_placeholder(
-            "private_key",
-            &text[block_start..block_end],
-        ));
-        cursor = block_end;
-        search = block_end;
-    }
-    out.push_str(&text[cursor..]);
-    out
-}
-
-fn find_next_private_key_block(
-    text: &str,
-    lower: &str,
-    mut search: usize,
-) -> Option<(usize, usize)> {
-    while let Some(relative) = lower[search..].find("-----begin ") {
-        let block_start = search + relative;
-        let header_name_start = block_start + "-----begin ".len();
-        let header_end_relative = lower[header_name_start..].find("-----")?;
-        let header_end = header_name_start + header_end_relative + "-----".len();
-        if !lower[block_start..header_end].contains("private key") {
-            search = header_name_start.min(text.len());
-            continue;
-        }
-
-        let mut end_search = header_end;
-        while let Some(end_relative) = lower[end_search..].find("-----end ") {
-            let footer_start = end_search + end_relative;
-            let footer_name_start = footer_start + "-----end ".len();
-            let footer_end_relative = lower[footer_name_start..].find("-----")?;
-            let block_end = footer_name_start + footer_end_relative + "-----".len();
-            if lower[footer_start..block_end].contains("private key") {
-                return Some((block_start, block_end));
-            }
-            end_search = footer_name_start.min(text.len());
-        }
-        return None;
-    }
-    None
-}
-
-fn find_next_key(lower: &str, cursor: usize, keys: &[&str]) -> Option<(usize, usize)> {
-    keys.iter()
-        .filter_map(|key| {
-            lower[cursor..]
-                .find(key)
-                .map(|idx| (cursor + idx, key.len()))
-        })
-        .min_by_key(|(idx, _)| *idx)
-}
-
-fn skip_chars(text: &str, mut pos: usize, predicate: impl Fn(char) -> bool) -> usize {
-    while pos < text.len() {
-        let Some(ch) = text[pos..].chars().next() else {
-            break;
-        };
-        if !predicate(ch) {
-            break;
-        }
-        pos += ch.len_utf8();
-    }
-    pos
-}
-
-fn sensitive_placeholder(pattern_name: &str, secret: &str) -> String {
-    let mut parts = vec![format!(
-        "[LCM sensitive redaction: name={}; chars={}; bytes={}",
-        safe_placeholder_metadata(pattern_name),
-        secret.chars().count(),
-        secret.len()
-    )];
-    if pattern_name != "password_assignment" {
-        let digest = projected_content_hash(secret);
-        parts.push(format!("sha256={}", &digest[..16]));
-    }
-    format!("{}]", parts.join("; "))
-}
+const MAX_PROVIDER_METADATA_BYTES: u64 = 1_048_576;
 
 fn protected_metadata_json(
     original: Option<&str>,
-    protection: &IngestProtection,
-) -> Option<String> {
-    if !has_ingest_protection_metadata(protection) {
-        return original.map(str::to_string);
+    prepared: &PreparedMessage,
+) -> Result<Option<String>, LcmError> {
+    let mut metadata =
+        sanitize_provider_metadata_json(original.unwrap_or("{}"), MAX_PROVIDER_METADATA_BYTES)
+            .ok_or_else(|| LcmError::Db("LCM metadata sanitization failed".to_owned()))?;
+    if !metadata.is_object() {
+        return Err(LcmError::Db(
+            "LCM metadata sanitization failed: metadata must be a JSON object".to_owned(),
+        ));
     }
-    let mut metadata = original
-        .and_then(|text| serde_json::from_str::<JsonValue>(text).ok())
-        .filter(JsonValue::is_object)
-        .unwrap_or_else(|| JsonValue::Object(Map::new()));
-    add_ingest_protection_metadata(&mut metadata, protection);
-    Some(metadata.to_string())
+    let sanitized_metadata = serde_json::to_string(&metadata)
+        .map_err(|error| LcmError::Db(format!("LCM metadata encoding failed: {error}")))?;
+    let metadata_sanitization =
+        bind_sanitized_lcm_payload_text(original.unwrap_or("{}"), &sanitized_metadata)
+            .map_err(|error| LcmError::Db(format!("LCM metadata receipt failed: {error}")))?;
+    add_sanitization_metadata(
+        &mut metadata,
+        prepared,
+        Some(metadata_sanitization.receipt()),
+    )?;
+    Ok(Some(metadata.to_string()))
 }
 
-fn payload_metadata_json(protection: &IngestProtection) -> Option<String> {
-    if !has_ingest_protection_metadata(protection) {
-        return None;
-    }
+fn payload_metadata_json(prepared: &PreparedMessage) -> Result<Option<String>, LcmError> {
     let mut metadata = JsonValue::Object(Map::new());
-    add_ingest_protection_metadata(&mut metadata, protection);
-    Some(metadata.to_string())
+    add_sanitization_metadata(&mut metadata, prepared, None)?;
+    Ok(Some(metadata.to_string()))
 }
 
-fn has_ingest_protection_metadata(protection: &IngestProtection) -> bool {
-    protection.nested_external_payloads > 0
-        || protection.redacted
-        || protection.lossy
-        || protection.quarantine_reason.is_some()
-}
-
-fn add_ingest_protection_metadata(metadata: &mut JsonValue, protection: &IngestProtection) {
-    if !has_ingest_protection_metadata(protection) {
-        return;
-    }
+fn add_sanitization_metadata(
+    metadata: &mut JsonValue,
+    prepared: &PreparedMessage,
+    metadata_receipt: Option<&SanitizationReceiptV1>,
+) -> Result<(), LcmError> {
     let mut ingest = Map::new();
-    if protection.nested_external_payloads > 0 {
+    ingest.insert(
+        "sanitization_receipt".to_owned(),
+        serde_json::to_value(prepared.receipt())
+            .map_err(|error| LcmError::Db(format!("LCM receipt encoding failed: {error}")))?,
+    );
+    if let Some(receipt) = metadata_receipt {
+        ingest.insert(
+            "metadata_sanitization_receipt".to_owned(),
+            serde_json::to_value(receipt).map_err(|error| {
+                LcmError::Db(format!("LCM metadata receipt encoding failed: {error}"))
+            })?,
+        );
+    }
+    if prepared.nested_external_payloads > 0 {
         ingest.insert(
             "nested_external_payloads".to_string(),
-            json!(protection.nested_external_payloads),
+            json!(prepared.nested_external_payloads),
         );
     }
-    if protection.redacted {
+    if !prepared.sanitization.findings().is_empty() {
+        let mut patterns = prepared
+            .sanitization
+            .findings()
+            .iter()
+            .map(|finding| redaction_pattern(finding.detector()))
+            .collect::<Vec<_>>();
+        patterns.sort_unstable();
+        patterns.dedup();
         ingest.insert("redacted".to_string(), json!(true));
-        ingest.insert(
-            "redaction_patterns".to_string(),
-            json!(protection.redaction_patterns),
-        );
-    }
-    if protection.lossy {
+        ingest.insert("redaction_patterns".to_string(), json!(patterns));
         ingest.insert("lossy".to_string(), json!(true));
     }
-    if let Some(reason) = protection.quarantine_reason.as_deref() {
+    if let Some(reason) = prepared.quarantine_reason.as_deref() {
         ingest.insert("reason".to_string(), json!(reason));
     }
-    if let Some(kind) = protection.quarantine_kind.as_deref() {
+    if let Some(kind) = prepared.quarantine_kind.as_deref() {
         ingest.insert("kind".to_string(), json!(kind));
     }
     if let Some(object) = metadata.as_object_mut() {
         object.insert("ingest_protection".to_string(), JsonValue::Object(ingest));
     }
+    Ok(())
+}
+
+const fn redaction_pattern(detector: PrivacyDetectorV1) -> &'static str {
+    match detector {
+        PrivacyDetectorV1::ExactCredential | PrivacyDetectorV1::CredentialAssignment => "api_key",
+        PrivacyDetectorV1::BearerToken => "bearer_token",
+        PrivacyDetectorV1::PrivateKey => "private_key",
+        PrivacyDetectorV1::SensitiveField => "sensitive_field",
+        PrivacyDetectorV1::HighEntropyToken => "high_entropy",
+        PrivacyDetectorV1::MalformedRecord => "malformed_record",
+        PrivacyDetectorV1::RecordSizeLimit => "record_size_limit",
+        PrivacyDetectorV1::StructureLimit => "structure_limit",
+    }
 }
 
 #[cfg(test)]
-mod ingest_protection_defaults_tests {
-    use super::{BUILT_IN_SENSITIVE_PATTERNS, IngestProtectionDefaults, ingest_config};
-    use crate::host_ports::LcmRedactionPolicy;
-
-    fn profile(enabled: bool, patterns: &[&str]) -> IngestProtectionDefaults {
-        IngestProtectionDefaults::from_policy(&LcmRedactionPolicy {
-            enabled,
-            patterns: patterns
-                .iter()
-                .map(|pattern| (*pattern).to_string())
-                .collect(),
-        })
-    }
-
-    #[test]
-    fn default_profile_leaves_redaction_off() {
-        let config = ingest_config(None, &IngestProtectionDefaults::default());
-        assert!(!config.sensitive_patterns_enabled);
-    }
-
-    #[test]
-    fn profile_setting_enables_redaction_without_a_metadata_key() {
-        let config = ingest_config(None, &profile(true, &[]));
-        assert!(config.sensitive_patterns_enabled);
-        assert_eq!(config.sensitive_patterns, BUILT_IN_SENSITIVE_PATTERNS);
-    }
-
-    #[test]
-    fn profile_patterns_restrict_the_redactor_set() {
-        let config = ingest_config(None, &profile(true, &["API_KEY"]));
-        assert_eq!(config.sensitive_patterns, vec!["api_key".to_string()]);
-    }
-
-    #[test]
-    fn message_metadata_still_overrides_the_profile_in_both_directions() {
-        let off = ingest_config(
-            Some(r#"{"lcm_ingest":{"sensitive_patterns_enabled":false}}"#),
-            &profile(true, &[]),
-        );
-        assert!(!off.sensitive_patterns_enabled);
-        let on = ingest_config(
-            Some(r#"{"lcm_ingest":{"sensitive_patterns_enabled":true}}"#),
-            &profile(false, &[]),
-        );
-        assert!(on.sensitive_patterns_enabled);
-    }
-
-    #[test]
-    fn enabled_profile_redacts_an_api_key_assignment() {
-        let config = ingest_config(None, &profile(true, &[]));
-        let outcome = super::redact_sensitive_text("api_key=sk-liveSECRETVALUE123", &config);
-        assert!(outcome.redacted, "profile-enabled redaction must fire");
-        assert!(
-            !outcome.text.contains("sk-liveSECRETVALUE123"),
-            "secret survived redaction: {}",
-            outcome.text
-        );
-    }
-}
+#[path = "raw/ingest_protection_defaults_tests.rs"]
+mod ingest_protection_defaults_tests;

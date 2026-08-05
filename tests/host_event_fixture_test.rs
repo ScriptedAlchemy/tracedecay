@@ -717,7 +717,6 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         .await
         .unwrap()
         .expect("sanitized host observation must reach the canonical external-source store");
-    assert_eq!(committed.projection().effects().len(), 1);
     let outcome = facade.probe(provider, scope);
     drop(facade);
     drop(runtime);
@@ -732,7 +731,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             .await
             .unwrap(),
         Some(committed),
-        "external-source receipt and projection effects must survive runtime restart"
+        "external-source receipt and its published projection must survive runtime restart"
     );
     outcome
 }
@@ -997,7 +996,12 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
             .await;
         assert_eq!(
             outcome.status,
-            HostAdmissionStatus::Committed,
+            HostAdmissionStatus::AcceptedForReplay,
+            "{session_id}"
+        );
+        assert_eq!(
+            outcome.reason_code,
+            Some("external_source_projection_pending"),
             "{session_id}"
         );
     }
@@ -1029,8 +1033,12 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
     let repeated_source_outcome = facade.capture(repeated_source_request()).await;
     assert_eq!(
         repeated_source_outcome.status,
-        HostAdmissionStatus::Committed,
+        HostAdmissionStatus::AcceptedForReplay,
         "{repeated_source_outcome:?}"
+    );
+    assert_eq!(
+        repeated_source_outcome.reason_code,
+        Some("external_source_projection_pending")
     );
 
     let project_rows = runtime
@@ -1081,9 +1089,11 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
             .sequence(),
         2
     );
+    let exact_replay = facade.capture(repeated_source_request()).await;
+    assert_eq!(exact_replay.status, HostAdmissionStatus::ExactDuplicate);
     assert_eq!(
-        facade.capture(repeated_source_request()).await.status,
-        HostAdmissionStatus::ExactDuplicate
+        exact_replay.reason_code,
+        Some("external_source_projection_pending")
     );
     assert_eq!(
         runtime

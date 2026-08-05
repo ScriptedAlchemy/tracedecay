@@ -9,6 +9,7 @@
 
 use std::borrow::Cow;
 
+#[cfg(test)]
 use tracedecay_api::WorkOperation;
 
 /// `operation_id` and `application_path` are the identity the contract test
@@ -27,40 +28,10 @@ pub(super) struct RegisteredWorkRouteContractV1 {
 
 /// Names the dashboard-exposed operations; every column of the document is read
 /// off the descriptor. A test holds this list to `WorkOperation::CORE`.
-macro_rules! dashboard_work_routes {
-    ($($variant:ident),+ $(,)?) => {
-        static REGISTERED_ROUTE_CONTRACTS: &[RegisteredWorkRouteContractV1] = &[
-            $(
-                RegisteredWorkRouteContractV1 {
-                    method: "POST",
-                    operation_id: WorkOperation::$variant.operation_id_str(),
-                    path: match WorkOperation::$variant.dashboard_route_path() {
-                        Some(path) => path,
-                        None => panic!("a dashboard Work route must have a public path"),
-                    },
-                    application_path: WorkOperation::$variant.application_route_path(),
-                    request_schema_name: || WorkOperation::$variant.request_schema_name(),
-                    response_schema_name: || WorkOperation::$variant.result_schema_name(),
-                },
-            )+
-        ];
+static REGISTERED_ROUTE_CONTRACTS: &[RegisteredWorkRouteContractV1] = &[];
 
-        #[cfg(test)]
-        static DOCUMENTED_OPERATIONS: &[WorkOperation] = &[$(WorkOperation::$variant),+];
-    };
-}
-
-dashboard_work_routes!(
-    Snapshot,
-    Delta,
-    Create,
-    ReplanDependencies,
-    ReviewProposal,
-    AcceptProposal,
-    AdmitExecution,
-    AttachRuntimeEvidence,
-    AcceptTask,
-);
+#[cfg(test)]
+static DOCUMENTED_OPERATIONS: &[WorkOperation] = &[];
 
 pub(super) fn registered_route_contracts() -> &'static [RegisteredWorkRouteContractV1] {
     REGISTERED_ROUTE_CONTRACTS

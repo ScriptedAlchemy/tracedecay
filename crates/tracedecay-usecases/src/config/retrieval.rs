@@ -964,72 +964,13 @@ fn contract_error(error: impl std::fmt::Display) -> RetrievalProfileActivationEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_search_eval::{
-        DirectProfileEvaluationV1, DirectQualityMetricsV1, DirectRatioMetricV1,
-        OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-    };
-
-    fn report(status: DirectEvaluationStatusV1) -> DirectEvaluationReportV1 {
-        let empty_ratio = || DirectRatioMetricV1 {
-            numerator: 0,
-            denominator: 0,
-            ppm: 0,
-        };
-        let row = |partition: &str| DirectProfileEvaluationV1 {
-            profile_id: "profile-v1".to_owned(),
-            partition: partition.to_owned(),
-            query_count: 0,
-            failed_queries: 0,
-            fallback_stable: true,
-            fallback_matches_expected: true,
-            cancellation_bounded: true,
-            offline: true,
-            resource_status: DirectEvaluationStatusV1::Pass,
-            optional_stages: OptionalStageMeasurementsV1 {
-                semantic: OptionalStageMeasurementV1::NotRequested,
-                rerank: OptionalStageMeasurementV1::NotRequested,
-            },
-            quality: DirectQualityMetricsV1 {
-                relevant_query_count: 0,
-                recall_at_10: empty_ratio(),
-                precision_at_10: empty_ratio(),
-                mean_reciprocal_rank_ppm: 0,
-                ndcg_at_10_ppm: 0,
-                duplicate_rate: empty_ratio(),
-                protected_recall_at_10: empty_ratio(),
-                strata: Vec::new(),
-                worst_stratum: None,
-            },
-            status,
-            queries: Vec::new(),
-        };
-        DirectEvaluationReportV1 {
-            command: "compare".to_owned(),
-            status,
-            workload_digest: "workload".to_owned(),
-            corpus_digest: "corpus".to_owned(),
-            fixture_source_repository_commit: "commit".to_owned(),
-            fixture_source_repository_tree: "tree".to_owned(),
-            profiles: vec![row("train"), row("validation")],
-        }
-    }
 
     #[test]
-    fn only_a_passing_result_value_becomes_activation_evidence() {
-        assert!(
-            PassingRetrievalEvaluationV1::from_report(
-                &report(DirectEvaluationStatusV1::Pass),
-                "profile-v1",
-            )
-            .is_ok()
-        );
-        assert_eq!(
-            PassingRetrievalEvaluationV1::from_report(
-                &report(DirectEvaluationStatusV1::Pending),
-                "profile-v1",
-            ),
-            Err(RetrievalProfileActivationErrorV1::EvaluationDidNotPass)
-        );
+    fn aggregate_only_report_cannot_become_activation_evidence() {
+        let aggregate_only =
+            include_str!("../../../../benchmarks/search-quality/query-fallback-report-v1.json");
+
+        assert!(serde_json::from_str::<DirectEvaluationReportV1>(aggregate_only).is_err());
     }
 
     #[test]

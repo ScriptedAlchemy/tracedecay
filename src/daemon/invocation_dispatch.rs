@@ -51,30 +51,29 @@ pub(super) async fn execute_portable_daemon_invocation(
     }
     let request_id = request.request_id.clone();
     let git_operation = invocation_is_git_operation(request.operation());
+    let configuration_reset = request.is_configuration_reset();
+    let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
-        if Box::pin(portable_project_server_for_request(
-            lifecycle,
-            store_administration.clone(),
-            project_open_gates,
-            invocation.clone(),
-            http_application_registry,
-            handshake,
-            ProjectServerRequirement::Core,
-            #[cfg(test)]
-            project_open_attempts,
-        ))
-        .await
-        .is_err()
-        {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                if git_operation {
-                    DaemonInvocationProblem::NotFoundOrNotAuthorized
-                } else {
-                    DaemonInvocationProblem::Unavailable
-                },
-            );
+        if !configuration_reset {
+            let project_server = Box::pin(portable_project_server_for_request(
+                lifecycle,
+                store_administration.clone(),
+                project_open_gates,
+                invocation.clone(),
+                http_application_registry,
+                handshake,
+                ProjectServerRequirement::Core,
+                #[cfg(test)]
+                project_open_attempts,
+            ))
+            .await;
+            if let Err(error) = project_server {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    project_open_problem(&error, workflow_application, git_operation),
+                );
+            }
         }
         let Ok((resolved_project_path, _)) = project_route_for_handshake(handshake) else {
             return DaemonInvocationResponse::problem(
@@ -82,7 +81,9 @@ pub(super) async fn execute_portable_daemon_invocation(
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        if admitted_lsp_root_for_project_path(&resolved_project_path).is_none() {
+        if !configuration_reset
+            && admitted_lsp_root_for_project_path(&resolved_project_path).is_none()
+        {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
@@ -128,35 +129,73 @@ pub(super) async fn write_tool_list_changed_notification(
 pub(super) async fn resolve_multi_root_projects(
     store_administration: &StoreAdministration,
     service: &service::invocation::DaemonInvocationService,
-    project_ids: &[tracedecay_domain::ProjectId],
+    selectors: &[tracedecay_application::RegisteredRootSelectorV1],
 ) -> std::result::Result<
-    Vec<(PathBuf, tracedecay_application::ResolvedScope)>,
+    Vec<(
+        PathBuf,
+        tracedecay_application::ResolvedScope,
+        tracedecay_application::RegisteredRootLocatorV1,
+    )>,
     service::invocation::DaemonInvocationProblem,
 > {
     let database = store_administration
         .registered_profile_database()
         .await
         .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
-    let mut roots = Vec::with_capacity(project_ids.len());
-    for project_id in project_ids {
+    let profile_id = store_administration
+        .profile_identity()
+        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?
+        .profile_id()
+        .clone();
+    let mut roots = Vec::with_capacity(selectors.len());
+    for selector in selectors {
         let context = database
-            .project_registry_context_by_id(project_id.as_str())
+            .project_registry_context_by_id(selector.project_id.as_str())
             .await
             .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?
             .ok_or(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
-        if context.project.project_id != project_id.as_str() {
+        if context.project.project_id != selector.project_id.as_str() {
             return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
-        let root = PathBuf::from(context.project.canonical_root);
-        if !root.is_absolute() || root.canonicalize().ok().as_ref() != Some(&root) {
+        let mut stores = context
+            .stores
+            .iter()
+            .filter(|store| store.store.project_id == selector.project_id.as_str());
+        let Some(store) = stores.next() else {
+            return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+        };
+        if stores.next().is_some() {
             return Err(service::invocation::DaemonInvocationProblem::Unavailable);
         }
-        let scope = project_open_owners::resolved_scope_for_project(&root, project_id)
+        let registered_root = PathBuf::from(context.project.canonical_root);
+        if !registered_root.is_absolute()
+            || registered_root.canonicalize().ok().as_ref() != Some(&registered_root)
+        {
+            return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+        }
+        let root = selector
+            .root
+            .canonicalize()
+            .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        tracedecay_usecases::context::RegisteredScopeResolver::resolve(
+            &registered_root,
+            &root,
+            &selector.project_id,
+        )
+        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        let scope = project_open_owners::resolved_scope_for_project(&root, &selector.project_id)
             .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
         if !service.lsp_owner_matches_scope(&root, &scope).await {
             return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
-        roots.push((root, scope));
+        let locator = tracedecay_application::RegisteredRootLocatorV1::new(
+            selector.project_id.clone(),
+            profile_id.clone(),
+            store.store.store_id.clone(),
+            root.clone(),
+        )
+        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        roots.push((root, scope, locator));
     }
     roots.sort_by(|left, right| left.1.scope_digest.cmp(&right.1.scope_digest));
     if roots
@@ -179,21 +218,20 @@ pub(super) async fn execute_daemon_invocation(
     }
     let request_id = request.request_id.clone();
     let git_operation = invocation_is_git_operation(request.operation());
+    let configuration_reset = request.is_configuration_reset();
+    let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
-        if engine
-            .project_server_for_request(handshake, ProjectServerRequirement::Core)
-            .await
-            .is_err()
-        {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                if git_operation {
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized
-                } else {
-                    service::invocation::DaemonInvocationProblem::Unavailable
-                },
-            );
+        if !configuration_reset {
+            let project_server = engine
+                .project_server_for_request(handshake, ProjectServerRequirement::Core)
+                .await;
+            if let Err(error) = project_server {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    project_open_problem(&error, workflow_application, git_operation),
+                );
+            }
         }
         let Ok((resolved_project_path, _)) = DaemonEngine::project_route(handshake) else {
             return DaemonInvocationResponse::problem(
@@ -201,7 +239,9 @@ pub(super) async fn execute_daemon_invocation(
                 service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        if admitted_lsp_root_for_project_path(&resolved_project_path).is_none() {
+        if !configuration_reset
+            && admitted_lsp_root_for_project_path(&resolved_project_path).is_none()
+        {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::Unavailable,
@@ -217,4 +257,43 @@ pub(super) async fn execute_daemon_invocation(
             request,
         )
         .await
+}
+
+fn project_open_problem(
+    error: &crate::errors::TraceDecayError,
+    workflow_application: bool,
+    git_operation: bool,
+) -> service::invocation::DaemonInvocationProblem {
+    if workflow_application
+        && matches!(
+            error,
+            crate::errors::TraceDecayError::ResetRequired { authority, .. }
+                if authority == "workflow"
+        )
+    {
+        service::invocation::DaemonInvocationProblem::ResetRequired
+    } else if git_operation {
+        service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized
+    } else {
+        service::invocation::DaemonInvocationProblem::Unavailable
+    }
+}
+
+#[cfg(test)]
+mod workflow_reset_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_project_open_reset_remains_a_daemon_reset_problem() {
+        let error =
+            crate::errors::TraceDecayError::reset_required("workflow", "partial workflow schema");
+        assert_eq!(
+            project_open_problem(&error, true, false),
+            service::invocation::DaemonInvocationProblem::ResetRequired
+        );
+        assert_eq!(
+            project_open_problem(&error, false, false),
+            service::invocation::DaemonInvocationProblem::Unavailable
+        );
+    }
 }

@@ -6,9 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationContractError, ObservationIdentityMaterialV1,
-    ObservationSourceCursorV1, ProjectionGenerationId, RetentionClass, SanitizationReceiptV1,
-    UtcMicros,
+    CanonicalObservationIdV1, ManifestDigest, ObservationContractError,
+    ObservationIdentityMaterialV1, ObservationSourceCursorV1, ProjectionGenerationId,
+    RetentionClass, SanitizationReceiptV1, SourceBindingIdentityV1, UtcMicros,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
@@ -174,6 +174,15 @@ pub enum CaptureObservationOutcome {
         sanitized_record: Box<SanitizedObservationRecordV1>,
         findings: Vec<SanitizationFindingV1>,
     },
+    AcceptedForReplay {
+        durable_observation_id: CanonicalObservationIdV1,
+        projection_state: ExternalSourceProjectionStateV1,
+        retry_handle: ExternalSourceProjectionRetryHandleV1,
+        outcome: Box<ObservationPersistOutcome>,
+        projection_status: ObservationProjectionStatus,
+        sanitized_record: Box<SanitizedObservationRecordV1>,
+        findings: Vec<SanitizationFindingV1>,
+    },
     Rejected {
         receipt: SanitizationReceiptV1,
         findings: Vec<SanitizationFindingV1>,
@@ -187,7 +196,9 @@ pub enum CaptureObservationOutcome {
 impl CaptureObservationOutcome {
     pub fn sanitization_receipt(&self) -> &SanitizationReceiptV1 {
         match self {
-            Self::Persisted { outcome, .. } => outcome.receipt().sanitization_receipt(),
+            Self::Persisted { outcome, .. } | Self::AcceptedForReplay { outcome, .. } => {
+                outcome.receipt().sanitization_receipt()
+            }
             Self::Rejected { receipt, .. } | Self::Quarantined { receipt, .. } => receipt,
         }
     }
@@ -195,9 +206,38 @@ impl CaptureObservationOutcome {
     pub fn findings(&self) -> &[SanitizationFindingV1] {
         match self {
             Self::Persisted { findings, .. }
+            | Self::AcceptedForReplay { findings, .. }
             | Self::Rejected { findings, .. }
             | Self::Quarantined { findings, .. } => findings,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalSourceProjectionStateV1 {
+    Pending,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalSourceProjectionRetryHandleV1 {
+    binding: SourceBindingIdentityV1,
+    source_receipt_digest: ManifestDigest,
+}
+
+impl ExternalSourceProjectionRetryHandleV1 {
+    pub fn new(binding: SourceBindingIdentityV1, source_receipt_digest: ManifestDigest) -> Self {
+        Self {
+            binding,
+            source_receipt_digest,
+        }
+    }
+
+    pub fn binding(&self) -> &SourceBindingIdentityV1 {
+        &self.binding
+    }
+
+    pub fn source_receipt_digest(&self) -> &ManifestDigest {
+        &self.source_receipt_digest
     }
 }
 

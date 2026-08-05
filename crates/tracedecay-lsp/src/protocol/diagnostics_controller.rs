@@ -1,4 +1,5 @@
 use super::outbound_controller::PublicationTag;
+use super::workspace_diagnostics_controller::WorkspaceDiagnosticResultIdentity;
 use super::{
     BTreeMap, ConnectionLocalRequestSequence, DaemonLspProtocolSession, DebouncedDiagnosticKind,
     Deserialize, DiagnosticMerge, DiagnosticRefreshAdmission, DiagnosticRefreshIdentity,
@@ -9,6 +10,10 @@ use super::{
     ManifestDigest, MethodUnavailableReason, OverlayDiagnosticDebouncer, RpcFailure,
     SemanticProviderPort, SessionLifecycle, Value, diagnostic_result_id, diagnostic_value,
     document_diagnostic_report_value, json, request_id_value, response_value,
+};
+use crate::workspace_diagnostics::{
+    MAX_WORKSPACE_DIAGNOSTIC_RESULT_ID_BYTES, MAX_WORKSPACE_DIAGNOSTIC_RESULTS,
+    WorkspaceDiagnosticRootFailure, WorkspaceDocumentDiagnostics, WorkspaceGenerationDiagnostics,
 };
 
 const MAX_NATIVE_DIAGNOSTIC_URI_BYTES: usize = 4 * 1024;
@@ -48,6 +53,9 @@ where
     pub(super) refresh_request: Option<LspRequestId>,
     pub(super) refresh_needed: bool,
     pub(super) active_refreshes: BTreeMap<String, PendingDiagnosticRefresh>,
+    pub(super) workspace_results: BTreeMap<String, WorkspaceDiagnosticResultIdentity>,
+    pub(super) workspace_snapshots: BTreeMap<String, WorkspaceGenerationDiagnostics>,
+    pub(super) workspace_failures: BTreeMap<String, WorkspaceDiagnosticRootFailure>,
 }
 
 impl<D> DiagnosticsController<D>
@@ -65,6 +73,9 @@ where
             refresh_request: None,
             refresh_needed: false,
             active_refreshes: BTreeMap::new(),
+            workspace_results: BTreeMap::new(),
+            workspace_snapshots: BTreeMap::new(),
+            workspace_failures: BTreeMap::new(),
         }
     }
 }
@@ -727,6 +738,156 @@ fn diagnostic_source_generation(outcome: &DiagnosticSnapshotOutcome) -> Option<u
         | DiagnosticSnapshotOutcome::Failed {
             source_generation, ..
         } => *source_generation,
+    }
+}
+
+pub(super) fn parse_workspace_previous_results(
+    params: &Value,
+) -> Result<BTreeMap<String, String>, RpcFailure> {
+    let Some(previous) = params.get("previousResultIds") else {
+        return Ok(BTreeMap::new());
+    };
+    let previous = previous
+        .as_array()
+        .ok_or_else(|| RpcFailure::invalid_params("previousResultIds must be an array"))?;
+    if previous.len() > MAX_WORKSPACE_DIAGNOSTIC_RESULTS {
+        return Err(RpcFailure::invalid_params(
+            "previousResultIds exceeds the workspace diagnostic bound",
+        ));
+    }
+    let mut parsed = BTreeMap::new();
+    for item in previous {
+        let object = item.as_object().filter(|object| {
+            object.len() == 2 && object.contains_key("uri") && object.contains_key("value")
+        });
+        let Some(object) = object else {
+            return Err(RpcFailure::invalid_params(
+                "previousResultIds entries require only uri and value",
+            ));
+        };
+        let uri = object
+            .get("uri")
+            .and_then(Value::as_str)
+            .filter(|uri| {
+                !uri.is_empty() && uri.len() <= crate::diagnostics::MAX_DIAGNOSTIC_URI_BYTES
+            })
+            .ok_or_else(|| RpcFailure::invalid_params("previousResultIds uri is invalid"))?;
+        let value = object
+            .get("value")
+            .and_then(Value::as_str)
+            .filter(|value| {
+                !value.is_empty() && value.len() <= MAX_WORKSPACE_DIAGNOSTIC_RESULT_ID_BYTES
+            })
+            .ok_or_else(|| RpcFailure::invalid_params("previousResultIds value is invalid"))?;
+        if parsed.insert(uri.to_owned(), value.to_owned()).is_some() {
+            return Err(RpcFailure::invalid_params(
+                "previousResultIds contains a duplicate uri",
+            ));
+        }
+    }
+    Ok(parsed)
+}
+
+pub(super) fn validate_workspace_progress_tokens(params: &Value) -> Result<(), RpcFailure> {
+    for field in ["workDoneToken", "partialResultToken"] {
+        if let Some(token) = params.get(field)
+            && token.as_str().is_none()
+            && token.as_i64().is_none()
+        {
+            return Err(RpcFailure::invalid_params(
+                "workspace diagnostic progress tokens must be strings or integers",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn workspace_result_identity(
+    root: &crate::gateway::AdmittedRoot,
+    code_generation_id: &str,
+    snapshot_digest: &ManifestDigest,
+    document: &WorkspaceDocumentDiagnostics,
+    diagnostic_digest: &ManifestDigest,
+) -> Result<WorkspaceDiagnosticResultIdentity, RpcFailure> {
+    let root_scope_digest = root.scope_digest().cloned().ok_or_else(|| {
+        workspace_diagnostic_failure("workspace-root-scope-unavailable", Vec::new())
+    })?;
+    if code_generation_id.is_empty() || code_generation_id.len() > 256 {
+        return Err(workspace_diagnostic_failure(
+            "workspace-code-generation-invalid",
+            Vec::new(),
+        ));
+    }
+    let digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.lsp.workspace-diagnostic-result.v1",
+        &root_scope_digest,
+        code_generation_id,
+        snapshot_digest,
+        &document.uri,
+        &document.content_digest,
+        diagnostic_digest,
+        document.diagnostics.generation,
+        document.version,
+    ))
+    .map_err(|_| {
+        workspace_diagnostic_failure(
+            "workspace-diagnostic-result-identity-unavailable",
+            Vec::new(),
+        )
+    })?;
+    let result_id = format!("tracedecay-workspace-diagnostic-v1:{}", digest.as_str());
+    if result_id.len() > MAX_WORKSPACE_DIAGNOSTIC_RESULT_ID_BYTES {
+        return Err(workspace_diagnostic_failure(
+            "workspace-diagnostic-result-identity-capacity",
+            Vec::new(),
+        ));
+    }
+    Ok(WorkspaceDiagnosticResultIdentity {
+        result_id,
+        root_scope_digest,
+        code_generation_id: code_generation_id.to_owned(),
+        snapshot_digest: snapshot_digest.clone(),
+        content_digest: document.content_digest.clone(),
+        diagnostic_digest: diagnostic_digest.clone(),
+        diagnostic_generation: document.diagnostics.generation,
+        version: document.version,
+    })
+}
+
+pub(super) fn workspace_root_failure(
+    root: &crate::gateway::AdmittedRoot,
+    failure_class: String,
+) -> WorkspaceDiagnosticRootFailure {
+    WorkspaceDiagnosticRootFailure {
+        root_uri: root.uri().to_owned(),
+        scope_digest: root.scope_digest().cloned(),
+        failure_class,
+    }
+}
+
+pub(super) fn workspace_root_failure_value(failure: &WorkspaceDiagnosticRootFailure) -> Value {
+    json!({
+        "rootUri": failure.root_uri,
+        "scopeDigest": failure.scope_digest.as_ref().map(ManifestDigest::as_str),
+        "failureClass": failure.failure_class,
+    })
+}
+
+pub(super) fn workspace_diagnostic_failure(
+    failure_class: &'static str,
+    root_failures: Vec<WorkspaceDiagnosticRootFailure>,
+) -> RpcFailure {
+    RpcFailure {
+        code: -32802,
+        message: "Server cancelled request",
+        data: json!({
+            "retriggerRequest": true,
+            "failureClass": failure_class,
+            "rootFailures": root_failures
+                .iter()
+                .map(workspace_root_failure_value)
+                .collect::<Vec<_>>(),
+        }),
     }
 }
 

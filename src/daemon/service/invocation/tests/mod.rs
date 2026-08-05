@@ -154,26 +154,26 @@ fn hook_binding() -> HookScopeBindingV1 {
 
 fn hook_lifecycle() -> ContextScoutLifecycleAddressV1 {
     ContextScoutLifecycleAddressV1 {
-        profile_id: tracedecay_domain::UserProfileId::new("profile.pr13-hook").unwrap(),
+        profile_id: tracedecay_domain::UserProfileId::new("profile.advisory-hook").unwrap(),
         provider_id: tracedecay_domain::ProviderId::new("codex").unwrap(),
-        project_id: ProjectId::new("project.pr13-hook").unwrap(),
-        worktree_id: tracedecay_domain::WorktreeId::new("worktree.pr13-hook").unwrap(),
-        session_id: tracedecay_domain::SessionId::new("session.pr13-hook").unwrap(),
-        thread_id: tracedecay_domain::ThreadId::new("thread.pr13-hook").unwrap(),
-        turn_id: tracedecay_domain::TurnId::new("turn.pr13-hook").unwrap(),
-        agent_id: tracedecay_domain::AgentInstanceId::new("agent.pr13-hook").unwrap(),
-        logical_message_id: tracedecay_domain::MessageId::new("message.pr13-hook").unwrap(),
+        project_id: ProjectId::new("project.advisory-hook").unwrap(),
+        worktree_id: tracedecay_domain::WorktreeId::new("worktree.advisory-hook").unwrap(),
+        session_id: tracedecay_domain::SessionId::new("session.advisory-hook").unwrap(),
+        thread_id: tracedecay_domain::ThreadId::new("thread.advisory-hook").unwrap(),
+        turn_id: tracedecay_domain::TurnId::new("turn.advisory-hook").unwrap(),
+        agent_id: tracedecay_domain::AgentInstanceId::new("agent.advisory-hook").unwrap(),
+        logical_message_id: tracedecay_domain::MessageId::new("message.advisory-hook").unwrap(),
     }
 }
 
+mod configuration_registrars_tests;
 mod configuration_tests;
 mod dispatch_tests;
 mod feedback_tests;
 mod git_tests;
+mod handoff_tests;
+mod invocation_observability_tests;
 mod lsp_lease_tests;
 mod lsp_tests;
-mod plan26_tests;
 mod primitive_tests;
-mod registrars_tests;
 mod types_tests;
-mod work_tests;

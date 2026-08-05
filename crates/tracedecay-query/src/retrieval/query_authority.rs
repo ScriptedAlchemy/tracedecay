@@ -1,8 +1,9 @@
 //! Authenticated production authority for the canonical query fallback.
 //!
-//! Construction requires an already accepted immutable evaluation profile and
-//! a daemon-owned query/cursor keyring. This module does not choose weights,
-//! mint calibration identities, or generate key material.
+//! Construction requires an immutable fallback policy and a daemon-owned
+//! query/cursor keyring. The policy may be the checked-in core fallback or an
+//! evaluated replacement; this module does not choose weights, mint
+//! calibration identities, or generate key material.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -64,9 +65,9 @@ pub enum QueryAuthorityErrorV1 {
 
 /// One production query profile/key authority.
 ///
-/// The configuration owner may mount this only after the profile's evaluation
-/// anchor has been accepted. The durable provider owns key lifecycle; only an
-/// authenticated [`QueryDigest`] and signed cursor leave this owner.
+/// The configuration owner mounts this from either the checked-in fallback
+/// policy or an accepted evaluation. The durable provider owns key lifecycle;
+/// only an authenticated [`QueryDigest`] and signed cursor leave this owner.
 pub struct QueryAuthorityV1 {
     profile: FusionProfile,
     diversity: DiversityPolicy,
@@ -106,7 +107,7 @@ impl QueryAuthorityV1 {
                 != Some(&profile.evaluation_result_anchor)
         {
             return Err(QueryAuthorityErrorV1::InvalidAuthority(
-                "diversity policy is not bound to the accepted evaluation".to_owned(),
+                "diversity policy is not bound to the immutable profile authority".to_owned(),
             ));
         }
         Ok(Self {

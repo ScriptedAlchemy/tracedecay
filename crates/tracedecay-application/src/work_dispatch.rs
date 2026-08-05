@@ -362,14 +362,19 @@ impl<R> InFlightV1<R> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use tracedecay_domain::{
-        AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
-        ProviderId, RefId, RepositoryId, RunId, TaskId, WorkAttemptProjectionBindingV1,
-        WorkCancellationStateV1, WorkEffectStateV1, WorkExecutionBudgetV1, WorkExecutionEnvelopeV1,
-        WorkFenceEpochV1, WorkLeaseId, WorkProjectionSequenceV1, WorkProviderBackendV1,
-        WorkProviderRouteId, WorkRecoveryStateV1, WorkVersion, WorkflowOperationRef, WorktreeId,
+        AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
+        ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RefId, RepositoryId, RunId,
+        TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptProjectionBindingV1,
+        WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
+        WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+        WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
+        WorkLeaseId, WorkProjectionSequenceV1, WorkProviderBackendV1, WorkProviderProtocol,
+        WorkProviderRouteId, WorkRecoveryStateV1, WorkSandboxPolicy, WorkVersion,
+        WorkflowOperationRef, WorktreeId,
     };
 
     use super::*;
@@ -392,6 +397,39 @@ mod tests {
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    fn execution_snapshot(route: WorkProviderRouteV1) -> WorkExecutionSnapshot {
+        WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
+            configuration_revision_id: id::<ConfigurationRevisionId>(
+                "configuration-revision.work.dispatch",
+            ),
+            configuration_snapshot_id: id::<ConfigurationSnapshotId>(
+                "configuration-snapshot.work.dispatch",
+            ),
+            effective_behavior_digest: digest('c'),
+            resolution_provenance_digest: digest('d'),
+            route,
+            backend: WorkProviderBackendV1::CodexAppServer,
+            protocol: WorkProviderProtocol::CodexAppServerJsonRpc,
+            model: "gpt-test".to_owned(),
+            executable: WorkExecutableReference::new(
+                "executable.codex.app-server".to_owned(),
+                digest('e'),
+            )
+            .unwrap(),
+            sandbox: WorkSandboxPolicy::Required,
+            approval: WorkApprovalPolicy::Never,
+            filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+            egress: WorkEgressPolicy::Deny,
+            environment_allowlist: BTreeSet::new(),
+            credential_references: BTreeSet::new(),
+            limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
+            deadline: UtcMicros(1_000_000),
+            fallback: WorkFallbackTopology::Disabled,
+            topology_policy_digest: digest('f'),
+        })
+        .unwrap()
     }
 
     fn lease(lease_id: &str, epoch: u64) -> WorkLeaseFenceV1 {
@@ -426,19 +464,14 @@ mod tests {
             identity.clone(),
             projection_binding.clone(),
             id::<WorkflowOperationRef>("operation.work.execute-provider"),
-            requested_route.clone(),
-            WorkProviderBackendV1::CodexAppServer,
-            "gpt-test".to_owned(),
-            digest('c'),
+            execution_snapshot(requested_route.clone()),
             id::<ProjectId>("project.work.dispatch"),
             id::<RepositoryId>("repository.work.dispatch"),
             id::<WorktreeId>("worktree.work.dispatch"),
             "/tmp/work-dispatch".to_owned(),
             Some(id::<RefId>("refs/heads/work-dispatch")),
             id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
-            tracedecay_domain::UtcMicros(1_000_000),
             1,
-            WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
             WorkEffectStateV1::Observational,
         )
         .unwrap();

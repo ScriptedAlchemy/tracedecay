@@ -262,6 +262,10 @@ impl SnapshotAdmissionRunner {
                 scope,
             )
             .await?;
+            if cancellation.is_cancelled() {
+                self.budget.defer_unadmitted(input_bytes);
+                return Ok(());
+            }
             if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
                 continue;
             }
@@ -307,7 +311,8 @@ impl SnapshotAdmissionRunner {
                 }
             };
             match outcome {
-                CaptureObservationOutcome::Persisted { outcome, .. } => {
+                CaptureObservationOutcome::Persisted { outcome, .. }
+                | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
                     if let ObservationPersistOutcome::Committed(receipt) = outcome.as_ref() {
                         self.stats.messages_upserted =
                             self.stats.messages_upserted.saturating_add(1);

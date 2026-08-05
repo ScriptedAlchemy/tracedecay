@@ -1,96 +1,165 @@
-//! Durable workflow authority over the canonical Work registered SQL channel.
-//!
-//! Definitions, handoffs, and execution fencing share the exact
-//! `ExactSqlHandle` owned by `WorkSqliteStorage`. This module never opens a
-//! private connection or creates a second Work authority.
+//! Durable workflow authority over the canonical registered SQL channel.
 
 use std::time::Duration;
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError,
-    WorkflowExecutionAuthorityPort, WorkflowExecutionFenceV1, WorkflowExecutionIdentityV1,
-    WorkflowExecutionTruthV1, WorkflowFanOutCheckpointV1,
+    TaskHandoffGrant, TaskHandoffScope, WorkflowDefinitionAuthorityError,
+    WorkflowDefinitionAuthorityPort, WorkflowEffectAuthorityErrorV1, WorkflowEffectAuthorityPortV1,
+    WorkflowEffectIdentityV1, WorkflowEffectJournalRecordV1, WorkflowEffectJournalStateV1,
+    WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectProblemV1,
+    WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{
-    AttemptId, ManifestDigest, UtcMicros, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
-    WorkflowDefinitionId, WorkflowDefinitionV1, canonical_sha256,
+    ManifestDigest, UtcMicros, WorkflowDefinition, WorkflowDefinitionId, canonical_sha256,
 };
 
 use crate::exact_sql::{
-    ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
-    ExactSqlValue,
+    ExactSqlError, ExactSqlError as MigrationSqlError, ExactSqlHandle, ExactSqlRows,
+    ExactSqlRows as MigrationSqlRows, ExactSqlStatement,
+    ExactSqlStatement as MigrationSqlStatement, ExactSqlTransaction, ExactSqlValue,
+    ExactSqlValue as MigrationSqlValue,
 };
-use crate::work::WorkSqliteStorage;
+mod effect_mutation;
+mod schema;
 
-const WORKFLOW_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS workflow_definitions_v1 (
-    definition_id TEXT NOT NULL,
-    definition_version INTEGER NOT NULL CHECK (definition_version > 0),
-    payload TEXT NOT NULL,
-    payload_digest TEXT NOT NULL,
-    PRIMARY KEY (definition_id, definition_version)
-) STRICT;
+pub use schema::{
+    WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_SCHEMA_VERSION_V1,
+    WORKFLOW_TABLE_CONTRACTS_V1, WorkflowColumnContractV1, WorkflowTableContractV1,
+    install_workflow_schema,
+};
 
-CREATE TABLE IF NOT EXISTS workflow_activations_v1 (
-    definition_id TEXT NOT NULL PRIMARY KEY,
-    active_version INTEGER NOT NULL CHECK (active_version > 0)
-) STRICT;
+const WORKFLOW_EFFECT_SELECT: &str = "SELECT identity_digest, state, terminal_payload,
+        identity_payload, identity_payload_digest,
+        terminal_payload_digest, operation,
+        prepared_payload, prepared_payload_digest
+ FROM workflow_effect_journal
+ WHERE idempotency_key = ?1";
 
-CREATE TABLE IF NOT EXISTS workflow_handoffs_v1 (
-    token_digest TEXT NOT NULL PRIMARY KEY,
-    scope_payload TEXT NOT NULL,
-    issued_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL CHECK (expires_at > issued_at),
-    consumed INTEGER NOT NULL CHECK (consumed IN (0, 1))
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS workflow_executions_v1 (
-    definition_id TEXT NOT NULL,
-    definition_version INTEGER NOT NULL CHECK (definition_version > 0),
-    run_id TEXT NOT NULL,
-    step_id TEXT NOT NULL,
-    plan_digest TEXT NOT NULL,
-    attempt_id TEXT NOT NULL,
-    lease_id TEXT NOT NULL,
-    fence_epoch INTEGER NOT NULL CHECK (fence_epoch > 0),
-    checkpoint_payload TEXT,
-    terminal_payload TEXT,
-    PRIMARY KEY (definition_id, definition_version, run_id, step_id)
-) STRICT;
-";
-
-/// Workflow persistence on the registered Work exact-SQL handle.
+/// Workflow persistence on the registered writer.
 #[derive(Clone)]
 pub struct WorkflowSqliteAuthority {
-    handle: ExactSqlHandle,
+    storage: ExactSqlHandle,
 }
 
 impl WorkflowSqliteAuthority {
-    /// Clone the crate-visible Work handle and install workflow tables through it.
-    pub fn from_work_storage(
-        storage: &WorkSqliteStorage,
+    pub fn from_registered(
+        storage: ExactSqlHandle,
     ) -> Result<Self, WorkflowSqliteAuthorityBuildError> {
-        let authority = Self {
-            handle: storage.handle.clone(),
-        };
-        authority.install_schema()?;
-        Ok(authority)
-    }
-
-    fn install_schema(&self) -> Result<(), WorkflowSqliteAuthorityBuildError> {
-        self.handle
-            .execute_batch(WORKFLOW_SCHEMA_V1.to_owned())
-            .map(|_| ())
-            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)
+        require_workflow_schema(&storage)?;
+        Ok(Self { storage })
     }
 }
 
 /// Construction failure for the durable workflow authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkflowSqliteAuthorityBuildError {
+    ResetRequired,
     Unavailable,
+}
+
+fn require_workflow_schema(
+    handle: &ExactSqlHandle,
+) -> Result<(), WorkflowSqliteAuthorityBuildError> {
+    let rows = handle
+        .query(
+            ExactSqlStatement::new(
+                "SELECT name, sql FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN (
+                       'workflow_definitions',
+                       'workflow_effect_journal',
+                       'workflow_handoffs',
+                       'workflow_schema'
+                   )
+                 ORDER BY name"
+                    .to_owned(),
+                Vec::new(),
+            )
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
+            Duration::from_secs(5),
+        )
+        .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
+    let actual = rows
+        .rows
+        .iter()
+        .filter_map(|row| match row.values.first() {
+            Some(ExactSqlValue::Text(name)) => match row.values.get(1) {
+                Some(ExactSqlValue::Text(sql)) => Some((name.as_str(), sql.as_str())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if actual
+        != WORKFLOW_TABLE_CONTRACTS_V1
+            .iter()
+            .map(|table| (table.name, table.sql))
+            .collect::<Vec<_>>()
+    {
+        return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
+    }
+    let schema = handle
+        .query(
+            ExactSqlStatement::new(
+                "SELECT singleton, schema_version, definition_digest FROM workflow_schema
+                 ORDER BY singleton"
+                    .to_owned(),
+                Vec::new(),
+            )
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
+            Duration::from_secs(5),
+        )
+        .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
+    let valid_schema = schema.rows.len() == 1
+        && schema.rows.first().is_some_and(|row| {
+            matches!(row.values.first(), Some(ExactSqlValue::Integer(1)))
+                && matches!(
+                    row.values.get(1),
+                    Some(ExactSqlValue::Integer(WORKFLOW_SCHEMA_VERSION_V1))
+                )
+                && matches!(
+                    row.values.get(2),
+                    Some(ExactSqlValue::Text(digest))
+                        if digest == WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1
+                )
+        });
+    if !valid_schema {
+        return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
+    }
+    for table in WORKFLOW_TABLE_CONTRACTS_V1 {
+        require_columns(handle, table)?;
+    }
+    Ok(())
+}
+
+fn require_columns(
+    handle: &ExactSqlHandle,
+    table: &WorkflowTableContractV1,
+) -> Result<(), WorkflowSqliteAuthorityBuildError> {
+    let columns = handle
+        .query(
+            ExactSqlStatement::new(format!("PRAGMA table_info({})", table.name), Vec::new())
+                .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
+            Duration::from_secs(5),
+        )
+        .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
+    let exact = columns.rows.len() == table.columns.len()
+        && columns
+            .rows
+            .iter()
+            .zip(table.columns)
+            .all(|(row, column)| {
+                matches!(row.values.get(1), Some(ExactSqlValue::Text(actual)) if actual == column.name)
+                    && matches!(row.values.get(2), Some(ExactSqlValue::Text(actual)) if actual == column.sql_type)
+                    && matches!(row.values.get(3), Some(ExactSqlValue::Integer(actual)) if *actual == column.not_null)
+                    && matches!(row.values.get(5), Some(ExactSqlValue::Integer(actual)) if *actual == column.primary_key)
+            });
+    if exact {
+        Ok(())
+    } else {
+        Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
+    }
 }
 
 fn definition_unavailable(_: ExactSqlError) -> WorkflowDefinitionAuthorityError {
@@ -113,30 +182,33 @@ fn handoff_codec_unavailable() -> TaskHandoffAuthorityError {
     TaskHandoffAuthorityError::Unavailable("workflow handoff authority unavailable".to_owned())
 }
 
-fn execution_unavailable(_: ExactSqlError) -> WorkflowExecutionAuthorityError {
-    WorkflowExecutionAuthorityError::Unavailable(
-        "workflow execution authority unavailable".to_owned(),
+fn workflow_effect_unavailable(_: ExactSqlError) -> WorkflowEffectAuthorityErrorV1 {
+    WorkflowEffectAuthorityErrorV1::Unavailable(
+        "registered workflow effect storage unavailable".to_owned(),
     )
 }
 
-fn execution_codec_unavailable() -> WorkflowExecutionAuthorityError {
-    WorkflowExecutionAuthorityError::Unavailable(
-        "workflow execution authority unavailable".to_owned(),
+fn workflow_effect_codec_unavailable() -> WorkflowEffectAuthorityErrorV1 {
+    WorkflowEffectAuthorityErrorV1::Unavailable(
+        "registered workflow effect receipt unavailable".to_owned(),
     )
 }
 
-fn statement(sql: &str, params: Vec<ExactSqlValue>) -> Result<ExactSqlStatement, ExactSqlError> {
-    ExactSqlStatement::new(sql.to_owned(), params)
+fn statement(
+    sql: &str,
+    params: Vec<MigrationSqlValue>,
+) -> Result<MigrationSqlStatement, MigrationSqlError> {
+    MigrationSqlStatement::new(sql.to_owned(), params)
 }
 
-fn exact_sql_text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
+fn sql_text(values: &[MigrationSqlValue], index: usize) -> Option<&str> {
     match values.get(index)? {
         ExactSqlValue::Text(value) => Some(value),
         _ => None,
     }
 }
 
-fn exact_sql_integer(values: &[ExactSqlValue], index: usize) -> Option<i64> {
+fn sql_integer(values: &[MigrationSqlValue], index: usize) -> Option<i64> {
     match values.get(index)? {
         ExactSqlValue::Integer(value) => Some(*value),
         _ => None,
@@ -147,25 +219,21 @@ fn version_i64(version: u64) -> Result<i64, ()> {
     i64::try_from(version).map_err(|_| ())
 }
 
-fn version_u64(value: i64) -> Result<u64, ()> {
-    u64::try_from(value).map_err(|_| ())
-}
-
 fn definition_digest(
-    definition: &WorkflowDefinitionV1,
+    definition: &WorkflowDefinition,
 ) -> Result<ManifestDigest, WorkflowDefinitionAuthorityError> {
     canonical_sha256(definition).map_err(|_| definition_codec_unavailable())
 }
 
 fn encode_definition(
-    definition: &WorkflowDefinitionV1,
+    definition: &WorkflowDefinition,
 ) -> Result<String, WorkflowDefinitionAuthorityError> {
     serde_json::to_string(definition).map_err(|_| definition_codec_unavailable())
 }
 
 fn decode_definition(
     payload: &str,
-) -> Result<WorkflowDefinitionV1, WorkflowDefinitionAuthorityError> {
+) -> Result<WorkflowDefinition, WorkflowDefinitionAuthorityError> {
     serde_json::from_str(payload).map_err(|_| definition_codec_unavailable())
 }
 
@@ -178,11 +246,11 @@ fn decode_json<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ()> {
 }
 
 fn query_handle(
-    handle: &ExactSqlHandle,
+    storage: &ExactSqlHandle,
     sql: &str,
-    params: Vec<ExactSqlValue>,
-) -> Result<ExactSqlRows, ExactSqlError> {
-    handle.query(statement(sql, params)?, Duration::from_secs(5))
+    params: Vec<MigrationSqlValue>,
+) -> Result<MigrationSqlRows, MigrationSqlError> {
+    storage.query(statement(sql, params)?, Duration::from_secs(5))
 }
 
 fn query_tx(
@@ -201,22 +269,32 @@ fn execute_tx(
     transaction.execute(statement(sql, params)?).map(|_| ())
 }
 
+fn execute_tx_changed(
+    transaction: &ExactSqlTransaction,
+    sql: &str,
+    params: Vec<ExactSqlValue>,
+) -> Result<usize, ExactSqlError> {
+    transaction
+        .execute(statement(sql, params)?)
+        .map(|result| result.changed_rows)
+}
+
 impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
     fn insert(
         &self,
-        definition: &WorkflowDefinitionV1,
+        definition: &WorkflowDefinition,
     ) -> Result<(), WorkflowDefinitionAuthorityError> {
         let version = version_i64(definition.definition_version())
             .map_err(|_| definition_codec_unavailable())?;
         let payload = encode_definition(definition)?;
         let digest = definition_digest(definition)?;
         let transaction = self
-            .handle
+            .storage
             .begin_immediate()
             .map_err(definition_unavailable)?;
         let existing = query_tx(
             &transaction,
-            "SELECT payload, payload_digest FROM workflow_definitions_v1
+            "SELECT payload, payload_digest FROM workflow_definitions
              WHERE definition_id = ?1 AND definition_version = ?2",
             vec![
                 ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
@@ -226,12 +304,12 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         .map_err(definition_unavailable)?;
         if let Some(row) = existing.rows.first() {
             let existing_digest =
-                exact_sql_text(&row.values, 1).ok_or_else(definition_codec_unavailable)?;
+                sql_text(&row.values, 1).ok_or_else(definition_codec_unavailable)?;
             let outcome = if existing_digest == digest.as_str() {
                 Err(WorkflowDefinitionAuthorityError::AlreadyExists)
             } else {
                 let existing_payload =
-                    exact_sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
+                    sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
                 let existing_definition = decode_definition(existing_payload)?;
                 if &existing_definition == definition {
                     Err(WorkflowDefinitionAuthorityError::AlreadyExists)
@@ -244,7 +322,7 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         }
         execute_tx(
             &transaction,
-            "INSERT INTO workflow_definitions_v1 (
+            "INSERT INTO workflow_definitions (
                  definition_id, definition_version, payload, payload_digest
              ) VALUES (?1, ?2, ?3, ?4)",
             vec![
@@ -265,12 +343,12 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         &self,
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
-    ) -> Result<Option<WorkflowDefinitionV1>, WorkflowDefinitionAuthorityError> {
+    ) -> Result<Option<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
         let version =
             version_i64(definition_version).map_err(|_| definition_codec_unavailable())?;
         let rows = query_handle(
-            &self.handle,
-            "SELECT payload FROM workflow_definitions_v1
+            &self.storage,
+            "SELECT payload FROM workflow_definitions
              WHERE definition_id = ?1 AND definition_version = ?2",
             vec![
                 ExactSqlValue::Text(definition_id.as_str().to_owned()),
@@ -281,91 +359,51 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         rows.rows
             .first()
             .map(|row| {
-                let payload =
-                    exact_sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
+                let payload = sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
                 decode_definition(payload)
             })
             .transpose()
     }
 
-    fn active_version(
+    fn list(
         &self,
-        definition_id: &WorkflowDefinitionId,
-    ) -> Result<Option<u64>, WorkflowDefinitionAuthorityError> {
-        let rows = query_handle(
-            &self.handle,
-            "SELECT active_version FROM workflow_activations_v1 WHERE definition_id = ?1",
-            vec![ExactSqlValue::Text(definition_id.as_str().to_owned())],
-        )
-        .map_err(definition_unavailable)?;
+        definition_id: Option<&WorkflowDefinitionId>,
+    ) -> Result<Vec<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
+        let (sql, params) = match definition_id {
+            Some(definition_id) => (
+                "SELECT payload FROM workflow_definitions
+                 WHERE definition_id = ?1
+                 ORDER BY definition_id, definition_version",
+                vec![ExactSqlValue::Text(definition_id.as_str().to_owned())],
+            ),
+            None => (
+                "SELECT payload FROM workflow_definitions
+                 ORDER BY definition_id, definition_version",
+                Vec::new(),
+            ),
+        };
+        let rows = query_handle(&self.storage, sql, params).map_err(definition_unavailable)?;
         rows.rows
-            .first()
+            .iter()
             .map(|row| {
-                let version =
-                    exact_sql_integer(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
-                version_u64(version).map_err(|_| definition_codec_unavailable())
+                let payload = sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
+                decode_definition(payload)
             })
-            .transpose()
-    }
-
-    fn compare_and_swap_activation(
-        &self,
-        definition_id: &WorkflowDefinitionId,
-        expected_version: Option<u64>,
-        replacement_version: u64,
-    ) -> Result<(), WorkflowDefinitionAuthorityError> {
-        let replacement =
-            version_i64(replacement_version).map_err(|_| definition_codec_unavailable())?;
-        let transaction = self
-            .handle
-            .begin_immediate()
-            .map_err(definition_unavailable)?;
-        let rows = query_tx(
-            &transaction,
-            "SELECT active_version FROM workflow_activations_v1 WHERE definition_id = ?1",
-            vec![ExactSqlValue::Text(definition_id.as_str().to_owned())],
-        )
-        .map_err(definition_unavailable)?;
-        let current = rows
-            .rows
-            .first()
-            .map(|row| {
-                let version =
-                    exact_sql_integer(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
-                version_u64(version).map_err(|_| definition_codec_unavailable())
-            })
-            .transpose()?;
-        if current != expected_version {
-            let _ = transaction.rollback();
-            return Err(WorkflowDefinitionAuthorityError::Conflict);
-        }
-        execute_tx(
-            &transaction,
-            "INSERT INTO workflow_activations_v1 (definition_id, active_version)
-             VALUES (?1, ?2)
-             ON CONFLICT(definition_id) DO UPDATE SET
-                 active_version = excluded.active_version",
-            vec![
-                ExactSqlValue::Text(definition_id.as_str().to_owned()),
-                ExactSqlValue::Integer(replacement),
-            ],
-        )
-        .map_err(definition_unavailable)?;
-        transaction
-            .commit()
-            .map(|_| ())
-            .map_err(definition_unavailable)
+            .collect()
     }
 }
 
 impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
-    fn issue(&self, grant: &TaskHandoffGrantV1) -> Result<(), TaskHandoffAuthorityError> {
+    fn issue(&self, grant: &TaskHandoffGrant) -> Result<(), TaskHandoffAuthorityError> {
         let scope_payload = encode_json(grant.scope()).map_err(|_| handoff_codec_unavailable())?;
-        let transaction = self.handle.begin_immediate().map_err(handoff_unavailable)?;
+        let transaction = self
+            .storage
+            .begin_immediate()
+            .map_err(handoff_unavailable)?;
         let existing = query_tx(
             &transaction,
-            "SELECT 1 FROM workflow_handoffs_v1 WHERE token_digest = ?1",
-            vec![ExactSqlValue::Text(
+            "SELECT 1 FROM workflow_handoffs WHERE token_digest = ?1",
+            vec![MigrationSqlValue::Text(
                 grant.token_digest().as_str().to_owned(),
             )],
         )
@@ -376,7 +414,7 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
         }
         execute_tx(
             &transaction,
-            "INSERT INTO workflow_handoffs_v1 (
+            "INSERT INTO workflow_handoffs (
                  token_digest, scope_payload, issued_at, expires_at, consumed
              ) VALUES (?1, ?2, ?3, ?4, 0)",
             vec![
@@ -396,13 +434,16 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
     fn consume(
         &self,
         token_digest: &ManifestDigest,
-        expected_scope: &TaskHandoffScopeV1,
+        expected_scope: &TaskHandoffScope,
         consumed_at: UtcMicros,
     ) -> Result<TaskHandoffConsumeOutcome, TaskHandoffAuthorityError> {
-        let transaction = self.handle.begin_immediate().map_err(handoff_unavailable)?;
+        let transaction = self
+            .storage
+            .begin_immediate()
+            .map_err(handoff_unavailable)?;
         let rows = query_tx(
             &transaction,
-            "SELECT scope_payload, expires_at, consumed FROM workflow_handoffs_v1
+            "SELECT scope_payload, expires_at, consumed FROM workflow_handoffs
              WHERE token_digest = ?1",
             vec![ExactSqlValue::Text(token_digest.as_str().to_owned())],
         )
@@ -411,27 +452,27 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::Missing);
         };
-        let scope_payload = exact_sql_text(&row.values, 0).ok_or_else(handoff_codec_unavailable)?;
-        let scope: TaskHandoffScopeV1 =
+        let scope_payload = sql_text(&row.values, 0).ok_or_else(handoff_codec_unavailable)?;
+        let scope: TaskHandoffScope =
             decode_json(scope_payload).map_err(|_| handoff_codec_unavailable())?;
         if &scope != expected_scope {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::ScopeMismatch);
         }
-        let expires_at = exact_sql_integer(&row.values, 1).ok_or_else(handoff_codec_unavailable)?;
+        let expires_at = sql_integer(&row.values, 1).ok_or_else(handoff_codec_unavailable)?;
         if consumed_at.0 >= expires_at {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::Expired);
         }
-        let consumed = exact_sql_integer(&row.values, 2).ok_or_else(handoff_codec_unavailable)?;
+        let consumed = sql_integer(&row.values, 2).ok_or_else(handoff_codec_unavailable)?;
         if consumed != 0 {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::Replay);
         }
         execute_tx(
             &transaction,
-            "UPDATE workflow_handoffs_v1 SET consumed = 1 WHERE token_digest = ?1 AND consumed = 0",
-            vec![ExactSqlValue::Text(token_digest.as_str().to_owned())],
+            "UPDATE workflow_handoffs SET consumed = 1 WHERE token_digest = ?1 AND consumed = 0",
+            vec![MigrationSqlValue::Text(token_digest.as_str().to_owned())],
         )
         .map_err(handoff_unavailable)?;
         transaction
@@ -441,332 +482,399 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
     }
 }
 
-#[derive(Clone)]
-struct StoredExecution {
-    plan_digest: ManifestDigest,
-    fence: WorkflowExecutionFenceV1,
-    checkpoint: Option<WorkflowFanOutCheckpointV1>,
-    terminal: Option<WorkflowExecutionTruthV1>,
-}
-
-fn identity_params(identity: &WorkflowExecutionIdentityV1) -> Result<Vec<ExactSqlValue>, ()> {
-    Ok(vec![
-        ExactSqlValue::Text(identity.definition_id.as_str().to_owned()),
-        ExactSqlValue::Integer(version_i64(identity.definition_version)?),
-        ExactSqlValue::Text(identity.run_id.as_str().to_owned()),
-        ExactSqlValue::Text(identity.step_id.as_str().to_owned()),
-    ])
-}
-
-fn load_execution(
-    transaction: &ExactSqlTransaction,
-    identity: &WorkflowExecutionIdentityV1,
-) -> Result<Option<StoredExecution>, WorkflowExecutionAuthorityError> {
-    let rows = query_tx(
-        transaction,
-        "SELECT plan_digest, attempt_id, lease_id, fence_epoch, checkpoint_payload, terminal_payload
-         FROM workflow_executions_v1
-         WHERE definition_id = ?1
-           AND definition_version = ?2
-           AND run_id = ?3
-           AND step_id = ?4",
-        identity_params(identity).map_err(|_| execution_codec_unavailable())?,
-    )
-    .map_err(execution_unavailable)?;
-    let Some(row) = rows.rows.first() else {
-        return Ok(None);
-    };
-    let plan_digest = ManifestDigest::new(
-        exact_sql_text(&row.values, 0)
-            .ok_or_else(execution_codec_unavailable)?
-            .to_owned(),
-    )
-    .map_err(|_| execution_codec_unavailable())?;
-    let attempt_id = AttemptId::new(
-        exact_sql_text(&row.values, 1)
-            .ok_or_else(execution_codec_unavailable)?
-            .to_owned(),
-    )
-    .map_err(|_| execution_codec_unavailable())?;
-    let lease_id = WorkLeaseId::new(
-        exact_sql_text(&row.values, 2)
-            .ok_or_else(execution_codec_unavailable)?
-            .to_owned(),
-    )
-    .map_err(|_| execution_codec_unavailable())?;
-    let fence_epoch = exact_sql_integer(&row.values, 3).ok_or_else(execution_codec_unavailable)?;
-    let fence = WorkflowExecutionFenceV1 {
-        attempt_id,
-        lease: WorkLeaseFenceV1::new(
-            lease_id,
-            WorkFenceEpochV1::new(
-                version_u64(fence_epoch).map_err(|_| execution_codec_unavailable())?,
-            )
-            .map_err(|_| execution_codec_unavailable())?,
+impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
+    fn reserve_effect(
+        &self,
+        identity: &WorkflowEffectIdentityV1,
+        prepared: &WorkflowEffectPreparedV1,
+    ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
+        if prepared.input_digest() != identity.input_digest()
+            || prepared
+                .operation()
+                .is_some_and(|operation| operation != identity.operation())
+        {
+            return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+        }
+        let identity_digest = identity
+            .identity_digest()
+            .map_err(|_| workflow_effect_codec_unavailable())?;
+        let identity_payload =
+            encode_json(identity).map_err(|_| workflow_effect_codec_unavailable())?;
+        let identity_payload_digest = identity
+            .payload_digest()
+            .map_err(|_| workflow_effect_codec_unavailable())?;
+        let prepared_payload =
+            encode_json(prepared).map_err(|_| workflow_effect_codec_unavailable())?;
+        let prepared_payload_digest = prepared
+            .payload_digest()
+            .map_err(|_| workflow_effect_codec_unavailable())?;
+        let transaction = self
+            .storage
+            .begin_immediate()
+            .map_err(workflow_effect_unavailable)?;
+        let existing = query_tx(
+            &transaction,
+            WORKFLOW_EFFECT_SELECT,
+            vec![ExactSqlValue::Text(
+                identity.idempotency_key().as_str().to_owned(),
+            )],
         )
-        .map_err(|_| execution_codec_unavailable())?,
-    };
-    let checkpoint = match row.values.get(4) {
-        Some(ExactSqlValue::Null) | None => None,
-        Some(ExactSqlValue::Text(payload)) => {
-            Some(decode_json(payload).map_err(|_| execution_codec_unavailable())?)
-        }
-        _ => return Err(execution_codec_unavailable()),
-    };
-    let terminal = match row.values.get(5) {
-        Some(ExactSqlValue::Null) | None => None,
-        Some(ExactSqlValue::Text(payload)) => {
-            Some(decode_json(payload).map_err(|_| execution_codec_unavailable())?)
-        }
-        _ => return Err(execution_codec_unavailable()),
-    };
-    Ok(Some(StoredExecution {
-        plan_digest,
-        fence,
-        checkpoint,
-        terminal,
-    }))
-}
-
-fn insert_execution(
-    transaction: &ExactSqlTransaction,
-    identity: &WorkflowExecutionIdentityV1,
-    fence: &WorkflowExecutionFenceV1,
-    plan_digest: &ManifestDigest,
-) -> Result<(), WorkflowExecutionAuthorityError> {
-    let mut params = identity_params(identity).map_err(|_| execution_codec_unavailable())?;
-    params.extend([
-        ExactSqlValue::Text(plan_digest.as_str().to_owned()),
-        ExactSqlValue::Text(fence.attempt_id.as_str().to_owned()),
-        ExactSqlValue::Text(fence.lease.lease_id().as_str().to_owned()),
-        ExactSqlValue::Integer(
-            version_i64(fence.lease.epoch().get()).map_err(|_| execution_codec_unavailable())?,
-        ),
-    ]);
-    execute_tx(
-        transaction,
-        "INSERT INTO workflow_executions_v1 (
-             definition_id, definition_version, run_id, step_id,
-             plan_digest, attempt_id, lease_id, fence_epoch,
-             checkpoint_payload, terminal_payload
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL)",
-        params,
-    )
-    .map_err(execution_unavailable)
-}
-
-fn update_execution_fence(
-    transaction: &ExactSqlTransaction,
-    identity: &WorkflowExecutionIdentityV1,
-    fence: &WorkflowExecutionFenceV1,
-) -> Result<(), WorkflowExecutionAuthorityError> {
-    let mut params = vec![
-        ExactSqlValue::Text(fence.attempt_id.as_str().to_owned()),
-        ExactSqlValue::Text(fence.lease.lease_id().as_str().to_owned()),
-        ExactSqlValue::Integer(
-            version_i64(fence.lease.epoch().get()).map_err(|_| execution_codec_unavailable())?,
-        ),
-    ];
-    params.extend(identity_params(identity).map_err(|_| execution_codec_unavailable())?);
-    execute_tx(
-        transaction,
-        "UPDATE workflow_executions_v1
-         SET attempt_id = ?1, lease_id = ?2, fence_epoch = ?3
-         WHERE definition_id = ?4
-           AND definition_version = ?5
-           AND run_id = ?6
-           AND step_id = ?7",
-        params,
-    )
-    .map_err(execution_unavailable)
-}
-
-impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
-    fn begin(
-        &self,
-        identity: &WorkflowExecutionIdentityV1,
-        fence: &WorkflowExecutionFenceV1,
-        plan_digest: &ManifestDigest,
-    ) -> Result<WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError> {
-        let transaction = self
-            .handle
-            .begin_immediate()
-            .map_err(execution_unavailable)?;
-        let stored = load_execution(&transaction, identity)?;
-        let Some(stored) = stored else {
-            insert_execution(&transaction, identity, fence, plan_digest)?;
-            transaction.commit().map_err(execution_unavailable)?;
-            return Ok(WorkflowExecutionAdmissionV1::Execute);
-        };
-
-        if stored.fence.attempt_id != fence.attempt_id
-            || stored.fence.lease.lease_id() != fence.lease.lease_id()
-            || stored.fence.lease.epoch().get() > fence.lease.epoch().get()
-        {
-            let _ = transaction.rollback();
-            return Ok(WorkflowExecutionAdmissionV1::StaleLease);
-        }
-
-        if let Some(terminal) = stored.terminal {
-            if &stored.plan_digest != plan_digest {
+        .map_err(workflow_effect_unavailable)?;
+        if let Some(row) = existing.rows.first() {
+            let persisted_digest =
+                sql_text(&row.values, 0).ok_or_else(workflow_effect_codec_unavailable)?;
+            if persisted_digest != identity_digest.as_str() {
                 let _ = transaction.rollback();
-                return Ok(WorkflowExecutionAdmissionV1::PlanConflict);
+                return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
             }
-            if stored.fence != *fence {
-                update_execution_fence(&transaction, identity, fence)?;
-                transaction.commit().map_err(execution_unavailable)?;
-            } else {
+            let persisted_identity = decode_workflow_effect_identity(&row.values)?;
+            if persisted_identity
+                .identity_digest()
+                .map_err(|_| workflow_effect_codec_unavailable())?
+                != identity_digest
+            {
                 let _ = transaction.rollback();
+                return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
             }
-            return Ok(WorkflowExecutionAdmissionV1::Replay(terminal));
+            let persisted_prepared = decode_workflow_effect_preparation(&row.values)?;
+            if persisted_prepared.input_digest() != persisted_identity.input_digest()
+                || persisted_prepared
+                    .operation()
+                    .is_some_and(|operation| operation != persisted_identity.operation())
+            {
+                let _ = transaction.rollback();
+                return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+            }
+            let record = decode_workflow_effect_record(&row.values)?;
+            if let Some(terminal) = record.terminal() {
+                terminal
+                    .identity()
+                    .validate()
+                    .map_err(|_| workflow_effect_codec_unavailable())?;
+                if terminal
+                    .identity()
+                    .identity_digest()
+                    .map_err(|_| workflow_effect_codec_unavailable())?
+                    != identity_digest
+                {
+                    let _ = transaction.rollback();
+                    return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+                }
+            }
+            transaction.commit().map_err(workflow_effect_unavailable)?;
+            return Ok(record);
         }
-
-        if &stored.plan_digest != plan_digest {
-            let _ = transaction.rollback();
-            return Ok(WorkflowExecutionAdmissionV1::PlanConflict);
-        }
-
-        if stored.fence != *fence {
-            update_execution_fence(&transaction, identity, fence)?;
-        }
-        let admission = match stored.checkpoint {
-            Some(checkpoint) => WorkflowExecutionAdmissionV1::Recover { checkpoint },
-            None => WorkflowExecutionAdmissionV1::Execute,
-        };
-        transaction.commit().map_err(execution_unavailable)?;
-        Ok(admission)
-    }
-
-    fn checkpoint(
-        &self,
-        identity: &WorkflowExecutionIdentityV1,
-        fence: &WorkflowExecutionFenceV1,
-        checkpoint: &WorkflowFanOutCheckpointV1,
-    ) -> Result<(), WorkflowExecutionAuthorityError> {
-        let transaction = self
-            .handle
-            .begin_immediate()
-            .map_err(execution_unavailable)?;
-        let stored = load_execution(&transaction, identity)?
-            .ok_or(WorkflowExecutionAuthorityError::Conflict)?;
-        if stored.terminal.is_some()
-            || &stored.fence != fence
-            || stored.plan_digest != checkpoint.plan_digest
-            || !checkpoint_is_well_formed(checkpoint)
-            || stored
-                .checkpoint
-                .as_ref()
-                .is_some_and(|current| !checkpoint_advances(current, checkpoint))
-        {
-            let _ = transaction.rollback();
-            return Err(WorkflowExecutionAuthorityError::Conflict);
-        }
-        let payload = encode_json(checkpoint).map_err(|_| execution_codec_unavailable())?;
-        let mut params = vec![ExactSqlValue::Text(payload)];
-        params.extend(identity_params(identity).map_err(|_| execution_codec_unavailable())?);
         execute_tx(
             &transaction,
-            "UPDATE workflow_executions_v1
-             SET checkpoint_payload = ?1
-             WHERE definition_id = ?2
-               AND definition_version = ?3
-               AND run_id = ?4
-               AND step_id = ?5",
-            params,
+            "INSERT INTO workflow_effect_journal (
+                 idempotency_key, identity_digest, identity_payload,
+                 identity_payload_digest, prepared_payload,
+                 prepared_payload_digest, operation, state, terminal_payload,
+                 terminal_payload_digest, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                 'before_effect', NULL, NULL, ?8, ?8
+             )",
+            vec![
+                ExactSqlValue::Text(identity.idempotency_key().as_str().to_owned()),
+                ExactSqlValue::Text(identity_digest.as_str().to_owned()),
+                ExactSqlValue::Text(identity_payload),
+                ExactSqlValue::Text(identity_payload_digest.as_str().to_owned()),
+                ExactSqlValue::Text(prepared_payload),
+                ExactSqlValue::Text(prepared_payload_digest.as_str().to_owned()),
+                ExactSqlValue::Text(identity.operation().as_str().to_owned()),
+                ExactSqlValue::Integer(identity.started_at().0),
+            ],
         )
-        .map_err(execution_unavailable)?;
-        transaction
-            .commit()
-            .map(|_| ())
-            .map_err(execution_unavailable)
+        .map_err(workflow_effect_unavailable)?;
+        transaction.commit().map_err(workflow_effect_unavailable)?;
+        Ok(WorkflowEffectJournalRecordV1::before_effect())
     }
 
-    fn complete(
+    fn execute_effect(
         &self,
-        identity: &WorkflowExecutionIdentityV1,
-        fence: &WorkflowExecutionFenceV1,
-        truth: &WorkflowExecutionTruthV1,
-    ) -> Result<(), WorkflowExecutionAuthorityError> {
+        identity: &WorkflowEffectIdentityV1,
+        prepared: &WorkflowEffectPreparedV1,
+        ended_at: UtcMicros,
+    ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
+        let reserved = self.reserve_effect(identity, prepared)?;
+        if reserved.terminal().is_some() {
+            return reconcile_workflow_effect(&self.storage, identity, reserved);
+        }
+        let identity_digest = identity
+            .identity_digest()
+            .map_err(|_| workflow_effect_codec_unavailable())?;
         let transaction = self
-            .handle
+            .storage
             .begin_immediate()
-            .map_err(execution_unavailable)?;
-        let stored = load_execution(&transaction, identity)?
-            .ok_or(WorkflowExecutionAuthorityError::Conflict)?;
-        let checkpoint = truth.checkpoint();
-        if stored.terminal.is_some()
-            || &stored.fence != fence
-            || stored.plan_digest != checkpoint.plan_digest
-            || !checkpoint_is_well_formed(checkpoint)
-            || checkpoint
-                .children
-                .iter()
-                .any(|child| child.receipt.is_none())
-            || match stored.checkpoint.as_ref() {
-                Some(stored) => stored != checkpoint,
-                None => !checkpoint.children.is_empty(),
-            }
+            .map_err(workflow_effect_unavailable)?;
+        let current = query_tx(
+            &transaction,
+            WORKFLOW_EFFECT_SELECT,
+            vec![ExactSqlValue::Text(
+                identity.idempotency_key().as_str().to_owned(),
+            )],
+        )
+        .map_err(workflow_effect_unavailable)?;
+        let row = current
+            .rows
+            .first()
+            .ok_or_else(workflow_effect_codec_unavailable)?;
+        if sql_text(&row.values, 0) != Some(identity_digest.as_str()) {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+        }
+        let persisted_identity = decode_workflow_effect_identity(&row.values)?;
+        if persisted_identity
+            .identity_digest()
+            .map_err(|_| workflow_effect_codec_unavailable())?
+            != identity_digest
         {
             let _ = transaction.rollback();
-            return Err(WorkflowExecutionAuthorityError::Conflict);
+            return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
         }
-        let payload = encode_json(truth).map_err(|_| execution_codec_unavailable())?;
-        let mut params = vec![ExactSqlValue::Text(payload)];
-        params.extend(identity_params(identity).map_err(|_| execution_codec_unavailable())?);
-        execute_tx(
+        let persisted_prepared = decode_workflow_effect_preparation(&row.values)?;
+        if persisted_prepared.input_digest() != persisted_identity.input_digest()
+            || persisted_prepared
+                .operation()
+                .is_some_and(|operation| operation != persisted_identity.operation())
+        {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+        }
+        let current_record = decode_workflow_effect_record(&row.values)?;
+        if current_record.terminal().is_some() {
+            transaction.commit().map_err(workflow_effect_unavailable)?;
+            return reconcile_workflow_effect(&self.storage, identity, current_record);
+        }
+        let claimed = execute_tx_changed(
             &transaction,
-            "UPDATE workflow_executions_v1
-             SET terminal_payload = ?1
-             WHERE definition_id = ?2
-               AND definition_version = ?3
-               AND run_id = ?4
-               AND step_id = ?5",
-            params,
+            "UPDATE workflow_effect_journal
+             SET state = 'in_flight', updated_at = ?2
+             WHERE idempotency_key = ?1
+               AND state IN ('before_effect', 'in_flight')
+               AND terminal_payload IS NULL",
+            vec![
+                ExactSqlValue::Text(identity.idempotency_key().as_str().to_owned()),
+                ExactSqlValue::Integer(ended_at.0),
+            ],
         )
-        .map_err(execution_unavailable)?;
-        transaction
-            .commit()
-            .map(|_| ())
-            .map_err(execution_unavailable)
+        .map_err(workflow_effect_unavailable)?;
+        if claimed != 1 {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
+        }
+        let outcome = if persisted_identity.deadline().is_elapsed_at(ended_at) {
+            WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::TimedOut)
+        } else {
+            effect_mutation::apply_workflow_effect(&transaction, &persisted_prepared)?
+        };
+        let terminal = WorkflowEffectTerminalV1::new(persisted_identity, ended_at, outcome)?;
+        let terminal_payload =
+            encode_json(&terminal).map_err(|_| workflow_effect_codec_unavailable())?;
+        let terminal_payload_digest =
+            canonical_sha256(&("tracedecay.runtime.workflow-effect-terminal.v1", &terminal))
+                .map_err(|_| workflow_effect_codec_unavailable())?;
+        let committed = execute_tx_changed(
+            &transaction,
+            "UPDATE workflow_effect_journal
+             SET state = 'committed', terminal_payload = ?2,
+                 terminal_payload_digest = ?3, updated_at = ?4
+             WHERE idempotency_key = ?1
+               AND state = 'in_flight'
+               AND terminal_payload IS NULL",
+            vec![
+                ExactSqlValue::Text(identity.idempotency_key().as_str().to_owned()),
+                ExactSqlValue::Text(terminal_payload),
+                ExactSqlValue::Text(terminal_payload_digest.as_str().to_owned()),
+                ExactSqlValue::Integer(ended_at.0),
+            ],
+        )
+        .map_err(workflow_effect_unavailable)?;
+        if committed != 1 {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
+        }
+        transaction.commit().map_err(workflow_effect_unavailable)?;
+        reconcile_workflow_effect(
+            &self.storage,
+            identity,
+            WorkflowEffectJournalRecordV1::with_terminal(
+                WorkflowEffectJournalStateV1::Committed,
+                terminal,
+            )?,
+        )
     }
 }
 
-fn checkpoint_advances(
-    current: &WorkflowFanOutCheckpointV1,
-    replacement: &WorkflowFanOutCheckpointV1,
-) -> bool {
-    checkpoint_is_well_formed(replacement)
-        && current.plan_digest == replacement.plan_digest
-        && current.children.iter().all(|stored| {
-            replacement.children.iter().any(|candidate| {
-                stored.task_id == candidate.task_id
-                    && stored.attempt_identity == candidate.attempt_identity
-                    && stored.lease.lease_id() == candidate.lease.lease_id()
-                    && stored.lease.epoch().get() <= candidate.lease.epoch().get()
-                    && match (&stored.receipt, &candidate.receipt) {
-                        (None, _) => true,
-                        (Some(stored_receipt), Some(candidate_receipt)) => {
-                            stored.lease == candidate.lease && stored_receipt == candidate_receipt
-                        }
-                        (Some(_), None) => false,
-                    }
-            })
-        })
+fn decode_workflow_effect_state(
+    value: &str,
+) -> Result<WorkflowEffectJournalStateV1, WorkflowEffectAuthorityErrorV1> {
+    match value {
+        "before_effect" => Ok(WorkflowEffectJournalStateV1::BeforeEffect),
+        "in_flight" => Ok(WorkflowEffectJournalStateV1::InFlight),
+        "committed" => Ok(WorkflowEffectJournalStateV1::Committed),
+        "reconciled" => Ok(WorkflowEffectJournalStateV1::Reconciled),
+        _ => Err(workflow_effect_codec_unavailable()),
+    }
 }
 
-fn checkpoint_is_well_formed(checkpoint: &WorkflowFanOutCheckpointV1) -> bool {
-    checkpoint
-        .children
-        .iter()
-        .enumerate()
-        .all(|(index, child)| {
-            if child.task_id != *child.attempt_identity.task_id() {
-                return false;
+fn decode_workflow_effect_record(
+    values: &[ExactSqlValue],
+) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
+    let state = decode_workflow_effect_state(
+        sql_text(values, 1).ok_or_else(workflow_effect_codec_unavailable)?,
+    )?;
+    match values.get(2) {
+        Some(ExactSqlValue::Text(payload)) => {
+            let expected_digest =
+                sql_text(values, 5).ok_or_else(workflow_effect_codec_unavailable)?;
+            let terminal: WorkflowEffectTerminalV1 =
+                decode_json(payload).map_err(|_| workflow_effect_codec_unavailable())?;
+            terminal
+                .validate()
+                .map_err(|_| workflow_effect_codec_unavailable())?;
+            if canonical_sha256(&("tracedecay.runtime.workflow-effect-terminal.v1", &terminal))
+                .map_err(|_| workflow_effect_codec_unavailable())?
+                .as_str()
+                != expected_digest
+            {
+                return Err(workflow_effect_codec_unavailable());
             }
-            checkpoint.children.iter().skip(index + 1).all(|other| {
-                child.task_id != other.task_id
-                    && child.attempt_identity != other.attempt_identity
-                    && child.lease.lease_id() != other.lease.lease_id()
-            })
-        })
+            WorkflowEffectJournalRecordV1::with_terminal(state, terminal)
+        }
+        Some(ExactSqlValue::Null)
+            if matches!(
+                state,
+                WorkflowEffectJournalStateV1::BeforeEffect | WorkflowEffectJournalStateV1::InFlight
+            ) && matches!(values.get(5), Some(ExactSqlValue::Null)) =>
+        {
+            WorkflowEffectJournalRecordV1::pending(state)
+        }
+        _ => Err(workflow_effect_codec_unavailable()),
+    }
+}
+
+fn decode_workflow_effect_identity(
+    values: &[ExactSqlValue],
+) -> Result<WorkflowEffectIdentityV1, WorkflowEffectAuthorityErrorV1> {
+    let payload = sql_text(values, 3).ok_or_else(workflow_effect_codec_unavailable)?;
+    let expected_digest = sql_text(values, 4).ok_or_else(workflow_effect_codec_unavailable)?;
+    let identity: WorkflowEffectIdentityV1 =
+        decode_json(payload).map_err(|_| workflow_effect_codec_unavailable())?;
+    identity
+        .validate()
+        .map_err(|_| workflow_effect_codec_unavailable())?;
+    if identity
+        .payload_digest()
+        .map_err(|_| workflow_effect_codec_unavailable())?
+        .as_str()
+        != expected_digest
+    {
+        return Err(workflow_effect_codec_unavailable());
+    }
+    if sql_text(values, 6) != Some(identity.operation().as_str()) {
+        return Err(workflow_effect_codec_unavailable());
+    }
+    Ok(identity)
+}
+
+fn decode_workflow_effect_preparation(
+    values: &[ExactSqlValue],
+) -> Result<WorkflowEffectPreparedV1, WorkflowEffectAuthorityErrorV1> {
+    let payload = sql_text(values, 7).ok_or_else(workflow_effect_codec_unavailable)?;
+    let expected_digest = sql_text(values, 8).ok_or_else(workflow_effect_codec_unavailable)?;
+    let prepared: WorkflowEffectPreparedV1 =
+        decode_json(payload).map_err(|_| workflow_effect_codec_unavailable())?;
+    if prepared
+        .payload_digest()
+        .map_err(|_| workflow_effect_codec_unavailable())?
+        .as_str()
+        != expected_digest
+    {
+        return Err(workflow_effect_codec_unavailable());
+    }
+    Ok(prepared)
+}
+
+fn reconcile_workflow_effect(
+    storage: &ExactSqlHandle,
+    identity: &WorkflowEffectIdentityV1,
+    record: WorkflowEffectJournalRecordV1,
+) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
+    if record.state() == WorkflowEffectJournalStateV1::Reconciled {
+        return Ok(record);
+    }
+    if record.state() != WorkflowEffectJournalStateV1::Committed {
+        return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
+    }
+    let terminal = record
+        .terminal()
+        .cloned()
+        .ok_or(WorkflowEffectAuthorityErrorV1::InvalidTransition)?;
+    let transaction = storage
+        .begin_immediate()
+        .map_err(workflow_effect_unavailable)?;
+    let changed = execute_tx_changed(
+        &transaction,
+        "UPDATE workflow_effect_journal
+         SET state = 'reconciled', updated_at = ?2
+         WHERE idempotency_key = ?1 AND state = 'committed'",
+        vec![
+            ExactSqlValue::Text(identity.idempotency_key().as_str().to_owned()),
+            ExactSqlValue::Integer(terminal.ended_at().0),
+        ],
+    )
+    .map_err(workflow_effect_unavailable)?;
+    if changed == 0 {
+        let current = query_tx(
+            &transaction,
+            WORKFLOW_EFFECT_SELECT,
+            vec![ExactSqlValue::Text(
+                identity.idempotency_key().as_str().to_owned(),
+            )],
+        )
+        .map_err(workflow_effect_unavailable)?;
+        let row = current
+            .rows
+            .first()
+            .ok_or_else(workflow_effect_codec_unavailable)?;
+        let identity_digest = identity
+            .identity_digest()
+            .map_err(|_| workflow_effect_codec_unavailable())?;
+        let persisted_identity = decode_workflow_effect_identity(&row.values)?;
+        if sql_text(&row.values, 0) != Some(identity_digest.as_str())
+            || persisted_identity
+                .identity_digest()
+                .map_err(|_| workflow_effect_codec_unavailable())?
+                != identity_digest
+        {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+        }
+        let persisted_prepared = decode_workflow_effect_preparation(&row.values)?;
+        if persisted_prepared.input_digest() != persisted_identity.input_digest()
+            || persisted_prepared
+                .operation()
+                .is_some_and(|operation| operation != persisted_identity.operation())
+        {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
+        }
+        let current_record = decode_workflow_effect_record(&row.values)?;
+        if current_record.state() != WorkflowEffectJournalStateV1::Reconciled
+            || current_record.terminal() != Some(&terminal)
+        {
+            let _ = transaction.rollback();
+            return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
+        }
+        transaction.commit().map_err(workflow_effect_unavailable)?;
+        return Ok(current_record);
+    }
+    if changed != 1 {
+        let _ = transaction.rollback();
+        return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
+    }
+    transaction.commit().map_err(workflow_effect_unavailable)?;
+    WorkflowEffectJournalRecordV1::with_terminal(WorkflowEffectJournalStateV1::Reconciled, terminal)
 }

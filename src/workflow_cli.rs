@@ -11,9 +11,10 @@ use tracedecay_api::WorkflowOperation;
 use tracedecay_application::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationResult, CancellationSignal, Deadline, LegalAction, ResultContractRef,
-    RetryDirective, SafeDiagnostic, TaskHandoffIssueRequestV1, TaskHandoffRedeemRequestV1,
-    WorkflowDefinitionActivateRequestV1, WorkflowDefinitionRegisterRequestV1,
-    WorkflowFanOutRequestV1, workflow_executable_binding_registry,
+    RetryDirective, SafeDiagnostic, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
+    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionValidateRequest, workflow_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
@@ -24,108 +25,98 @@ use crate::daemon_client::{
 };
 use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
-    WorkflowApplicationInvocationV1, WorkflowApplicationOutcomeV1,
+    WorkflowApplicationInvocation, WorkflowApplicationOutcome,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 const WORKFLOW_CLI_DEADLINE_MICROS: i64 = 120_000_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorkflowCliOperation {
-    RegisterDefinition,
-    ActivateDefinition,
-    ExecuteFanOut,
-    HandoffIssue,
-    HandoffRedeem,
+fn workflow_result_contract(operation: WorkflowOperation) -> Result<ResultContractRef> {
+    let operation_id =
+        OperationId::new(operation.operation_id_str().to_owned()).map_err(config_error)?;
+    let registry = workflow_executable_binding_registry().map_err(config_error)?;
+    let Some(binding) = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+    else {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "Workflow operation {} is not advertised by this build",
+                operation_id.as_str()
+            ),
+        });
+    };
+    Ok(ResultContractRef::from_schema(
+        binding.result_schema().schema_ref(),
+    ))
 }
 
-impl WorkflowCliOperation {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RegisterDefinition => "register_definition",
-            Self::ActivateDefinition => "activate_definition",
-            Self::ExecuteFanOut => "execute_fan_out",
-            Self::HandoffIssue => "handoff_issue",
-            Self::HandoffRedeem => "handoff_redeem",
+fn decode_workflow_invocation(
+    operation: WorkflowOperation,
+    body: Value,
+) -> Result<WorkflowApplicationInvocation> {
+    match operation {
+        WorkflowOperation::RegisterDefinition => decode::<WorkflowDefinitionRegisterRequest>(body)
+            .map(WorkflowApplicationInvocation::RegisterDefinition),
+        WorkflowOperation::ValidateDefinition => decode::<WorkflowDefinitionValidateRequest>(body)
+            .map(WorkflowApplicationInvocation::ValidateDefinition),
+        WorkflowOperation::GetDefinition => decode::<WorkflowDefinitionGetRequest>(body)
+            .map(WorkflowApplicationInvocation::GetDefinition),
+        WorkflowOperation::ListDefinitions => decode::<WorkflowDefinitionListRequest>(body)
+            .map(WorkflowApplicationInvocation::ListDefinitions),
+        WorkflowOperation::DefinitionHistory => decode::<WorkflowDefinitionHistoryRequest>(body)
+            .map(WorkflowApplicationInvocation::DefinitionHistory),
+        WorkflowOperation::DiffDefinition => decode::<WorkflowDefinitionDiffRequest>(body)
+            .map(WorkflowApplicationInvocation::DiffDefinition),
+        WorkflowOperation::HandoffIssue => {
+            decode::<TaskHandoffIssueRequest>(body).map(WorkflowApplicationInvocation::HandoffIssue)
         }
+        WorkflowOperation::HandoffRedeem => decode::<TaskHandoffRedeemRequest>(body)
+            .map(WorkflowApplicationInvocation::HandoffRedeem),
     }
+}
 
-    const fn canonical(self) -> WorkflowOperation {
-        match self {
-            Self::RegisterDefinition => WorkflowOperation::RegisterDefinition,
-            Self::ActivateDefinition => WorkflowOperation::ActivateDefinition,
-            Self::ExecuteFanOut => WorkflowOperation::ExecuteFanOut,
-            Self::HandoffIssue => WorkflowOperation::HandoffIssue,
-            Self::HandoffRedeem => WorkflowOperation::HandoffRedeem,
-        }
-    }
-
-    fn result_contract(self) -> Result<ResultContractRef> {
-        let operation_id = OperationId::new(self.canonical().operation_id_str().to_owned())
-            .map_err(config_error)?;
-        let registry = workflow_executable_binding_registry().map_err(config_error)?;
-        let Some(binding) = registry
-            .get(&operation_id)
-            .and_then(|availability| availability.binding())
-        else {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "Workflow operation {} is not advertised by this build",
-                    operation_id.as_str()
-                ),
-            });
-        };
-        Ok(ResultContractRef::from_schema(
-            binding.result_schema().schema_ref(),
-        ))
-    }
-
-    fn decode(self, body: Value) -> Result<WorkflowApplicationInvocationV1> {
-        match self {
-            Self::RegisterDefinition => decode::<WorkflowDefinitionRegisterRequestV1>(body)
-                .map(WorkflowApplicationInvocationV1::RegisterDefinition),
-            Self::ActivateDefinition => decode::<WorkflowDefinitionActivateRequestV1>(body)
-                .map(WorkflowApplicationInvocationV1::ActivateDefinition),
-            Self::ExecuteFanOut => decode::<WorkflowFanOutRequestV1>(body)
-                .map(Box::new)
-                .map(WorkflowApplicationInvocationV1::ExecuteFanOut),
-            Self::HandoffIssue => decode::<TaskHandoffIssueRequestV1>(body)
-                .map(WorkflowApplicationInvocationV1::HandoffIssue),
-            Self::HandoffRedeem => decode::<TaskHandoffRedeemRequestV1>(body)
-                .map(WorkflowApplicationInvocationV1::HandoffRedeem),
-        }
-    }
-
-    fn matches(self, outcome: &WorkflowApplicationOutcomeV1) -> bool {
-        matches!(
-            (self, outcome),
-            (
-                Self::RegisterDefinition,
-                WorkflowApplicationOutcomeV1::RegisterDefinition(_)
-            ) | (
-                Self::ActivateDefinition,
-                WorkflowApplicationOutcomeV1::ActivateDefinition(_)
-            ) | (
-                Self::ExecuteFanOut,
-                WorkflowApplicationOutcomeV1::ExecuteFanOut(_)
-            ) | (
-                Self::HandoffIssue,
-                WorkflowApplicationOutcomeV1::HandoffIssue(_)
-            ) | (
-                Self::HandoffRedeem,
-                WorkflowApplicationOutcomeV1::HandoffRedeem(_)
-            )
+fn workflow_outcome_matches(
+    operation: WorkflowOperation,
+    outcome: &WorkflowApplicationOutcome,
+) -> bool {
+    matches!(
+        (operation, outcome),
+        (
+            WorkflowOperation::RegisterDefinition,
+            WorkflowApplicationOutcome::RegisterDefinition(_)
+        ) | (
+            WorkflowOperation::ValidateDefinition,
+            WorkflowApplicationOutcome::ValidateDefinition(_)
+        ) | (
+            WorkflowOperation::GetDefinition,
+            WorkflowApplicationOutcome::GetDefinition(_)
+        ) | (
+            WorkflowOperation::ListDefinitions,
+            WorkflowApplicationOutcome::ListDefinitions(_)
+        ) | (
+            WorkflowOperation::DefinitionHistory,
+            WorkflowApplicationOutcome::DefinitionHistory(_)
+        ) | (
+            WorkflowOperation::DiffDefinition,
+            WorkflowApplicationOutcome::DiffDefinition(_)
+        ) | (
+            WorkflowOperation::HandoffIssue,
+            WorkflowApplicationOutcome::HandoffIssue(_)
+        ) | (
+            WorkflowOperation::HandoffRedeem,
+            WorkflowApplicationOutcome::HandoffRedeem(_)
         )
-    }
+    )
 }
 
 pub async fn invoke_workflow_cli(
     project_root: PathBuf,
-    operation: WorkflowCliOperation,
+    operation: WorkflowOperation,
     body: Value,
 ) -> Result<ApplicationResult<Value>> {
-    let result_contract = operation.result_contract()?;
+    let result_contract = workflow_result_contract(operation)?;
     let request_id =
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate a Workflow CLI request id".to_owned(),
@@ -138,7 +129,7 @@ pub async fn invoke_workflow_cli(
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
             .map_err(config_error)?;
-    let invocation = match operation.decode(body) {
+    let invocation = match decode_workflow_invocation(operation, body) {
         Ok(invocation) => invocation,
         Err(_) => {
             return Ok(Err(workflow_problem(
@@ -176,7 +167,7 @@ pub async fn invoke_workflow_cli(
     };
     match response.outcome {
         DaemonInvocationOutcome::WorkflowApplication { scope, outcome }
-            if operation.matches(&outcome) =>
+            if workflow_outcome_matches(operation, &outcome) =>
         {
             Ok(Ok(ApplicationEnvelope {
                 contract: result_contract,
@@ -205,14 +196,17 @@ pub async fn invoke_workflow_cli(
 }
 
 fn erase_workflow_outcome(
-    outcome: WorkflowApplicationOutcomeV1,
+    outcome: WorkflowApplicationOutcome,
 ) -> Result<ApplicationOutcome<Value>> {
     let outcome = match outcome {
-        WorkflowApplicationOutcomeV1::RegisterDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcomeV1::ActivateDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcomeV1::ExecuteFanOut(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcomeV1::HandoffIssue(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcomeV1::HandoffRedeem(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::RegisterDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::ValidateDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::GetDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::ListDefinitions(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::DefinitionHistory(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::DiffDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::HandoffIssue(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::HandoffRedeem(outcome) => serde_json::to_value(outcome),
     }?;
     serde_json::from_value(outcome).map_err(Into::into)
 }
@@ -250,6 +244,10 @@ fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationPr
         DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
+        DaemonInvocationProblem::ResetRequired => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "workflow_authority_reset_required".to_owned(),
+            message: "The owning Workflow authority requires an explicit reset".to_owned(),
+        }),
         DaemonInvocationProblem::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "workflow_authority_unavailable".to_owned(),
             message: "The owning Workflow authority is unavailable".to_owned(),
@@ -266,6 +264,24 @@ where
     })
 }
 
+#[cfg(test)]
+mod reset_problem_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_workflow_reset_remains_a_typed_cli_problem() {
+        let problem = daemon_application_problem(DaemonInvocationProblem::ResetRequired);
+        let ApplicationProblem::Unavailable { diagnostic, .. } = problem else {
+            panic!("workflow reset must remain a typed unavailable problem");
+        };
+        assert_eq!(diagnostic.code, "workflow_authority_reset_required");
+        assert_eq!(
+            diagnostic.message,
+            "The owning Workflow authority requires an explicit reset"
+        );
+    }
+}
+
 fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: error.to_string(),
@@ -275,14 +291,17 @@ fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tracedecay_api::WorkflowOperation;
 
-    use super::WorkflowCliOperation;
+    use super::decode_workflow_invocation;
 
     #[test]
     fn closed_binding_rejects_unknown_request_fields_before_daemon_dispatch() {
-        let error = WorkflowCliOperation::HandoffRedeem
-            .decode(json!({"unexpected": true}))
-            .expect_err("strict DTO must reject unknown fields");
+        let error = decode_workflow_invocation(
+            WorkflowOperation::HandoffRedeem,
+            json!({"unexpected": true}),
+        )
+        .expect_err("strict DTO must reject unknown fields");
         assert!(error.to_string().contains("invalid typed Workflow request"));
     }
 }

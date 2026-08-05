@@ -2,10 +2,9 @@
 //! but must not own.
 //!
 //! Three things the transcript runtime needs live above this crate: the agent
-//! host installation layout (`tracedecay-agent-hosts`), the hook process
-//! spawner (root `src/hooks/`), and the user profile configuration loader
-//! (root `src/user_config.rs`). Depending on any of them from here would point
-//! the session layer back at the composition root.
+//! host installation layout (`tracedecay-agent-hosts`) and the hook process
+//! spawner (root `src/hooks/`). Depending on either from here would point the
+//! session layer back at the composition root.
 //!
 //! Each capability is therefore a process-global slot the composition root
 //! fills once during startup, in the same shape as
@@ -13,10 +12,12 @@
 //! conservative default so an unwired process still runs — it just does less.
 //!
 //! Root wiring needed: `tracedecay::sessions` install must call
-//! [`hermes_profile_pin::register`], [`session_review::register`], and
-//! [`lcm_redaction::register`] before any transcript ingest runs.
+//! [`hermes_profile_pin::register`] and [`session_review::register`] before any
+//! transcript ingest runs.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::OnceLock;
 
 /// Reads the pinned TraceDecay project root out of a Hermes profile config.
@@ -45,13 +46,14 @@ pub mod hermes_profile_pin {
 
 /// Schedules the post-ingest user session review.
 ///
-/// The review runs as a reaped hook child process, which is a root concern:
-/// this crate must not know the binary path or the hook argv.
+/// The review hint is delivered through the root-owned daemon client. This
+/// crate must not know the daemon transport or scheduling policy.
 pub mod session_review {
-    use super::OnceLock;
+    use super::{Future, OnceLock, Pin};
 
     /// Scheduler installed by the composition root.
-    pub type Scheduler = fn(&str, Option<&str>);
+    pub type Scheduler =
+        for<'a> fn(&'a str, Option<&'a str>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
     static SCHEDULER: OnceLock<Scheduler> = OnceLock::new();
 
@@ -61,44 +63,10 @@ pub mod session_review {
     }
 
     /// Requests a review pass; a no-op when unwired.
-    pub fn schedule(provider: &str, session_id: Option<&str>) {
+    pub async fn schedule(provider: &str, session_id: Option<&str>) {
         if let Some(scheduler) = SCHEDULER.get() {
-            scheduler(provider, session_id);
+            scheduler(provider, session_id).await;
         }
-    }
-}
-
-/// Owner-configured sensitive-value redaction policy for LCM raw ingest.
-///
-/// Redaction is irreversible, so the unwired default is "off with no
-/// patterns" — exactly what the root `UserConfig` default produces.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LcmRedactionPolicy {
-    /// Whether owner-opted-in sensitive-value redaction is active.
-    pub enabled: bool,
-    /// Lowercased sensitive key patterns; empty means "use the built-ins".
-    pub patterns: Vec<String>,
-}
-
-/// Supplies [`LcmRedactionPolicy`] from the user profile configuration.
-pub mod lcm_redaction {
-    use super::{LcmRedactionPolicy, OnceLock};
-
-    /// Policy provider installed by the composition root.
-    pub type Provider = fn() -> LcmRedactionPolicy;
-
-    static PROVIDER: OnceLock<Provider> = OnceLock::new();
-
-    /// Installs the profile-backed provider. First call wins.
-    pub fn register(provider: Provider) {
-        let _ = PROVIDER.set(provider);
-    }
-
-    /// Resolves the active policy, defaulting to "redaction off".
-    pub fn resolve() -> LcmRedactionPolicy {
-        PROVIDER
-            .get()
-            .map_or_else(LcmRedactionPolicy::default, |provider| provider())
     }
 }
 

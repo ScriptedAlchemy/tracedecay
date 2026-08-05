@@ -13,6 +13,7 @@ mod content_digest;
 pub use content_digest::{CanonicalContentDigestError, canonical_session_domain_content_sha256};
 #[doc(hidden)]
 pub mod exact_sql;
+pub mod handoff;
 mod ledger;
 pub mod maintenance;
 mod operation;
@@ -25,7 +26,6 @@ mod telemetry;
 #[cfg(test)]
 mod test_support;
 pub mod watermark;
-pub mod work;
 pub mod workflow;
 mod writer;
 

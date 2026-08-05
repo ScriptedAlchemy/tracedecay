@@ -65,7 +65,7 @@ use crate::feedback::owner::{
 };
 pub use crate::lsp_support::{
     BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, DaemonSemanticProviderAdapter,
-    LspDiagnosticDocumentPort, LspSemanticRequestAuthority,
+    LspDiagnosticDocumentPort, LspSemanticRequestAuthority, LspWorkspaceDocumentIndexPort,
 };
 use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
@@ -299,11 +299,8 @@ pub trait LspFeedbackProjectionScopePort: Send + Sync {
     ) -> LspRuntimeFuture<Result<LspFeedbackProjectionScope, LspRuntimeFailure>>;
 }
 
-/// Exact registered project/root authority used by production LSP sessions.
-///
-/// Project identity and authorization scope come from the already-registered
-/// feedback runtime. Current generation comes from the canonical diagnostics
-/// store and HEAD comes from the admitted repository root.
+/// Exact registered project/root authority used by production LSP sessions,
+/// bound to the admitted feedback scope and code-index generation.
 #[derive(Clone)]
 pub struct RegisteredProjectLspAuthority {
     feedback: Arc<Pr12FeedbackRuntime>,
@@ -312,12 +309,14 @@ pub struct RegisteredProjectLspAuthority {
     project_dir: Arc<Dir>,
     root_uri: Url,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    workspace_index: Arc<dyn crate::lsp_support::LspWorkspaceDocumentIndexPort>,
 }
 
 impl RegisteredProjectLspAuthority {
     pub fn new(
         feedback: Arc<Pr12FeedbackRuntime>,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+        workspace_index: Arc<dyn crate::lsp_support::LspWorkspaceDocumentIndexPort>,
     ) -> Result<Self, LspRuntimeFailure> {
         let project_root = feedback
             .project_root()
@@ -347,6 +346,7 @@ impl RegisteredProjectLspAuthority {
             project_dir: Arc::new(project_dir),
             root_uri,
             code_index,
+            workspace_index,
         })
     }
 
@@ -355,6 +355,9 @@ impl RegisteredProjectLspAuthority {
     }
 
     fn validate_root(&self, root: &AdmittedRoot) -> Result<(), LspRuntimeFailure> {
+        if root.scope_digest() != Some(&self.feedback.scope().scope_digest) {
+            return Err(LspRuntimeFailure::new("registered-project-root-mismatch"));
+        }
         let path = strict_file_url(root.uri())
             .and_then(|url| {
                 url.to_file_path()
@@ -479,13 +482,41 @@ impl LspDiagnosticDocumentPort for RegisteredProjectLspAuthority {
                     (adapter.language, adapter.language_id, text)
                 }
             };
-            Ok(LspDocument {
+            let document = LspDocument {
                 language,
                 language_id,
                 relative_path,
                 text,
-            })
+            };
+            let observed_content_digest = ContentDigest::of_bytes(document.text.as_bytes());
+            if request
+                .expected_content_digest
+                .as_ref()
+                .is_some_and(|expected| expected != &observed_content_digest)
+            {
+                return Err(LspRuntimeFailure::new("document-content-stale"));
+            }
+            Ok(document)
         })
+    }
+}
+
+impl crate::lsp_support::LspWorkspaceDocumentIndexPort for RegisteredProjectLspAuthority {
+    fn is_mounted(&self) -> bool {
+        self.workspace_index.is_mounted()
+    }
+
+    fn indexed_documents(
+        &self,
+        root: AdmittedRoot,
+        maximum_documents: usize,
+    ) -> LspRuntimeFuture<Result<tracedecay_lsp::IndexedWorkspaceDocuments, LspRuntimeFailure>>
+    {
+        if let Err(error) = self.validate_root(&root) {
+            return Box::pin(async move { Err(error) });
+        }
+        self.workspace_index
+            .indexed_documents(root, maximum_documents)
     }
 }
 
@@ -1827,12 +1858,7 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
                 )
                 .await?;
             let scope = current.scope;
-            // `ManagedDiagnosticSnapshot` carries coverage only on individual
-            // diagnostics, so a read that produced no cycle has nowhere to say
-            // "unknown". Publishing an empty set would tell the editor the
-            // document is clean, so this one surface still declines rather
-            // than assert a health it cannot support. The context projection
-            // below has a coverage field and does report the degraded state.
+            crate::lsp_support::validate_managed_diagnostic_scope(&request, &scope)?;
             let Some(result) = current.result else {
                 return Err(LspRuntimeFailure::new("feedback-read-incomplete"));
             };
@@ -1860,6 +1886,9 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
                 .await?;
             Ok(ManagedDiagnosticSnapshot {
                 generation: scope.generation,
+                code_generation_id: scope.code_generation_id.clone(),
+                snapshot_digest: scope.snapshot_digest.clone(),
+                authority_digest: crate::lsp_support::managed_diagnostic_authority_digest(&scope)?,
                 diagnostics,
             })
         })
@@ -2228,6 +2257,7 @@ pub fn lsp_session_factory<F>(
     feedback_runtime: Arc<Pr12FeedbackRuntime>,
     database: Database,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    workspace_index: Arc<dyn crate::lsp_support::LspWorkspaceDocumentIndexPort>,
     feedback_cycle: F,
     semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
     diagnostic_broker: Arc<AsyncMutex<DiagnosticBroker>>,
@@ -2242,6 +2272,7 @@ where
     let project = Arc::new(RegisteredProjectLspAuthority::new(
         feedback_runtime.clone(),
         code_index,
+        workspace_index,
     )?);
     let test_runs = lsp_test_result_port(project.clone());
     let diagnostic_projection = Arc::new(DiagnosticsStoreLspFeedbackProjection::new(

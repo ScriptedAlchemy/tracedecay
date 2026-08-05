@@ -72,7 +72,7 @@ async fn status_can_omit_verbose_branch_diagnostics() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn status_stalled_session_ingest_warning_points_to_daemon_import() {
+async fn status_reports_daemon_owned_partial_history_catch_up() {
     let (cg, _env, dir) = setup_empty_project().await;
     let runtime = open_active_project_session_db(&cg).await;
     let transcript = dir.path().join("claude-backlog.jsonl");
@@ -106,7 +106,7 @@ async fn status_stalled_session_ingest_warning_points_to_daemon_import() {
     let result = tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
         &cg,
         "tracedecay_status",
-        json!({}),
+        json!({"format": "json"}),
         None,
         None,
         tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
@@ -115,10 +115,13 @@ async fn status_stalled_session_ingest_warning_points_to_daemon_import() {
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("session transcript ingest looks stalled"));
-    assert!(text.contains("automatic catch-up warning threshold"));
-    assert!(text.contains("tracedecay sessions import --project-path"));
+    let status = extract_json(&result.value);
+    assert_eq!(status["session_history_catch_up"]["status"], "warming");
+    assert_eq!(status["session_history_catch_up"]["coverage"], "partial");
+    assert_eq!(status["session_history_catch_up"]["authority"], "daemon");
+    let text = status.to_string();
+    assert!(text.contains("continues bounded background catch-up"));
+    assert!(!text.contains("tracedecay sessions ingest --project-path"));
     assert!(!text.contains("hook catch-up cap"));
     assert!(!text.contains("tracedecay doctor --agent cursor"));
 }

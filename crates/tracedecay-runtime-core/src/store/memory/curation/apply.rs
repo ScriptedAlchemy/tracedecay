@@ -26,10 +26,10 @@ use super::super::repair::{
 use super::{
     compatibility_add_entity_alias_tx, compatibility_available_curation_fact_tx,
     compatibility_curated_correction_batch, compatibility_curation_mappings_from_ids_tx,
-    compatibility_curation_operation_digest, compatibility_link_facts_tx,
-    compatibility_merge_entities_tx, compatibility_normalize_tags_tx,
+    compatibility_curation_operation_digest, compatibility_legacy_relation_provenance,
+    compatibility_link_facts_tx, compatibility_merge_entities_tx, compatibility_normalize_tags_tx,
     compatibility_record_oplog_tx, compatibility_replay_curation_tx,
-    compatibility_sanitized_relation_metadata, compatibility_upsert_legacy_relation_tx,
+    compatibility_upsert_legacy_relation_tx,
 };
 use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
@@ -489,7 +489,7 @@ async fn compatibility_rewire_merge_relations_tx(
             relation,
             confidence,
             &compatibility_source_label(Some(&source_label))?,
-            &compatibility_sanitized_relation_metadata(&metadata).await?,
+            &compatibility_legacy_relation_provenance(&metadata).await?,
             compatibility_legacy_timestamp(now),
         )
         .await?;

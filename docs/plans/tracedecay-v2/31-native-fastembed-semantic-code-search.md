@@ -1,16 +1,16 @@
-# PR10: Native FastEmbed semantic code search
+# Native FastEmbed semantic code search
 
-**Status:** active PR10 implementation and product-test authority. The current
+**Status:** active semantic-retrieval implementation and product-test authority. The current
 checkout contains callable FastEmbed, exact-flat, vector-generation,
-calibration, fallback, and runtime-routing artifacts, but PR10 remains
+calibration, fallback, and runtime-routing artifacts, but delivery remains
 unfinished until the Plan 15 Linux comparison, direct tests, and normal CI
-pass. PR9 must still ship and test the exact/lexical/graph fallback and
-exact-tier behavior before PR10 can activate semantics. Those versioned PR9
+pass. Exact/lexical/graph retrieval must ship and test its fallback and
+exact-tier behavior before semantics can activate. Those versioned lexical
 results become immutable runtime prerequisites for semantic composition.
 
-PR9 baseline/profile and generation versions are reproducibility identities,
+Lexical baseline/profile and generation versions are reproducibility identities,
 not evidence that a predecessor wire contract shipped. Pure source-only/internal
-PR9/PR10 request helpers, wire-visible V2 request revisions, index/profile
+lexical/semantic request helpers, wire-visible request revisions, index/profile
 manifests, generations, model bindings, and activation receipts change in
 place. Only their exact final persisted shape is accepted; any other database,
 store, spool, file, or projection returns typed `ResetRequired` and requires
@@ -25,13 +25,13 @@ Plan 20 owns repairing and validating that snapshot; this plan owns mounting a
 compatible complete semantic generation and proving successful activation.
 Until both occur, fallback-allowed requests preserve exact/lexical/graph
 results and strict-semantic requests return typed unavailable. This is truthful
-degraded behavior, not PR10 acceptance.
+degraded behavior, not semantic-retrieval acceptance.
 
-Plan 31 owns the PR10 semantic adapter, projection/runtime, and direct
-testing. Plan 15 owns quality evaluation, while Plan 25 owns the PR9 code
+Plan 31 owns the semantic adapter, projection/runtime, and direct
+testing. Plan 15 owns quality evaluation, while Plan 25 owns the code
 generation and lexical/graph prerequisite. Plans 09/10/11/12/14 are later
 application and surface consumers. Consumers audit tested callable behavior,
-quality fixtures, and direct regressions; they do not rebuild PR9/PR10 by old
+quality fixtures, and direct regressions; they do not rebuild retrieval by old
 module, type, fixture, benchmark, or suite-spine names.
 
 ## Outcome
@@ -425,13 +425,13 @@ measurements.
   enter Git.
 - Semantic errors, timeout, cancellation, OOM, corruption, or missing artifacts cannot
   broaden scope. When the selected profile permits fallback, the lexical/graph
-  lane outcomes and Plan 15's named PR9 fallback subpayload are byte-identical.
+  lane outcomes and Plan 15's named exact/lexical/graph fallback subpayload are byte-identical.
   The enclosing response may add only a typed semantic/rerank outcome outside
   that subpayload, its digest, and cursor identity; strict mode fails closed.
 
 ## Plan 15 evaluation handoff and fresh-store reset
 
-PR10 ships a versioned sanitized corpus covering exact names, natural-language
+Semantic retrieval ships a versioned sanitized corpus covering exact names, natural-language
 intent, mixed queries, renamed symbols, same-name cross-scope cases, no-answer
 queries, generated/vendor noise, large symbols, unsupported languages, and
 incremental edits. It measures exact-hit retention, precision/recall/MRR/nDCG,
@@ -523,17 +523,17 @@ fail, and restoring the source makes it pass.
 - **Asynchronous, non-blocking indexing:** delivered at the projection,
   generation-selection, runtime-routing, and bounded-session boundaries.
   `only_a_current_receipt_routes_to_semantic_search` routes indexing, degraded,
-  unavailable, and rollback states to the frozen PR9 fallback, while
+  unavailable, and rollback states to the frozen exact/lexical/graph fallback, while
   `saturated_runtime_omits_semantics_without_entering_the_waiter_queue` proves
   query work does not wait for semantic capacity.
 - **Calibrated abstention:** delivered. Missing or shifted calibration invokes
   no semantic authority and preserves fallback; distance and margin rejection
   are versioned and generation-bound. Strict semantic returns typed unavailable.
   Linux threshold evaluation remains pending.
-- **Byte-stable PR9 fallback:** delivered at the semantic service boundary.
+- **Byte-stable exact/lexical/graph fallback:** delivered at the semantic service boundary.
   Direct regressions retain the caller-owned validated fallback object through
-  augmentation and every tested abstention path. The versioned PR9 fallback
-  bytes and digest remain pending direct PR9 verification.
+  augmentation and every tested abstention path. The versioned fallback bytes
+  and digest remain pending direct lexical verification.
 - **Evaluation before activation:** still pending. Current runtime
   routing requires an observed current activation receipt and rejects an
   indexing receipt, but the Plan 15 Linux evaluation, current/10x measurements,
@@ -624,14 +624,14 @@ for every statistic and label unsupported p99 or uncertainty claims `pending`.
 
 ### Hard activation barrier
 
-No semantic comparison starts until callable PR9 exact/lexical/graph behavior
+No semantic comparison starts until callable exact/lexical/graph behavior
 passes direct regressions and its versioned profile, exact-tier contract,
 fallback-subpayload bytes, and quality fixtures are identified by real
 content/revision digests. Historical artifact-name parity is not part of this
 barrier. No activation occurs unless Plan 15 reports `pass`,
 authorization/scope leakage is zero, protected exact results are
-unchanged, the PR9 fallback subpayload is byte-identical, generation
-compatibility holds, search-during-indexing leaves PR9 bytes and rank
+unchanged, the exact/lexical/graph fallback subpayload is byte-identical,
+generation compatibility holds, search-during-indexing leaves fallback bytes and rank
 unchanged, incomplete or stale generations contribute nothing, all
 resource ceilings pass, and cold offline rollback succeeds.
 
@@ -640,12 +640,12 @@ eligible.
 
 ## Acceptance
 
-PR10 is complete when semantic projection, atomic publication, PR9-preserving
+Semantic retrieval is complete when projection, atomic publication, lexical-fallback-preserving
 search, bounded generic fusion/reranking/redundancy, artifact/offline lifecycle,
 configuration, production status/Doctor behavior, corpus/resource/privacy
 tests, fault recovery, rollback, explicit reset/recreation, the Linux developer
-evaluation, and normal CI pass. PR11/PR12/PR14 still own application, public
-transport, and dashboard adapters. No separate
+evaluation, and normal CI pass. Application, public transport, and dashboard
+adapters remain required parts of the same product. No separate
 semantic endpoint, vector database, browser inference runtime, or model-specific
 transport is introduced. Queries never silently substitute a model/revision,
 download at query time, cascade to an unmeasured representation, or treat

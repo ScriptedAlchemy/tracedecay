@@ -3,7 +3,8 @@ use tracedecay_store::{
     AnchoredObservationWrite, DiagnosticGenerationSupersessionV1, EvidenceAssemblyWriteV1,
     FactWriteBatch, ObservationCursorAdvance, ProjectReadOperationV1, ProjectReadResultV1,
     RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
-    SanitizedCleanDiagnosticSnapshotV1, SourceCommitV1,
+    SanitizedCleanDiagnosticSnapshotV1, SourceAcquisitionQueueCasV1, SourceCommitV1,
+    SourceProjectionCommitV1,
 };
 
 use super::{
@@ -94,6 +95,24 @@ impl ProjectExecutor {
         commit: &SourceCommitV1,
     ) -> rusqlite::Result<()> {
         self.external_source.execute_write(savepoint, commit)
+    }
+
+    pub fn execute_external_source_projection_write(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        projection: &SourceProjectionCommitV1,
+    ) -> rusqlite::Result<()> {
+        self.external_source
+            .execute_projection_write(savepoint, projection)
+    }
+
+    pub fn execute_external_source_acquisition_write(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        command: &SourceAcquisitionQueueCasV1,
+    ) -> rusqlite::Result<()> {
+        self.external_source
+            .execute_acquisition_state_cas(savepoint, command)
     }
 
     pub fn execute_external_source_read(

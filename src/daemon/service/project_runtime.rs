@@ -117,6 +117,8 @@ pub(crate) struct ProjectRuntime {
     lsp_owner: Option<DaemonLspInvocationOwner>,
     advisory: Option<Arc<dyn Any + Send + Sync>>,
     advisory_hook_orchestrator: Option<Arc<dyn Pr13HookOrchestrationPortV1>>,
+    external_acquisition:
+        Option<Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>>,
     semantic: Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
     reservations: Vec<TypeId>,
     #[cfg(test)]
@@ -144,6 +146,7 @@ impl ProjectRuntime {
             || self.lsp_owner.is_some()
             || self.advisory.is_some()
             || self.advisory_hook_orchestrator.is_some()
+            || self.external_acquisition.is_some()
             || self.semantic.is_some()
             || {
                 #[cfg(test)]
@@ -200,6 +203,7 @@ project_runtime_components!(
     DaemonLspInvocationOwner => lsp_owner,
     Arc<dyn Any + Send + Sync> => advisory,
     Arc<dyn Pr13HookOrchestrationPortV1> => advisory_hook_orchestrator,
+    Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1> => external_acquisition,
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
 );
 
@@ -354,6 +358,7 @@ impl ProjectRuntimePublication {
                 move_component!(lsp_owner);
                 move_component!(advisory);
                 move_component!(advisory_hook_orchestrator);
+                move_component!(external_acquisition);
                 move_component!(semantic);
                 #[cfg(test)]
                 {

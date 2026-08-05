@@ -24,17 +24,20 @@ use tracedecay_application::{
     AuthorizedScopeSet, CancellationContext, CreateWorkCommand, Deadline, EffectId, EffectReceipt,
     EffectResult, EvidenceAuthority, EvidenceCoverage, EvidencePacket, EvidenceScore,
     IdempotencyKey, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
-    MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, Omission, OperationReceipt,
-    PageRequest, PageState, PreviewId, PreviewResult, ReconciliationState,
-    ReplanDependenciesCommand, RequestId, ResolvedScope, RetrieverContribution,
-    ReviewProposalRequestV1, TaskHandoffGrantV1, TaskHandoffIssueRequestV1,
-    TaskHandoffRedeemRequestV1, TaskHandoffRedeemedV1, TemporalState,
-    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
-    WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
-    WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
-    WorkAttemptStartRequestV1, WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkflowActivationV1, WorkflowDefinitionActivateRequestV1,
-    WorkflowDefinitionRegisterRequestV1, WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
+    MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, Omission,
+    OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1,
+    OpenTaskHandoffResultV1, OperationReceipt, PageRequest, PageState, PreviewId, PreviewResult,
+    ReconciliationState, ReplanDependenciesCommand, RequestId, ResolvedScope,
+    RetrieverContribution, ReviewProposalRequestV1, TaskHandoffGrant, TaskHandoffIssueRequest,
+    TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState, WorkAttemptAcquireLeaseRequestV1,
+    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
+    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
+    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
+    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
+    WorkflowDefinitionValidation,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
@@ -165,6 +168,7 @@ pub(crate) enum DaemonInvocationOperation {
     MultiRootExecute,
     WorkApplication,
     WorkflowApplication,
+    HandoffApplication,
     WorkAttempt,
     SemanticEvaluateAndPublish,
     LspOpen,
@@ -213,6 +217,7 @@ impl DaemonInvocationOperation {
             Self::MultiRootExecute => "multi_root_execute",
             Self::WorkApplication => "work_application",
             Self::WorkflowApplication => "workflow_application",
+            Self::HandoffApplication => "handoff_application",
             Self::WorkAttempt => "work_attempt",
             Self::SemanticEvaluateAndPublish => "semantic_evaluate_and_publish",
             Self::LspOpen => "lsp_open",
@@ -294,22 +299,44 @@ impl WorkApplicationInvocationV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
-pub(crate) enum WorkflowApplicationInvocationV1 {
-    RegisterDefinition(WorkflowDefinitionRegisterRequestV1),
-    ActivateDefinition(WorkflowDefinitionActivateRequestV1),
-    ExecuteFanOut(Box<WorkflowFanOutRequestV1>),
-    HandoffIssue(TaskHandoffIssueRequestV1),
-    HandoffRedeem(TaskHandoffRedeemRequestV1),
+pub(crate) enum WorkflowApplicationInvocation {
+    RegisterDefinition(WorkflowDefinitionRegisterRequest),
+    ValidateDefinition(WorkflowDefinitionValidateRequest),
+    GetDefinition(WorkflowDefinitionGetRequest),
+    ListDefinitions(WorkflowDefinitionListRequest),
+    DefinitionHistory(WorkflowDefinitionHistoryRequest),
+    DiffDefinition(WorkflowDefinitionDiffRequest),
+    HandoffIssue(TaskHandoffIssueRequest),
+    HandoffRedeem(TaskHandoffRedeemRequest),
 }
 
-impl WorkflowApplicationInvocationV1 {
+impl WorkflowApplicationInvocation {
     pub(crate) const fn operation_key(&self) -> &'static str {
         match self {
             Self::RegisterDefinition(_) => "register_definition",
-            Self::ActivateDefinition(_) => "activate_definition",
-            Self::ExecuteFanOut(_) => "execute_fan_out",
+            Self::ValidateDefinition(_) => "validate_definition",
+            Self::GetDefinition(_) => "get_definition",
+            Self::ListDefinitions(_) => "list_definitions",
+            Self::DefinitionHistory(_) => "definition_history",
+            Self::DiffDefinition(_) => "diff_definition",
             Self::HandoffIssue(_) => "handoff_issue",
             Self::HandoffRedeem(_) => "handoff_redeem",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "request", rename_all = "snake_case")]
+pub(crate) enum HandoffApplicationInvocationV1 {
+    OpenInvestigationHandoff(OpenInvestigationHandoffRequestV1),
+    OpenTaskHandoff(OpenTaskHandoffRequestV1),
+}
+
+impl HandoffApplicationInvocationV1 {
+    pub(crate) const fn operation_key(&self) -> &'static str {
+        match self {
+            Self::OpenInvestigationHandoff(_) => "open_investigation_handoff",
+            Self::OpenTaskHandoff(_) => "open_task_handoff",
         }
     }
 }
@@ -480,7 +507,13 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     WorkflowApplication {
-        request: WorkflowApplicationInvocationV1,
+        request: WorkflowApplicationInvocation,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    HandoffApplication {
+        request: HandoffApplicationInvocationV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -707,7 +740,8 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationProtectedApply
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackPreview
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackApply
-            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit => {
+            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit
+            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset => {
                 unreachable!("configuration operations use their typed constructor")
             }
             crate::application_surface::ApplicationSurfaceOperation::ContextScoutStatus
@@ -1037,7 +1071,7 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn workflow_application(
         request_id: impl Into<String>,
-        request: WorkflowApplicationInvocationV1,
+        request: WorkflowApplicationInvocation,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1048,6 +1082,27 @@ impl DaemonInvocationRequest {
             request_id: request_id.into(),
             delivery_route: None,
             payload: DaemonInvocationPayload::WorkflowApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub(crate) fn handoff_application(
+        request_id: impl Into<String>,
+        request: HandoffApplicationInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::HandoffApplication {
                 request,
                 observed_at,
                 deadline,
@@ -1411,6 +1466,9 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::WorkflowApplication { .. } => {
                 DaemonInvocationOperation::WorkflowApplication
             }
+            DaemonInvocationPayload::HandoffApplication { .. } => {
+                DaemonInvocationOperation::HandoffApplication
+            }
             DaemonInvocationPayload::WorkAttempt { .. } => DaemonInvocationOperation::WorkAttempt,
             DaemonInvocationPayload::SemanticEvaluateAndPublish { .. } => {
                 DaemonInvocationOperation::SemanticEvaluateAndPublish
@@ -1458,9 +1516,31 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::MultiRootExecute
                 | DaemonInvocationOperation::WorkApplication
                 | DaemonInvocationOperation::WorkflowApplication
+                | DaemonInvocationOperation::HandoffApplication
                 | DaemonInvocationOperation::WorkAttempt
                 | DaemonInvocationOperation::SemanticEvaluateAndPublish
                 | DaemonInvocationOperation::LspOpen
+        )
+    }
+
+    pub(crate) fn is_configuration_reset(&self) -> bool {
+        self.delivery_route == Some(Plan26DeliveryRouteV1::Cli)
+            && matches!(
+                &self.payload,
+                DaemonInvocationPayload::Configuration {
+                    surface_operation:
+                        crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset,
+                    request: crate::application_surface::ConfigurationSurfaceRequest::Reset(_),
+                    resolved_scope: None,
+                    ..
+                }
+            )
+    }
+
+    pub(crate) fn is_workflow_application(&self) -> bool {
+        matches!(
+            &self.payload,
+            DaemonInvocationPayload::WorkflowApplication { .. }
         )
     }
 
@@ -1559,12 +1639,6 @@ impl DaemonInvocationRequest {
                 cancellation,
                 ..
             }
-            | DaemonInvocationPayload::Configuration {
-                observed_at,
-                deadline,
-                cancellation,
-                ..
-            }
             | DaemonInvocationPayload::WorkApplication {
                 observed_at,
                 deadline,
@@ -1572,6 +1646,12 @@ impl DaemonInvocationRequest {
                 ..
             }
             | DaemonInvocationPayload::WorkflowApplication {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::HandoffApplication {
                 observed_at,
                 deadline,
                 cancellation,
@@ -1588,6 +1668,45 @@ impl DaemonInvocationRequest {
                     || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::Configuration {
+                surface_operation,
+                request,
+                resolved_scope,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+                let reset_operation = *surface_operation
+                    == crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset;
+                let reset_request = matches!(
+                    request,
+                    crate::application_surface::ConfigurationSurfaceRequest::Reset(_)
+                );
+                if reset_operation || reset_request {
+                    if !reset_operation
+                        || !reset_request
+                        || resolved_scope.is_some()
+                        || self.delivery_route != Some(Plan26DeliveryRouteV1::Cli)
+                    {
+                        return Err(DaemonInvocationProblem::InvalidRequest);
+                    }
+                    if let crate::application_surface::ConfigurationSurfaceRequest::Reset(request) =
+                        request
+                        && request
+                            .confirmation
+                            .as_ref()
+                            .is_some_and(|confirmation| confirmation.validate().is_err())
+                    {
+                        return Err(DaemonInvocationProblem::InvalidRequest);
+                    }
                 }
             }
             DaemonInvocationPayload::PrimitiveCode {
@@ -1866,6 +1985,7 @@ pub(crate) enum DaemonInvocationProblem {
     InvalidRequest,
     UnsupportedRevision,
     NotFoundOrNotAuthorized,
+    ResetRequired,
     Unavailable,
 }
 
@@ -2170,6 +2290,9 @@ pub(crate) enum DaemonInvocationOutcome {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<serde_json::Value>,
     },
+    ConfigurationReset {
+        outcome: tracedecay_application::ConfigurationResetOutcomeV1,
+    },
     ContextScout {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<serde_json::Value>,
@@ -2193,7 +2316,11 @@ pub(crate) enum DaemonInvocationOutcome {
     },
     WorkflowApplication {
         scope: ResolvedScope,
-        outcome: WorkflowApplicationOutcomeV1,
+        outcome: WorkflowApplicationOutcome,
+    },
+    HandoffApplication {
+        scope: ResolvedScope,
+        outcome: HandoffApplicationOutcomeV1,
     },
     WorkAttempt {
         scope: ResolvedScope,
@@ -2255,12 +2382,22 @@ pub(crate) enum WorkApplicationOutcomeV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
-pub(crate) enum WorkflowApplicationOutcomeV1 {
-    RegisterDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinitionV1>),
-    ActivateDefinition(ApplicationOutcome<WorkflowActivationV1>),
-    ExecuteFanOut(ApplicationOutcome<WorkflowExecutionTruthV1>),
-    HandoffIssue(ApplicationOutcome<TaskHandoffGrantV1>),
-    HandoffRedeem(ApplicationOutcome<TaskHandoffRedeemedV1>),
+pub(crate) enum WorkflowApplicationOutcome {
+    RegisterDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinition>),
+    ValidateDefinition(ApplicationOutcome<WorkflowDefinitionValidation>),
+    GetDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinition>),
+    ListDefinitions(ApplicationOutcome<Vec<tracedecay_domain::WorkflowDefinition>>),
+    DefinitionHistory(ApplicationOutcome<Vec<tracedecay_domain::WorkflowDefinition>>),
+    DiffDefinition(ApplicationOutcome<WorkflowDefinitionDiff>),
+    HandoffIssue(ApplicationOutcome<TaskHandoffGrant>),
+    HandoffRedeem(ApplicationOutcome<TaskHandoffRedeemed>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
+pub(crate) enum HandoffApplicationOutcomeV1 {
+    OpenInvestigationHandoff(ApplicationOutcome<OpenInvestigationHandoffResultV1>),
+    OpenTaskHandoff(ApplicationOutcome<OpenTaskHandoffResultV1>),
 }
 
 impl DaemonInvocationResponse {

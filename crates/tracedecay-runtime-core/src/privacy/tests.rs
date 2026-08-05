@@ -3,9 +3,11 @@ use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalWorkflowSemanticKindV1,
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceIdentityV1, ObservationContractError, ObservationId, ObservationOrderingDomainV1,
-    ObservationScopeV1, ObservationSourceIdentityV1, PayloadReferenceV1, ProviderId,
-    RetentionClass, SanitizerDispositionV1, SensitivityV1, SessionId,
+    ClaudeSourceIdentityV1, ComponentVersion, ObservationContractError, ObservationId,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1,
+    PayloadReferenceV1, ProviderId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId,
 };
 
 use super::detect::{
@@ -16,9 +18,13 @@ use super::sanitize::{CLAUDE_SANITIZER_VERSION_V1, OBSERVATION_SANITIZER_VERSION
 use super::{
     CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
     ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, DetectionConfidenceV1,
-    MAX_OBSERVATION_RECORD_BYTES, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
-    SanitizationFindingV1, parse_claude_record_v1, parse_normalized_observation_record_v1,
-    parse_observation_record_v1, sanitize_code_source_bytes,
+    LcmSensitiveRedactionPolicyV1, MAX_OBSERVATION_RECORD_BYTES, MEMORY_FACT_SANITIZER_VERSION_V1,
+    MemoryFactSanitizationV1, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
+    SanitizationFindingV1, SanitizedPayloadVerificationError, parse_claude_record_v1,
+    parse_normalized_observation_record_v1, parse_observation_record_v1,
+    redact_lcm_sensitive_payload, sanitize_code_source_bytes, sanitize_memory_fact_payload,
+    sanitize_provider_metadata_json, verify_memory_fact_sanitization,
+    verify_sanitized_json_payload,
 };
 
 fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {
@@ -131,6 +137,82 @@ fn code_source_sanitizer_redacts_and_issues_raw_bound_receipts() {
         first.receipt().receipt().receipt_id(),
         second.receipt().receipt().receipt_id(),
         "equal sanitized output from different raw secrets needs distinct scan evidence"
+    );
+}
+
+#[test]
+fn payload_verifier_rejects_stale_receipts_and_exact_content_mismatch() {
+    let sanitized = sanitize_code_source_bytes(b"let safe = true;\n").expect("sanitize source");
+    let (bytes, receipt) = sanitized.into_parts();
+    let payload = Value::String(String::from_utf8(bytes).expect("sanitized UTF-8"));
+    let revision = ComponentVersion::new(CODE_SOURCE_SANITIZER_VERSION_V1).expect("valid revision");
+
+    assert!(verify_sanitized_json_payload(&payload, &receipt, &revision).is_ok());
+    assert_eq!(
+        verify_sanitized_json_payload(
+            &payload,
+            &receipt,
+            &ComponentVersion::new("privacy.code-source.future").expect("valid revision"),
+        ),
+        Err(SanitizedPayloadVerificationError::StaleRevision)
+    );
+    assert_eq!(
+        verify_sanitized_json_payload(&json!({"different": true}), &receipt, &revision),
+        Err(SanitizedPayloadVerificationError::PayloadMismatch)
+    );
+}
+
+#[test]
+fn memory_fact_verifier_rejects_a_self_authored_receipt() {
+    let MemoryFactSanitizationV1::Durable { payload, receipt } =
+        sanitize_memory_fact_payload(json!({"content": "safe"})).expect("sanitize fact")
+    else {
+        panic!("safe fact should be durable");
+    };
+    let forged = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new("memory-fact-receipt.v1.forged").unwrap(),
+            ComponentVersion::new(MEMORY_FACT_SANITIZER_VERSION_V1).unwrap(),
+        )
+        .unwrap(),
+        receipt.disposition(),
+        receipt.sensitivity(),
+        receipt.payload().cloned(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        verify_memory_fact_sanitization(&payload, &forged),
+        Err(SanitizedPayloadVerificationError::ReceiptAuthorityMismatch)
+    );
+    assert!(verify_memory_fact_sanitization(&payload, &receipt).is_ok());
+}
+
+#[test]
+fn lcm_payload_sanitization_is_idempotent() {
+    let raw = "api_key=sk-lcm-canonical-detector-1234567890abcdef";
+    let first = super::sanitize_lcm_payload_text(raw).expect("first sanitization");
+    let second =
+        super::sanitize_lcm_payload_text(first.sanitized_text()).expect("second sanitization");
+
+    assert_eq!(second.sanitized_text(), first.sanitized_text());
+}
+
+#[test]
+fn lcm_receipt_binding_preserves_findings_from_the_raw_payload() {
+    let raw = "api_key=sk-lcm-binding-raw-secret-1234567890abcdef";
+    let sanitized = super::sanitize_lcm_payload_text(raw).expect("sanitize raw payload");
+    let bound = super::bind_sanitized_lcm_payload_text(raw, sanitized.sanitized_text())
+        .expect("bind protected candidate");
+
+    assert_eq!(
+        bound.receipt().disposition(),
+        SanitizerDispositionV1::Redacted
+    );
+    assert_eq!(bound.receipt().sensitivity(), SensitivityV1::Secret);
+    assert!(
+        !bound.findings().is_empty(),
+        "receipt binding discarded raw-input findings"
     );
 }
 
@@ -1332,4 +1414,60 @@ fn custom_policy_behavior_has_a_deterministic_version_fingerprint() {
         outcome.receipt().receipt().sanitizer_version(),
         first.version()
     );
+}
+
+#[test]
+fn lcm_sensitive_redaction_parses_structured_payload_before_scanning_values() {
+    let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_key"]);
+    let raw = r#"{"nested":{"api_key":"short","password":"owner-kept-value"},"safe":"keep"}"#;
+
+    let outcome =
+        redact_lcm_sensitive_payload(raw, &policy).expect("structured LCM privacy scan succeeds");
+    let sanitized: Value =
+        serde_json::from_str(outcome.text()).expect("structured output remains JSON");
+
+    assert_eq!(
+        sanitized["nested"]["api_key"],
+        "[TraceDecay redacted: sensitive field]"
+    );
+    assert_eq!(sanitized["nested"]["password"], "owner-kept-value");
+    assert_eq!(sanitized["safe"], "keep");
+    assert_eq!(outcome.patterns(), &["api_key".to_string()]);
+}
+
+#[test]
+fn lcm_sensitive_redaction_fails_closed_for_unknown_configured_patterns() {
+    let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_keey"]);
+    let secret = "sk-unknown-policy-1234567890";
+
+    let outcome = redact_lcm_sensitive_payload(&format!("api_key={secret}"), &policy)
+        .expect("fail-closed LCM privacy scan succeeds");
+
+    assert!(!outcome.text().contains(secret));
+    assert_eq!(outcome.patterns(), &["api_key".to_string()]);
+}
+
+#[test]
+fn provider_metadata_json_is_structurally_sanitized_or_rejected() {
+    let secret = ["s", "k", "-metadata-", "1234567890abcdef"].concat();
+    let raw = json!({
+        "nested": {
+            "authorization": format!("Bearer {secret}"),
+            "safe": "retained"
+        }
+    })
+    .to_string();
+
+    let sanitized =
+        sanitize_provider_metadata_json(&raw, 4_096).expect("valid bounded metadata is sanitized");
+    assert_eq!(sanitized["nested"]["safe"], "retained");
+    assert!(
+        sanitized["nested"]["authorization"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("[TraceDecay redacted:"))
+    );
+    assert!(!sanitized.to_string().contains(&secret));
+
+    assert!(sanitize_provider_metadata_json("{malformed", 4_096).is_none());
+    assert!(sanitize_provider_metadata_json(&raw, 8).is_none());
 }
