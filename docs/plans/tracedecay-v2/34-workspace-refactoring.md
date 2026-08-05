@@ -22,6 +22,7 @@ A user can inspect a symbol-aware workspace rename preview that preserves exact
 symbol identity and reports every known site, hazard, affected file, and test.
 The future apply-grade journey must fail closed on stale or ambiguous evidence
 and leave either the complete accepted edit or the exact original workspace.
+It is a required future outcome, not a currently callable operation.
 
 Optional staging and commit remain separate Plan 36 operations. Refactoring
 never autonomously mutates branches, worktrees, refs, history, tags, or
@@ -122,5 +123,5 @@ source edits never substitute for stored-data conversion.
 - Database conversion, dual write, shadow read, lazy migration, or a recovery
   reader.
 - A permanent compatibility inventory, execution ledger, scaffold-only
-  capability milestone, or planning-artifact acceptance gate.
+  capability claim, or planning-artifact acceptance gate.
 - LSP edit authority or autonomous Git mutation.

@@ -128,9 +128,8 @@ duplicating business logic.
   Lifecycle, framing, and document notifications remain protocol mechanics,
   not callable catalog capabilities. `prepareRename` and `rename` bind only to
   read-only candidate/preview UseCaseIds owned by
-  [34](34-workspace-refactoring.md); they never bind directly
-  to `tracedecay_rename_symbol`, another write-effect entry,
-  `workspace/applyEdit`, or opaque server commands. No separate
+  [34](34-workspace-refactoring.md); they never bind directly to a write-effect
+  entry, `workspace/applyEdit`, or opaque server commands. No separate
   `lsp_*` capability is cataloged for them, and no binding may apply an edit
   on their behalf. `textDocument/codeAction` is cataloged only when its owning
   typed candidate-consumption operation, effect classification, canonical
