@@ -2,17 +2,17 @@
 
 ## 1. Install
 
-**Homebrew (macOS):**
+**Linux and Apple silicon macOS:**
 
 ```bash
-brew install ScriptedAlchemy/tap/tracedecay
+curl -fsSL https://github.com/ScriptedAlchemy/tracedecay/releases/latest/download/install.sh | bash
 ```
 
-**Cargo (any platform):**
+**Windows:**
 
-```bash
-cargo install tracedecay
-```
+Download the x86_64 Windows archive from the
+[latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest),
+extract `tracedecay.exe`, and place it on `PATH`.
 
 Verify it works:
 
