@@ -216,7 +216,7 @@ export function CommandPalette({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Go to workspace or project…"
-              className="h-10 w-full bg-transparent text-sm outline-none placeholder:text-text-muted"
+              className="min-h-[var(--touch-target-min)] w-full bg-transparent text-sm outline-none placeholder:text-text-muted"
               role="combobox"
               aria-expanded="true"
               aria-controls="td-palette-list"
@@ -244,7 +244,7 @@ export function CommandPalette({
                   onMouseEnter={() => setActive(i)}
                   onClick={entry.action}
                   className={cn(
-                    'flex h-9 cursor-pointer items-center justify-between rounded-[var(--radius-chip)] px-2.5 text-sm',
+                    'flex min-h-[var(--touch-target-min)] cursor-pointer items-center justify-between rounded-[var(--radius-chip)] px-2.5 text-sm',
                     i === activeIndex ? 'bg-surface-2 text-text-primary' : 'text-text-secondary',
                   )}
                 >

@@ -146,7 +146,7 @@ export function InspectorStack() {
                   aria-label={`Move ${entry.entity.id} earlier`}
                   disabled={index === 0}
                   onClick={() => move(key, -1)}
-                  className="flex size-8 items-center justify-center text-text-muted enabled:hover:text-text-primary disabled:opacity-30"
+                  className="flex size-[var(--touch-target-min)] items-center justify-center text-text-muted enabled:hover:text-text-primary disabled:opacity-30"
                 >
                   <ChevronLeft aria-hidden size={13} />
                 </button>
@@ -155,7 +155,7 @@ export function InspectorStack() {
                   aria-label={`Move ${entry.entity.id} later`}
                   disabled={index === entries.length - 1}
                   onClick={() => move(key, 1)}
-                  className="flex size-8 items-center justify-center text-text-muted enabled:hover:text-text-primary disabled:opacity-30"
+                  className="flex size-[var(--touch-target-min)] items-center justify-center text-text-muted enabled:hover:text-text-primary disabled:opacity-30"
                 >
                   <ChevronRight aria-hidden size={13} />
                 </button>
@@ -163,7 +163,7 @@ export function InspectorStack() {
                   type="button"
                   aria-label={`Close ${entry.entity.id}`}
                   onClick={() => close(key)}
-                  className="flex size-8 items-center justify-center text-text-muted hover:text-text-primary"
+                  className="flex size-[var(--touch-target-min)] items-center justify-center text-text-muted hover:text-text-primary"
                 >
                   <X aria-hidden size={13} />
                 </button>
