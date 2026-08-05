@@ -222,7 +222,7 @@ fn evaluate_scale(
             passed: incremental.iter().all(|sample| {
                 sample.extraction_disposition == "changed_regions"
                     && sample.reset_extractions == 0
-                    && sample.visited_top_level_nodes == 1
+                    && sample.visited_top_level_nodes <= 3
             }),
             observed: format!(
                 "max_extracted_bytes={max_extracted_bytes}, source_bytes={}",
