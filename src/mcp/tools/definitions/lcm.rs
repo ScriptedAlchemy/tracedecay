@@ -487,15 +487,6 @@ pub(super) fn def_lcm_preflight() -> ToolDefinition {
                     "type": "string",
                     "description": "Provider-local session id."
                 },
-                "messages": {
-                    "type": "array",
-                    "description": "Current active context messages to inspect before compression.",
-                    "items": {"type": "object"}
-                },
-                "transcript_projection": {
-                    "type": "boolean",
-                    "description": "Host-integration flag: also upsert these stable-id messages into this project's searchable transcript projection. Intended for Hermes live turn ingestion when its state.db session lacks cwd provenance."
-                },
                 "current_tokens": {
                     "type": "integer",
                     "minimum": 0,
@@ -556,7 +547,6 @@ pub(super) fn def_lcm_preflight() -> ToolDefinition {
                 },
                 "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
                 "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
-                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage.")
             },
             "required": ["provider", "session_id"]
         }),

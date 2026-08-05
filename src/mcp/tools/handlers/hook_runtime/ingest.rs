@@ -196,6 +196,7 @@ pub(super) async fn codex_compact(
         "reason": result.reason,
         "summary_nodes_created": result.summary_nodes_created,
         "summary_node_ids": result.summary_nodes.into_iter().map(|node| node.node_id).collect::<Vec<_>>(),
+        "relation_projection_status": result.relation_projection_status,
     }))
 }
 
@@ -252,6 +253,7 @@ pub(super) async fn cursor_compact(
         "reason": result.reason,
         "summary_nodes_created": result.summary_nodes_created,
         "summary_node_ids": result.summary_nodes.into_iter().map(|node| node.node_id).collect::<Vec<_>>(),
+        "relation_projection_status": result.relation_projection_status,
         "messages_upserted": ingest.messages_upserted,
     }))
 }
@@ -262,6 +264,7 @@ fn cursor_compact_skipped(reason: impl Into<String>) -> Value {
         "reason": reason.into(),
         "summary_nodes_created": 0,
         "summary_node_ids": [],
+        "relation_projection_status": "not_applicable",
     })
 }
 
@@ -310,10 +313,7 @@ fn host_lcm_request(
         dynamic_leaf_chunk_max: None,
         context_length,
         reserve_tokens_floor: None,
-        summarizer: crate::sessions::lcm::LcmSummarizerMode::Provided {
-            summary_text: String::new(),
-            route: Some("daemon_deterministic".to_string()),
-        },
+        summarizer: crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary,
     }
 }
 

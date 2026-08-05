@@ -302,7 +302,8 @@ fn decide_codex_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
 
 /// Codex `PostCompact` hook handler.
 ///
-/// Replaces temporary compaction summaries from visible LCM source messages.
+/// Routes exact plaintext transcript evidence or an app-server-generated
+/// auxiliary summary through the daemon-owned LCM effect boundary.
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
     let root = event_project_root_with_identity_from_json(&event).await;

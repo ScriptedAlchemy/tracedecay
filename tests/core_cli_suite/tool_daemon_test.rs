@@ -1867,11 +1867,6 @@ fn user_scoped_lcm_tool_cli_handshakes_projectless_from_filesystem_root_cwd() {
         "provider": "hermes",
         "session_id": "stock-check-session",
         "storage_scope": "user",
-        "transcript_projection": true,
-        "messages": [
-            {"role": "user", "content": "hello", "id": "m1"},
-            {"role": "assistant", "content": "hi there", "id": "m2"}
-        ],
     })
     .to_string();
 
@@ -1905,9 +1900,9 @@ fn user_scoped_lcm_tool_cli_handshakes_projectless_from_filesystem_root_cwd() {
 }
 
 #[test]
-fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
-    // Mirrors scripts/hermes_stock_check.py: user-scoped sync_turn (cwd=/) then
-    // project-scoped lcm_grep must stay available without inventing project=/.
+fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
+    // A user-scoped read-only preflight from cwd=/ must not detach the
+    // independently mounted project-scoped LCM read authority.
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
@@ -1921,23 +1916,6 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
         "provider": "hermes",
         "session_id": "stock-check-session",
         "storage_scope": "user",
-        "transcript_projection": true,
-        "messages": [
-            {
-                "role": "user",
-                "content": "hello",
-                "id": "tracedecay_sync_1_user",
-                "timestamp": 1.0,
-                "associated_project_roots": [project_arg],
-            },
-            {
-                "role": "assistant",
-                "content": "hi there",
-                "id": "tracedecay_sync_1_assistant",
-                "timestamp": 1.0,
-                "associated_project_roots": [project_arg],
-            }
-        ],
     })
     .to_string();
     let user_output = tracedecay_command_with_home(&home_path)
@@ -1951,7 +1929,7 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
             user_args.as_str(),
         ])
         .output()
-        .expect("user-scoped sync_turn preflight should run");
+        .expect("user-scoped preflight should run");
     assert!(
         user_output.status.success(),
         "user-scoped Hermes preflight must succeed projectless\nstdout:\n{}\nstderr:\n{}",
@@ -1962,23 +1940,6 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
     let project_args = json!({
         "provider": "hermes",
         "session_id": "stock-check-session",
-        "transcript_projection": true,
-        "messages": [
-            {
-                "role": "user",
-                "content": "hello",
-                "id": "tracedecay_sync_1_user",
-                "timestamp": 1.0,
-                "associated_project_roots": [project_arg],
-            },
-            {
-                "role": "assistant",
-                "content": "hi there",
-                "id": "tracedecay_sync_1_assistant",
-                "timestamp": 1.0,
-                "associated_project_roots": [project_arg],
-            }
-        ],
     })
     .to_string();
     let project_output = tracedecay_command_with_home(&home_path)
@@ -1994,7 +1955,7 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
             project_args.as_str(),
         ])
         .output()
-        .expect("project-scoped sync_turn preflight should run");
+        .expect("project-scoped preflight should run");
     assert!(
         project_output.status.success(),
         "project-scoped Hermes preflight must succeed\nstdout:\n{}\nstderr:\n{}",
@@ -2042,7 +2003,7 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
         .unwrap_or(grep);
     assert!(
         payload.get("error").is_none(),
-        "stock Hermes regression: grep must remain available after sync_turn, got {payload}"
+        "Hermes regression: grep must remain available after preflight, got {payload}"
     );
     assert_ne!(
         payload.get("status").and_then(Value::as_str),

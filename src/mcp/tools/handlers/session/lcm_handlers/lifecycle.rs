@@ -3,7 +3,6 @@ use super::super::lcm_compact::{lcm_preflight_tool_json, lcm_response_handle_roo
 use super::super::lcm_storage::{
     LcmHandlerContext, LcmOpenMode, LcmStorageResolution, open_lcm_storage,
 };
-use super::super::live_projection::upsert_live_transcript_projection;
 use super::super::*;
 
 pub(in crate::mcp::tools::handlers) async fn handle_lcm_session_boundary(
@@ -47,17 +46,27 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_preflight(
 ) -> Result<ToolResult> {
     let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = match open_lcm_storage(context, &args, LcmOpenMode::Writable).await {
+    if [
+        "messages",
+        "transcript_projection",
+        "ignore_message_patterns",
+    ]
+    .iter()
+    .any(|field| args.get(*field).is_some())
+    {
+        return Err(argument_error(
+            "LCM preflight is read-only; admit host messages through canonical transcript ingestion",
+        ));
+    }
+    let storage = match open_lcm_storage(context, &args, LcmOpenMode::ReadOnlyExisting).await {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
-    let messages = messages_arg(&args)?;
     let response = storage
         .db
         .lcm_preflight(LcmPreflightRequest {
             provider: provider.to_string(),
             session_id: session_id.to_string(),
-            messages: messages.clone(),
             current_tokens: non_negative_i64_arg(&args, "current_tokens")?,
             threshold_tokens: non_negative_i64_arg(&args, "threshold_tokens")?,
             max_assembly_tokens: non_negative_i64_arg(&args, "max_assembly_tokens")?,
@@ -72,20 +81,9 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_preflight(
             reserve_tokens_floor: non_negative_i64_arg(&args, "reserve_tokens_floor")?,
             ignore_session_patterns: string_array_arg(&args, "ignore_session_patterns")?,
             stateless_session_patterns: string_array_arg(&args, "stateless_session_patterns")?,
-            ignore_message_patterns: string_array_arg(&args, "ignore_message_patterns")?,
         })
         .await
         .map_err(lcm_error)?;
-    if bool_arg(&args, "transcript_projection")? == Some(true) {
-        upsert_live_transcript_projection(
-            &storage.db,
-            context.project_root,
-            provider,
-            session_id,
-            &messages,
-        )
-        .await?;
-    }
     Ok(lcm_preflight_tool_json(
         context.project_root,
         &args,
@@ -147,10 +145,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_compress(
             dynamic_leaf_chunk_max: non_negative_i64_arg(&args, "dynamic_leaf_chunk_max")?,
             context_length: non_negative_i64_arg(&args, "context_length")?,
             reserve_tokens_floor: non_negative_i64_arg(&args, "reserve_tokens_floor")?,
-            summarizer: LcmSummarizerMode::Provided {
-                summary_text: String::new(),
-                route: Some("daemon_deterministic".to_string()),
-            },
+            summarizer: LcmSummarizerMode::HermesAuxiliary,
         })
         .await
         .map_err(lcm_error)?;
@@ -171,6 +166,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_compress(
             "fallback_used": response.fallback_used,
             "context_recovery_hint": response.context_recovery_hint,
             "retry_status": response.retry_status,
+            "relation_projection_status": response.relation_projection_status,
             "frontier": response.frontier,
             "summary_request": response.summary_request,
         }),

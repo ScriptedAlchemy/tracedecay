@@ -1,7 +1,10 @@
-//! Codex context-compaction ingestion: LCM summary nodes, incremental depth,
-//! successor publication, pending-leaf tracking, and writer rollback.
+//! Codex context-compaction ingestion and daemon-owned summary publication.
+//! Transcript reads retain exact native evidence; only the PostCompact effect
+//! may turn that evidence or an app-server result into an LCM summary node.
 
 use std::io::Write;
+#[cfg(unix)]
+use std::process::Stdio;
 
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
@@ -12,6 +15,13 @@ use tracedecay::sessions::lcm::{
 };
 use tracedecay_domain::ProjectId;
 
+#[cfg(unix)]
+use crate::common::{
+    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, spawn_tracedecay_daemon,
+    tracedecay_command_with_home,
+};
+#[cfg(unix)]
+use crate::restart_atomicity::mark_test_project;
 use crate::support::setup;
 
 async fn registered_runtime(
@@ -79,20 +89,80 @@ fn write_codex_rollout_with_compaction(
     path
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn codex_context_compaction_creates_lcm_summary_node() {
+#[allow(clippy::await_holding_lock)]
+async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effect() {
     let tmp = TempDir::new().unwrap();
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (home, project) = setup(&tmp);
-    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
-
-    let runtime = registered_runtime(&home, &project).await;
-    let source = CodexSource::with_home(&home);
-
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
+    let profile = home.join(".tracedecay");
+    let _env_guards = [
+        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
+        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
+        EnvVarGuard::set("HOME", &home),
+        EnvVarGuard::set("USERPROFILE", &home),
+    ];
+    let project_id = mark_test_project(&project);
+    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();
-    assert_eq!(stats.messages_upserted, 4);
+    drop(enrollment);
+    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
+
+    let codex_bin = tmp.path().join("codex");
+    std::fs::write(
+        &codex_bin,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
+    *'"id":1'*) printf '%s\n' '{"id":1,"result":{"thread":{"id":"thread-1","model":"codex-hook-test"}}}' ;;
+    *'"id":2'*)
+      printf '%s\n' '{"method":"item/completed","params":{"model":"codex-hook-test","item":{"content":[{"type":"output_text","text":"Codex authoritative hook summary"}]}}}'
+      printf '%s\n' '{"method":"turn/completed"}'
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&codex_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _summary_env = [
+        EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &codex_bin),
+        EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5"),
+    ];
+    let daemon = spawn_tracedecay_daemon(&home);
+    let event = serde_json::json!({
+        "hook_event_name": "PostCompact",
+        "session_id": "codex-compact",
+        "cwd": project,
+        "context_tokens": 124_000,
+        "context_window_size": 128_000
+    });
+    let mut hook = tracedecay_command_with_home(&home);
+    let mut child = hook
+        .arg("hook-codex-post-compact")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.take().unwrap(), "{event}").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Codex PostCompact hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    drop(daemon);
+
+    let runtime = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id)
+        .await
+        .unwrap();
 
     let status = runtime
         .lcm_status_for_test("codex", Some("codex-compact"))
@@ -113,6 +183,13 @@ async fn codex_context_compaction_creates_lcm_summary_node() {
     assert_eq!(description.summary_nodes.len(), 1);
     assert_eq!(description.summary_nodes[0].depth, 1);
     assert_eq!(description.summary_nodes[0].source_count, 2);
+    assert!(
+        description.summary_nodes[0]
+            .metadata_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("codex_app_server:codex-hook-test")
+    );
 
     let node_id = description.summary_nodes[0].node_id.clone();
     let expanded = runtime
@@ -142,17 +219,45 @@ async fn codex_context_compaction_creates_lcm_summary_node() {
         })
         .await
         .unwrap();
+    assert_eq!(
+        expansion
+            .summary_node
+            .as_ref()
+            .expect("expanded summary node should be present")
+            .summary_text,
+        "Codex authoritative hook summary"
+    );
     assert!(
         expansion
             .content
             .contains("Map the release automation state")
     );
     assert!(expansion.content.contains("Release automation is mapped"));
-    assert!(!expansion.content.contains("Summary body is encrypted"));
+    assert!(!expansion.content.contains("encrypted-codex-summary"));
     assert_eq!(expansion.summary_sources.len(), 2);
 }
+
+#[cfg(not(unix))]
 #[tokio::test]
-async fn repeated_codex_compactions_only_source_messages_since_previous_boundary() {
+async fn codex_transcript_compaction_evidence_does_not_publish_outside_daemon_effect() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
+    let runtime = registered_runtime(&home, &project).await;
+    let source = CodexSource::with_home(&home);
+    let stats = runtime
+        .ingest_project_transcript_source_for_test(&source, &project, None)
+        .await
+        .unwrap();
+    assert_eq!(stats.messages_upserted, 4);
+    let status = runtime
+        .lcm_status_for_test("codex", Some("codex-compact"))
+        .await
+        .unwrap();
+    assert_eq!(status.summary_node_count, 0);
+}
+#[tokio::test]
+async fn repeated_codex_compactions_remain_native_evidence_until_daemon_effect() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let dir = home.join(".codex/sessions/2026/01/01");
@@ -219,26 +324,16 @@ async fn repeated_codex_compactions_only_source_messages_since_previous_boundary
         .unwrap();
     assert_eq!(stats.messages_upserted, 6);
 
-    let description = runtime
-        .lcm_describe_for_test(LcmDescribeRequest {
-            provider: "codex".to_string(),
-            session_id: "codex-repeat".to_string(),
-            target: LcmDescribeTarget::Session,
-        })
+    let status = runtime
+        .lcm_status_for_test("codex", Some("codex-repeat"))
         .await
         .unwrap();
-    assert_eq!(description.summary_nodes.len(), 2);
-    let source_counts = description
-        .summary_nodes
-        .iter()
-        .map(|node| (node.depth, node.source_count))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(source_counts.get(&1), Some(&2));
-    assert_eq!(source_counts.get(&2), Some(&2));
+    assert_eq!(status.raw_message_count, 6);
+    assert_eq!(status.summary_node_count, 0);
 }
 
 #[tokio::test]
-async fn incremental_codex_compaction_depth_continues_from_prior_history() {
+async fn incremental_codex_compaction_ingest_never_bypasses_daemon_effect() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let dir = home.join(".codex/sessions/2026/01/01");
@@ -321,24 +416,16 @@ async fn incremental_codex_compaction_depth_continues_from_prior_history() {
         .unwrap();
     assert_eq!(stats.messages_upserted, 3);
 
-    let description = runtime
-        .lcm_describe_for_test(LcmDescribeRequest {
-            provider: "codex".to_string(),
-            session_id: "codex-incremental".to_string(),
-            target: LcmDescribeTarget::Session,
-        })
+    let status = runtime
+        .lcm_status_for_test("codex", Some("codex-incremental"))
         .await
         .unwrap();
-    let depths = description
-        .summary_nodes
-        .iter()
-        .map(|node| node.depth)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(depths, [1, 2].into_iter().collect());
+    assert_eq!(status.raw_message_count, 6);
+    assert_eq!(status.summary_node_count, 0);
 }
 
 #[tokio::test]
-async fn codex_compaction_depth_resets_when_rollout_replays_from_start() {
+async fn replayed_codex_compaction_ingest_never_bypasses_daemon_effect() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let dir = home.join(".codex/sessions/2026/01/01");
@@ -415,18 +502,10 @@ async fn codex_compaction_depth_resets_when_rollout_replays_from_start() {
         .unwrap();
     assert_eq!(stats.messages_upserted, 6);
 
-    let description = runtime
-        .lcm_describe_for_test(LcmDescribeRequest {
-            provider: "codex".to_string(),
-            session_id: "codex-replay".to_string(),
-            target: LcmDescribeTarget::Session,
-        })
+    let status = runtime
+        .lcm_status_for_test("codex", Some("codex-replay"))
         .await
         .unwrap();
-    let depths = description
-        .summary_nodes
-        .iter()
-        .map(|node| node.depth)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(depths, [1, 2].into_iter().collect());
+    assert_eq!(status.raw_message_count, 6);
+    assert_eq!(status.summary_node_count, 0);
 }

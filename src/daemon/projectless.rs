@@ -369,20 +369,9 @@ async fn projectless_user_lcm_tools_call_response(
     .await;
     match result {
         Ok(result) => {
-            if tool_name == "tracedecay_lcm_preflight"
-                && arguments
-                    .get("transcript_projection")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-            {
-                let _ = refresh_wake
-                    .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
-                    .await;
-            } else if matches!(
+            if matches!(
                 tool_name,
-                "tracedecay_lcm_preflight"
-                    | "tracedecay_lcm_compress"
-                    | "tracedecay_lcm_session_boundary"
+                "tracedecay_lcm_compress" | "tracedecay_lcm_session_boundary"
             ) {
                 refresh_wake.wake();
             }

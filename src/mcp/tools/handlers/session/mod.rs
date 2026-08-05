@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 use super::super::render::{self, Md, truncated_json_envelope_with_handle};
 use super::support::{argument_error, string_arg, tool_json, tool_json_with_md};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{ParseOffset, RegisteredGlobalDb, TranscriptBatch};
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::response_handles::{
     RESPONSE_RETRIEVE_TOOL, observe_response_truncation, store_response_handle,
 };
@@ -19,10 +19,9 @@ use crate::sessions::lcm::{
     LcmDescribeTarget, LcmExpandQueryRequest, LcmExpandTarget, LcmGcConfig, LcmGrepSort,
     LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest, LcmSummarizerMode,
 };
-use crate::sessions::shared::{content_storage_text_and_tools, preview_title};
 use crate::sessions::{
-    ProviderScope, SessionMessageRecord, SessionMessageSearchResult, SessionMessageType,
-    SessionRecord, SessionSearchScope, SessionSearchTimeRange,
+    ProviderScope, SessionMessageSearchResult, SessionMessageType, SessionSearchScope,
+    SessionSearchTimeRange,
 };
 use crate::timeutil::SearchTimeBound;
 use crate::tracedecay::{TraceDecay, current_timestamp};
@@ -31,7 +30,6 @@ mod lcm_args;
 mod lcm_compact;
 mod lcm_handlers;
 mod lcm_storage;
-mod live_projection;
 pub(crate) mod message_search;
 mod session_refresh;
 mod sessions_for;

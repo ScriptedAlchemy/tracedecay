@@ -25,6 +25,69 @@ use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::PayloadAccessState;
 
+#[cfg(feature = "test-transport")]
+async fn seed_cursor_compaction_evidence(
+    cg: &tracedecay::tracedecay::TraceDecay,
+    session_id: &str,
+    message_id: &str,
+    ordinal: i64,
+    summary_text: &str,
+) {
+    let runtime = open_active_project_session_db(cg).await;
+    let metadata_json = serde_json::json!({
+        "version": 1,
+        "provider": "cursor",
+        "native_record_kind": "composer_message",
+        "stable_record_id": message_id,
+        "relations": {
+            "session_id": session_id,
+            "message_id": message_id
+        },
+        "facts": [
+            {
+                "kind": "message",
+                "role": "assistant",
+                "content": summary_text
+            },
+            {
+                "kind": "compaction",
+                "summary": summary_text
+            }
+        ],
+        "evidence": {
+            "ordering_domain": "file_bytes",
+            "range": {
+                "start": ordinal,
+                "end": ordinal + 1
+            }
+        }
+    })
+    .to_string();
+    assert!(
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &SessionMessageRecord {
+                    provider: "cursor".to_string(),
+                    message_id: message_id.to_string(),
+                    session_id: session_id.to_string(),
+                    role: "assistant".to_string(),
+                    timestamp: Some(ordinal),
+                    ordinal,
+                    text: summary_text.to_string(),
+                    kind: Some("message".to_string()),
+                    model: None,
+                    tool_names: None,
+                    source_path: None,
+                    source_offset: None,
+                    metadata_json: Some(metadata_json),
+                },
+            )
+            .await
+            .unwrap()
+    );
+}
+
 #[test]
 fn lcm_compress_public_schema_accepts_only_identity_and_pressure_hints() {
     let tools = get_tool_definitions();
@@ -38,6 +101,15 @@ fn lcm_compress_public_schema_accepts_only_identity_and_pressure_hints() {
     assert!(properties.contains_key("provider"));
     assert!(properties.contains_key("session_id"));
     assert!(properties.contains_key("expected_current_frontier_store_id"));
+
+    let preflight = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_preflight")
+        .expect("tracedecay_lcm_preflight definition");
+    let preflight_properties = preflight.input_schema["properties"].as_object().unwrap();
+    assert!(!preflight_properties.contains_key("messages"));
+    assert!(!preflight_properties.contains_key("transcript_projection"));
+    assert!(!preflight_properties.contains_key("ignore_message_patterns"));
 }
 
 #[tokio::test]
@@ -52,10 +124,6 @@ async fn lcm_project_root_storage_arg_is_not_rejected_as_selector() {
             "provider": "cursor",
             "session_id": "stock-check-session",
             "project_root": project_root,
-            "messages": [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "hi there"}
-            ],
             "current_tokens": 50
         }),
         None,
@@ -81,10 +149,6 @@ async fn lcm_project_path_selector_is_rejected_before_dispatch() {
             "provider": "cursor",
             "session_id": "stock-check-session",
             "project_path": project_path,
-            "messages": [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "hi there"}
-            ],
             "current_tokens": 50
         }),
         None,
@@ -607,12 +671,12 @@ async fn lcm_tools_reject_invalid_storage_routing_arguments() {
 }
 
 #[tokio::test]
-async fn user_scoped_lcm_preflight_ingests_without_a_project() {
+async fn user_scoped_lcm_preflight_rejects_live_message_ingest() {
     let profile = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
         .await
         .unwrap();
-    let result = runtime
+    let error = runtime
         .call_user_lcm_tool_for_test(
             "tracedecay_lcm_preflight",
             json!({
@@ -624,38 +688,37 @@ async fn user_scoped_lcm_preflight_ingests_without_a_project() {
                     "role": "user",
                     "content": "Remember this general preference"
                 }],
-                "transcript_projection": true,
                 "format": "json"
             }),
             profile.path(),
         )
         .await
-        .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"], "ok");
+        .unwrap_err();
+    assert!(error.to_string().contains("LCM preflight is read-only"));
 
     assert!(
         runtime
             .lcm_load_raw_message_for_test("hermes", "untethered-message-1")
             .await
-            .is_some()
+            .is_none()
     );
-    let session = runtime
-        .session_for_test(HostAdmissionScope::Profile, "hermes", "untethered-session")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(session.project_key, "user");
+    assert!(
+        runtime
+            .session_for_test(HostAdmissionScope::Profile, "hermes", "untethered-session")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
-async fn user_scoped_lcm_projection_preserves_associated_project_roots() {
+async fn preflight_rejects_host_associated_project_root_projection() {
     let profile = TempDir::new().unwrap();
     let roots = json!(["/work/alpha", "/work/beta"]);
     let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
         .await
         .unwrap();
-    runtime
+    let error = runtime
         .call_user_lcm_tool_for_test(
             "tracedecay_lcm_preflight",
             json!({
@@ -668,13 +731,13 @@ async fn user_scoped_lcm_projection_preserves_associated_project_roots() {
                 "content": "Update both repositories",
                 "associated_project_roots": roots
             }],
-            "transcript_projection": true,
             "format": "json"
             }),
             profile.path(),
         )
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(error.to_string().contains("LCM preflight is read-only"));
 
     let message = runtime
         .session_message_for_test(
@@ -683,11 +746,8 @@ async fn user_scoped_lcm_projection_preserves_associated_project_roots() {
             "multi-project-message-1",
         )
         .await
-        .unwrap()
         .unwrap();
-    let metadata: Value = serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["associated_project_roots"], roots);
-    assert_eq!(metadata["storage_scope"], "user");
+    assert!(message.is_none());
 }
 
 #[cfg(feature = "test-transport")]
@@ -998,8 +1058,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "tracedecay_lcm_preflight",
         json!({
             "provider": "cursor",
-            "session_id": "lcm-session",
-            "messages": [{"id": "active-preflight", "role": "user", "content": "hello"}]
+            "session_id": "lcm-session"
         }),
         None,
         None,
@@ -1027,6 +1086,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     assert_eq!(compress_payload["summary_nodes_created"], 0);
     assert_eq!(compress_payload["compression_attempts"], 0);
     assert_eq!(compress_payload["fallback_used"], false);
+    assert_eq!(
+        compress_payload["relation_projection_status"],
+        "not_applicable"
+    );
     assert!(
         compress_payload.get("retry_status").is_some(),
         "compress response must expose retry_status for bridge contract"
@@ -1055,6 +1118,14 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         )
         .await;
     }
+    seed_cursor_compaction_evidence(
+        &cg,
+        "lcm-critical-session",
+        "lcm-critical-native-summary",
+        9,
+        "exact Cursor critical-pressure summary",
+    )
+    .await;
 
     let critical_compress = handle_tool_call(
         &cg,
@@ -1078,7 +1149,8 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     assert_eq!(critical_payload["reason"], "forced_overflow_recovery");
     assert_eq!(critical_payload["summary_nodes_created"], 4);
     assert_eq!(critical_payload["compression_attempts"], 4);
-    assert_eq!(critical_payload["fallback_used"], true);
+    assert_eq!(critical_payload["fallback_used"], false);
+    assert_eq!(critical_payload["relation_projection_status"], "pending");
     assert_eq!(
         critical_payload["retry_status"],
         "critical_pressure_catch_up"
@@ -1106,6 +1178,14 @@ async fn lcm_compress_uses_daemon_summary_without_exposing_raw_sources() {
         )
         .await;
     }
+    seed_cursor_compaction_evidence(
+        &cg,
+        "lcm-default-summarizer-session",
+        "lcm-default-native-summary",
+        4,
+        "exact Cursor Composer summary",
+    )
+    .await;
 
     let compress = handle_tool_call(
         &cg,
@@ -1127,19 +1207,21 @@ async fn lcm_compress_uses_daemon_summary_without_exposing_raw_sources() {
     let payload: Value = serde_json::from_str(extract_text(&compress.value)).unwrap();
 
     assert_eq!(payload["status"], "ok");
-    assert_eq!(
-        payload["reason"],
-        "compressed_backlog_with_fallback_summary"
-    );
+    assert_eq!(payload["reason"], "compressed_backlog");
     assert_eq!(payload["summary_nodes_created"], 1);
     assert_eq!(payload["compression_attempts"], 1);
-    assert_eq!(payload["fallback_used"], true);
+    assert_eq!(payload["fallback_used"], false);
+    assert_eq!(payload["relation_projection_status"], "pending");
+    assert_eq!(
+        payload["summary_nodes"][0]["summary_text"],
+        "exact Cursor Composer summary"
+    );
     assert!(payload["summary_request"].is_null());
     let replay = payload["replay_messages"]
         .as_array()
         .expect("bounded replay should be present");
     assert_eq!(replay.len(), 2);
-    assert_eq!(replay[1]["content"], "fresh objective eta theta");
+    assert_eq!(replay[1]["content"], "exact Cursor Composer summary");
     assert!(
         payload["replay_token_estimate"].as_i64().unwrap() <= 20,
         "default auxiliary mode must return a bounded replay"
@@ -1147,10 +1229,27 @@ async fn lcm_compress_uses_daemon_summary_without_exposing_raw_sources() {
 }
 
 #[tokio::test]
-async fn lcm_preflight_oversized_replay_preserves_bridge_contract() {
+#[cfg(feature = "test-transport")]
+async fn lcm_preflight_oversized_canonical_replay_preserves_bridge_contract() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
     let huge_source = "preflight oversized active context ".repeat(1_000);
+    seed_lcm_session_message(
+        &cg,
+        "lcm-oversized-preflight",
+        "preflight-1",
+        huge_source,
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-oversized-preflight",
+        "preflight-2",
+        "acknowledged",
+        2,
+    )
+    .await;
 
     let preflight = handle_tool_call(
         &cg,
@@ -1158,10 +1257,6 @@ async fn lcm_preflight_oversized_replay_preserves_bridge_contract() {
         json!({
             "provider": "cursor",
             "session_id": "lcm-oversized-preflight",
-            "messages": [
-                {"id": "preflight-1", "role": "user", "content": huge_source},
-                {"id": "preflight-2", "role": "assistant", "content": "acknowledged"}
-            ],
             "current_tokens": 10,
             "threshold_tokens": 1_000
         }),
@@ -1192,9 +1287,26 @@ async fn lcm_preflight_oversized_replay_preserves_bridge_contract() {
 }
 
 #[tokio::test]
-async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
+#[cfg(feature = "test-transport")]
+async fn lcm_preflight_large_canonical_replay_content_is_bounded_for_mcp() {
     let (cg, _dir) = setup_project().await;
     let huge_source = "structured preflight payload ".repeat(8_000);
+    seed_lcm_session_message(
+        &cg,
+        "lcm-structured-preflight",
+        "structured-preflight-1",
+        huge_source,
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-structured-preflight",
+        "structured-preflight-2",
+        "acknowledged",
+        2,
+    )
+    .await;
 
     let preflight = handle_tool_call(
         &cg,
@@ -1202,17 +1314,6 @@ async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
         json!({
             "provider": "cursor",
             "session_id": "lcm-structured-preflight",
-            "messages": [
-                {
-                    "id": "structured-preflight-1",
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": huge_source},
-                        {"type": "input_json", "value": {"nested": huge_source}}
-                    ]
-                },
-                {"id": "structured-preflight-2", "role": "assistant", "content": "acknowledged"}
-            ],
             "current_tokens": 10,
             "threshold_tokens": 1_000
         }),
@@ -1229,12 +1330,8 @@ async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
     assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
     let compacted_content = payload["replay_messages"][0]["content"]
         .as_str()
-        .expect("structured replay content should be serialized to bounded text");
+        .expect("canonical replay content should be bounded text");
     assert!(compacted_content.len() <= 512);
-    assert_eq!(
-        payload["replay_messages"][0]["content_serialized_for_mcp"],
-        true
-    );
     assert_eq!(
         payload["replay_messages"][0]["content_truncated_for_mcp"],
         true
@@ -1289,7 +1386,6 @@ async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() 
         json!({
             "provider": "cursor",
             "session_id": "lcm-boundary-session",
-            "messages": [],
             "current_tokens": 120,
             "threshold_tokens": 100
         }),
@@ -2139,7 +2235,6 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
         json!({
             "provider": "cursor",
             "session_id": "cli-bridge-status",
-            "messages": [{"role": "user", "content": "status payload"}],
             "current_tokens": 10
         }),
         None,
@@ -2874,13 +2969,26 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
         .await
         .expect("depth-1 summary should insert");
     }
+    seed_cursor_compaction_evidence(
+        &cg,
+        "lcm-depth-session",
+        "lcm-depth-native-summary",
+        7,
+        "exact Cursor depth condensation summary",
+    )
+    .await;
+    let evidence_store_id = db
+        .lcm_load_raw_message_for_test("cursor", "lcm-depth-native-summary")
+        .await
+        .expect("native summary evidence should be stored")
+        .store_id;
     db.lcm_update_lifecycle_for_test(
         HostAdmissionScope::Project,
         LcmLifecycleUpdate {
             provider: "cursor".to_string(),
             conversation_id: "lcm-depth-session".to_string(),
             current_session_id: "lcm-depth-session".to_string(),
-            current_frontier_store_id: store_ids.last().copied(),
+            current_frontier_store_id: Some(evidence_store_id),
             last_finalized_session_id: None,
             last_finalized_frontier_store_id: None,
             maintenance_debt: Vec::new(),
@@ -2906,12 +3014,15 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
 
     assert_eq!(payload["status"], "ok");
-    assert_eq!(
-        payload["reason"],
-        "condensed_summary_nodes_with_fallback_summary"
-    );
+    assert_eq!(payload["reason"], "condensed_summary_nodes");
     assert_eq!(payload["summary_nodes_created"], 1);
     assert_eq!(payload["summary_nodes"][0]["depth"], 2);
+    assert_eq!(
+        payload["summary_nodes"][0]["summary_text"],
+        "exact Cursor depth condensation summary"
+    );
+    assert_eq!(payload["fallback_used"], false);
+    assert_eq!(payload["relation_projection_status"], "pending");
     assert!(
         payload["context_recovery_hint"]
             .as_str()

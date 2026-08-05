@@ -8,6 +8,8 @@
 
 use std::time::Duration;
 
+use crate::sessions::lcm::LcmRelationProjectionStatus;
+
 /// Overall budget for the `preCompact` hook (registered with a 120s timeout).
 const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_secs(115);
 
@@ -17,6 +19,8 @@ pub struct CursorPreCompactOutcome {
     pub reason: String,
     pub summary_nodes_created: usize,
     pub summary_node_ids: Vec<String>,
+    #[serde(default)]
+    pub relation_projection_status: LcmRelationProjectionStatus,
 }
 
 impl CursorPreCompactOutcome {
@@ -26,6 +30,7 @@ impl CursorPreCompactOutcome {
             reason: reason.into(),
             summary_nodes_created: 0,
             summary_node_ids: Vec::new(),
+            relation_projection_status: LcmRelationProjectionStatus::NotApplicable,
         }
     }
 
@@ -35,6 +40,7 @@ impl CursorPreCompactOutcome {
             reason: reason.into(),
             summary_nodes_created: 0,
             summary_node_ids: Vec::new(),
+            relation_projection_status: LcmRelationProjectionStatus::NotApplicable,
         }
     }
 }

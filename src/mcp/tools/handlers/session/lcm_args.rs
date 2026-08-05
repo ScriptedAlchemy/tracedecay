@@ -251,16 +251,6 @@ pub(super) fn lcm_temporal_mode(args: &Value, default: TemporalModeV1) -> Result
     }
 }
 
-pub(super) fn messages_arg(args: &Value) -> Result<Vec<Value>> {
-    let Some(messages) = args.get("messages") else {
-        return Ok(Vec::new());
-    };
-    let Some(messages) = messages.as_array() else {
-        return Err(argument_error("messages must be an array"));
-    };
-    Ok(messages.clone())
-}
-
 pub(super) fn string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
     let Some(value) = args.get(name) else {
         return Ok(Vec::new());
