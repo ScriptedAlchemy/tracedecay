@@ -2,11 +2,14 @@ use rusqlite::{Savepoint, Transaction};
 use tracedecay_store::{
     AnchoredObservationWrite, DiagnosticGenerationSupersessionV1, EvidenceAssemblyWriteV1,
     FactWriteBatch, ObservationCursorAdvance, ProjectReadOperationV1, ProjectReadResultV1,
-    RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
-    SanitizedCleanDiagnosticSnapshotV1, SourceAcquisitionQueueCasV1, SourceCommitV1,
-    SourceProjectionCommitV1,
+    RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1, RetrievalAnchorDerivativeV1,
+    RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1,
+    SourceAcquisitionQueueCasV1, SourceCommitV1, SourceProjectionCommitV1,
 };
 
+use super::remote::{
+    install_writer_fence, persist_remote_observation_event, verify_and_seed_writer_fence,
+};
 use super::{
     DiagnosticExecutor, EvidenceAssemblyExecutor, ExternalSourceExecutor, FactExecutor,
     ObservationExecutor, RetrievalAnchorExecutor,
@@ -49,6 +52,24 @@ impl ProjectExecutor {
             rusqlite::Error::InvalidParameterName(format!("{operation}: {detail}"))
         })?;
         Ok(())
+    }
+
+    pub fn execute_remote_observation_replay(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        write: &RemoteObservationReplayWriteV1,
+    ) -> rusqlite::Result<()> {
+        verify_and_seed_writer_fence(savepoint, write)?;
+        self.execute_observation_write(savepoint, &write.observation)?;
+        persist_remote_observation_event(savepoint, write)
+    }
+
+    pub fn execute_remote_writer_fence_install(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        install: &RemoteWriterFenceInstallV1,
+    ) -> rusqlite::Result<()> {
+        install_writer_fence(savepoint, install)
     }
 
     pub fn execute_observation_cursor_advance(

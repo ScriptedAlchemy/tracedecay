@@ -660,6 +660,14 @@ impl HostAdmissionTestRuntimeV1 {
         std::fs::create_dir_all(&payload_dir)?;
         std::fs::write(payload_dir.join("payload-a"), external_content)?;
 
+        // Durable raw rows only render once they carry the canonical
+        // `ingest_protection.sanitization_receipt` the payload sanitizer binds
+        // at ingest; a receipt-free row is refused by `verify_raw_message_receipt`.
+        let raw_message_metadata =
+            lcm_render_fixture_sanitization_metadata("canonical raw message")?;
+        let external_message_metadata =
+            lcm_render_fixture_sanitization_metadata(external_content)?;
+
         database
             .writer_connection()?
             .execute_batch(&format!(
@@ -677,7 +685,8 @@ impl HostAdmissionTestRuntimeV1 {
                  ) VALUES (
                     'codex', 'message-a', 'session-a', 11, 'assistant', 0, 11,
                     'canonical raw message', '{raw_hash}', 'inline', NULL,
-                    'canonical raw message', 'canonical raw message', 0, 0, NULL
+                    'canonical raw message', 'canonical raw message', 0, 0,
+                    '{raw_message_metadata}'
                  );
                  INSERT INTO lcm_raw_messages(
                     provider, message_id, session_id, store_id, role, ordinal, timestamp,
@@ -686,7 +695,8 @@ impl HostAdmissionTestRuntimeV1 {
                  ) VALUES (
                     'codex', 'message-b', 'session-a', 12, 'tool', 1, 12,
                     NULL, '{external_hash}', 'external', 'payload-a',
-                    'canonical external payload', 'canonical external payload', 0, 0, NULL
+                    'canonical external payload', 'canonical external payload', 0, 0,
+                    '{external_message_metadata}'
                  );
                  INSERT INTO lcm_summary_nodes(
                     node_id, provider, conversation_id, session_id, depth, summary_text,
@@ -718,6 +728,32 @@ impl HostAdmissionTestRuntimeV1 {
             .await?;
         Ok(())
     }
+}
+
+/// Builds the canonical `ingest_protection.sanitization_receipt` metadata that
+/// the payload sanitizer binds at ingest, so a seeded raw row satisfies
+/// `verify_raw_message_receipt`. Returns a SQL-escaped literal ready to embed
+/// directly in a fixture `INSERT`.
+#[cfg(any(test, feature = "test-helpers"))]
+fn lcm_render_fixture_sanitization_metadata(
+    content: &str,
+) -> tracedecay_runtime_core::errors::Result<String> {
+    let sanitization = tracedecay_runtime_core::privacy::sanitize_lcm_payload_text(content)
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "seed canonical lcm render sanitization receipt".to_owned(),
+                message: format!("payload sanitizer rejected fixture content: {error:?}"),
+            },
+        )?;
+    let receipt = serde_json::to_value(sanitization.receipt()).map_err(|error| {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "seed canonical lcm render sanitization receipt".to_owned(),
+            message: format!("sanitization receipt encoding failed: {error}"),
+        }
+    })?;
+    let metadata =
+        serde_json::json!({ "ingest_protection": { "sanitization_receipt": receipt } });
+    Ok(metadata.to_string().replace('\'', "''"))
 }
 
 #[cfg(any(test, feature = "test-helpers"))]

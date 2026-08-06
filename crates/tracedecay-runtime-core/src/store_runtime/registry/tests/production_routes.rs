@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_domain::{
-    BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros, WorktreeId,
+    BrainId, BrainNodeId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros,
+    WorktreeId,
 };
 use tracedecay_store::{
     CodeShardScopeV1, ConsistencyModeV1, OperationPriorityV1, RuntimeCancellationIdV1,
@@ -44,6 +45,54 @@ impl RuntimeRequestProbeV1 for Probe {
 struct FileResolver {
     roots: Mutex<Vec<PathBuf>>,
     calls: AtomicUsize,
+}
+
+#[derive(Default)]
+struct InitializingFileResolver {
+    roots: Mutex<Vec<PathBuf>>,
+    calls: AtomicUsize,
+}
+
+impl InitializingFileResolver {
+    fn push(&self, path: PathBuf) {
+        self.roots.lock().unwrap().push(path);
+    }
+}
+
+impl StoreRuntimeResolver for InitializingFileResolver {
+    fn resolve<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+        mode: StoreRuntimeOpenMode,
+        database_authority: Option<&'a crate::db::DatabaseAuthority>,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let path = self.roots.lock().unwrap()[call].clone();
+        let locator = VerifiedStoreLocatorV1::new(
+            key.shard_id.clone(),
+            key.incarnation,
+            LocatorDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
+        );
+        Box::pin(async move {
+            let authority = database_authority.ok_or_else(|| {
+                StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: "initialization requires database authority".to_owned(),
+                }
+            })?;
+            if authority.canonical_database_path() != path {
+                return Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: "database authority does not match prospective path".to_owned(),
+                });
+            }
+            match mode {
+                StoreRuntimeOpenMode::Initialize => {
+                    Ok(ResolvedStoreLocator::prospective(locator, path))
+                }
+                StoreRuntimeOpenMode::Existing => Ok(ResolvedStoreLocator::new(locator, path)),
+            }
+        })
+    }
 }
 
 impl FileResolver {
@@ -222,6 +271,78 @@ async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
     assert!(!physical.writer_present);
     assert!(physical.reader_handles > 0);
     assert_health_route(&project, false).await;
+}
+
+#[tokio::test]
+async fn remote_node_initialization_installs_only_the_final_registered_schema() {
+    let root = TempDir::new().unwrap();
+    let profile_path = root.path().join("profile.db");
+    let remote_path = root.path().join("remote.db");
+    let resolver = Arc::new(InitializingFileResolver::default());
+    resolver.push(profile_path.clone());
+    resolver.push(remote_path.clone());
+    let registry =
+        StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
+
+    let profile_authority =
+        crate::db::DatabaseAuthority::acquire_test(&profile_path, "initialize profile").unwrap();
+    open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new_initialize_authorized(
+            profile_shard(),
+            incarnation(),
+            None,
+            profile_authority,
+        ),
+    )
+    .await;
+    let pin = match registry.profile_authority_pin(&profile_shard()) {
+        ProfileAuthorityPinResult::Pinned(pin) => pin,
+        other => panic!("profile was not pinned: {other:?}"),
+    };
+    let remote_authority =
+        crate::db::DatabaseAuthority::acquire_test(&remote_path, "initialize remote node").unwrap();
+    let remote = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new_initialize_authorized(
+            StoreShardIdV1::remote_node(
+                id::<BrainId>("brain.registry"),
+                id::<UserProfileId>("profile.registry"),
+                id::<BrainNodeId>("node.remote"),
+            ),
+            incarnation(),
+            Some(pin),
+            remote_authority,
+        ),
+    )
+    .await;
+
+    assert!(remote.schema_migrated());
+    let tables: Vec<String> = Connection::open(&remote_path)
+        .unwrap()
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        tables,
+        vec![
+            "remote_authorities",
+            "remote_enrollment_grants",
+            "remote_enrollments",
+            "remote_node_identity",
+            "remote_query_policies",
+            "remote_recovery_authorities",
+            "remote_recovery_operations",
+            "remote_recovery_sink_installations",
+            "remote_replay_policies",
+            "remote_replay_recovery_lease",
+            "remote_spool_frames",
+            "remote_store_contract",
+        ]
+    );
 }
 
 #[tokio::test]
