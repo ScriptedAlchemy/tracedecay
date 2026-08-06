@@ -435,8 +435,13 @@ impl HttpApplicationOperation {
     ///
     /// Git preview/apply remain in the shared operation family but are
     /// intentionally exposed through CLI/MCP mutation bindings only.
+    /// Configuration reset is a destructive administrative journey bound to
+    /// the CLI surface alone; it never mounts an HTTP route.
     pub const fn is_http_exposed(self) -> bool {
-        !matches!(self, Self::GitPreview | Self::GitApply)
+        !matches!(
+            self,
+            Self::GitPreview | Self::GitApply | Self::ConfigurationReset
+        )
     }
 
     pub fn route_path(self) -> String {

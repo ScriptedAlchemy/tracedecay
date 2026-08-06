@@ -242,6 +242,11 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
     )
     .expect("application profile");
 
+    let administrative_profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+    )
+    .expect("administrative profile");
+
     for operation in APPLICATION_SURFACE_OPERATIONS {
         let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(operation.as_str())
             .expect("operation name");
@@ -253,6 +258,10 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
                 (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
                 (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
             ][..]
+        } else if operation == ApplicationSurfaceOperation::ConfigurationReset {
+            // The destructive reset journey is bound to the CLI surface alone
+            // and only through the administrative profile.
+            &[(tracedecay_tool_catalog::BindingSurface::Cli, "cli")][..]
         } else {
             &[
                 (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
@@ -260,12 +269,18 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
                 (tracedecay_tool_catalog::BindingSurface::Http, "http"),
             ][..]
         };
+        let operation_profile_id =
+            if operation == ApplicationSurfaceOperation::ConfigurationReset {
+                administrative_profile_id.clone()
+            } else {
+                profile_id.clone()
+            };
         for &(surface, surface_name) in expected_surfaces {
             let binding = crate::daemon_client::BindingResolver::resolve_binding(
                 &resolver,
                 surface,
                 &crate::daemon_client::BindingResolution {
-                    profile_id: profile_id.clone(),
+                    profile_id: operation_profile_id.clone(),
                     operation: operation_name.clone(),
                     protocol_revision: APPLICATION_PROTOCOL_REVISION,
                     negotiated_features: application_negotiated_features(),
