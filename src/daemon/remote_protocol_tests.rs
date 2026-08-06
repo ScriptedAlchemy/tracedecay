@@ -153,7 +153,7 @@ async fn mounted_node_populates_exact_prebody_credential_route_and_shutdown_canc
     let session = service
         .admit_before_body(
             &OpaqueRemoteCredential::new(secret).expect("opaque credential"),
-            RemoteCredentialUseV1::Query,
+            RemoteCredentialUseV1::InitialEnrollment,
             UtcMicros(10),
         )
         .expect("pre-body credential admission");
@@ -164,7 +164,7 @@ async fn mounted_node_populates_exact_prebody_credential_route_and_shutdown_canc
     assert_eq!(
         service.admit_before_body(
             &OpaqueRemoteCredential::new(secret).expect("opaque credential"),
-            RemoteCredentialUseV1::Query,
+            RemoteCredentialUseV1::InitialEnrollment,
             UtcMicros(11),
         ),
         Err(RemoteCredentialAdmissionErrorV1::Unavailable)

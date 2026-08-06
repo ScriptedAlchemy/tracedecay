@@ -332,8 +332,13 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
             "remote_authorities",
             "remote_enrollment_grants",
             "remote_enrollments",
+            "remote_node_identity",
             "remote_query_policies",
+            "remote_recovery_authorities",
+            "remote_recovery_operations",
+            "remote_recovery_sink_installations",
             "remote_replay_policies",
+            "remote_replay_recovery_lease",
             "remote_spool_frames",
             "remote_store_contract",
         ]
