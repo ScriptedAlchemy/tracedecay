@@ -9,28 +9,25 @@ use tracedecay_application::{RequestAdmission, RequestContext, now_micros};
 use tracedecay_domain::feedback::GitHubReviewRateLimitCheckpointV1;
 
 use super::{
-    GitHubCiRepositoryTargetV1, GitHubCredentialAuthorizationV1, GitHubHttpReadConfigV1,
+    GitHubCiRepositoryTargetV1, GitHubCredentialAuthorizationV1, GitHubHttpReadClientV1,
     GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, HttpResponseV1, MAX_CI_RESPONSE_BYTES_V1,
-    MAX_GITHUB_READ_RESPONSE_BYTES_V1, decode_ureq_response, request_context_admitted,
-    valid_ci_page, valid_full_commit_id, wait_for_read,
+    MAX_GITHUB_READ_RESPONSE_BYTES_V1, valid_ci_page, valid_full_commit_id,
 };
 
 #[derive(Clone)]
 pub struct GitHubCiReadOnlyClientV1 {
-    pub(super) agent: ureq::Agent,
     pub(super) target: GitHubCiRepositoryTargetV1,
     pub(super) credential: GitHubReadOnlyCredentialV1,
-    pub(super) config: GitHubHttpReadConfigV1,
+    pub(super) transport: GitHubHttpReadClientV1,
 }
 
 impl GitHubCiReadOnlyClientV1 {
-    pub(super) fn new(
+    pub fn new(
         target: GitHubCiRepositoryTargetV1,
         credential: GitHubReadOnlyCredentialV1,
-        config: GitHubHttpReadConfigV1,
+        transport: GitHubHttpReadClientV1,
     ) -> Option<Self> {
         if !target.validate()
-            || !config.validate()
             || matches!(
                 credential.authorization_for_repository(
                     &target.owner,
@@ -50,43 +47,39 @@ impl GitHubCiReadOnlyClientV1 {
         {
             return None;
         }
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(config.request_timeout))
-            .timeout_connect(Some(config.connect_timeout))
-            .timeout_recv_response(Some(config.socket_timeout))
-            .timeout_recv_body(Some(config.socket_timeout))
-            .https_only(true)
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .build()
-            .into();
         Some(Self {
-            agent,
             target,
             credential,
-            config,
+            transport,
         })
     }
 
-    fn get(&self, url: &str, permission: GitHubReadPermissionV1) -> HttpResponseV1 {
-        let authorization = self.credential.authorization_for_repository(
-            &self.target.owner,
-            &self.target.repository,
-            permission,
-        );
-        if matches!(&authorization, GitHubCredentialAuthorizationV1::Denied) {
-            return HttpResponseV1::Denied;
-        }
-        let mut request = self
-            .agent
-            .get(url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", "tracedecay-github-read");
-        if let GitHubCredentialAuthorizationV1::Private(authorization) = &authorization {
-            request = request.header("Authorization", authorization.as_str());
-        }
-        decode_ureq_response(request.call(), MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+    async fn get(
+        &self,
+        context: &RequestContext,
+        url: &str,
+        permission: GitHubReadPermissionV1,
+    ) -> HttpResponseV1 {
+        self.transport
+            .execute(
+                Some(context),
+                MAX_GITHUB_READ_RESPONSE_BYTES_V1,
+                || {
+                    self.credential.authorization_header_for_repository(
+                        &self.target.owner,
+                        &self.target.repository,
+                        permission,
+                    )
+                },
+                |client| {
+                    client
+                        .get(url)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .header("User-Agent", "tracedecay-github-read")
+                },
+            )
+            .await
     }
 
     pub(crate) fn read_workflow_run<'a>(
@@ -102,7 +95,7 @@ impl GitHubCiReadOnlyClientV1 {
             GitHubReadPermissionV1::Actions,
             format!(
                 "{}/repos/{}/{}/actions/runs/{run_id}",
-                self.config.rest_base_uri.trim_end_matches('/'),
+                self.transport.config.rest_base_uri.trim_end_matches('/'),
                 self.target.owner,
                 self.target.repository
             ),
@@ -125,7 +118,7 @@ impl GitHubCiReadOnlyClientV1 {
             GitHubReadPermissionV1::Actions,
             format!(
                 "{}/repos/{}/{}/actions/runs?head_sha={encoded_head}&per_page=100&page={}",
-                self.config.rest_base_uri.trim_end_matches('/'),
+                self.transport.config.rest_base_uri.trim_end_matches('/'),
                 self.target.owner,
                 self.target.repository,
                 page
@@ -146,7 +139,7 @@ impl GitHubCiReadOnlyClientV1 {
             GitHubReadPermissionV1::Checks,
             format!(
                 "{}/repos/{}/{}/check-runs/{check_run_id}",
-                self.config.rest_base_uri.trim_end_matches('/'),
+                self.transport.config.rest_base_uri.trim_end_matches('/'),
                 self.target.owner,
                 self.target.repository
             ),
@@ -166,7 +159,7 @@ impl GitHubCiReadOnlyClientV1 {
             GitHubReadPermissionV1::Actions,
             format!(
                 "{}/repos/{}/{}/actions/jobs/{job_id}",
-                self.config.rest_base_uri.trim_end_matches('/'),
+                self.transport.config.rest_base_uri.trim_end_matches('/'),
                 self.target.owner,
                 self.target.repository
             ),
@@ -187,7 +180,7 @@ impl GitHubCiReadOnlyClientV1 {
             GitHubReadPermissionV1::Actions,
             format!(
                 "{}/repos/{}/{}/actions/runs/{run_id}/jobs?per_page=100&page={}",
-                self.config.rest_base_uri.trim_end_matches('/'),
+                self.transport.config.rest_base_uri.trim_end_matches('/'),
                 self.target.owner,
                 self.target.repository,
                 page
@@ -209,7 +202,7 @@ impl GitHubCiReadOnlyClientV1 {
             GitHubReadPermissionV1::Checks,
             format!(
                 "{}/repos/{}/{}/check-suites/{check_suite_id}/check-runs?status=completed&filter=latest&per_page=100&page={}",
-                self.config.rest_base_uri.trim_end_matches('/'),
+                self.transport.config.rest_base_uri.trim_end_matches('/'),
                 self.target.owner,
                 self.target.repository,
                 page
@@ -231,7 +224,7 @@ impl GitHubCiReadOnlyClientV1 {
             GitHubReadPermissionV1::Checks,
             format!(
                 "{}/repos/{}/{}/check-runs/{check_run_id}/annotations?per_page=100&page={}",
-                self.config.rest_base_uri.trim_end_matches('/'),
+                self.transport.config.rest_base_uri.trim_end_matches('/'),
                 self.target.owner,
                 self.target.repository,
                 page
@@ -261,48 +254,16 @@ impl GitHubCiReadOnlyClientV1 {
         ) {
             return Box::pin(async { GitHubCiTransportOutcomeV1::Denied });
         }
-        let client = self.clone();
-        let context_for_read = context.clone();
         Box::pin(async move {
-            let task = tokio::task::spawn_blocking(move || {
-                if request_context_admitted(&context_for_read)
-                    && !matches!(
-                        client.credential.authorization_for_repository(
-                            &client.target.owner,
-                            &client.target.repository,
-                            permission,
-                        ),
-                        GitHubCredentialAuthorizationV1::Denied
-                    )
-                {
-                    let response = client.get(&url, permission);
-                    if request_context_admitted(&context_for_read)
-                        && !matches!(
-                            client.credential.authorization_for_repository(
-                                &client.target.owner,
-                                &client.target.repository,
-                                permission,
-                            ),
-                            GitHubCredentialAuthorizationV1::Denied
-                        )
-                    {
-                        response
-                    } else {
-                        HttpResponseV1::Denied
-                    }
-                } else {
-                    HttpResponseV1::Denied
-                }
-            });
-            match wait_for_read(context, task).await {
-                Some(HttpResponseV1::Ok { body, .. }) if body.len() <= MAX_CI_RESPONSE_BYTES_V1 => {
+            match self.get(context, &url, permission).await {
+                HttpResponseV1::Ok { body, .. } if body.len() <= MAX_CI_RESPONSE_BYTES_V1 => {
                     GitHubCiTransportOutcomeV1::Response(body)
                 }
-                Some(HttpResponseV1::RateLimited {
+                HttpResponseV1::RateLimited {
                     checkpoint: Some(limit),
                     ..
-                }) => GitHubCiTransportOutcomeV1::RateLimited(limit),
-                Some(HttpResponseV1::Denied) => GitHubCiTransportOutcomeV1::Denied,
+                } => GitHubCiTransportOutcomeV1::RateLimited(limit),
+                HttpResponseV1::Denied => GitHubCiTransportOutcomeV1::Denied,
                 _ => GitHubCiTransportOutcomeV1::Unavailable,
             }
         })

@@ -2,17 +2,16 @@ use super::*;
 
 #[derive(Clone)]
 pub struct GitHubReadOnlyClientV1 {
-    pub(super) agent: ureq::Agent,
     pub(super) target: GitHubRepositoryTargetV1,
     pub(super) credential: GitHubReadOnlyCredentialV1,
-    pub(super) config: GitHubHttpReadConfigV1,
+    pub(super) transport: GitHubHttpReadClientV1,
 }
 
 impl GitHubReadOnlyClientV1 {
     pub fn new(
         target: GitHubRepositoryTargetV1,
         credential: GitHubReadOnlyCredentialV1,
-        config: GitHubHttpReadConfigV1,
+        transport: GitHubHttpReadClientV1,
     ) -> Option<Self> {
         if matches!(
             credential.authorization_for_target(&target, GitHubReadPermissionV1::PullRequests),
@@ -20,44 +19,25 @@ impl GitHubReadOnlyClientV1 {
         ) {
             return None;
         }
-        Self::build(target, credential, config)
-    }
-
-    pub fn new_for_ci(
-        target: GitHubCiRepositoryTargetV1,
-        credential: GitHubReadOnlyCredentialV1,
-        config: GitHubHttpReadConfigV1,
-    ) -> Option<GitHubCiReadOnlyClientV1> {
-        GitHubCiReadOnlyClientV1::new(target, credential, config)
+        Self::build(target, credential, transport)
     }
 
     pub(super) fn build(
         target: GitHubRepositoryTargetV1,
         credential: GitHubReadOnlyCredentialV1,
-        config: GitHubHttpReadConfigV1,
+        transport: GitHubHttpReadClientV1,
     ) -> Option<Self> {
-        if !target.validate() || !config.validate() {
+        if !target.validate() {
             return None;
         }
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(config.request_timeout))
-            .timeout_connect(Some(config.connect_timeout))
-            .timeout_recv_response(Some(config.socket_timeout))
-            .timeout_recv_body(Some(config.socket_timeout))
-            .https_only(true)
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .build()
-            .into();
         Some(Self {
-            agent,
             target,
             credential,
-            config,
+            transport,
         })
     }
 
-    pub(super) fn execute_rest(
+    pub(super) async fn execute_rest(
         &self,
         context: &RequestContext,
         request: &GitHubRestReadRequestV1,
@@ -89,35 +69,39 @@ impl GitHubReadOnlyClientV1 {
         };
         let url = format!(
             "{}/repos/{}/{}/pulls/{}{}",
-            self.config.rest_base_uri.trim_end_matches('/'),
+            self.transport.config.rest_base_uri.trim_end_matches('/'),
             self.target.owner,
             self.target.repository,
             self.target.pull_request_number,
             suffix
         );
         if !request_context_admitted(context) {
-            return GitHubReadNetworkOutcomeV1::Denied;
+            return GitHubReadNetworkOutcomeV1::Unavailable;
         }
-        let response = self.get(
-            &url,
-            (page == 1)
-                .then_some(request.resume.etag.as_ref())
-                .flatten(),
-            GitHubReadPermissionV1::PullRequests,
-        );
-        if !request_context_admitted(context)
-            || matches!(
-                self.credential
-                    .authorization_for_target(&self.target, GitHubReadPermissionV1::PullRequests),
-                GitHubCredentialAuthorizationV1::Denied
+        let response = self
+            .get(
+                context,
+                &url,
+                (page == 1)
+                    .then_some(request.resume.etag.as_ref())
+                    .flatten(),
+                GitHubReadPermissionV1::PullRequests,
             )
-        {
+            .await;
+        if !request_context_admitted(context) {
+            return GitHubReadNetworkOutcomeV1::Unavailable;
+        }
+        if matches!(
+            self.credential
+                .authorization_for_target(&self.target, GitHubReadPermissionV1::PullRequests),
+            GitHubCredentialAuthorizationV1::Denied
+        ) {
             return GitHubReadNetworkOutcomeV1::Denied;
         }
         Self::decode_rest_response(response, request.descriptor.operation, page)
     }
 
-    pub(super) fn execute_graphql(
+    pub(super) async fn execute_graphql(
         &self,
         context: &RequestContext,
         request: &GitHubGraphQlReadRequestV1,
@@ -147,7 +131,7 @@ impl GitHubReadOnlyClientV1 {
             "loadThreads": true,
             "loadComments": false,
         });
-        let (mut envelope, mut rate_limit) = match self.graphql(context, &variables) {
+        let (mut envelope, mut rate_limit) = match self.graphql(context, &variables).await {
             Ok(page) => page,
             Err(failure) => return network_failure(failure),
         };
@@ -164,8 +148,9 @@ impl GitHubReadOnlyClientV1 {
             }
             return GitHubReadNetworkOutcomeV1::Unavailable;
         }
-        if let Err(failure) =
-            self.complete_nested_comment_pages(context, &mut envelope, &mut rate_limit)
+        if let Err(failure) = self
+            .complete_nested_comment_pages(context, &mut envelope, &mut rate_limit)
+            .await
         {
             return network_failure(failure);
         }
@@ -189,13 +174,14 @@ impl GitHubReadOnlyClientV1 {
         if body.len() > MAX_GITHUB_READ_RESPONSE_BYTES_V1 {
             return GitHubReadNetworkOutcomeV1::Unavailable;
         }
-        if !request_context_admitted(context)
-            || matches!(
-                self.credential
-                    .authorization_for_target(&self.target, GitHubReadPermissionV1::PullRequests),
-                GitHubCredentialAuthorizationV1::Denied
-            )
-        {
+        if !request_context_admitted(context) {
+            return GitHubReadNetworkOutcomeV1::Unavailable;
+        }
+        if matches!(
+            self.credential
+                .authorization_for_target(&self.target, GitHubReadPermissionV1::PullRequests),
+            GitHubCredentialAuthorizationV1::Denied
+        ) {
             return GitHubReadNetworkOutcomeV1::Denied;
         }
         GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
@@ -210,7 +196,7 @@ impl GitHubReadOnlyClientV1 {
         })
     }
 
-    pub(super) fn complete_nested_comment_pages(
+    pub(super) async fn complete_nested_comment_pages(
         &self,
         context: &RequestContext,
         envelope: &mut GraphQlResponseV1,
@@ -255,7 +241,7 @@ impl GitHubReadOnlyClientV1 {
                     "loadThreads": false,
                     "loadComments": true,
                 });
-                let (page, page_rate_limit) = self.graphql(context, &variables)?;
+                let (page, page_rate_limit) = self.graphql(context, &variables).await?;
                 merge_rate_limit(rate_limit, page_rate_limit);
                 if !page.errors.is_empty() {
                     if let Some(checkpoint) = rate_limit
@@ -289,33 +275,35 @@ impl GitHubReadOnlyClientV1 {
         Ok(())
     }
 
-    pub(super) fn graphql(
+    pub(super) async fn graphql(
         &self,
         context: &RequestContext,
         variables: &serde_json::Value,
     ) -> Result<(GraphQlResponseV1, Option<GitHubReviewRateLimitCheckpointV1>), HttpResponseV1>
     {
-        if !request_context_admitted(context)
-            || matches!(
-                self.credential
-                    .authorization_for_target(&self.target, GitHubReadPermissionV1::PullRequests),
-                GitHubCredentialAuthorizationV1::Denied
-            )
-        {
+        if !request_context_admitted(context) {
+            return Err(HttpResponseV1::Unavailable);
+        }
+        if matches!(
+            self.credential
+                .authorization_for_target(&self.target, GitHubReadPermissionV1::PullRequests),
+            GitHubCredentialAuthorizationV1::Denied
+        ) {
             return Err(HttpResponseV1::Denied);
         }
         let payload = json!({
             "query": GITHUB_REVIEW_THREADS_QUERY_V1,
             "variables": variables,
         });
-        let response = self.post_static_graphql(&payload);
-        if !request_context_admitted(context)
-            || matches!(
-                self.credential
-                    .authorization_for_target(&self.target, GitHubReadPermissionV1::PullRequests),
-                GitHubCredentialAuthorizationV1::Denied
-            )
-        {
+        let response = self.post_static_graphql(context, &payload).await;
+        if !request_context_admitted(context) {
+            return Err(HttpResponseV1::Unavailable);
+        }
+        if matches!(
+            self.credential
+                .authorization_for_target(&self.target, GitHubReadPermissionV1::PullRequests),
+            GitHubCredentialAuthorizationV1::Denied
+        ) {
             return Err(HttpResponseV1::Denied);
         }
         match response {
@@ -422,57 +410,71 @@ impl GitHubReadOnlyClientV1 {
                 body: Vec::new(),
             }),
             HttpResponseV1::Denied => GitHubReadNetworkOutcomeV1::Denied,
-            HttpResponseV1::Unavailable => GitHubReadNetworkOutcomeV1::Unavailable,
+            HttpResponseV1::NotFound | HttpResponseV1::Unavailable => {
+                GitHubReadNetworkOutcomeV1::Unavailable
+            }
         }
     }
 
-    pub(super) fn get(
+    pub(super) async fn get(
         &self,
+        context: &RequestContext,
         url: &str,
         etag: Option<&GitHubReviewEtagV1>,
         permission: GitHubReadPermissionV1,
     ) -> HttpResponseV1 {
-        let authorization = self
-            .credential
-            .authorization_for_target(&self.target, permission);
-        if matches!(&authorization, GitHubCredentialAuthorizationV1::Denied) {
-            return HttpResponseV1::Denied;
-        }
-        let mut request = self
-            .agent
-            .get(url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", "tracedecay-github-read");
-        if let GitHubCredentialAuthorizationV1::Private(authorization) = &authorization {
-            request = request.header("Authorization", authorization.as_str());
-        }
-        if let Some(etag) = etag {
-            request = request.header("If-None-Match", etag.as_str());
-        }
-        decode_ureq_response(request.call(), MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+        self.transport
+            .execute(
+                Some(context),
+                MAX_GITHUB_READ_RESPONSE_BYTES_V1,
+                || {
+                    self.credential.authorization_header_for_repository(
+                        &self.target.owner,
+                        &self.target.repository,
+                        permission,
+                    )
+                },
+                |client| {
+                    let request = client
+                        .get(url)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .header("User-Agent", "tracedecay-github-read");
+                    match etag {
+                        Some(etag) => request.header("If-None-Match", etag.as_str()),
+                        None => request,
+                    }
+                },
+            )
+            .await
     }
 
-    pub(super) fn post_static_graphql(&self, payload: &serde_json::Value) -> HttpResponseV1 {
-        let authorization = self
-            .credential
-            .authorization_for_target(&self.target, GitHubReadPermissionV1::PullRequests);
-        if matches!(&authorization, GitHubCredentialAuthorizationV1::Denied) {
-            return HttpResponseV1::Denied;
-        }
-        let mut request = self
-            .agent
-            .post(&self.config.graphql_uri)
-            .header("Accept", "application/json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", "tracedecay-github-read");
-        if let GitHubCredentialAuthorizationV1::Private(authorization) = &authorization {
-            request = request.header("Authorization", authorization.as_str());
-        }
-        decode_ureq_response(
-            request.send_json(payload),
-            MAX_GITHUB_READ_RESPONSE_BYTES_V1,
-        )
+    pub(super) async fn post_static_graphql(
+        &self,
+        context: &RequestContext,
+        payload: &serde_json::Value,
+    ) -> HttpResponseV1 {
+        self.transport
+            .execute(
+                Some(context),
+                MAX_GITHUB_READ_RESPONSE_BYTES_V1,
+                || {
+                    self.credential.authorization_header_for_repository(
+                        &self.target.owner,
+                        &self.target.repository,
+                        GitHubReadPermissionV1::PullRequests,
+                    )
+                },
+                |client| {
+                    client
+                        .post(&self.transport.config.graphql_uri)
+                        .header("Accept", "application/json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .header("User-Agent", "tracedecay-github-read")
+                        .json(payload)
+                },
+            )
+            .await
     }
 }
 
@@ -491,16 +493,7 @@ impl GitHubReadOnlyNetworkAuthorityV1 for GitHubReadOnlyClientV1 {
         {
             return Box::pin(async { GitHubReadNetworkOutcomeV1::Denied });
         }
-        let client = self.clone();
-        let context = context.clone();
-        let request = request.clone();
-        Box::pin(async move {
-            let wait_context = context.clone();
-            let task = tokio::task::spawn_blocking(move || client.execute_rest(&context, &request));
-            wait_for_read(&wait_context, task)
-                .await
-                .unwrap_or(GitHubReadNetworkOutcomeV1::Unavailable)
-        })
+        Box::pin(self.execute_rest(context, request))
     }
 
     fn query<'a>(
@@ -517,16 +510,6 @@ impl GitHubReadOnlyNetworkAuthorityV1 for GitHubReadOnlyClientV1 {
         {
             return Box::pin(async { GitHubReadNetworkOutcomeV1::Denied });
         }
-        let client = self.clone();
-        let context = context.clone();
-        let request = request.clone();
-        Box::pin(async move {
-            let wait_context = context.clone();
-            let task =
-                tokio::task::spawn_blocking(move || client.execute_graphql(&context, &request));
-            wait_for_read(&wait_context, task)
-                .await
-                .unwrap_or(GitHubReadNetworkOutcomeV1::Unavailable)
-        })
+        Box::pin(self.execute_graphql(context, request))
     }
 }

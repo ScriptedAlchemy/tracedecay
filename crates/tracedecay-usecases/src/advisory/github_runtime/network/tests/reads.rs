@@ -5,22 +5,18 @@ async fn cancelled_ci_read_makes_no_network_request() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
+    let config = GitHubHttpReadConfigV1 {
+        rest_base_uri: format!("http://{address}"),
+        graphql_uri: format!("http://{address}/graphql"),
+        ..GitHubHttpReadConfigV1::default()
+    };
     let client = GitHubCiReadOnlyClientV1 {
-        agent: ureq::Agent::config_builder()
-            .https_only(false)
-            .http_status_as_error(false)
-            .build()
-            .into(),
         target: GitHubCiRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "tracedecay".to_owned(),
         },
         credential: GitHubReadOnlyCredentialV1::anonymous(),
-        config: GitHubHttpReadConfigV1 {
-            rest_base_uri: format!("http://{address}"),
-            graphql_uri: format!("http://{address}/graphql"),
-            ..GitHubHttpReadConfigV1::default()
-        },
+        transport: test_http_transport(config),
     };
     let request_scope = scope("cancelled-ci");
     let cancelled = context(&request_scope).with_cancellation(
@@ -94,8 +90,8 @@ pub(super) fn write_http_json(stream: &mut TcpStream, value: &serde_json::Value)
     stream.write_all(&body).unwrap();
 }
 
-#[test]
-fn expired_context_after_first_graphql_page_makes_no_nested_request() {
+#[tokio::test]
+async fn expired_context_after_first_graphql_page_makes_no_nested_request() {
     let mut first_page: serde_json::Value = serde_json::from_str(THREAD_CAPTURE).unwrap();
     first_page = first_page["response"].take();
     let thread = &mut first_page["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0];
@@ -123,12 +119,12 @@ fn expired_context_after_first_graphql_page_makes_no_nested_request() {
             Err(error) => panic!("nested request probe failed: {error}"),
         }
     });
+    let config = GitHubHttpReadConfigV1 {
+        rest_base_uri: format!("http://{address}"),
+        graphql_uri: format!("http://{address}/graphql"),
+        ..GitHubHttpReadConfigV1::default()
+    };
     let client = GitHubReadOnlyClientV1 {
-        agent: ureq::Agent::config_builder()
-            .https_only(false)
-            .http_status_as_error(false)
-            .build()
-            .into(),
         target: GitHubRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "tracedecay".to_owned(),
@@ -136,30 +132,31 @@ fn expired_context_after_first_graphql_page_makes_no_nested_request() {
             pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
         },
         credential: GitHubReadOnlyCredentialV1::anonymous(),
-        config: GitHubHttpReadConfigV1 {
-            rest_base_uri: format!("http://{address}"),
-            graphql_uri: format!("http://{address}/graphql"),
-            ..GitHubHttpReadConfigV1::default()
-        },
+        transport: test_http_transport(config),
     };
     let owner_scope = scope("expired-page");
     let deadline = Deadline::new(UtcMicros(now_micros().0.saturating_add(250_000))).unwrap();
     let expired_during_read = context(&owner_scope).with_deadline(deadline);
-    let outcome = client.execute_graphql(
-        &expired_during_read,
-        &GitHubGraphQlReadRequestV1 {
-            scope: owner_scope,
-            pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
-            resume: GitHubReadResumeV1::empty(),
-        },
-    );
+    let outcome = client
+        .execute_graphql(
+            &expired_during_read,
+            &GitHubGraphQlReadRequestV1 {
+                scope: owner_scope,
+                pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+                resume: GitHubReadResumeV1::empty(),
+            },
+        )
+        .await;
 
-    assert!(matches!(outcome, GitHubReadNetworkOutcomeV1::Denied));
+    assert!(
+        matches!(outcome, GitHubReadNetworkOutcomeV1::Unavailable),
+        "unexpected expired-read outcome: {outcome:?}"
+    );
     assert_eq!(server.join().unwrap(), 1);
 }
 
-#[test]
-fn unregistered_credential_after_first_graphql_page_makes_no_nested_request() {
+#[tokio::test]
+async fn unregistered_credential_after_first_graphql_page_makes_no_nested_request() {
     let mut first_page: serde_json::Value = serde_json::from_str(THREAD_CAPTURE).unwrap();
     first_page = first_page["response"].take();
     let thread = &mut first_page["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0];
@@ -198,12 +195,12 @@ fn unregistered_credential_after_first_graphql_page_makes_no_nested_request() {
             Err(error) => panic!("nested request probe failed: {error}"),
         }
     });
+    let config = GitHubHttpReadConfigV1 {
+        rest_base_uri: format!("http://{address}"),
+        graphql_uri: format!("http://{address}/graphql"),
+        ..GitHubHttpReadConfigV1::default()
+    };
     let client = GitHubReadOnlyClientV1 {
-        agent: ureq::Agent::config_builder()
-            .https_only(false)
-            .http_status_as_error(false)
-            .build()
-            .into(),
         target: GitHubRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "revoked-after-page".to_owned(),
@@ -211,21 +208,19 @@ fn unregistered_credential_after_first_graphql_page_makes_no_nested_request() {
             pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
         },
         credential,
-        config: GitHubHttpReadConfigV1 {
-            rest_base_uri: format!("http://{address}"),
-            graphql_uri: format!("http://{address}/graphql"),
-            ..GitHubHttpReadConfigV1::default()
-        },
+        transport: test_http_transport(config),
     };
     let owner_scope = scope("revoked-page");
-    let outcome = client.execute_graphql(
-        &context(&owner_scope),
-        &GitHubGraphQlReadRequestV1 {
-            scope: owner_scope,
-            pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
-            resume: GitHubReadResumeV1::empty(),
-        },
-    );
+    let outcome = client
+        .execute_graphql(
+            &context(&owner_scope),
+            &GitHubGraphQlReadRequestV1 {
+                scope: owner_scope,
+                pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+                resume: GitHubReadResumeV1::empty(),
+            },
+        )
+        .await;
 
     assert!(matches!(outcome, GitHubReadNetworkOutcomeV1::Denied));
     assert_eq!(server.join().unwrap(), 1);
@@ -296,11 +291,6 @@ async fn github_nested_pagination_and_cas_are_owner_bound() {
         ..GitHubHttpReadConfigV1::default()
     };
     let client = GitHubReadOnlyClientV1 {
-        agent: ureq::Agent::config_builder()
-            .https_only(false)
-            .http_status_as_error(false)
-            .build()
-            .into(),
         target: GitHubRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "tracedecay".to_owned(),
@@ -308,19 +298,21 @@ async fn github_nested_pagination_and_cas_are_owner_bound() {
             pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
         },
         credential: GitHubReadOnlyCredentialV1::anonymous(),
-        config,
+        transport: test_http_transport(config),
     };
     let owner_scope = scope("owner");
     let read_request = request(owner_scope.clone());
     let read_context = context(&owner_scope);
-    let outcome = client.execute_graphql(
-        &read_context,
-        &GitHubGraphQlReadRequestV1 {
-            scope: owner_scope.clone(),
-            pull_request_id: read_request.pull_request_id.clone(),
-            resume: GitHubReadResumeV1::empty(),
-        },
-    );
+    let outcome = client
+        .execute_graphql(
+            &read_context,
+            &GitHubGraphQlReadRequestV1 {
+                scope: owner_scope.clone(),
+                pull_request_id: read_request.pull_request_id.clone(),
+                resume: GitHubReadResumeV1::empty(),
+            },
+        )
+        .await;
     server.join().unwrap();
     let GitHubReadNetworkOutcomeV1::Response(response) = outcome else {
         panic!("production GraphQL client must complete nested pagination");

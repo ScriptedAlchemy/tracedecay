@@ -66,7 +66,7 @@ impl CiSourceAccessAuthorityV1 for StaleSourceAccess {
     }
 }
 
-fn scope(
+pub(super) fn scope(
     fixture: &crate::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
 ) -> FeedbackScopeV1 {
     FeedbackScopeV1 {
@@ -87,7 +87,7 @@ fn target(
     }
 }
 
-fn config(
+pub(super) fn config(
     fixture: &crate::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
 ) -> ProductionCiProviderConfigV1 {
     config_with_source(fixture, SequencedSourceAccess::ready())
@@ -97,20 +97,26 @@ fn config_with_source(
     fixture: &crate::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
     source_access: Arc<dyn CiSourceAccessAuthorityV1>,
 ) -> ProductionCiProviderConfigV1 {
+    let target = target(fixture);
+    let client = GitHubCiReadOnlyClientV1::new(
+        target.clone(),
+        GitHubReadOnlyCredentialV1::anonymous(),
+        GitHubHttpReadClientV1::new(GitHubHttpReadConfigV1::default()).unwrap(),
+    )
+    .unwrap();
     ProductionCiProviderConfigV1 {
         provider: ProviderId::new(GITHUB_ACTIONS_PROVIDER_ID_V1).unwrap(),
         parser: CiFailureParserIdentityV1 {
             parser_id: "parser.github-actions.v1".to_owned(),
             parser_version: "1".to_owned(),
         },
-        target: target(fixture),
-        credential: GitHubReadOnlyCredentialV1::anonymous(),
-        http: GitHubHttpReadConfigV1::default(),
+        target,
+        client,
         source_access,
     }
 }
 
-fn context(scope: &FeedbackScopeV1, expires_at: UtcMicros) -> RequestContext {
+pub(super) fn context(scope: &FeedbackScopeV1, expires_at: UtcMicros) -> RequestContext {
     let resolved = ResolvedScope::new(
         scope.project_id.clone(),
         scope.repository_id.clone(),
@@ -544,10 +550,10 @@ async fn retained_stale_fallback_exposes_rate_limit_cause_and_coverage() {
     let target = target(&fixture);
     let archive = ProductionGitHubCiArchiveV1 {
         provider: ProviderId::new(GITHUB_ACTIONS_PROVIDER_ID_V1).unwrap(),
-        client: GitHubReadOnlyClientV1::new_for_ci(
+        client: GitHubCiReadOnlyClientV1::new(
             target.clone(),
             GitHubReadOnlyCredentialV1::anonymous(),
-            GitHubHttpReadConfigV1::default(),
+            GitHubHttpReadClientV1::new(GitHubHttpReadConfigV1::default()).unwrap(),
         )
         .unwrap(),
         retained: Arc::new(RetainedFixture(CiRetainedProviderRecordV1 {
@@ -814,17 +820,24 @@ async fn discovery_collects_every_bounded_page_in_order() {
         crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
     let scope = scope(&fixture);
     let first = fixture.ci_provider_record.workflow_run.clone();
+    let first_page = (0..100_u64)
+        .map(|offset| {
+            let mut record = first.clone();
+            record.id += offset;
+            record
+        })
+        .collect::<Vec<_>>();
     let mut second = first.clone();
-    second.id += 1;
+    second.id += 100;
     let client = PagedDiscoveryClient {
         workflow_run_pages: vec![
             serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
-                "workflow_runs": [first],
+                "total_count": 101,
+                "workflow_runs": first_page,
             }))
             .unwrap(),
             serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
+                "total_count": 101,
                 "workflow_runs": [second],
             }))
             .unwrap(),
@@ -841,7 +854,7 @@ async fn discovery_collects_every_bounded_page_in_order() {
     .await
     .unwrap();
 
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 101);
     assert_eq!(*client.requested_pages.lock().unwrap(), vec![1, 2]);
 }
 
@@ -851,17 +864,24 @@ async fn discovery_collects_every_bounded_workflow_job_page_in_order() {
         crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
     let scope = scope(&fixture);
     let first = fixture.ci_provider_record.workflow_job.clone();
+    let first_page = (0..100_u64)
+        .map(|offset| {
+            let mut record = first.clone();
+            record.id += offset;
+            record
+        })
+        .collect::<Vec<_>>();
     let mut second = first.clone();
-    second.id += 1;
+    second.id += 100;
     let client = PagedWorkflowJobDiscoveryClient {
         workflow_job_pages: vec![
             serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
-                "jobs": [first],
+                "total_count": 101,
+                "jobs": first_page,
             }))
             .unwrap(),
             serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
+                "total_count": 101,
                 "jobs": [second],
             }))
             .unwrap(),
@@ -879,7 +899,7 @@ async fn discovery_collects_every_bounded_workflow_job_page_in_order() {
     .await
     .unwrap();
 
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 101);
     assert_eq!(*client.requested_pages.lock().unwrap(), vec![1, 2]);
 }
 
@@ -889,17 +909,24 @@ async fn source_revocation_stops_before_the_next_page() {
         crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
     let scope = scope(&fixture);
     let first = fixture.ci_provider_record.workflow_run.clone();
+    let first_page = (0..100_u64)
+        .map(|offset| {
+            let mut record = first.clone();
+            record.id += offset;
+            record
+        })
+        .collect::<Vec<_>>();
     let source = SequencedSourceAccess::revoke_at(3);
     let config = config_with_source(&fixture, source.clone());
     let client = PagedDiscoveryClient {
         workflow_run_pages: vec![
             serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
-                "workflow_runs": [first.clone()],
+                "total_count": 101,
+                "workflow_runs": first_page,
             }))
             .unwrap(),
             serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
+                "total_count": 101,
                 "workflow_runs": [first],
             }))
             .unwrap(),

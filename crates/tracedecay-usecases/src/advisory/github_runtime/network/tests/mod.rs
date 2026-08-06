@@ -30,6 +30,10 @@ const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const THREAD_CAPTURE: &str =
     include_str!("../../../fixtures/pr13_branch_pr/review_thread.graphql.json");
 
+fn test_http_transport(config: GitHubHttpReadConfigV1) -> GitHubHttpReadClientV1 {
+    GitHubHttpReadClientV1::build(config, false).unwrap()
+}
+
 #[derive(Clone, Copy)]
 enum FixtureCredentialAuthorityModeV1 {
     Verified,
@@ -151,7 +155,7 @@ fn credential_remount_receives_a_new_opaque_generation() {
     ));
 }
 
-fn captured_get_headers(credential: GitHubReadOnlyCredentialV1, repository: &str) -> String {
+async fn captured_get_headers(credential: GitHubReadOnlyCredentialV1, repository: &str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
@@ -173,12 +177,12 @@ fn captured_get_headers(credential: GitHubReadOnlyCredentialV1, repository: &str
         .unwrap();
         String::from_utf8(bytes).unwrap()
     });
+    let config = GitHubHttpReadConfigV1 {
+        rest_base_uri: format!("http://{address}"),
+        graphql_uri: format!("http://{address}/graphql"),
+        ..GitHubHttpReadConfigV1::default()
+    };
     let client = GitHubReadOnlyClientV1 {
-        agent: ureq::Agent::config_builder()
-            .https_only(false)
-            .http_status_as_error(false)
-            .build()
-            .into(),
         target: GitHubRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: repository.to_owned(),
@@ -186,22 +190,22 @@ fn captured_get_headers(credential: GitHubReadOnlyCredentialV1, repository: &str
             pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
         },
         credential,
-        config: GitHubHttpReadConfigV1 {
-            rest_base_uri: format!("http://{address}"),
-            graphql_uri: format!("http://{address}/graphql"),
-            ..GitHubHttpReadConfigV1::default()
-        },
+        transport: test_http_transport(config),
     };
-    let _ = client.get(
-        &format!("http://{address}/fixture"),
-        None,
-        GitHubReadPermissionV1::PullRequests,
-    );
+    let request_scope = scope("captured-headers");
+    let _ = client
+        .get(
+            &context(&request_scope),
+            &format!("http://{address}/fixture"),
+            None,
+            GitHubReadPermissionV1::PullRequests,
+        )
+        .await;
     server.join().unwrap()
 }
 
-#[test]
-fn retry_after_without_primary_rate_headers_is_not_authorization_denial() {
+#[tokio::test]
+async fn retry_after_without_primary_rate_headers_is_not_authorization_denial() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
@@ -213,12 +217,12 @@ fn retry_after_without_primary_rate_headers_is_not_authorization_denial() {
         )
         .unwrap();
     });
+    let config = GitHubHttpReadConfigV1 {
+        rest_base_uri: format!("http://{address}"),
+        graphql_uri: format!("http://{address}/graphql"),
+        ..GitHubHttpReadConfigV1::default()
+    };
     let client = GitHubReadOnlyClientV1 {
-        agent: ureq::Agent::config_builder()
-            .https_only(false)
-            .http_status_as_error(false)
-            .build()
-            .into(),
         target: GitHubRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "retry-after-only".to_owned(),
@@ -226,18 +230,17 @@ fn retry_after_without_primary_rate_headers_is_not_authorization_denial() {
             pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
         },
         credential: GitHubReadOnlyCredentialV1::anonymous(),
-        config: GitHubHttpReadConfigV1 {
-            rest_base_uri: format!("http://{address}"),
-            graphql_uri: format!("http://{address}/graphql"),
-            ..GitHubHttpReadConfigV1::default()
-        },
+        transport: test_http_transport(config),
     };
-
-    let response = client.get(
-        &format!("http://{address}/fixture"),
-        None,
-        GitHubReadPermissionV1::PullRequests,
-    );
+    let request_scope = scope("retry-after");
+    let response = client
+        .get(
+            &context(&request_scope),
+            &format!("http://{address}/fixture"),
+            None,
+            GitHubReadPermissionV1::PullRequests,
+        )
+        .await;
     server.join().unwrap();
 
     let outcome = network_failure(response);
@@ -280,8 +283,8 @@ fn github_credentials_are_not_debuggable_or_serializable() {
     );
 }
 
-#[test]
-fn exact_profile_configuration_mount_authenticates_project_open_review_read() {
+#[tokio::test]
+async fn exact_profile_configuration_mount_authenticates_project_open_review_read() {
     struct PullRequestReadCredential;
 
     impl GitHubReadOnlyCredentialAuthorityV1 for PullRequestReadCredential {
@@ -357,12 +360,12 @@ fn exact_profile_configuration_mount_authenticates_project_open_review_read() {
         write_http_json(&mut stream, &fixture["response"]);
         headers
     });
+    let config = GitHubHttpReadConfigV1 {
+        rest_base_uri: format!("http://{address}"),
+        graphql_uri: format!("http://{address}/graphql"),
+        ..GitHubHttpReadConfigV1::default()
+    };
     let client = GitHubReadOnlyClientV1 {
-        agent: ureq::Agent::config_builder()
-            .https_only(false)
-            .http_status_as_error(false)
-            .build()
-            .into(),
         target: GitHubRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "profile-mounted-private".to_owned(),
@@ -370,21 +373,19 @@ fn exact_profile_configuration_mount_authenticates_project_open_review_read() {
             pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
         },
         credential,
-        config: GitHubHttpReadConfigV1 {
-            rest_base_uri: format!("http://{address}"),
-            graphql_uri: format!("http://{address}/graphql"),
-            ..GitHubHttpReadConfigV1::default()
-        },
+        transport: test_http_transport(config),
     };
     let request_scope = scope("exact-profile-project-open");
-    let outcome = client.execute_graphql(
-        &context(&request_scope),
-        &GitHubGraphQlReadRequestV1 {
-            scope: request_scope,
-            pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
-            resume: GitHubReadResumeV1::empty(),
-        },
-    );
+    let outcome = client
+        .execute_graphql(
+            &context(&request_scope),
+            &GitHubGraphQlReadRequestV1 {
+                scope: request_scope,
+                pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+                resume: GitHubReadResumeV1::empty(),
+            },
+        )
+        .await;
     let GitHubReadNetworkOutcomeV1::Response(response) = outcome else {
         panic!("exact-profile project-open review read must contribute a response");
     };
@@ -456,14 +457,14 @@ fn application_registration_retains_and_exactly_unregisters_authority() {
     assert!(weak.upgrade().is_none());
 }
 
-#[test]
-fn anonymous_requests_never_emit_authorization() {
-    let headers = captured_get_headers(GitHubReadOnlyCredentialV1::anonymous(), "tracedecay");
+#[tokio::test]
+async fn anonymous_requests_never_emit_authorization() {
+    let headers = captured_get_headers(GitHubReadOnlyCredentialV1::anonymous(), "tracedecay").await;
     assert!(!headers.to_ascii_lowercase().contains("authorization:"));
 }
 
-#[test]
-fn verified_private_requests_emit_secret_only_as_authorization() {
+#[tokio::test]
+async fn verified_private_requests_emit_secret_only_as_authorization() {
     let (_authority, resolution) =
         registered_fixture_credential("private-read", FixtureCredentialAuthorityModeV1::Verified);
     let RegisteredGitHubReadOnlyCredentialV1::Verified(credential) = resolution else {
@@ -479,22 +480,24 @@ fn verified_private_requests_emit_secret_only_as_authorization() {
         GitHubReadOnlyClientV1::new(
             target.clone(),
             credential.clone(),
-            GitHubHttpReadConfigV1::default(),
+            GitHubHttpReadClientV1::new(GitHubHttpReadConfigV1::default()).unwrap(),
         )
         .is_some()
     );
     assert!(
-        GitHubReadOnlyClientV1::new_for_ci(
+        GitHubCiReadOnlyClientV1::new(
             GitHubCiRepositoryTargetV1 {
                 owner: target.owner,
                 repository: target.repository,
             },
             credential.clone(),
-            GitHubHttpReadConfigV1::default(),
+            GitHubHttpReadClientV1::new(GitHubHttpReadConfigV1::default()).unwrap(),
         )
         .is_some()
     );
-    let headers = captured_get_headers(credential, "private-read").to_ascii_lowercase();
+    let headers = captured_get_headers(credential, "private-read")
+        .await
+        .to_ascii_lowercase();
     assert!(headers.contains("authorization: bearer github_pat_fixture_private_read"));
 }
 
@@ -554,7 +557,7 @@ fn cached_private_credential_re_resolves_permission_and_repository_binding() {
         GitHubReadOnlyClientV1::new(
             wrong_repository,
             credential.clone(),
-            GitHubHttpReadConfigV1::default(),
+            GitHubHttpReadClientV1::new(GitHubHttpReadConfigV1::default()).unwrap(),
         )
         .is_none()
     );
@@ -595,8 +598,8 @@ fn cached_private_credential_fails_closed_when_authority_expires() {
     );
 }
 
-#[test]
-fn permission_drift_after_rest_response_blocks_response_publication() {
+#[tokio::test]
+async fn permission_drift_after_rest_response_blocks_response_publication() {
     let authority = Arc::new(MutableFixtureCredentialAuthorityV1::new(
         FixtureCredentialAuthorityModeV1::Verified,
     ));
@@ -628,12 +631,12 @@ fn permission_drift_after_rest_response_blocks_response_publication() {
             }),
         );
     });
+    let config = GitHubHttpReadConfigV1 {
+        rest_base_uri: format!("http://{address}"),
+        graphql_uri: format!("http://{address}/graphql"),
+        ..GitHubHttpReadConfigV1::default()
+    };
     let client = GitHubReadOnlyClientV1 {
-        agent: ureq::Agent::config_builder()
-            .https_only(false)
-            .http_status_as_error(false)
-            .build()
-            .into(),
         target: GitHubRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "publication-drift".to_owned(),
@@ -641,24 +644,22 @@ fn permission_drift_after_rest_response_blocks_response_publication() {
             pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
         },
         credential,
-        config: GitHubHttpReadConfigV1 {
-            rest_base_uri: format!("http://{address}"),
-            graphql_uri: format!("http://{address}/graphql"),
-            ..GitHubHttpReadConfigV1::default()
-        },
+        transport: test_http_transport(config),
     };
     let request_scope = scope("publication-drift");
-    let outcome = client.execute_rest(
-        &context(&request_scope),
-        &GitHubRestReadRequestV1 {
-            descriptor: super::super::GitHubRestDescriptorV1 {
-                operation: GitHubReviewReadOperationV1::RestGetPullRequest,
+    let outcome = client
+        .execute_rest(
+            &context(&request_scope),
+            &GitHubRestReadRequestV1 {
+                descriptor: super::super::GitHubRestDescriptorV1 {
+                    operation: GitHubReviewReadOperationV1::RestGetPullRequest,
+                },
+                scope: request_scope,
+                pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+                resume: GitHubReadResumeV1::empty(),
             },
-            scope: request_scope,
-            pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
-            resume: GitHubReadResumeV1::empty(),
-        },
-    );
+        )
+        .await;
     server.join().unwrap();
 
     assert_eq!(outcome, GitHubReadNetworkOutcomeV1::Denied);
@@ -741,6 +742,7 @@ fn complete_response(request: &GitHubReviewReadRequestV1) -> GitHubReviewReadRes
     }
 }
 
+mod async_transport;
 mod reads;
 
 use reads::{read_http_request, read_http_request_with_headers, write_http_json};

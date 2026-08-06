@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
-use tracedecay_application::now_micros;
 use tracedecay_domain::feedback::{GitHubPullRequestIdV1, GitHubReviewRateLimitCheckpointV1};
 use tracedecay_domain::{CommitId, UtcMicros};
 use url::Url;
 
+use super::network::HttpResponseV1;
 use super::{
-    GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
+    GitHubHttpReadClientV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
     GitHubRepositoryTargetV1,
 };
 
@@ -65,20 +65,22 @@ struct AssociatedRepositoryV1 {
 /// GitHub's commit-associated pull-request endpoint. Anonymous acquisition is
 /// used only for repositories this request proves publicly readable; private
 /// acquisition requires a registered verified read credential.
-pub fn discover_exact_commit_pull_request_v1(
+pub async fn discover_exact_commit_pull_request_v1(
     owner: &str,
     repository: &str,
     head_commit: &CommitId,
-    config: &GitHubHttpReadConfigV1,
+    transport: &GitHubHttpReadClientV1,
     credential: &GitHubReadOnlyCredentialV1,
 ) -> GitHubExactCommitDiscoveryOutcomeV1 {
     let first =
-        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+        scan_exact_commit_pull_request_v1(owner, repository, head_commit, transport, credential)
+            .await;
     if !discovery_outcome_requires_consensus(&first) {
         return first;
     }
     let second =
-        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+        scan_exact_commit_pull_request_v1(owner, repository, head_commit, transport, credential)
+            .await;
     if !discovery_outcome_requires_consensus(&second) {
         return second;
     }
@@ -86,7 +88,8 @@ pub fn discover_exact_commit_pull_request_v1(
         return agreed;
     }
     let third =
-        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+        scan_exact_commit_pull_request_v1(owner, repository, head_commit, transport, credential)
+            .await;
     if !discovery_outcome_requires_consensus(&third) {
         return third;
     }
@@ -115,38 +118,25 @@ fn discovery_consensus(
     }
 }
 
-fn scan_exact_commit_pull_request_v1(
+async fn scan_exact_commit_pull_request_v1(
     owner: &str,
     repository: &str,
     head_commit: &CommitId,
-    config: &GitHubHttpReadConfigV1,
+    transport: &GitHubHttpReadClientV1,
     credential: &GitHubReadOnlyCredentialV1,
 ) -> GitHubExactCommitDiscoveryOutcomeV1 {
     if !valid_path_segment(owner)
         || !valid_path_segment(repository)
         || !valid_full_commit_id(head_commit.as_str())
-        || !valid_rest_base_uri(&config.rest_base_uri)
-        || config.request_timeout.is_zero()
-        || config.connect_timeout.is_zero()
-        || config.socket_timeout.is_zero()
+        || !valid_rest_base_uri(&transport.config.rest_base_uri)
     {
         return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
     }
 
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(config.request_timeout))
-        .timeout_connect(Some(config.connect_timeout))
-        .timeout_recv_response(Some(config.socket_timeout))
-        .timeout_recv_body(Some(config.socket_timeout))
-        .https_only(true)
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build()
-        .into();
     let expected_repository = format!("{owner}/{repository}");
     let endpoint = format!(
         "{}/repos/{owner}/{repository}/commits/{}/pulls",
-        config.rest_base_uri.trim_end_matches('/'),
+        transport.config.rest_base_uri.trim_end_matches('/'),
         head_commit.as_str()
     );
     let mut page = 1_u32;
@@ -157,71 +147,43 @@ fn scan_exact_commit_pull_request_v1(
         if page > MAX_GITHUB_DISCOVERY_PAGES_V1 || !visited_pages.insert(page) {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
         }
-        let authorization =
-            match credential.authorization_header_for(GitHubReadPermissionV1::PullRequests) {
-                Ok(authorization) => authorization,
-                Err(()) => return GitHubExactCommitDiscoveryOutcomeV1::Denied,
-            };
-        let mut request = agent
-            .get(format!(
-                "{endpoint}?per_page={GITHUB_DISCOVERY_PAGE_SIZE_V1}&page={page}"
-            ))
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", "tracedecay-github-read");
-        if let Some(authorization) = authorization.as_ref() {
-            request = request.header("Authorization", authorization.as_str());
-        }
-        let response = request.call();
-        let Ok(mut response) = response else {
-            return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
-        };
-        if credential
-            .authorization_header_for(GitHubReadPermissionV1::PullRequests)
-            .is_err()
-        {
-            return GitHubExactCommitDiscoveryOutcomeV1::Denied;
-        }
-        let checkpoint = rate_limit_checkpoint(response.headers());
-        match response.status().as_u16() {
-            200 => {}
-            401 => return GitHubExactCommitDiscoveryOutcomeV1::Denied,
-            403 => {
-                let retry_at = retry_at(response.headers());
-                if checkpoint
-                    .as_ref()
-                    .is_none_or(|checkpoint| checkpoint.remaining != 0)
-                    && retry_at.is_none()
-                {
-                    return GitHubExactCommitDiscoveryOutcomeV1::Denied;
-                }
+        let url = format!("{endpoint}?per_page={GITHUB_DISCOVERY_PAGE_SIZE_V1}&page={page}");
+        let response = transport
+            .execute(
+                None,
+                MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1,
+                || {
+                    credential.authorization_header_for_repository(
+                        owner,
+                        repository,
+                        GitHubReadPermissionV1::PullRequests,
+                    )
+                },
+                |client| {
+                    client
+                        .get(&url)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .header("User-Agent", "tracedecay-github-read")
+                },
+            )
+            .await;
+        let (body, mut next_page) = match response {
+            HttpResponseV1::Ok {
+                body, next_page, ..
+            } => (body, next_page),
+            HttpResponseV1::RateLimited {
+                checkpoint,
+                retry_at,
+            } => {
                 return GitHubExactCommitDiscoveryOutcomeV1::RateLimited {
+                    checkpoint,
                     retry_at,
-                    checkpoint,
                 };
             }
-            429 => {
-                return GitHubExactCommitDiscoveryOutcomeV1::RateLimited {
-                    retry_at: retry_at(response.headers()),
-                    checkpoint,
-                };
-            }
-            404 => return GitHubExactCommitDiscoveryOutcomeV1::NotFound,
+            HttpResponseV1::NotFound => return GitHubExactCommitDiscoveryOutcomeV1::NotFound,
+            HttpResponseV1::Denied => return GitHubExactCommitDiscoveryOutcomeV1::Denied,
             _ => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
-        }
-
-        let mut next_page =
-            match next_page(response.headers(), &config.rest_base_uri, &endpoint, page) {
-                Ok(next_page) => next_page,
-                Err(()) => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
-            };
-        let Ok(body) = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1 as u64)
-            .read_to_vec()
-        else {
-            return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
         };
         let Ok(pulls) = serde_json::from_slice::<Vec<AssociatedPullRequestV1>>(&body) else {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
@@ -297,84 +259,6 @@ fn exact_pull_request(
         base_commit_id,
         head_commit_id,
     })
-}
-
-fn next_page(
-    headers: &ureq::http::HeaderMap,
-    rest_base_uri: &str,
-    endpoint: &str,
-    current_page: u32,
-) -> Result<Option<u32>, ()> {
-    let Some(link) = header(headers, "link") else {
-        return Ok(None);
-    };
-    let Some(next) = link.split(',').find(|entry| entry.contains("rel=\"next\"")) else {
-        return Ok(None);
-    };
-    let url = next
-        .split_once('<')
-        .and_then(|(_, value)| value.split_once('>'))
-        .map(|(value, _)| value)
-        .and_then(|value| Url::parse(value).ok())
-        .ok_or(())?;
-    let base = Url::parse(rest_base_uri).map_err(|_| ())?;
-    let expected = Url::parse(endpoint).map_err(|_| ())?;
-    if url.scheme() != "https"
-        || url.host_str() != base.host_str()
-        || url.port_or_known_default() != base.port_or_known_default()
-        || url.path() != expected.path()
-    {
-        return Err(());
-    }
-    let mut page = None;
-    let mut has_page_size = false;
-    for (key, value) in url.query_pairs() {
-        match key.as_ref() {
-            "page" if page.is_none() => page = value.parse::<u32>().ok(),
-            "per_page" if !has_page_size && value == GITHUB_DISCOVERY_PAGE_SIZE_V1.to_string() => {
-                has_page_size = true;
-            }
-            _ => return Err(()),
-        }
-    }
-    has_page_size
-        .then_some(page)
-        .flatten()
-        .filter(|page| *page > current_page)
-        .map(Some)
-        .ok_or(())
-}
-
-fn rate_limit_checkpoint(
-    headers: &ureq::http::HeaderMap,
-) -> Option<GitHubReviewRateLimitCheckpointV1> {
-    let checkpoint = GitHubReviewRateLimitCheckpointV1 {
-        limit: header(headers, "x-ratelimit-limit")?.parse().ok()?,
-        remaining: header(headers, "x-ratelimit-remaining")?.parse().ok()?,
-        reset_at: UtcMicros(
-            header(headers, "x-ratelimit-reset")?
-                .parse::<i64>()
-                .ok()?
-                .checked_mul(1_000_000)?,
-        ),
-    };
-    checkpoint.validate().is_ok().then_some(checkpoint)
-}
-
-fn retry_at(headers: &ureq::http::HeaderMap) -> Option<UtcMicros> {
-    let retry_seconds = header(headers, "retry-after")?.parse::<i64>().ok()?;
-    Some(UtcMicros(
-        now_micros()
-            .0
-            .checked_add(retry_seconds.checked_mul(1_000_000)?)?,
-    ))
-}
-
-fn header(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }
 
 fn valid_rest_base_uri(value: &str) -> bool {

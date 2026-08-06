@@ -141,11 +141,9 @@ pub fn open_production_ci_provider_authorities_v1(
     }
     let target = config.target;
     let source_access = config.source_access;
-    let client = GitHubReadOnlyClientV1::new_for_ci(target.clone(), config.credential, config.http)
-        .ok_or(ProductionCiProviderOpenErrorV1::InvalidNetworkConfiguration)?;
     let archive: ProductionCiArchiveHandleV1 = Arc::new(ProductionGitHubCiArchiveV1 {
         provider: config.provider,
-        client,
+        client: config.client,
         retained,
         target: target.clone(),
         source_access: Arc::clone(&source_access),

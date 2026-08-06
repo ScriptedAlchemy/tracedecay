@@ -55,10 +55,11 @@ pub use dto::{
 pub(crate) use dto::{GraphQlResponseV1, RestPullRequestV1, RestReviewCommentV1, RestReviewV1};
 pub use network::{
     GITHUB_REVIEW_THREADS_QUERY_V1, GitHubCiReadOnlyClientV1, GitHubCiRepositoryTargetV1,
-    GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1, GitHubReadOnlyClientV1,
-    GitHubReadOnlyCredentialAuthorityOutcomeV1, GitHubReadOnlyCredentialAuthorityV1,
-    GitHubReadOnlyCredentialSecretV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
-    GitHubRepositoryTargetV1, register_github_read_only_credential_authority_v1,
+    GitHubCiTransportOutcomeV1, GitHubHttpReadClientV1, GitHubHttpReadConfigV1,
+    GitHubReadOnlyClientV1, GitHubReadOnlyCredentialAuthorityOutcomeV1,
+    GitHubReadOnlyCredentialAuthorityV1, GitHubReadOnlyCredentialSecretV1,
+    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
+    register_github_read_only_credential_authority_v1,
     register_profile_github_read_only_credential_authority_v1,
     unregister_github_read_only_credential_authority_v1,
     unregister_profile_github_read_only_credential_authority_v1,
