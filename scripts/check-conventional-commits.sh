@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly DEFAULT_BASELINE=".github/conventional-commit-baseline.txt"
 readonly CONVENTIONAL_SUBJECT_RE='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([A-Za-z0-9._/-]+\))?!?: [^[:space:]].*$'
 
 usage() {
@@ -85,32 +84,6 @@ if [ "$#" -ne 1 ]; then
 fi
 
 range="$1"
-baseline_file="${CONVENTIONAL_COMMIT_BASELINE:-$DEFAULT_BASELINE}"
-baseline_commits=()
-
-if [ -f "$baseline_file" ]; then
-    while IFS= read -r line; do
-        line="${line%%#*}"
-        line="${line//[[:space:]]/}"
-        if [ -n "$line" ]; then
-            baseline_commits+=("$line")
-        fi
-    done < "$baseline_file"
-fi
-
-is_baselined_commit() {
-    local commit="$1"
-    local baseline
-
-    for baseline in "${baseline_commits[@]}"; do
-        if [[ "$commit" == "$baseline"* ]]; then
-            return 0
-        fi
-    done
-
-    return 1
-}
-
 rev_args=()
 if [[ "$range" == *".."* ]]; then
     rev_args=("$range")
@@ -134,11 +107,6 @@ failed=0
 for commit in "${commits[@]}"; do
     short_sha=$(git rev-parse --short=7 "$commit")
     subject=$(git log -1 --format=%s "$commit")
-
-    if is_baselined_commit "$commit"; then
-        echo "Skipping grandfathered commit $short_sha: $subject"
-        continue
-    fi
 
     if ! validate_subject "$short_sha" "$subject"; then
         failed=1

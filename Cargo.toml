@@ -31,6 +31,7 @@ members = [
     "crates/tracedecay-tool-catalog",
     "crates/tracedecay-usecases",
 ]
+exclude = [".worktrees", ".codex-worktrees"]
 resolver = "3"
 
 [workspace.metadata.cargo-shear]
