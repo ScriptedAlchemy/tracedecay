@@ -180,7 +180,7 @@ where
         .collect::<Vec<_>>();
     if !scoped.is_empty() {
         let all_nodes = graph.db.get_all_nodes_unguarded(transaction).await?;
-        let resolver = ReferenceResolver::from_nodes(&graph.db, &all_nodes);
+        let resolver = ReferenceResolver::from_nodes(&all_nodes);
         let resolution = resolver.resolve_all(&scoped);
         let edges = resolver.create_edges(&resolution.resolved);
         if !edges.is_empty() {

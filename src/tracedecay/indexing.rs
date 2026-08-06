@@ -848,7 +848,7 @@ impl TraceDecay {
         // 4. Resolve references in-memory (parallel) before DB insert
         let phase_start = Instant::now();
         if !all_unresolved.is_empty() {
-            let resolver = ReferenceResolver::from_nodes(&self.db, &all_nodes);
+            let resolver = ReferenceResolver::from_nodes(&all_nodes);
             let resolution = resolver.resolve_all(&all_unresolved);
             all_edges.extend(resolver.create_edges(&resolution.resolved));
         }
@@ -1327,7 +1327,7 @@ impl TraceDecay {
             return Ok(());
         }
         let all_nodes = self.db.get_all_nodes().await?;
-        let resolver = ReferenceResolver::from_nodes(&self.db, &all_nodes);
+        let resolver = ReferenceResolver::from_nodes(&all_nodes);
         let resolution = resolver.resolve_all(&refs);
         let edges = resolver.create_edges(&resolution.resolved);
         if !edges.is_empty() {

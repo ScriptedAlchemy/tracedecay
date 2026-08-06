@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
 
-use crate::db::Database;
 use crate::types::*;
 
 /// Names that are too common to resolve across files reliably.
@@ -164,9 +163,7 @@ fn path_proximity(a: &str, b: &str) -> i64 {
 ///
 /// Caches are built once at construction time by loading all nodes from the
 /// database and indexing them by `name` and `qualified_name`.
-pub struct ReferenceResolver<'a> {
-    #[allow(dead_code)]
-    db: &'a Database,
+pub struct ReferenceResolver {
     /// Nodes grouped by their short name.
     name_cache: HashMap<String, Vec<Node>>,
     /// Nodes grouped by their qualified name.
@@ -182,9 +179,9 @@ pub struct ReferenceResolver<'a> {
     import_index: HashMap<String, HashSet<String>>,
 }
 
-impl<'a> ReferenceResolver<'a> {
+impl ReferenceResolver {
     /// Creates a resolver from pre-loaded nodes.
-    pub fn from_nodes(db: &'a Database, all_nodes: &[Node]) -> Self {
+    pub fn from_nodes(all_nodes: &[Node]) -> Self {
         let mut name_cache: HashMap<String, Vec<Node>> = HashMap::new();
         let mut qualified_name_cache: HashMap<String, Vec<Node>> = HashMap::new();
         let mut suffix_cache: HashMap<String, Vec<String>> = HashMap::new();
@@ -257,7 +254,6 @@ impl<'a> ReferenceResolver<'a> {
         }
 
         Self {
-            db,
             name_cache,
             qualified_name_cache,
             suffix_cache,
