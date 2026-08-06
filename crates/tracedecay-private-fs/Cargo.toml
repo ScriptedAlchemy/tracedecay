@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dev-dependencies]
-tempfile.workspace = true
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

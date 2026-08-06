@@ -131,7 +131,6 @@ pub(super) async fn resolved_project_server_key(
         canonical_project_path,
         &handshake.open_options(),
         registry_database.as_ref(),
-        false,
     )
     .await
     else {
@@ -157,6 +156,7 @@ pub(super) async fn resolved_project_server_key(
             &layout.data_root,
             &graph_db_path,
         )?,
+        project_root: authority::canonical_identity_path(&layout.project_root)?,
         scope_prefix: handshake.scope_prefix.clone(),
     }))
 }
