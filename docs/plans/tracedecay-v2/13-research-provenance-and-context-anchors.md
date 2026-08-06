@@ -4,7 +4,7 @@
 
 Status: active product contract.
 
-Role: PR7 establishes stable evidence anchors for captured observations. Later query,
+Role: the anchor delivery establishes stable evidence anchors for captured observations. Later query,
 search, API, and UI slices preserve and resolve those anchors. This plan does not
 create a research-management system.
 
@@ -27,7 +27,7 @@ Pure source-only/internal request helpers and wire-visible V2 request revisions
 may converge in place.
 `V1` may identify an initial final wire record.
 
-**Status (2026-07-23):** Landed on this branch. PR7/Plan 13's core — `RetrievalAnchorId`
+**Status (2026-07-23):** Landed on this branch. Plan 13's core — `RetrievalAnchorId`
 identity and resolution, the branch's V2/V3-named anchor targets, native Git/worktree/integration-receipt
 topology anchors, the immutable evidence-span/occurrence/retriever-contribution
 contract, dispositions and safe tombstones, and the atomic evidence-assembly store — is
@@ -38,17 +38,17 @@ implemented across `crates/tracedecay-domain/src/research/`,
 Per-section verdicts follow.
 
 **Status split (2026-07-26, closed 2026-07-29).** The core above is delivered
-PR7 behavior. Dedicated `GitHubStackCapabilitySnapshotV1`/`GitHubStackSnapshotV1`
-anchor targets were the one named PR13/Plan 37 integration follow-up; they now
+anchor behavior. Dedicated `GitHubStackCapabilitySnapshotV1`/`GitHubStackSnapshotV1`
+anchor targets were the one named Plan 37 advisory integration follow-up; they now
 ship in `crates/tracedecay-domain/src/research/git_topology.rs` as
 `GitTopologyAnchorTargetV1::{GitHubStackCapability, GitHubStackSnapshot}`.
 
 Scope of that closure, stated exactly: this delivers Plan 13's anchor-target and
 lineage contract, not a producer. Plan 27's stacked-pull-request capability
-probing and Plan 37's PR15 read-only stack adapter remain unshipped, so no
+probing and Plan 37's multi-root read-only stack adapter remain unshipped, so no
 production path mints these anchors yet. The targets exist so those owners bind
 to one anchor contract instead of inventing a parallel reference family; their
-own absence must not be refiled as a Plan 13 gap or as a PR14 dashboard gap.
+own absence must not be refiled as a Plan 13 gap or as a dashboard gap.
 
 ## Outcome
 
@@ -139,7 +139,7 @@ evidence-span identity, and payload-free retriever-contribution anchors all exis
    transport `rh_` response handle, collection cursor, rank, file path, branch
    name, timestamp, or content hash. IDs never embed payload bytes.
 2. Owning ingress paths create anchors in the same authoritative transaction as the
-   retained sanitized evidence and its source identity for that target kind. PR7
+   retained sanitized evidence and its source identity for that target kind. The anchor delivery
    covers observation anchors; the read-only GitHub review and CI localization
    journey adds those evidence classes. Retry returns the existing anchor.
 3. Each anchor records target kind, canonical owner, native aliases when available,
@@ -163,11 +163,11 @@ evidence-span identity, and payload-free retriever-contribution anchors all exis
 10. Later query slices return anchors for exact results, omissions, and explanations;
     transport and UI layers pass them through without defining another reference type.
 11. A Git anchor never treats a branch, tag, symbolic ref, checkout path, or current
-    `HEAD` as immutable evidence. PR7 resolves routing inputs to exact retained Git
+    `HEAD` as immutable evidence. Anchor capture resolves routing inputs to exact retained Git
     objects or a receipt-bound index/worktree capture in the authoritative anchor
     transaction; ref movement cannot change what an existing anchor means.
 12. Commit, tree, and blob anchors preserve native object identity and repository
-    ownership. Patch hunks use the PR9 `HunkRef`, which references anchored sides (or
+    ownership. Patch hunks use the Git-intelligence `HunkRef`, which references anchored sides (or
     captured mutable-state watermarks) plus native Git diff options and coordinates;
     it does not create a second content or provenance identity.
 13. GitHub thread, comment, and reply anchors bind sanitized retained provider
@@ -237,7 +237,7 @@ Shipped reality:
 
 ## Native Git, worktree, and integration-receipt anchors
 
-PR7 extends `RetrievalAnchorTargetV3`; it does not create a parallel public
+The anchor delivery extends `RetrievalAnchorTargetV3`; it does not create a parallel public
 topology ID family. Plan 16 owns canonical project/repository/worktree
 relationships, Plan 36 owns native Git capture and object/ref interpretation,
 Plan 27 owns provider/host observation decoding into Plan 03 canonical
@@ -376,7 +376,7 @@ Direct coverage: `tests/session_suite/{anchor_resolution,anchor_tombstone_expiry
 
 ## Immutable evidence-span contract
 
-PR7 adds one payload-free identity model for consecutive message, tool-invocation,
+The anchor delivery adds one payload-free identity model for consecutive message, tool-invocation,
 tool-result, and code-chunk occurrences. It does not reuse observation-level anchors,
 `SessionSummaryRecordV1::source_anchors`, or sorted `RetrievalAnchorRecordV2`
 lineage as an ordering model: those collections cannot distinguish multiple projected
@@ -701,7 +701,7 @@ with immutable inserts and atomic rollback on replay conflict.
   occurrence-set/span/
   contribution identity, owner-bound lineage, replay semantics, resolution states,
   dispositions, and minimum-safe tombstones. Plan 02 owns generic persistence and
-  final-shape persistence policy/primitives; Plan 13's PR7 owns the evidence-assembly
+  final-shape persistence policy/primitives; Plan 13 owns the evidence-assembly
   persistence contract and adapter behavior above. Plan 09 owns current authorization and
   transaction orchestration; Plan 18 owns sanitization and disposition policy.
 - Plan 23 owns candidate generation, ranking, temporal selection, summary DAG
@@ -765,7 +765,7 @@ through without defining another reference type (Required behavior 10).
 
 ## Acceptance
 
-- PR7 tests atomic observation-and-anchor creation, idempotent replay, rollback, native
+- Anchor tests cover atomic observation-and-anchor creation, idempotent replay, rollback, native
   alias collisions, copied-prompt attribution, and unauthorized resolution.
 - Rebuilding projections preserves anchor IDs and source lineage.
 - Evidence-span contract tests prove deterministic
