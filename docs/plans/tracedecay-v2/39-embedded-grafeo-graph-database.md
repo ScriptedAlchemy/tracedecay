@@ -6,9 +6,10 @@
 to depend directly on Grafeo. Domain crates keep typed TraceDecay identities
 and contracts; storage adapters translate those contracts into labels, typed
 edges, properties, vectors, traversals, and snapshots without exposing Grafeo
-types. Each datum has exactly one authority: durable graph-shaped state lives
-in Grafeo, rebuildable projections are recreated from canonical
-manifests/events, and SQLite does not dual-write or shadow the same graph.
+types. Each datum has exactly one authority: canonical events, facts, content,
+and source manifests remain in their domain stores; Grafeo is the sole
+persisted and queried graph/vector projection over those sources. SQLite does
+not store shadow adjacency, graph indexes, or vector indexes.
 
 **Tech Stack:** Rust 2024, the published Grafeo `=0.5.42` crates from
 crates.io, TraceDecay domain/store ports, Tokio cancellation, Criterion, and
@@ -35,15 +36,31 @@ cargo-nextest.
   cutover receipt. Native ingestion of older host transcripts, repositories,
   and other source material remains a required ordinary V2 journey.
 - One datum has one authority. A rebuildable Grafeo projection records its source generation/watermark and never becomes a second canonical copy.
-- Event-sourced domains use one crash-safe publication protocol: commit the canonical event and an idempotent graph outbox record in SQLite, apply the graph batch, then advance the graph watermark. No caller reads past the acknowledged watermark, and replay never invents a second event.
+- Every persistent Grafeo mutation is derived from a durable canonical
+  manifest/event plus a complete replay payload or deterministic reconstruction
+  recipe. No canonical business event, fact content, source content, or
+  irreplaceable vector value exists only in Grafeo.
+- Event-sourced domains use one crash-safe publication protocol: commit the
+  canonical event and idempotent graph outbox/replay record first, apply the
+  graph batch as unverified projection work, close and reopen the Grafeo
+  directory, recompute the recovered namespace/projection digest from actual
+  entities and relations, and only then advance the relational verified graph
+  watermark. No caller reads past that verified watermark, and replay never
+  invents a second event.
 - Durable facts remain project-wide. Branches and worktrees never own, copy, merge, or retire facts.
 - Preserve typed TraceDecay IDs at every boundary; Grafeo node and edge IDs are storage-local handles only.
 - Preserve typed cancellation, staleness, denial, unavailable, reset-required, corruption, and budget-exhaustion outcomes.
-- Validation and pre-commit mutation failures leave the prior graph readable.
-  A Grafeo post-commit WAL/checkpoint failure is reported as typed
-  `DurabilityUncertain`, closes that runtime instance, and permits no further
-  reads from it until reopening the same directory completes Grafeo recovery
-  and TraceDecay validates the logical store identity and watermark.
+- Grafeo `0.5.42` does not propagate every session/direct-mutation WAL append
+  failure. `GraphDurability::WalSync` therefore requests synchronous WAL
+  flushing but is not a durable-publication receipt. A WAL sync/close/recovery
+  error is reported as typed `DurabilityUncertain` and closes that runtime
+  instance. Even after a successful sync, persistent projection work remains
+  unverified until close/reopen plus a full recovered-state digest matches its
+  canonical replay manifest. Mismatch, corruption, or a missing marker
+  quarantines/resets the derived projection and rebuilds it from canonical
+  input; it never advances or serves the failed watermark.
+- Validation and pre-commit mutation failures leave the prior verified graph
+  readable. New unverified mutations never become a reader snapshot.
 - Preserve deterministic ordering, pagination, authorization, coverage, and exact source hydration above the storage layer.
 - Never install, run, restart, or test V2 against the operator's live TraceDecay profile. All runtime tests use isolated temporary home/profile/socket paths.
 
@@ -94,7 +111,7 @@ Official implementation references:
 
 ## Data placement
 
-Move to Grafeo as sole authority:
+Move to Grafeo as the sole persisted/query graph and vector projection:
 
 - code symbol/file/chunk nodes, canonical relation edges, graph traversal indexes, and admitted code vectors;
 - Git repository/ref/commit/parent topology and typed commit-to-code/session/work evidence relations;
@@ -107,6 +124,9 @@ Move to Grafeo as sole authority:
 Keep in SQLite:
 
 - registry, configuration, secrets metadata, observation admission, source cursors, inbox/outbox, idempotency, effects, leases, receipts, and transactional journals;
+- complete graph replay inputs or deterministic reconstruction manifests,
+  expected recovered-state digests, and relational verified projection
+  watermarks until the corresponding canonical sources are retained;
 - raw session/message content, external payload references, redaction authority, exact evidence spans, and retention/GC journals;
 - immutable Work/workflow event payloads, runtime fencing, execution receipts, and artifact metadata;
 - embedding model manifests, acquisition/install state, generation publication state, and exact source manifests; and
@@ -155,6 +175,7 @@ pub struct GraphDb;
 pub struct GraphSnapshot;
 pub struct GraphWriteBatch;
 pub struct GraphPublication;
+pub struct VerifiedGraphCommit;
 
 pub struct GraphDbOpenOptions {
     pub location: GraphDbLocation,
@@ -175,15 +196,22 @@ pub struct GraphPublication {
 impl GraphDb {
     pub fn open(options: GraphDbOpenOptions) -> Result<Self, GraphDbError>;
     pub fn snapshot(&self) -> Result<GraphSnapshot, GraphDbError>;
-    pub fn apply(&self, batch: GraphWriteBatch) -> Result<GraphCommit, GraphDbError>;
-    pub fn replace_projection(
+    pub(crate) fn apply_unverified(
+        &self,
+        batch: GraphWriteBatch,
+    ) -> Result<GraphCommit, GraphDbError>;
+    pub(crate) fn replace_projection_unverified(
         &self,
         replacement: ProjectionReplacement,
     ) -> Result<GraphCommit, GraphDbError>;
-    pub fn publish(
+    pub(crate) fn publish_unverified(
         &self,
         publication: GraphPublication,
     ) -> Result<GraphCommit, GraphDbError>;
+    pub fn verify_recovered_projection(
+        &self,
+        manifest: &GraphReplayManifest,
+    ) -> Result<VerifiedGraphCommit, GraphDbError>;
     pub fn traverse(
         &self,
         request: TraversalRequest,
@@ -200,7 +228,8 @@ impl GraphDb {
 Cover in-memory and standard persistent-directory open, canonical
 project/profile directory resolution, exact logical store identity, atomic
 batch rollback, snapshot isolation, deterministic traversal, cancellation,
-vector dimension/metric rejection, WAL recovery and reopen durability,
+vector dimension/metric rejection, WAL recovery, unverified writes remaining
+unservable, close/reopen full-digest verification, missing/corrupt WAL records,
 corruption, and foreign-shape `ResetRequired`.
 
 Run:
@@ -241,15 +270,16 @@ pub struct GraphRelation {
 Open persistent databases by directory with Grafeo's public configuration API
 and WAL enabled; Grafeo owns the files below that directory. All validation
 occurs before mutation. Validation and transaction failures leave the prior
-generation readable. Grafeo `0.5.42` surfaces some WAL/checkpoint failures
-after its in-memory commit; those failures close the runtime instance as
-`DurabilityUncertain` instead of falsely claiming rollback or serving
-uncertain state. Reopen uses the same canonical directory, lets Grafeo perform
-WAL recovery, and validates the TraceDecay identity and watermark before
-serving. `GraphPublication` carries the canonical event/generation identity,
-idempotency key, expected graph watermark, replacement batch, and resulting
-watermark; same-key/same-input replay returns the original commit while
-changed input conflicts.
+verified generation readable. A successful `WalSync` is only an unverified
+apply outcome because Grafeo `0.5.42` can suppress an earlier WAL append error.
+The daemon-owned publisher closes and reopens the directory, lets Grafeo
+perform recovery, recomputes the complete recovered namespace/projection
+digest, compares it with the canonical replay manifest, and only then exposes
+`VerifiedGraphCommit` and advances the relational verified watermark.
+`GraphPublication` carries the canonical event/generation identity,
+idempotency key, expected graph watermark, complete replay input, replacement
+batch, and resulting watermark; same-key/same-input replay returns the
+original verified commit while changed input conflicts.
 
 - [ ] **Step 4: Verify boundary isolation**
 
@@ -301,7 +331,7 @@ pub trait CodeGraphProjectionPublisher {
         edges: &[CanonicalRelationEdge],
         chunks: &[CodeSearchChunk],
         cancellation: &CancellationToken,
-    ) -> Result<GraphWatermark, RetrievalPortError>;
+    ) -> Result<VerifiedGraphCommit, RetrievalPortError>;
 }
 ```
 
@@ -314,7 +344,10 @@ reopen.
 
 - [ ] **Step 2: Publish code generations atomically**
 
-Build the replacement off to the side, validate every typed identity, then replace the generation pointer in one graph-db commit. Readers keep the prior complete generation until publication succeeds.
+Build the replacement off to the side, validate every typed identity, apply it
+as one unverified convergence batch, then close/reopen and verify the complete
+recovered projection digest. Readers keep the prior verified generation until
+that verification succeeds.
 
 - [ ] **Step 3: Remove direct query-to-Grafeo coupling**
 
@@ -357,7 +390,8 @@ git commit -am "refactor(code-graph): route Grafeo through graph-db"
 **Interfaces:**
 - Consumes: `EmbeddingProjectionKey`, verified `EmbeddingVector`, source
   generation, model/artifact digest, metric, dimensions, and normalization.
-- Produces: atomic vector-generation publication and bounded exact Grafeo similarity/hybrid search with deterministic score normalization.
+- Produces: recovered-state-verified vector-generation publication and bounded
+  exact Grafeo similarity/hybrid search with deterministic score normalization.
 
 ```rust
 pub trait SemanticVectorStore {
@@ -366,7 +400,7 @@ pub trait SemanticVectorStore {
         generation: &VectorGenerationId,
         vectors: Vec<AdmittedSemanticVector>,
         cancellation: &CancellationToken,
-    ) -> Result<GraphWatermark, SemanticStoreError>;
+    ) -> Result<VerifiedGraphCommit, SemanticStoreError>;
 
     fn search(
         &self,
@@ -421,7 +455,7 @@ pub trait GitTopologyStore {
         &self,
         projection: GitTopologyProjection,
         cancellation: &CancellationToken,
-    ) -> Result<GraphWatermark, GitTopologyError>;
+    ) -> Result<VerifiedGraphCommit, GitTopologyError>;
 
     fn traverse(
         &self,
@@ -472,8 +506,8 @@ git commit -am "refactor(git): project topology into graph-db"
 pub trait SessionRelationGraph {
     fn publish(
         &self,
-        event: SessionRelationEvent,
-    ) -> Result<GraphWatermark, SessionRelationError>;
+        batch: SessionRelationBatch,
+    ) -> Result<VerifiedGraphCommit, SessionRelationError>;
 
     fn select(
         &self,
@@ -528,8 +562,8 @@ git commit -am "refactor(sessions): move relation DAGs to graph-db"
 pub trait MemoryGraphStore {
     fn publish(
         &self,
-        event: ProjectMemoryGraphEvent,
-    ) -> Result<GraphWatermark, MemoryStoreError>;
+        batch: ProjectMemoryGraphBatch,
+    ) -> Result<VerifiedGraphCommit, MemoryStoreError>;
 
     fn search(
         &self,
@@ -578,9 +612,9 @@ git commit -am "refactor(memory): move graph and vectors to graph-db"
 pub trait WorkTopologyStore {
     fn project(
         &self,
-        event: &WorkEvent,
+        events: &[WorkEvent],
         expected: WorkGraphVersion,
-    ) -> Result<WorkGraphVersion, WorkStoreError>;
+    ) -> Result<VerifiedGraphCommit, WorkStoreError>;
 
     fn read(
         &self,
@@ -627,7 +661,7 @@ pub trait WorkflowTopologyStore {
     fn publish_definition(
         &self,
         definition: &WorkflowDefinition,
-    ) -> Result<GraphWatermark, WorkflowStoreError>;
+    ) -> Result<VerifiedGraphCommit, WorkflowStoreError>;
 
     fn read(
         &self,
@@ -704,7 +738,12 @@ Cover linked worktrees sharing project graph identity, multi-root routing, cross
 
 - [ ] **Step 2: Register one graph-db runtime per exact project/profile authority**
 
-The daemon registry owns open/close, writer serialization, snapshot leases, retention, and health. MCP, CLI, HTTP/dashboard, LSP, hooks, workers, and tests never open graph-db directly.
+The daemon registry owns open/close, writer serialization, unverified
+convergence, close/reopen recovered-state verification, verified snapshot
+leases, retention, and health. MCP, CLI, HTTP/dashboard, LSP, hooks, workers,
+and tests never open graph-db directly. A reader lease binds a
+`VerifiedGraphCommit`; an unverified apply never replaces the currently served
+snapshot.
 
 - [ ] **Step 3: Wire retained tools and views**
 
@@ -785,11 +824,20 @@ git diff --check
 
 - [ ] **Step 1: Add representative benchmarks**
 
-Measure cold/open and warm traversal, 1/2/4-hop bounded code graphs, Git ancestry, LCM expansion, Work readiness, 100k/1m vector search, concurrent readers plus one writer, generation replacement, reopen, and retained-store size.
+Measure cold/open and warm traversal, 1/2/4-hop bounded code graphs, Git
+ancestry, LCM expansion, Work readiness, 100k/1m vector search, concurrent
+readers plus one convergence writer, generation replacement, close/reopen
+recovery plus full-digest verification, replay after mismatch, and retained
+store size. Batch convergence so the required verification boundary remains
+fast without weakening it.
 
 - [ ] **Step 2: Add failure and crash recovery tests**
 
-Cover interrupted projection replacement, corrupt persistent store, partial vector batch, writer cancellation, reader snapshot during publication, daemon shutdown, foreign final-shape rejection, and explicit fresh-profile recreation.
+Cover interrupted projection replacement, a missing/corrupt WAL record,
+recovered-state digest mismatch, replay from the canonical manifest/outbox,
+partial vector batch, writer cancellation, the prior verified reader snapshot
+during convergence, daemon shutdown, foreign final-shape rejection, and
+explicit fresh-profile recreation.
 
 - [ ] **Step 3: Run ordinary product verification in an isolated profile**
 
