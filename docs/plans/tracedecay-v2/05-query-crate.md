@@ -2,34 +2,36 @@
 
 ## Status / Role
 
-- Status: shared query-contract authority. PR8 temporal-kernel delivery is
-  complete. PR9 lexical/code and PR10 semantic implementations are callable;
+- Status: shared query-contract authority. The temporal-kernel delivery is
+  complete. Lexical/code and semantic implementations are callable;
   their locked quality/resource acceptance remains active under Plans 25, 31,
   and 15.
-- PR5 added only the observation read/replay needed by its capture vertical in
+- The capture delivery added only the observation read/replay needed by its capture vertical in
   existing store and application modules. Extract `tracedecay-query` only when
-  PR8-or-later reuse, dependency isolation, or compile-time savings justify the
+  later reuse, dependency isolation, or compile-time savings justify the
   boundary.
-- PR8 established the temporal kernel's behavior and ownership contract:
+- The temporal-kernel delivery established the temporal kernel's behavior and ownership contract:
   typed domain requests, read-only storage/projector boundaries, and no
   SQL/transport/policy authority in the kernel. Its proposed module layout,
   type spellings, suite spine, fixture names, and benchmark paths describe how
   that delivery may be proven; acceptance audits the callable behavior and
   direct regressions rather than requiring those artifacts by name.
-- The extraction decision is re-evaluated at PR9, when lexical code retrieval
+- The extraction decision is re-evaluated at the lexical-code delivery, when lexical code retrieval
   becomes the first second consumer of the shared execution primitives. It
   proceeds only with the Plan 19 evidence: named reuse across slices and a
   same-host measurement showing a smaller frequently touched compile graph.
-- PR7 adds facts and provenance, PR8 adds LCM/session retrieval, PR9 adds
-  lexical code search, code navigation, and current diagnostics, and PR10 adds
-  semantic search.
-- PR11 composes query use cases in application and policy. PR12 exposes them
+- The memory delivery adds facts and provenance, the temporal-kernel delivery
+  adds LCM/session retrieval, the code-intelligence delivery adds
+  lexical code search, code navigation, and current diagnostics, and the
+  semantic delivery adds semantic search.
+- The application delivery composes query use cases in application and policy.
+  The surface delivery exposes them
   through CLI, MCP, HTTP, LSP, export, and live non-dashboard adapters.
-  PR14 first ships dashboard binding and dashboard parity.
+  The dashboard delivery first ships dashboard binding and dashboard parity.
 - Plan 05 owns the shared execution semantics. Plan 23 remains the current
-  owner of temporal retrieval semantics; Plans 25 and 31 own active PR9
-  lexical/code and PR10 semantic acceptance. Plans 09/10/11/12/14 and Plan 24
-  consume the accepted PR8 behavior, not a superseded implementation shape.
+  owner of temporal retrieval semantics; Plans 25 and 31 own active
+  lexical/code and semantic acceptance. Plans 09/10/11/12/14 and Plan 24
+  consume the accepted temporal-kernel behavior, not a superseded implementation shape.
 - The task/work delivery journey reuses these shared scope, budget,
   cancellation, cursor, watermark, merge, and coverage primitives to execute
   Plan 24 requests. Plan 24 owns those typed requests, graph
@@ -38,10 +40,10 @@
   resource, and no-op measurements directly to end-to-end performance work.
 - If extracted, `tracedecay-query` is a transport-neutral execution library. It
   does not replace domain-specific query contracts with one universal language.
-- Staged execution: PR8 operates on current-project/single-root scope with
+- Staged execution: the temporal kernel operates on current-project/single-root scope with
   available watermark/cursor semantics; frozen multi-root watermarks, shard
-  selection/merge, canonical multi-root composition, and federation activate in
-  PR15 with [Plan 16](16-cross-project-repository-worktree-scope.md).
+  selection/merge, canonical multi-root composition, and federation activate
+  with multi-root scope ([Plan 16](16-cross-project-repository-worktree-scope.md)).
 
 ## Outcome
 
@@ -60,7 +62,7 @@ Every product surface can run the same bounded query use case and receive determ
   universal query AST.
 - Planning against application-resolved scope and store-advertised read capabilities.
 - Execution coordination, deterministic merge, and stable tie-breaking; bounded
-  shard selection activates with PR15 multi-root execution (Plan 16).
+  shard selection activates with multi-root execution (Plan 16).
 - Cursor authentication and validation against scope, access, schema, ranking version, index generation, and captured watermarks.
 - Query-side ranking mechanics shared by compatible channels, including finite scores, declared normalization, stable fallback, and component explanations.
 - Immutable query-evidence input types for current diagnostics, code
@@ -103,12 +105,12 @@ Every product surface can run the same bounded query use case and receive determ
 
 ## Required behavior
 
-- **PR8 — one temporal kernel:** message, Turn, session, thread, agent, summary,
+- **One temporal kernel:** message, Turn, session, thread, agent, summary,
   LCM expansion, and compact context requests share one temporal retrieval and
   hydration pipeline. `message_search`, `lcm_grep`, `lcm_load`, `lcm_describe`,
   `lcm_expand`, and `lcm_expand_query` are temporary bindings to it, not query
   implementations.
-- **PR8 — compatibility:** compatibility bindings translate inputs and results
+- **Temporal-kernel compatibility:** compatibility bindings translate inputs and results
   only. They preserve the kernel's scope, temporal mode, watermarks, ordering,
   cursors, coverage, authorization, and cancellation without private fallback.
   Audit this through each currently callable compatibility operation and direct
@@ -116,18 +118,18 @@ Every product surface can run the same bounded query use case and receive determ
   fixture filenames, benchmark scripts, and test-module registration are not
   independent rebuild requirements.
 
-- **PR5 — observation read:** add one typed observation point-read plus bounded
+- **Observation read:** add one typed observation point-read plus bounded
   sequence replay from the already resolved canonical profile or project store.
   Return sanitized content or payload reference, sanitization receipt, source
   identity/cursor, projection status, and explicit coverage.
-- **PR5 — boundary:** use the existing store/application path with bounded
+- **Observation-read boundary:** use the existing store/application path with bounded
   reads and cancellation. Do not add activity/session search, multi-root query,
   ranking, shard merge, authenticated distributed cursors, or a query framework.
-- **PR8 — shared execution (single-root):** introduce current-project scope,
+- **Shared execution (single-root):** introduce current-project scope,
   single-root frozen watermarks and authenticated cursors, cost budgets, and
   reusable query execution for the temporal kernel and its compatibility
   bindings.
-- **PR15 — multi-root execution (Plan 16):** consume Plan 16's
+- **Multi-root execution (Plan 16):** consume Plan 16's
   `ResolvedScopeSet`, then execute source selection, bounded per-shard
   retrieval, duplicate collapse, fusion, hydration, and coverage as separate
   phases. Capture a repeatable per-shard snapshot/watermark vector.
@@ -138,21 +140,21 @@ Every product surface can run the same bounded query use case and receive determ
   continuation/exhaustion state, fusion/ranking/dedup revisions, last
   total-order key, authorization epoch, schema/catalog revision, expiry, and a
   policy-safe coverage summary.
-- **PR7 — facts/provenance:** add typed fact, assertion, evidence, contradiction, supersession, trust, and as-of requests. Preserve source and privacy-domain identity through merge and hydration.
-- **PR7 — immutable Git evidence:** anchors may identify retained commit, tree,
+- **Facts/provenance:** add typed fact, assertion, evidence, contradiction, supersession, trust, and as-of requests. Preserve source and privacy-domain identity through merge and hydration.
+- **Immutable Git evidence:** anchors may identify retained commit, tree,
   blob, index, and captured-worktree evidence. Mutable ref names and ambient
   checkout state are routing inputs only; resolution records the exact object
   identity or captured state watermark that was observed.
-- **PR8 — LCM/session:** add typed recent-session, message, occurrence,
+- **LCM/session:** add typed recent-session, message, occurrence,
   logical-copy, summary-DAG, current, as-of, evolution, and forensic requests
   over current-project/single-root scope. Native rows remain addressable;
   representative views report hidden and unknown counts.
-- **PR9 — extraction gate:** before adding the lexical surface, decide the
+- **Extraction gate:** before adding the lexical surface, decide the
   `tracedecay-query` extraction with the Plan 19 evidence (reuse across the
-  PR8 temporal kernel and this slice; same-host compile-graph measurement).
-  Either outcome, PR9 code lands against the same typed-request/port contract
-  the PR8 kernel modules already enforce — location changes, contracts do not.
-- **PR9 — lexical code:** add exact identifier, phrase, token, field, bounded
+  temporal kernel and this slice; same-host compile-graph measurement).
+  Either outcome, lexical-code work lands against the same typed-request/port contract
+  the temporal kernel modules already enforce — location changes, contracts do not.
+- **Lexical code:** add exact identifier, phrase, token, field, bounded
   fuzzy, relation, path, impact, affected-test, facet, and timeline requests.
   Preserve a non-demotable exact tier for identifiers, paths, quoted phrases,
   error text, tool names, and configuration keys. Index whole identifiers and
@@ -166,7 +168,7 @@ Every product surface can run the same bounded query use case and receive determ
   `conservative_dependency_candidates`, `observed_coverage_candidates`,
   `predictive_ranked_candidates`, or `unknown_unsupported`; no mode proves a
   test executed, a change was delivered, or universal safety.
-- **PR9 — Git queries:** add typed working-tree, staged, and arbitrary revision-
+- **Git queries:** add typed working-tree, staged, and arbitrary revision-
   range diff requests plus status, history, blame, and `HunkRef` resolution.
   Native Git remains authoritative for objects, revision traversal, status,
   blame, rename detection, and patch/hunk production. Results can join hunks to
@@ -174,27 +176,27 @@ Every product surface can run the same bounded query use case and receive determ
   candidates through the code graph; Tree-sitter maps source spans to canonical
   structure and `ast-grep-core` evaluates explicit structural patterns only.
   No layer reimplements Git history, blame, or diff semantics.
-- **PR9 — dual provenance:** Git evidence provenance and repository-state
+- **Dual provenance:** Git evidence provenance and repository-state
   watermarks remain distinct from code-index generation, graph, diagnostic,
   and test-attribution provenance. Joins report both watermarks, mismatch and
   partial coverage explicitly; a matching path or line never implies matching
   content or generation.
-- **PR9 — diagnostics/navigation:** add typed current-diagnostic and
+- **Diagnostics/navigation:** add typed current-diagnostic and
   code-navigation reads over exact clean-generation and graph-backed evidence,
   covering declaration, definition, type-definition, implementation,
   references, symbols, and call hierarchy. Current results require matching
   scope, generation, content, producer provenance, freshness, and
-  clearing/supersession state. PR9 query work does not import Plan 09, depend
+  clearing/supersession state. This query work does not import Plan 09, depend
   on live providers, or open analyzer sessions. The graph remains authoritative
   for stable identity, generations, bounded traversal, history, cross-project
   evidence, and test attribution.
-- **PR12 — analyzer-derived navigation:** activate hover, signature help, type
+- **Analyzer-derived navigation:** activate hover, signature help, type
   hierarchy, and rename-candidate merging in the same slice as Plan 35
   analyzer producers. Plan 09 translates provider results into Plan-05-owned
   explicit evidence inputs; the query crate validates and merges only those
   typed inputs and never opens analyzer sessions or depends on live provider
   availability. Rename candidates are not durable clean-generation evidence.
-- **PR9 — lexical ranking:** centralize tokenizer/profile versions, lexical
+- **Lexical ranking:** centralize tokenizer/profile versions, lexical
   normalization, deterministic fusion, diversity, and explanations. `V1` may
   name the initial final profile. V2 profile bindings, indexes, and all related
   persisted state accept only their exact final shape; any other shape returns
@@ -202,16 +204,16 @@ Every product surface can run the same bounded query use case and receive determ
   storage compatibility/rebuild reader, migration, backfill, dual write, or
   census path. Independently released public query protocols are separate from
   persisted-state admission; fixtures alone do not establish publication.
-- **PR10 — semantic:** add local semantic candidate and bounded rerank channels only with exact model, tokenizer, dimension, metric, normalization, runtime, index-generation, privacy, and watermark compatibility.
-- **PR10 — fallback:** when semantic or rerank execution is unavailable, preserve the pre-stage lexical result bytes and order when the selected profile permits fallback; otherwise fail explicitly.
-- **PR11 — composition:** expose typed query services to application and pure policy evaluators without importing application or policy into this crate.
-- **PR12 — surfaces:** CLI, MCP, HTTP, LSP, exports, and live views map typed
+- **Semantic:** add local semantic candidate and bounded rerank channels only with exact model, tokenizer, dimension, metric, normalization, runtime, index-generation, privacy, and watermark compatibility.
+- **Semantic fallback:** when semantic or rerank execution is unavailable, preserve the pre-stage lexical result bytes and order when the selected profile permits fallback; otherwise fail explicitly.
+- **Application composition:** expose typed query services to application and pure policy evaluators without importing application or policy into this crate.
+- **Surfaces:** CLI, MCP, HTTP, LSP, exports, and live views map typed
   requests and responses without implementing their own scope, ranking, cursor,
   hydration, coverage, or fallback rules. LSP uses the same query kernels as
   every other adapter. Dashboard binding and dashboard parity remain owned by
-  PR14; PR12 does not ship dashboard adapters.
-- **PR12 — export/live:** stream bounded frozen exports with manifests and ordered snapshot/delta/gap contracts. Filesystem publication and SSE framing remain adapter responsibilities.
-- **PR17 — task/work reuse:** accept Plan 24-owned typed request and projection
+  the dashboard delivery; the surface delivery does not ship dashboard adapters.
+- **Export/live:** stream bounded frozen exports with manifests and ordered snapshot/delta/gap contracts. Filesystem publication and SSE framing remain adapter responsibilities.
+- **Task/work reuse:** accept Plan 24-owned typed request and projection
   descriptors through narrow consumer-owned ports, then provide only shared
   scope resolution inputs, budgets, cancellation, pagination, watermarks,
   deterministic merge, coverage, and explanations. Execute Plan 24-owned task
@@ -223,24 +225,24 @@ Every product surface can run the same bounded query use case and receive determ
 
 ## Acceptance
 
-- PR5 direct tests cover point-read, bounded ordered replay, receipt/source/cursor
+- Observation-read direct tests cover point-read, bounded ordered replay, receipt/source/cursor
   and projection status, partial or unavailable coverage, cancellation, exact
   retry, and canonical profile/project ownership without ambient fallback.
-- PR7 direct tests cover provenance preservation, contradiction/supersession, as-of knowledge, denied payloads, redacted frontiers, and unknown denominators.
-- PR7 tests also prove Git anchors resolve immutable objects or retained
+- Facts/provenance direct tests cover provenance preservation, contradiction/supersession, as-of knowledge, denied payloads, redacted frontiers, and unknown denominators.
+- Facts/provenance tests also prove Git anchors resolve immutable objects or retained
   captured state after ref movement, checkout removal, and index rebuild.
-- PR8 direct tests cover native versus representative views, copied prompts, punctuation/CJK/emoji, provider filters, summary freshness, temporal resolution, and restart-stable pagination.
-- PR9 direct tests compare lexical inclusion and declared ordering with redacted V1 fixtures and cover exact identifiers, fuzzy bounds, graph limits, impact roles, facets, deterministic diversity, and generation-exact clean-generation/graph-backed diagnostic and navigation reads.
-- PR9 Git tests cover working, staged, committed-range, rename, deletion,
+- Temporal-kernel direct tests cover native versus representative views, copied prompts, punctuation/CJK/emoji, provider filters, summary freshness, temporal resolution, and restart-stable pagination.
+- Lexical-code direct tests compare lexical inclusion and declared ordering with redacted V1 fixtures and cover exact identifiers, fuzzy bounds, graph limits, impact roles, facets, deterministic diversity, and generation-exact clean-generation/graph-backed diagnostic and navigation reads.
+- Git-query tests cover working, staged, committed-range, rename, deletion,
   binary, merge-history, blame, and hunk queries; stable `HunkRef` replay;
   symbol/caller/hazard/affected-test joins; bounded partial coverage; and
   rejection or explicit degradation when Git and code-generation watermarks do
   not match native content.
-- PR12 direct tests cover analyzer-derived hover, signature help, type hierarchy, and rename-candidate merging from explicit typed evidence inputs only.
-- PR10 direct tests cover incompatible representations, privacy isolation, missing artifacts, exact fallback, semantic failure, rerank caps, and byte-stable lexical fallback.
-- PR11/PR12 contract tests submit equivalent typed requests through application,
+- Surface direct tests cover analyzer-derived hover, signature help, type hierarchy, and rename-candidate merging from explicit typed evidence inputs only.
+- Semantic direct tests cover incompatible representations, privacy isolation, missing artifacts, exact fallback, semantic failure, rerank caps, and byte-stable lexical fallback.
+- Application/surface contract tests submit equivalent typed requests through application,
   CLI JSON, MCP JSON, HTTP JSON, LSP, export, and live adapters and compare
-  semantic results before rendering. PR14 contract tests add dashboard binding
+  semantic results before rendering. Dashboard contract tests add dashboard binding
   and dashboard parity on the same typed requests.
 - Task/work composition tests prove Plan 24 requests retain identical selected entity
   IDs, versions, scope, watermarks, coverage, and ordering when run through
