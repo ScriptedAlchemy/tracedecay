@@ -22,8 +22,8 @@ use tempfile::TempDir;
 use tracedecay_domain::{CodeGenerationId, ProjectId, SanitizerRevision};
 
 use super::{
-    CodeIndexReconcileOutcomeV1, CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1,
-    SharedCodeIndexBytePoolV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+    DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1,
 };
 use crate::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 
@@ -91,6 +91,90 @@ fn publication_store(store_root: &Path) -> DaemonCodeIndexPublicationStoreV1 {
         SanitizerRevision::new(CODE_SOURCE_SANITIZER_VERSION_V1).expect("sanitizer revision"),
     )
     .expect("open publication store")
+}
+
+/// A cold mount is a foreground routing operation, not a repository or sealed-
+/// store verification pass. The mounted route must become visible while the
+/// retained background owner is admission-blocked, and it must expose no
+/// generation until that owner proves the sealed generation still matches the
+/// exact worktree.
+#[tokio::test]
+async fn cold_mount_defers_sealed_decode_and_truth_verification_to_the_retained_owner() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(store.path(), project.path());
+    let generation_id = {
+        let mut scheduler = open(project.path(), &scoped_store);
+        publish(&mut scheduler)
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    let background_admission = registry.background_reconcile_admission();
+    let mount_started = std::time::Instant::now();
+    assert!(
+        registry
+            .mount_worktree(
+                project_id(),
+                project.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("mount the exact worktree"),
+        "the cold route is newly mounted"
+    );
+    assert!(
+        mount_started.elapsed() < std::time::Duration::from_millis(250),
+        "foreground route mount exceeded the 250ms cold-admission budget: {:?}",
+        mount_started.elapsed()
+    );
+
+    let scheduler = registry
+        .scheduler_handle(project.path())
+        .await
+        .expect("mounted scheduler");
+    {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            scheduler.sealed_decode_count(),
+            0,
+            "foreground mount must not decode the sealed generation"
+        );
+        assert!(
+            !scheduler.verified_against_source(),
+            "a cold route is explicitly unverified until background truth completes"
+        );
+        assert!(
+            scheduler.latest_complete_already_decoded().is_none(),
+            "unverified sealed bytes cannot become a serving generation"
+        );
+    }
+    assert!(
+        registry
+            .latest_complete_ready(project.path())
+            .await
+            .is_none(),
+        "query admission returns typed unavailable while activation is warming"
+    );
+
+    background_admission.add_permits(1);
+    let activated = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if registry.latest_generation_id(project.path()).await.as_ref() == Some(&generation_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        activated.is_ok(),
+        "the retained owner must activate the exact sealed generation after verification"
+    );
+    registry.shutdown().await;
 }
 
 /// Activation pays the sealed decode and every per-generation derivation. The

@@ -315,6 +315,8 @@ pub(in crate::daemon) enum QuerySearchExecutionErrorV1 {
     InvalidScope(String),
     #[error("no complete current code generation matches the exact admitted scope")]
     GenerationUnavailable,
+    #[error("the exact code generation is mounted but still warming or unverified")]
+    GenerationUnverified,
     #[error("query authority is unavailable for the exact admitted scope")]
     AuthorityUnavailable,
     #[error("query search policy is invalid: {0}")]
@@ -373,7 +375,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     // never parking, then still fail typed rather than degrade
                     // into an empty answer.
                     self.request_query_background_reconcile(scope).await;
-                    return Err(QuerySearchExecutionErrorV1::GenerationUnavailable);
+                    let unverified = self.generation_is_unverified_for_scope(scope).await;
+                    return Err(if unverified {
+                        QuerySearchExecutionErrorV1::GenerationUnverified
+                    } else {
+                        QuerySearchExecutionErrorV1::GenerationUnavailable
+                    });
                 }
             },
         };
