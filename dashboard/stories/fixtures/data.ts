@@ -1259,6 +1259,19 @@ const HINT_CATEGORIES = [
   'subagent_start_context',
 ] as const;
 
+/** GET /api/plugins/analytics/agents (analytics_api::agents). */
+function analyticsAgentsPayload(): Record<string, unknown> {
+  return {
+    available: true,
+    source: 'sessions',
+    by_agent: [
+      { agent: 'Codex', sessions: 42 },
+      { agent: 'Claude', sessions: 31 },
+      { agent: 'Cursor', sessions: 7 },
+    ],
+  };
+}
+
 function analyticsHintsPayload(): Record<string, unknown> {
   return {
     available: true,
@@ -2340,6 +2353,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // the backend schema floor; fixtures keep the same outer wire authority now.
   '/api/plugins/analytics/overview': envelope(analyticsOverviewPayload()),
   '/api/plugins/analytics/usage': envelope(analyticsUsagePayload()),
+  '/api/plugins/analytics/agents': envelope(analyticsAgentsPayload()),
   '/api/plugins/analytics/hints': envelope(analyticsHintsPayload()),
   '/api/plugins/analytics/underused': envelope(analyticsUnderusedPayload()),
   '/api/plugins/analytics/diagnostics': envelope(analyticsDiagnosticsPayload()),

@@ -4,7 +4,11 @@ import { ReadFailure } from '../../ui/LegacyStates.tsx';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
-import { AnalyticsUsageSummaryV1Schema } from '../../contracts/generated.ts';
+import {
+  AnalyticsAgentsPayloadV1Schema,
+  AnalyticsUsageSummaryV1Schema,
+  type AnalyticsAgentUsageV1,
+} from '../../contracts/generated.ts';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { logFraction } from '../../viz/scale.ts';
 import {
@@ -124,6 +128,13 @@ export function AgentsPage() {
     `${BASE}/diagnostics`,
     DiagnosticsPayload,
     { staleTime: 5 * 60_000 },
+  );
+  // Cheap session-store query, separate from the hook-analytics fold: which
+  // managed subagents were delegated to, counted in sessions.
+  const agents = useEnvelope(
+    ['analytics', 'agents'],
+    `${BASE}/agents`,
+    AnalyticsAgentsPayloadV1Schema,
   );
 
   return (
@@ -322,6 +333,29 @@ export function AgentsPage() {
                   }}
                 </ReadSection>
               </OverviewCard>
+
+              <OverviewCard title="Subagent delegation">
+                <ReadSection
+                  title="Subagents"
+                  chrome="centered"
+                  state={envelopeReadState(agents.isPending, agents.data, {
+                    loading: 'reading subagent sessions',
+                    transport: 'subagent sessions could not be read',
+                  })}
+                >
+                  {(envelope) => {
+                    const payload = envelope.payload;
+                    return payload == null || payload.available === false ? (
+                      <ReadFailure
+                        label="Subagent sessions unavailable"
+                        detail={envelope.coverage.omission_reasons[0]}
+                      />
+                    ) : (
+                      <SubagentSessions rows={payload.by_agent} source={payload.source} />
+                    );
+                  }}
+                </ReadSection>
+              </OverviewCard>
             </OverviewGrid>
           </div>
         );
@@ -413,6 +447,43 @@ function CategoryComposition({
 /** The 136 distinct MCP tools the window recorded, ranked. Same log band and
  * the same caption obligation as the composition plate — this distribution is
  * even longer-tailed (1,945 to 1). */
+/** Sessions per managed subagent, straight from the session store. A count of
+ * delegations, not of work done inside them — that context lives in Loom's
+ * per-thread drill-down. */
+function SubagentSessions({
+  rows,
+  source,
+}: {
+  rows: readonly AnalyticsAgentUsageV1[];
+  source: string;
+}) {
+  if (rows.length === 0) {
+    return (
+      <p className="text-2xs text-text-muted">
+        no subagent sessions are recorded in the session store
+      </p>
+    );
+  }
+  const ranked = [...rows].sort((a, b) => b.sessions - a.sessions);
+  const ceiling = ranked[0]?.sessions ?? 0;
+  return (
+    <figure className="flex flex-col gap-1.5">
+      <figcaption className="td-legend">
+        sessions per managed subagent · source: {source} · log scale
+      </figcaption>
+      {ranked.map((row) => (
+        <MeterRow
+          key={row.agent}
+          label={row.agent}
+          title={row.agent}
+          fraction={logFraction(row.sessions, ceiling)}
+          value={row.sessions.toLocaleString()}
+        />
+      ))}
+    </figure>
+  );
+}
+
 function ToolRanking({ rows }: { rows: ReadonlyArray<Record<string, unknown>> }) {
   const ranked = [...rows]
     .map((row) => ({
