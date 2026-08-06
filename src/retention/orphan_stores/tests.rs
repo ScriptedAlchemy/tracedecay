@@ -1315,9 +1315,11 @@ mod durable_inventory {
 
     #[test]
     fn registered_graph_scopes_at_custom_paths_are_covered() {
+        let store = tempfile::tempdir().unwrap();
         let custom = PathBuf::from("scopes/custom-scope.db");
 
         let DurableDatabaseInventoryV1::Resolved(inventory) = durable_database_inventory(
+            store.path(),
             Some(&manifest_bytes("custom-main.db")),
             std::slice::from_ref(&custom),
         ) else {
@@ -1332,9 +1334,34 @@ mod durable_inventory {
     }
 
     #[test]
+    fn branch_databases_are_part_of_the_inventory() {
+        let store = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(store.path().join("branches")).unwrap();
+        std::fs::write(store.path().join("branches/feature-x.db"), b"").unwrap();
+        std::fs::write(store.path().join("branches/main.db"), b"").unwrap();
+        std::fs::write(store.path().join("branches/notes.txt"), b"").unwrap();
+
+        let DurableDatabaseInventoryV1::Resolved(inventory) = durable_database_inventory(
+            store.path(),
+            Some(&manifest_bytes("code.db")),
+            &[],
+        ) else {
+            panic!("a readable manifest must resolve an inventory");
+        };
+
+        assert!(
+            inventory.contains(&PathBuf::from("branches/feature-x.db")),
+            "a branch database can hold the only surviving durable rows"
+        );
+        assert!(inventory.contains(&PathBuf::from("branches/main.db")));
+        assert!(!inventory.contains(&PathBuf::from("branches/notes.txt")));
+    }
+
+    #[test]
     fn a_missing_manifest_fails_closed() {
+        let store = tempfile::tempdir().unwrap();
         assert_eq!(
-            durable_database_inventory(None, &[]),
+            durable_database_inventory(store.path(), None, &[]),
             DurableDatabaseInventoryV1::Unverifiable,
             "without a manifest the store's graph path is a guess, not a fact"
         );
@@ -1342,8 +1369,9 @@ mod durable_inventory {
 
     #[test]
     fn a_malformed_manifest_fails_closed() {
+        let store = tempfile::tempdir().unwrap();
         assert_eq!(
-            durable_database_inventory(Some(b"{ not json"), &[]),
+            durable_database_inventory(store.path(), Some(b"{ not json"), &[]),
             DurableDatabaseInventoryV1::Unverifiable
         );
     }
