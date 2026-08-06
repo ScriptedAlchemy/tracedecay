@@ -71,7 +71,15 @@ pub(super) async fn lazy_index_ignored_dependency_candidates(
             paths.push(path);
         }
     }
-    cg.lazy_index_ignored_dependency_files(&paths).await
+    GraphRuntimePort::lazy_index_ignored_dependency_files(
+        cg,
+        &paths,
+        GraphRequestControl {
+            deadline,
+            cancellation,
+        },
+    )
+    .await
 }
 
 async fn ignored_dependency_candidates(

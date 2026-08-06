@@ -28,6 +28,12 @@ pub(super) const NODES_BY_KIND_PAGE_SQL: &str = concat!(
     ", rowid FROM nodes WHERE kind = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3"
 );
 
+const ALL_NODES_PAGE_SQL: &str = concat!(
+    "SELECT ",
+    node_select_columns!(),
+    ", rowid FROM nodes WHERE rowid > ?1 ORDER BY rowid LIMIT ?2"
+);
+
 impl Database {
     /// Inserts or replaces a single node.
     pub async fn insert_node(&self, node: &Node) -> Result<()> {
@@ -561,14 +567,25 @@ impl Database {
     pub async fn get_all_nodes(&self) -> Result<Vec<Node>> {
         collect_rowid_pages(
             &self.engine_conn(),
-            concat!(
-                "SELECT ",
-                node_select_columns!(),
-                ", rowid FROM nodes WHERE rowid > ?1 ORDER BY rowid LIMIT ?2"
-            ),
+            ALL_NODES_PAGE_SQL,
             NODE_COLUMNS,
             row_to_node,
             "get_all_nodes",
+        )
+        .await
+    }
+
+    /// Returns every node visible inside an existing write transaction.
+    pub async fn get_all_nodes_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+    ) -> Result<Vec<Node>> {
+        collect_rowid_pages(
+            transaction,
+            ALL_NODES_PAGE_SQL,
+            NODE_COLUMNS,
+            row_to_node,
+            "get_all_nodes_unguarded",
         )
         .await
     }

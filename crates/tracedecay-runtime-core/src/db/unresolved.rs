@@ -164,6 +164,21 @@ impl Database {
         .await
     }
 
+    /// Returns every unresolved reference visible inside an existing write transaction.
+    pub async fn get_unresolved_refs_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+    ) -> Result<Vec<UnresolvedRef>> {
+        collect_rowid_pages(
+            transaction,
+            UNRESOLVED_REF_PAGE_SQL,
+            UNRESOLVED_REF_COLUMNS,
+            row_to_unresolved_ref,
+            "get_unresolved_refs_unguarded",
+        )
+        .await
+    }
+
     /// Removes all unresolved references.
     pub async fn clear_unresolved_refs(&self) -> Result<()> {
         let transaction = self
