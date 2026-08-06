@@ -1461,6 +1461,40 @@ mod tests {
     }
 
     #[test]
+    fn project_graph_locator_is_shared_while_code_scope_resolution_fails_closed() {
+        let fixture = Fixture::new();
+        let resolver = fixture.resolver_for([fixture.first_alias.clone()]);
+        let project_key = StoreRuntimeKey::new(fixture.shard(), incarnation());
+        let project_graph = resolved(resolver.resolve_graph_key(&project_key));
+        assert_eq!(project_graph.locator().verified().shard_id, fixture.shard());
+        assert_eq!(
+            project_graph.locator().path(),
+            fixture
+                .profile_root
+                .join("projects")
+                .join(fixture.project_id.as_str())
+                .join("tracedecay.grafeo")
+        );
+
+        let code_shard = StoreShardIdV1::code(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            fixture.project_id.clone(),
+            id("repository.local-resolver"),
+            tracedecay_store::CodeShardScopeV1::Worktree {
+                worktree_id: id("worktree.local-resolver"),
+            },
+        );
+        assert!(matches!(
+            resolver.resolve_graph_key(&StoreRuntimeKey::new(code_shard, incarnation())),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn shared_resolver_accepts_a_typed_project_authority_after_construction() {
         let fixture = Fixture::new();
         let resolver = LocalStoreRuntimeResolverV1::new(fixture.profile_authority());

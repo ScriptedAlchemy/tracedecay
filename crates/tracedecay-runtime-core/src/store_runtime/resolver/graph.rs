@@ -1,4 +1,4 @@
-use tracedecay_store::graph_store_locator_path;
+use tracedecay_store::{StoreShardScopeV1, graph_store_locator_path};
 
 use super::{
     LocalStoreLocatorResolutionV1, LocalStoreLocatorUnavailableReasonV1,
@@ -7,14 +7,20 @@ use super::{
 };
 
 impl LocalStoreRuntimeResolverV1 {
-    /// Resolves the Grafeo database file paired with one exact canonical runtime shard.
+    /// Resolves the Grafeo database file paired with one exact project/profile
+    /// relational authority.
     ///
-    /// The relational locator selects the store family and authority root.
-    /// Deriving a sibling `.grafeo` file from the relational filename keeps every
-    /// project, session, and code shard physically distinct without letting a
-    /// Graph consumer derive or normalize a path independently. Grafeo owns
-    /// the database file and its transient WAL sidecar.
+    /// Code scopes are namespaces inside their owning project graph runtime,
+    /// not physical stores. Callers must retain the project graph key through
+    /// `StoreRuntimeRegistry::retain_code_graph_store`; resolving a code shard
+    /// here fails closed instead of recreating per-worktree graph sharding.
     pub fn resolve_graph_key(&self, key: &StoreRuntimeKey) -> LocalStoreLocatorResolutionV1 {
+        if matches!(key.shard_id().scope, StoreShardScopeV1::Code { .. }) {
+            return LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                shard_id: key.shard_id().clone(),
+                reason: LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope,
+            });
+        }
         let resolved = self
             .resolve_key_inner(key, &local_filesystem_safety)
             .and_then(|store| {

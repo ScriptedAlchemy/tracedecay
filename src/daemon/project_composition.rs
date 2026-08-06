@@ -313,6 +313,7 @@ pub(super) async fn production_project_server(
                     .to_owned(),
             })?;
     let registered_profile_db = store_administration.registered_profile_database().await?;
+    let graph_runtime = store_administration.registered_runtime_registry().await?;
     let registry_db = Arc::clone(&registered_profile_db);
     let profile_identity = store_administration.profile_identity()?.clone();
     let accounting_db =
@@ -357,6 +358,7 @@ pub(super) async fn production_project_server(
         let scope = code_search_scope.clone();
         let route_registered = Arc::clone(&route_registered);
         let cancellation = cancellation.clone();
+        let graph_runtime = Arc::clone(&graph_runtime);
         Arc::new(move || {
             let invocation = invocation.clone();
             let project_id = project_id.clone();
@@ -369,6 +371,7 @@ pub(super) async fn production_project_server(
             let scope = scope.clone();
             let route_registered = Arc::clone(&route_registered);
             let cancellation = cancellation.clone();
+            let graph_runtime = Arc::clone(&graph_runtime);
             Box::pin(async move {
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked before code-index mount".to_owned());
@@ -384,6 +387,7 @@ pub(super) async fn production_project_server(
                     Some(semantic_database),
                     semantic_lifecycle,
                     Some(semantic_resources),
+                    graph_runtime,
                 );
                 tokio::select! {
                     biased;

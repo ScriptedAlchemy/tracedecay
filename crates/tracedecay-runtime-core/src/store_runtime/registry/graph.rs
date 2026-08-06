@@ -2,8 +2,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tracedecay_domain::CodeGenerationId;
+use tracedecay_graph_db::GraphNamespace;
 use tracedecay_store::{
-    RetainedGraphStoreLeaseV1, StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1,
+    RetainedGraphStoreLeaseV1, StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1,
+    VerifiedStoreLocatorV1,
 };
 
 use super::{
@@ -16,6 +19,60 @@ pub struct CanonicalGraphStoreLeaseV1 {
     binding: StoreRuntimeBindingV1,
     verified_locator: VerifiedStoreLocatorV1,
     canonical_path: PathBuf,
+}
+
+/// One exact code scope routed through its owning project graph runtime.
+///
+/// The retained store lease deliberately stays project-scoped so all linked
+/// worktrees share one physical Grafeo file and one `GraphDbRegistry` entry.
+/// The namespace remains exact to the requested repository/worktree/ref or
+/// snapshot scope and immutable generation so independently published
+/// generations never overwrite one another.
+pub struct CanonicalCodeGraphStoreLeaseV1 {
+    store: Arc<CanonicalGraphStoreLeaseV1>,
+    code_shard_id: StoreShardIdV1,
+    generation_id: CodeGenerationId,
+    namespace: GraphNamespace,
+}
+
+impl CanonicalCodeGraphStoreLeaseV1 {
+    pub fn code_shard_id(&self) -> &StoreShardIdV1 {
+        &self.code_shard_id
+    }
+
+    pub fn generation_id(&self) -> &CodeGenerationId {
+        &self.generation_id
+    }
+
+    pub fn namespace(&self) -> &GraphNamespace {
+        &self.namespace
+    }
+}
+
+impl RetainedGraphStoreLeaseV1 for CanonicalCodeGraphStoreLeaseV1 {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        self.store.binding()
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        self.store.verified_locator()
+    }
+
+    fn canonical_path(&self) -> &Path {
+        self.store.canonical_path()
+    }
+}
+
+impl fmt::Debug for CanonicalCodeGraphStoreLeaseV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CanonicalCodeGraphStoreLeaseV1")
+            .field("store", &self.store)
+            .field("code_shard_id", &self.code_shard_id)
+            .field("generation_id", &self.generation_id)
+            .field("namespace", &self.namespace)
+            .finish()
+    }
 }
 
 impl RetainedGraphStoreLeaseV1 for CanonicalGraphStoreLeaseV1 {
@@ -54,6 +111,26 @@ impl Drop for CanonicalGraphStoreLeaseV1 {
 }
 
 impl StoreRuntimeRegistry {
+    /// Retains one physical project graph store together with the exact code
+    /// namespace selected by a linked worktree, ref, or immutable snapshot and
+    /// code generation.
+    pub async fn retain_code_graph_store(
+        &self,
+        project_key: StoreRuntimeKey,
+        code_shard_id: StoreShardIdV1,
+        generation_id: CodeGenerationId,
+    ) -> Result<Arc<CanonicalCodeGraphStoreLeaseV1>, StoreRuntimeRegistryFailure> {
+        validate_project_code_scope(&project_key, &code_shard_id)?;
+        let namespace = code_graph_namespace(&code_shard_id, &generation_id)?;
+        let store = self.retain_graph_store(project_key).await?;
+        Ok(Arc::new(CanonicalCodeGraphStoreLeaseV1 {
+            store,
+            code_shard_id,
+            generation_id,
+            namespace,
+        }))
+    }
+
     pub async fn retain_graph_store(
         &self,
         key: StoreRuntimeKey,
@@ -203,10 +280,54 @@ fn validate_graph_scope(key: &StoreRuntimeKey) -> Result<(), StoreRuntimeRegistr
         StoreShardScopeV1::Project { .. }
             | StoreShardScopeV1::ProjectSessions { .. }
             | StoreShardScopeV1::ProfileSessions
-            | StoreShardScopeV1::Code { .. }
     ) {
         Ok(())
     } else {
         Err(StoreRuntimeRegistryFailure::UnsupportedShardScope)
     }
+}
+
+fn validate_project_code_scope(
+    project_key: &StoreRuntimeKey,
+    code_shard_id: &StoreShardIdV1,
+) -> Result<(), StoreRuntimeRegistryFailure> {
+    let StoreShardScopeV1::Project { project_id } = &project_key.shard_id().scope else {
+        return Err(StoreRuntimeRegistryFailure::UnsupportedShardScope);
+    };
+    let StoreShardScopeV1::Code {
+        project_id: code_project_id,
+        ..
+    } = &code_shard_id.scope
+    else {
+        return Err(StoreRuntimeRegistryFailure::UnsupportedShardScope);
+    };
+    if project_key.shard_id().brain_id != code_shard_id.brain_id
+        || project_key.shard_id().profile_id != code_shard_id.profile_id
+        || project_id != code_project_id
+    {
+        return Err(StoreRuntimeRegistryFailure::ResolverFailed {
+            message: "code graph scope does not belong to the retained project authority"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn code_graph_namespace(
+    code_shard_id: &StoreShardIdV1,
+    generation_id: &CodeGenerationId,
+) -> Result<GraphNamespace, StoreRuntimeRegistryFailure> {
+    let digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.code-graph.scope.v1",
+        code_shard_id,
+        generation_id,
+    ))
+    .map_err(|error| StoreRuntimeRegistryFailure::ResolverFailed {
+        message: format!("derive exact code graph namespace: {error}"),
+    })?;
+    GraphNamespace::new(format!("code-scope:{}", digest.as_str())).map_err(|error| {
+        StoreRuntimeRegistryFailure::ResolverFailed {
+            message: format!("construct exact code graph namespace: {error}"),
+        }
+    })
 }
