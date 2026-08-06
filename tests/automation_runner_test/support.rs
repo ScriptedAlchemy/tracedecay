@@ -349,6 +349,7 @@ impl AgentTaskBackend for JsonBackend {
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: self.model.clone(),
+            provider: self.model.as_ref().map(|_| "fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -471,6 +472,7 @@ impl AgentTaskBackend for SkillJsonBackend {
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -523,6 +525,7 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
             output_text: json!({"skills": []}).to_string(),
             output_json: Some(json!({"skills": []})),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -562,6 +565,7 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
             output_text: json!({"skills": []}).to_string(),
             output_json: Some(json!({"skills": []})),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -639,6 +643,7 @@ impl AgentTaskBackend for SkillTextBackend {
             output_text: self.output.to_string(),
             output_json: None,
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -682,6 +687,7 @@ impl AgentTaskBackend for MalformedTextBackend {
             output_text: self.output.to_string(),
             output_json: None,
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -727,6 +733,7 @@ impl AgentTaskBackend for SessionJsonBackend {
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -786,6 +793,7 @@ impl AgentTaskBackend for CombinedJsonBackend {
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -839,6 +847,7 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
             output_text: json!({"facts": []}).to_string(),
             output_json: Some(json!({"facts": []})),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -910,6 +919,7 @@ impl AgentTaskBackend for SessionReplayEvidenceBackend {
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -959,6 +969,7 @@ impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
             output_text: json!({"skills": []}).to_string(),
             output_json: Some(json!({"skills": []})),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })

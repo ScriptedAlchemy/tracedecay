@@ -4,7 +4,9 @@ use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
     CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1,
     CanonicalWorkflowEvidenceKindV1, CanonicalWorkflowSemanticKindV1, ObservationId,
-    ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId, SessionId,
+    ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId,
+    ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
+    ProviderUsageScopeV1, SessionId,
 };
 
 use crate::{ObservationRecordParseErrorV1, parse_rfc3339_timestamp};
@@ -64,6 +66,7 @@ pub fn normalize(
             &mut facts,
             message,
             stable_record_id.as_str(),
+            record_kind == "assistant",
             authored_message,
         );
         append_assistant_attribution_fact(&mut facts, native, record_kind);
@@ -296,17 +299,63 @@ fn append_message_facts(
     facts: &mut Vec<CanonicalObservationFactV1>,
     message: &Value,
     message_id: &str,
+    provider_usage_allowed: bool,
     mut authored_message: Option<CanonicalObservationFactV1>,
 ) {
-    if let Some(usage) = message.get("usage").filter(|value| value.is_object()) {
-        facts.push(CanonicalObservationFactV1::Usage {
-            input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
-            output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
-            cache_read_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
-            cache_write_tokens: usage
-                .get("cache_creation_input_tokens")
-                .and_then(Value::as_u64),
-            reasoning_tokens: usage.get("reasoning_tokens").and_then(Value::as_u64),
+    if let Some(usage) = provider_usage_allowed
+        .then(|| message.get("usage").filter(|value| value.is_object()))
+        .flatten()
+    {
+        let input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
+        let output_tokens = usage.get("output_tokens").and_then(Value::as_u64);
+        let cache_read_tokens = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
+        let cache_write_tokens = usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64);
+        let reasoning_tokens = usage.get("reasoning_tokens").and_then(Value::as_u64);
+        let total_tokens = usage.get("total_tokens").and_then(Value::as_u64);
+        let optional_counters_are_valid = [
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+        ]
+        .into_iter()
+        .all(|field| {
+            usage
+                .get(field)
+                .is_none_or(|value| value.as_u64().is_some())
+        });
+        let counters =
+            if input_tokens.is_some() && output_tokens.is_some() && optional_counters_are_valid {
+                ProviderUsageCountersV1::Known {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    reasoning_tokens,
+                    total_tokens,
+                }
+            } else {
+                ProviderUsageCountersV1::Unknown {
+                    reason: CanonicalUnknownStateV1::Malformed,
+                }
+            };
+        facts.push(CanonicalObservationFactV1::ProviderUsage {
+            model: message.get("model").and_then(Value::as_str).map_or(
+                ProviderUsageModelV1::Unknown {
+                    reason: CanonicalUnknownStateV1::Absent,
+                },
+                |model| ProviderUsageModelV1::Known {
+                    model: model.to_owned(),
+                },
+            ),
+            native_scope: ProviderUsageScopeV1::Message,
+            counter_semantics: ProviderUsageCounterSemanticsV1::Delta,
+            counters,
+            request_id: None,
+            native_kind: "assistant".to_owned(),
+            native_field: "message.usage".to_owned(),
         });
     }
     let Some(blocks) = message.get("content").and_then(Value::as_array) else {
@@ -519,4 +568,80 @@ fn value_label(value: &Value) -> Option<String> {
 
 fn is_canonical_label(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+mod provider_usage_tests {
+    use serde_json::json;
+    use tracedecay_domain::{
+        CanonicalObservationFactV1, CanonicalUnknownStateV1, ObservationId,
+        ObservationSourceRangeV1, ProviderUsageCountersV1,
+    };
+
+    use super::normalize;
+
+    #[test]
+    fn malformed_required_usage_counter_is_unknown_not_zero() {
+        let native = json!({
+            "type": "assistant",
+            "message": {
+                "id": "message.fixture",
+                "model": "claude-sonnet-4",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}],
+                "usage": {
+                    "input_tokens": "100",
+                    "output_tokens": 20
+                }
+            }
+        });
+        let envelope = normalize(
+            &native,
+            "session.fixture",
+            ObservationId::new("message.fixture").unwrap(),
+            ObservationSourceRangeV1::new(10, 20).unwrap(),
+        )
+        .unwrap();
+
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::ProviderUsage {
+                counters: ProviderUsageCountersV1::Unknown {
+                    reason: CanonicalUnknownStateV1::Malformed
+                },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn user_record_usage_lookalike_is_not_provider_billing_evidence() {
+        let native = json!({
+            "type": "user",
+            "message": {
+                "id": "message.user-fixture",
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}],
+                "model": "claude-sonnet-4",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20
+                }
+            }
+        });
+        let envelope = normalize(
+            &native,
+            "session.fixture",
+            ObservationId::new("message.user-fixture").unwrap(),
+            ObservationSourceRangeV1::new(20, 30).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            !envelope
+                .facts()
+                .iter()
+                .any(|fact| matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. }))
+        );
+    }
 }

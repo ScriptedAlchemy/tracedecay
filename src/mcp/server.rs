@@ -48,6 +48,7 @@ mod hook_dispatch;
 mod hook_writes;
 mod ledger;
 mod lifecycle;
+mod live_transcript_refresh;
 mod project_registry;
 mod protocol;
 mod read_coalescing;
@@ -70,6 +71,9 @@ pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 pub(crate) use lifecycle::{
     McpBackgroundTaskOwner, ProjectServerResponseLifecycle, StartupCatchUpMachineV1,
     VersionCheckState,
+};
+pub(crate) use live_transcript_refresh::{
+    LiveTranscriptRefreshJoin, join_required_live_transcript_refresh,
 };
 pub(crate) use protocol::*;
 use read_coalescing::*;

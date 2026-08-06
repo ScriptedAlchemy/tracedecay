@@ -168,8 +168,9 @@ Network-capable effects are separate from core retrieval:
   explicitly configured private GitHub review source can use a read-only
   credential from the operating-system keyring; missing, ambiguous,
   write-capable, or unverifiable credentials fail closed.
-- Cost pricing refresh: `tracedecay cost` may retrieve public model-pricing
-  data and cache it locally.
+- Provider usage and pricing: `tracedecay cost` performs a side-effect-free read
+  over immutable native usage observations and the deterministic bundled
+  all-provider pricing table. Unknown or unavailable evidence remains typed.
 - Semantic models: when semantic auto-download is enabled, TraceDecay can
   download missing revision-pinned artifacts from Hugging Face hosts and verify
   their catalog-pinned lengths and SHA-256 digests before publication.

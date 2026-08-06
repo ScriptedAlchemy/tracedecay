@@ -20,6 +20,11 @@ pub const SESSION_MESSAGE_PROJECTOR_VERSION_V3: &str = "claude-session-message-v
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V4: &str = "claude-session-message-v4";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V4;
 pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION;
+/// Immutable provider-usage row contract. Usage shares the canonical
+/// observation projection's checkpoint and rebuild transaction, but carries
+/// its own output version so an already-published message checkpoint can never
+/// make a newly mounted usage table look current.
+pub const PROVIDER_USAGE_PROJECTOR_VERSION: &str = "provider-usage-v1";
 
 /// Immutable provenance for one observation-derived searchable message row.
 #[derive(Clone, Debug, PartialEq, Eq)]

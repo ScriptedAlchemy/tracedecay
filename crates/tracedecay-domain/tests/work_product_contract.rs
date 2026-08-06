@@ -1,15 +1,22 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{
-    AcceptanceCriterionId, AttemptId, InitiativeId, ManifestDigest, MilestoneId, ProposalId,
-    ProviderId, RetrievalAnchorId, RunId, TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId,
-    UtcMicros, WorkAcceptanceCriterionV1, WorkAttemptIdentityV1, WorkGraphChangeV1,
-    WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1,
-    WorkLegalActionV1, WorkPlanId, WorkPlanV1, WorkProductContractError, WorkProductGraphV1,
-    WorkProductProjectionBundleV1, WorkProductRelationV1, WorkProposalV1, WorkProposedChildV1,
-    WorkProviderOutcomeV1, WorkProviderRouteId, WorkProviderRouteV1, WorkProviderTerminalV1,
-    WorkRouteDecisionV1, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
-    WorkTaskEvidenceCoverageV1, WorkTaskEvidenceV1, WorkTimelineLaneV1,
+    AcceptanceCriterionId, ActorId, AttemptId, InitiativeId, MAX_WORK_PRODUCT_EVENT_EVIDENCE,
+    MAX_WORK_PRODUCT_EVENT_RELATION_SCOPES, MAX_WORK_PRODUCT_EVENT_SOURCE_WATERMARKS,
+    ManifestDigest, MilestoneId, ProjectionGenerationId, ProposalId, RetrievalAnchorId, RunId,
+    SourceStoreId, TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros,
+    WorkAcceptanceCriterionV1, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkGraphChangeV1,
+    WorkGraphVersionV1, WorkHandoffId, WorkHandoffV1, WorkHierarchyV1, WorkInitiativeV1,
+    WorkItemInputV1, WorkItemV1, WorkPlanId, WorkPlanV1, WorkProductAuthorizedRelationScopeV1,
+    WorkProductContractError, WorkProductEventContractError, WorkProductEventEvidenceV1,
+    WorkProductEventInputV1, WorkProductEventPayloadV1, WorkProductEventSequenceV1,
+    WorkProductEventV1, WorkProductGraphV1, WorkProductProfileScopeV1,
+    WorkProductProjectionBundleV1, WorkProductRelationV1, WorkProductSourceWatermarkV1,
+    WorkProjectionSequenceV1, WorkProposalDispositionV1, WorkProposalV1, WorkProposedChildV1,
+    WorkRelationReplanProposalV1, WorkRouteDecisionV1, WorkRuntimeAttemptProjectionV1,
+    WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorkScoreKindV1,
+    WorkShapeAssessmentV1, WorkSizingV1, WorkTaskEvidenceCoverageV1, WorkTaskEvidenceV1,
+    WorkTimelineLaneV1,
 };
 
 fn id<T>(value: &str) -> T
@@ -42,6 +49,15 @@ fn criterion(task: &str) -> WorkAcceptanceCriterionV1 {
 }
 
 fn item(task: &str, dependencies: &[&str], effort: u32) -> WorkItemV1 {
+    item_scheduled_at(task, dependencies, effort, None)
+}
+
+fn item_scheduled_at(
+    task: &str,
+    dependencies: &[&str],
+    effort: u32,
+    scheduled_at: Option<UtcMicros>,
+) -> WorkItemV1 {
     WorkItemV1::new(WorkItemInputV1 {
         task_id: id::<TaskId>(task),
         hierarchy: hierarchy(),
@@ -54,7 +70,7 @@ fn item(task: &str, dependencies: &[&str], effort: u32) -> WorkItemV1 {
         causal_candidates: BTreeSet::new(),
         acceptance_criteria: vec![criterion(task)],
         effort,
-        scheduled_at: None,
+        scheduled_at,
         deadline: Some(UtcMicros(1_000)),
         created_at: UtcMicros(10),
         updated_at: UtcMicros(10),
@@ -105,12 +121,87 @@ fn attempt(task_id: &TaskId, suffix: &str) -> WorkAttemptIdentityV1 {
     .unwrap()
 }
 
-fn route() -> WorkProviderRouteV1 {
-    WorkProviderRouteV1::new(
-        id::<ProviderId>("provider.contract"),
-        id::<WorkProviderRouteId>("route.contract"),
+fn runtime(
+    graph: &WorkProductGraphV1,
+    observed_at: UtcMicros,
+    attempts: Vec<WorkRuntimeAttemptProjectionV1>,
+) -> WorkRuntimeProjectionV1 {
+    WorkRuntimeProjectionV1::new(
+        graph.version(),
+        id::<ProjectionGenerationId>("generation.runtime.contract"),
+        WorkProjectionSequenceV1::new(1),
+        observed_at,
+        attempts,
+        WorkRuntimeProjectionCoverageV1::Complete,
     )
     .unwrap()
+}
+
+#[path = "work_product_contract/accepted_attempt.rs"]
+mod accepted_attempt;
+
+fn graph_with_accepted_relation_replan(
+    items: Vec<WorkItemV1>,
+    task_id: &str,
+    proposal_id: &str,
+    dependencies: &[&str],
+    informational_relations: &[&str],
+    causal_candidates: &[&str],
+) -> WorkProductGraphV1 {
+    let graph = graph(items);
+    let proposal = WorkRelationReplanProposalV1::new(
+        id(proposal_id),
+        id(task_id),
+        graph.version(),
+        dependencies.iter().map(|value| id(*value)).collect(),
+        informational_relations
+            .iter()
+            .map(|value| id(*value))
+            .collect(),
+        causal_candidates.iter().map(|value| id(*value)).collect(),
+    )
+    .unwrap();
+    graph
+        .apply(WorkGraphChangeV1::RelationReplanDecided {
+            proposal,
+            disposition: WorkProposalDispositionV1::Accepted,
+            decided_at: UtcMicros(20),
+        })
+        .unwrap()
+}
+
+fn relations_replanned(proposal_id: &str, applied_at: UtcMicros) -> WorkGraphChangeV1 {
+    WorkGraphChangeV1::TaskRelationsReplanned {
+        proposal_id: id(proposal_id),
+        applied_at,
+    }
+}
+
+fn work_product_event_input(event_id: &str, task_id: &str) -> WorkProductEventInputV1 {
+    WorkProductEventInputV1 {
+        event_id: id(event_id),
+        sequence: WorkProductEventSequenceV1::new(1).unwrap(),
+        actor_id: id("actor.contract"),
+        owner_scope: WorkProductProfileScopeV1 {
+            brain_id: id("brain.contract"),
+            profile_id: id("profile.contract"),
+        },
+        authorized_relation_scopes: Vec::new(),
+        expected_graph_version: None,
+        result_graph_version: WorkGraphVersionV1::initial(),
+        command_id: id("command.contract"),
+        canonical_input_digest: digest('1'),
+        causation_event_id: None,
+        evidence: Vec::new(),
+        source_watermark: WorkProductSourceWatermarkV1::new(BTreeMap::new()).unwrap(),
+        occurred_at: UtcMicros(0),
+        policy_revision_id: id("policy.contract"),
+        configuration_revision_id: id("configuration.contract"),
+        catalog_generation_id: id("catalog.contract"),
+        payload: WorkProductEventPayloadV1::Created {
+            graph: graph(vec![item(task_id, &[], 1)]),
+        },
+    }
 }
 
 #[test]
@@ -165,6 +256,491 @@ fn hierarchy_and_gating_dag_are_validated_as_one_graph() {
 }
 
 #[test]
+fn relation_replanning_replaces_all_selected_task_relations_at_one_version() {
+    let selected = id::<TaskId>("task.c");
+    let original = graph_with_accepted_relation_replan(
+        vec![
+            item("task.a", &[], 3),
+            item("task.b", &[], 5),
+            item("task.c", &["task.b"], 2),
+        ],
+        "task.c",
+        "proposal.c.replan",
+        &["task.a"],
+        &["task.b"],
+        &["task.a"],
+    );
+
+    let replanned = original
+        .apply(relations_replanned("proposal.c.replan", UtcMicros(30)))
+        .unwrap();
+
+    assert_eq!(replanned.version().get(), 3);
+    let item = replanned.item(&selected).unwrap();
+    assert_eq!(item.dependencies(), &BTreeSet::from([id("task.a")]));
+    assert_eq!(
+        item.informational_relations(),
+        &BTreeSet::from([id("task.b")])
+    );
+    assert_eq!(item.causal_candidates(), &BTreeSet::from([id("task.a")]));
+    assert!(item.accepted_proposal().is_none());
+    assert!(item.accepted_attempts().is_empty());
+    assert_eq!(item.updated_at(), UtcMicros(30));
+}
+
+#[test]
+fn accepted_relation_replan_payload_cannot_be_substituted_at_apply_time() {
+    let ordered = WorkRelationReplanProposalV1::new(
+        id("proposal.order.a"),
+        id("task.c"),
+        WorkGraphVersionV1::initial(),
+        vec![id("task.a"), id("task.b")],
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let reversed = WorkRelationReplanProposalV1::new(
+        id("proposal.order.b"),
+        id("task.c"),
+        WorkGraphVersionV1::initial(),
+        vec![id("task.b"), id("task.a")],
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(ordered.payload_digest, reversed.payload_digest);
+    assert_eq!(ordered.dependencies(), reversed.dependencies());
+
+    let original = graph_with_accepted_relation_replan(
+        vec![
+            item("task.a", &[], 3),
+            item("task.b", &[], 5),
+            item("task.c", &["task.b"], 2),
+        ],
+        "task.c",
+        "proposal.c.replan",
+        &["task.a"],
+        &[],
+        &[],
+    );
+    let mut encoded =
+        serde_json::to_value(relations_replanned("proposal.c.replan", UtcMicros(30))).unwrap();
+    encoded["dependencies"] = serde_json::json!(["task.b"]);
+
+    assert!(serde_json::from_value::<WorkGraphChangeV1>(encoded).is_err());
+    let replanned = original
+        .apply(relations_replanned("proposal.c.replan", UtcMicros(30)))
+        .unwrap();
+    assert_eq!(
+        replanned.item(&id("task.c")).unwrap().dependencies(),
+        &BTreeSet::from([id("task.a")])
+    );
+}
+
+#[test]
+fn relation_replanning_rejects_stale_unknown_duplicate_self_and_cyclic_proposals() {
+    let original = graph(vec![
+        item("task.a", &[], 3),
+        item("task.b", &["task.a"], 5),
+        item("task.c", &[], 2),
+    ]);
+    let proposal = |task: &str,
+                    proposal: &str,
+                    dependencies: &[&str],
+                    informational: &[&str],
+                    causal: &[&str]| {
+        WorkRelationReplanProposalV1::new(
+            id(proposal),
+            id(task),
+            original.version(),
+            dependencies.iter().map(|value| id(*value)).collect(),
+            informational.iter().map(|value| id(*value)).collect(),
+            causal.iter().map(|value| id(*value)).collect(),
+        )
+    };
+    assert_eq!(
+        proposal(
+            "task.c",
+            "proposal.duplicate",
+            &["task.a", "task.a"],
+            &[],
+            &[]
+        )
+        .unwrap_err(),
+        WorkProductContractError::DuplicateIdentity
+    );
+    assert_eq!(
+        proposal("task.c", "proposal.self-gating", &["task.c"], &[], &[]).unwrap_err(),
+        WorkProductContractError::DependencyCycle
+    );
+    assert_eq!(
+        proposal("task.c", "proposal.self-info", &[], &["task.c"], &[]).unwrap_err(),
+        WorkProductContractError::IllegalTransition
+    );
+    assert_eq!(
+        proposal("task.c", "proposal.self-causal", &[], &[], &["task.c"]).unwrap_err(),
+        WorkProductContractError::IllegalTransition
+    );
+
+    let decide = |proposal| WorkGraphChangeV1::RelationReplanDecided {
+        proposal,
+        disposition: WorkProposalDispositionV1::Accepted,
+        decided_at: UtcMicros(20),
+    };
+    assert_eq!(
+        original
+            .clone()
+            .apply(WorkGraphChangeV1::RelationReplanDecided {
+                proposal: proposal("task.c", "proposal.stale-time", &[], &[], &[]).unwrap(),
+                disposition: WorkProposalDispositionV1::Accepted,
+                decided_at: UtcMicros(9),
+            })
+            .unwrap_err(),
+        WorkProductContractError::InvalidTime
+    );
+    let mut mismatched_digest = serde_json::to_value(
+        proposal(
+            "task.c",
+            "proposal.mismatched-digest",
+            &["task.a"],
+            &[],
+            &[],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    mismatched_digest["payload_digest"] = serde_json::to_value(digest('0')).unwrap();
+    assert_eq!(
+        original
+            .clone()
+            .apply(decide(
+                serde_json::from_value::<WorkRelationReplanProposalV1>(mismatched_digest).unwrap()
+            ))
+            .unwrap_err(),
+        WorkProductContractError::ProposalMismatch
+    );
+    assert_eq!(
+        original
+            .clone()
+            .apply(decide(
+                proposal("task.unknown", "proposal.unknown-task", &[], &[], &[]).unwrap()
+            ))
+            .unwrap_err(),
+        WorkProductContractError::UnknownTask
+    );
+    assert_eq!(
+        original
+            .clone()
+            .apply(decide(
+                proposal(
+                    "task.c",
+                    "proposal.unknown-relation",
+                    &["task.unknown"],
+                    &[],
+                    &[]
+                )
+                .unwrap()
+            ))
+            .unwrap_err(),
+        WorkProductContractError::UnknownTask
+    );
+    assert_eq!(
+        original
+            .clone()
+            .apply(decide(
+                proposal("task.a", "proposal.cycle", &["task.b"], &[], &[]).unwrap()
+            ))
+            .unwrap_err(),
+        WorkProductContractError::DependencyCycle
+    );
+    assert_eq!(original.version(), WorkGraphVersionV1::initial());
+
+    let accepted = graph_with_accepted_relation_replan(
+        original.items().to_vec(),
+        "task.c",
+        "proposal.c.stale",
+        &["task.a"],
+        &[],
+        &[],
+    );
+    let advanced = accepted
+        .apply(WorkGraphChangeV1::TaskAdded {
+            item: item("task.d", &[], 1),
+        })
+        .unwrap();
+    assert_eq!(
+        advanced
+            .apply(relations_replanned("proposal.c.stale", UtcMicros(30)))
+            .unwrap_err(),
+        WorkProductContractError::ProposalMismatch
+    );
+}
+
+#[test]
+fn informational_and_causal_relations_may_form_multi_task_cycles() {
+    let graph = graph_with_accepted_relation_replan(
+        vec![item("task.a", &[], 3), item("task.b", &[], 5)],
+        "task.a",
+        "proposal.a.relations",
+        &[],
+        &["task.b"],
+        &["task.b"],
+    )
+    .apply(relations_replanned("proposal.a.relations", UtcMicros(30)))
+    .unwrap();
+    let graph = graph_with_accepted_relation_replan(
+        graph.items().to_vec(),
+        "task.b",
+        "proposal.b.relations",
+        &[],
+        &["task.a"],
+        &["task.a"],
+    )
+    .apply(relations_replanned("proposal.b.relations", UtcMicros(30)))
+    .unwrap();
+
+    assert_eq!(
+        graph.item(&id("task.a")).unwrap().informational_relations(),
+        &BTreeSet::from([id("task.b")])
+    );
+    assert_eq!(
+        graph.item(&id("task.b")).unwrap().causal_candidates(),
+        &BTreeSet::from([id("task.a")])
+    );
+}
+
+#[test]
+fn work_product_event_envelopes_pin_profile_authority_versions_and_exact_evidence() {
+    let mut input = work_product_event_input("event.work-product.1", "task.event");
+    input.sequence = WorkProductEventSequenceV1::new(7).unwrap();
+    input.authorized_relation_scopes = vec![
+        WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: id("project.contract"),
+            repository_id: id("repository.contract"),
+        },
+        WorkProductAuthorizedRelationScopeV1::Project {
+            project_id: id("project.contract"),
+        },
+    ];
+    input.evidence = vec![WorkProductEventEvidenceV1 {
+        source_store_id: id("source.contract"),
+        anchor_id: id("anchor.contract"),
+        evidence_digest: digest('2'),
+    }];
+    input.source_watermark =
+        WorkProductSourceWatermarkV1::new(BTreeMap::from([(id("source.contract"), 11)])).unwrap();
+    let event = WorkProductEventV1::new(input).unwrap();
+
+    assert_eq!(event.expected_graph_version(), None);
+    assert_eq!(event.result_graph_version(), WorkGraphVersionV1::initial());
+    assert_eq!(event.occurred_at(), UtcMicros(0));
+    assert_eq!(event.evidence()[0].anchor_id.as_str(), "anchor.contract");
+    assert_eq!(event.authorized_relation_scopes().len(), 2);
+    assert!(matches!(
+        event.authorized_relation_scopes()[0],
+        WorkProductAuthorizedRelationScopeV1::Project { .. }
+    ));
+    let encoded = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        serde_json::from_value::<WorkProductEventV1>(encoded).unwrap(),
+        event
+    );
+}
+
+#[test]
+fn work_product_event_deserialization_rejects_invalid_creation_progression_and_self_causation() {
+    let input = work_product_event_input("event.work-product.invalid", "task.event.invalid");
+    let event = WorkProductEventV1::new(input).unwrap();
+    let mut noncontiguous = serde_json::to_value(&event).unwrap();
+    noncontiguous["result_graph_version"] = serde_json::json!(2);
+    assert!(serde_json::from_value::<WorkProductEventV1>(noncontiguous).is_err());
+
+    let mut self_caused = serde_json::to_value(event).unwrap();
+    self_caused["causation_event_id"] = serde_json::json!("event.work-product.invalid");
+    assert_eq!(
+        serde_json::from_value::<WorkProductEventV1>(self_caused)
+            .unwrap_err()
+            .to_string(),
+        WorkProductEventContractError::SelfCausation.to_string()
+    );
+}
+
+#[test]
+fn work_product_event_rejects_created_and_changed_payload_version_substitution() {
+    let mut created =
+        work_product_event_input("event.work-product.created-mismatch", "task.event.created");
+    created.expected_graph_version = Some(WorkGraphVersionV1::initial());
+    created.result_graph_version = WorkGraphVersionV1::new(2).unwrap();
+    assert_eq!(
+        WorkProductEventV1::new(created).unwrap_err(),
+        WorkProductEventContractError::InvalidVersionProgression
+    );
+
+    let mut changed =
+        work_product_event_input("event.work-product.changed-mismatch", "task.event.changed");
+    changed.payload = WorkProductEventPayloadV1::Changed {
+        change: WorkGraphChangeV1::TaskAdded {
+            item: item("task.event.changed.next", &[], 1),
+        },
+    };
+    assert_eq!(
+        WorkProductEventV1::new(changed.clone()).unwrap_err(),
+        WorkProductEventContractError::InvalidVersionProgression
+    );
+    changed.expected_graph_version = Some(WorkGraphVersionV1::initial());
+    changed.result_graph_version = WorkGraphVersionV1::new(2).unwrap();
+    assert!(WorkProductEventV1::new(changed).is_ok());
+
+    let relation_proposal = WorkRelationReplanProposalV1::new(
+        id("proposal.event.replan"),
+        id("task.event.changed"),
+        WorkGraphVersionV1::initial(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let mut relation_event =
+        work_product_event_input("event.work-product.replan", "task.event.changed");
+    relation_event.expected_graph_version = Some(WorkGraphVersionV1::initial());
+    relation_event.result_graph_version = WorkGraphVersionV1::new(2).unwrap();
+    relation_event.payload = WorkProductEventPayloadV1::Changed {
+        change: WorkGraphChangeV1::RelationReplanDecided {
+            proposal: relation_proposal,
+            disposition: WorkProposalDispositionV1::Accepted,
+            decided_at: UtcMicros(1),
+        },
+    };
+    let mut mismatched_digest =
+        serde_json::to_value(WorkProductEventV1::new(relation_event).unwrap()).unwrap();
+    mismatched_digest["payload"]["change"]["proposal"]["payload_digest"] =
+        serde_json::to_value(digest('0')).unwrap();
+    assert!(serde_json::from_value::<WorkProductEventV1>(mismatched_digest).is_err());
+
+    let version_two_graph = graph(vec![item("task.event.graph", &[], 1)])
+        .apply(WorkGraphChangeV1::TaskAdded {
+            item: item("task.event.graph.next", &[], 1),
+        })
+        .unwrap();
+    let mut wrong_created =
+        work_product_event_input("event.work-product.graph-mismatch", "task.event.ignored");
+    wrong_created.payload = WorkProductEventPayloadV1::Created {
+        graph: version_two_graph,
+    };
+    assert_eq!(
+        WorkProductEventV1::new(wrong_created).unwrap_err(),
+        WorkProductEventContractError::InvalidVersionProgression
+    );
+}
+
+#[test]
+fn work_product_event_rejects_duplicate_authorized_scopes() {
+    let relation_scope = WorkProductAuthorizedRelationScopeV1::Project {
+        project_id: id("project.contract"),
+    };
+    let mut input = work_product_event_input(
+        "event.work-product.duplicate-scope",
+        "task.event.duplicate-scope",
+    );
+    input.authorized_relation_scopes = vec![relation_scope.clone(), relation_scope];
+    let rejected = WorkProductEventV1::new(input).unwrap_err();
+
+    assert_eq!(
+        rejected,
+        WorkProductEventContractError::DuplicateRelationScope
+    );
+}
+
+#[test]
+fn work_product_event_rejects_duplicate_evidence_and_missing_source_watermarks() {
+    let evidence = WorkProductEventEvidenceV1 {
+        source_store_id: id("source.contract"),
+        anchor_id: id("anchor.contract"),
+        evidence_digest: digest('4'),
+    };
+    let mut duplicate =
+        work_product_event_input("event.work-product.duplicate", "task.event.duplicate");
+    duplicate.evidence = vec![evidence.clone(), evidence.clone()];
+    duplicate.source_watermark =
+        WorkProductSourceWatermarkV1::new(BTreeMap::from([(id("source.contract"), 1)])).unwrap();
+
+    assert_eq!(
+        WorkProductEventV1::new(duplicate).unwrap_err(),
+        WorkProductEventContractError::DuplicateEvidence
+    );
+
+    let mut missing_source =
+        work_product_event_input("event.work-product.no-watermark", "task.event.no-watermark");
+    missing_source.evidence = vec![evidence];
+    assert_eq!(
+        WorkProductEventV1::new(missing_source).unwrap_err(),
+        WorkProductEventContractError::MissingEvidenceSourceWatermark
+    );
+}
+
+#[test]
+fn work_product_event_sequence_and_metadata_bounds_are_enforced() {
+    assert_eq!(
+        WorkProductEventSequenceV1::new(0).unwrap_err(),
+        WorkProductEventContractError::InvalidSequence
+    );
+    assert_eq!(
+        WorkProductSourceWatermarkV1::new(BTreeMap::from([(id("source.zero"), 0)])).unwrap_err(),
+        WorkProductEventContractError::InvalidSourceWatermarkSequence
+    );
+    assert_eq!(
+        serde_json::from_value::<WorkProductSourceWatermarkV1>(serde_json::json!({
+            "source.zero": 0
+        }))
+        .unwrap_err()
+        .to_string(),
+        WorkProductEventContractError::InvalidSourceWatermarkSequence.to_string()
+    );
+    let components = (0..=MAX_WORK_PRODUCT_EVENT_SOURCE_WATERMARKS)
+        .map(|ordinal| {
+            (
+                id::<SourceStoreId>(&format!("source.contract.{ordinal}")),
+                ordinal as u64 + 1,
+            )
+        })
+        .collect();
+    assert_eq!(
+        WorkProductSourceWatermarkV1::new(components).unwrap_err(),
+        WorkProductEventContractError::TooManySourceWatermarks
+    );
+
+    let mut too_many_scopes =
+        work_product_event_input("event.work-product.scopes-bound", "task.event.scopes-bound");
+    too_many_scopes.authorized_relation_scopes = (0..=MAX_WORK_PRODUCT_EVENT_RELATION_SCOPES)
+        .map(|ordinal| WorkProductAuthorizedRelationScopeV1::Project {
+            project_id: id(&format!("project.contract.{ordinal}")),
+        })
+        .collect();
+    assert_eq!(
+        WorkProductEventV1::new(too_many_scopes).unwrap_err(),
+        WorkProductEventContractError::TooManyRelationScopes
+    );
+
+    let mut too_much_evidence = work_product_event_input(
+        "event.work-product.evidence-bound",
+        "task.event.evidence-bound",
+    );
+    too_much_evidence.evidence = (0..=MAX_WORK_PRODUCT_EVENT_EVIDENCE)
+        .map(|ordinal| WorkProductEventEvidenceV1 {
+            source_store_id: id("source.contract"),
+            anchor_id: id(&format!("anchor.contract.{ordinal}")),
+            evidence_digest: digest('6'),
+        })
+        .collect();
+    too_much_evidence.source_watermark =
+        WorkProductSourceWatermarkV1::new(BTreeMap::from([(id("source.contract"), 1)])).unwrap();
+    assert_eq!(
+        WorkProductEventV1::new(too_much_evidence).unwrap_err(),
+        WorkProductEventContractError::TooMuchEvidence
+    );
+}
+
+#[test]
 fn crafted_json_cannot_deserialize_a_cyclic_graph_snapshot() {
     let graph = graph(vec![item("task.a", &[], 3), item("task.b", &["task.a"], 5)]);
     let mut encoded = serde_json::to_value(graph).unwrap();
@@ -181,7 +757,12 @@ fn every_work_view_is_a_projection_of_the_same_versioned_selection() {
         item("task.c", &["task.a"], 2),
         item("task.d", &["task.b", "task.c"], 4),
     ]);
-    let bundle = WorkProductProjectionBundleV1::from_graph(&graph).unwrap();
+    let bundle = WorkProductProjectionBundleV1::from_graph(
+        &graph,
+        &runtime(&graph, UtcMicros(100), Vec::new()),
+        UtcMicros(100),
+    )
+    .unwrap();
 
     assert_eq!(bundle.graph_version(), graph.version());
     assert_eq!(bundle.kanban().graph_version(), graph.version());
@@ -209,6 +790,54 @@ fn every_work_view_is_a_projection_of_the_same_versioned_selection() {
     assert_eq!(
         bundle.kanban().lane_for(&id::<TaskId>("task.d")),
         Some(WorkTimelineLaneV1::Blocked)
+    );
+}
+
+#[test]
+fn an_initial_empty_graph_has_empty_zero_effort_projections() {
+    let graph = graph(Vec::new());
+    let bundle = WorkProductProjectionBundleV1::from_graph(
+        &graph,
+        &runtime(&graph, UtcMicros(0), Vec::new()),
+        UtcMicros(0),
+    )
+    .unwrap();
+
+    assert!(bundle.critical_path().task_ids().is_empty());
+    assert_eq!(bundle.critical_path().total_effort(), 0);
+    assert_eq!(bundle.workload().total_effort(), 0);
+    assert!(bundle.dag().gating_edges().is_empty());
+}
+
+#[test]
+fn projection_observation_time_controls_scheduled_lane_boundaries() {
+    let task_id = id::<TaskId>("task.scheduled");
+    let graph = graph(vec![item_scheduled_at(
+        task_id.as_str(),
+        &[],
+        3,
+        Some(UtcMicros(500)),
+    )]);
+
+    let before_schedule = WorkProductProjectionBundleV1::from_graph(
+        &graph,
+        &runtime(&graph, UtcMicros(0), Vec::new()),
+        UtcMicros(0),
+    )
+    .unwrap();
+    assert_eq!(
+        before_schedule.kanban().lane_for(&task_id),
+        Some(WorkTimelineLaneV1::Scheduled)
+    );
+    let at_schedule = WorkProductProjectionBundleV1::from_graph(
+        &graph,
+        &runtime(&graph, UtcMicros(500), Vec::new()),
+        UtcMicros(500),
+    )
+    .unwrap();
+    assert_eq!(
+        at_schedule.kanban().lane_for(&task_id),
+        Some(WorkTimelineLaneV1::Todo)
     );
 }
 
@@ -244,17 +873,53 @@ fn task_evidence_is_task_rooted_bounded_and_exactly_expandable() {
         "anchor.task.review"
     );
 
-    let wrong_root = WorkTaskEvidenceV1::new(
-        id("task.other"),
-        WorkGraphVersionV1::new(7).unwrap(),
-        evidence.links().to_vec(),
-        WorkTaskEvidenceCoverageV1::Complete {
-            returned: 1,
-            available: 1,
-        },
-    )
-    .unwrap_err();
-    assert_eq!(wrong_root, WorkProductContractError::EvidenceTaskMismatch);
+    let mut wrong_root = serde_json::to_value(&evidence).unwrap();
+    wrong_root["task_id"] = serde_json::json!("task.other");
+    assert_eq!(
+        serde_json::from_value::<WorkTaskEvidenceV1>(wrong_root)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        WorkProductContractError::EvidenceTaskMismatch
+    );
+    let mut invalid_link = serde_json::to_value(&evidence).unwrap();
+    invalid_link["links"][0]["revision"] = serde_json::json!(0);
+    assert_eq!(
+        serde_json::from_value::<WorkTaskEvidenceV1>(invalid_link)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        WorkProductContractError::InvalidVersion
+    );
+    let mut duplicate_link = serde_json::to_value(&evidence).unwrap();
+    let repeated_link = duplicate_link["links"][0].clone();
+    duplicate_link["links"]
+        .as_array_mut()
+        .unwrap()
+        .push(repeated_link);
+    duplicate_link["coverage"] = serde_json::json!({"state":"complete","returned":2,"available":2});
+    assert_eq!(
+        serde_json::from_value::<WorkTaskEvidenceV1>(duplicate_link)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        WorkProductContractError::DuplicateIdentity
+    );
+    for coverage in [
+        serde_json::json!({"state":"complete","returned":1,"available":2}),
+        serde_json::json!({"state":"partial","returned":2,"available":1,"unknowns":["missing"]}),
+        serde_json::json!({"state":"partial","returned":1,"available":2,"unknowns":[]}),
+        serde_json::json!({"state":"partial","returned":1,"available":2,"unknowns":["bad\ntext"]}),
+    ] {
+        let mut malformed = serde_json::to_value(&evidence).unwrap();
+        malformed["coverage"] = coverage;
+        assert!(
+            serde_json::from_value::<WorkTaskEvidenceV1>(malformed)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
 }
 
 #[test]
@@ -284,6 +949,16 @@ fn accepting_a_decomposition_proposal_fans_out_without_changing_parent_identity(
     )
     .unwrap();
 
+    assert_eq!(
+        graph
+            .clone()
+            .apply(WorkGraphChangeV1::ProposalAccepted {
+                proposal: proposal.clone(),
+                accepted_at: UtcMicros(9),
+            })
+            .unwrap_err(),
+        WorkProductContractError::InvalidTime
+    );
     let accepted = graph
         .apply(WorkGraphChangeV1::ProposalAccepted {
             proposal,
@@ -306,118 +981,4 @@ fn accepting_a_decomposition_proposal_fans_out_without_changing_parent_identity(
         accepted.item(&id("task.child.b")).unwrap().dependencies(),
         &BTreeSet::from([id("task.child.a")])
     );
-}
-
-#[test]
-fn retry_projections_ignore_historical_outcomes_and_failed_current_attempt_cannot_accept() {
-    let task_id = id::<TaskId>("task.retry");
-    let graph = graph(vec![item(task_id.as_str(), &[], 8)]);
-    let proposal = WorkProposalV1::new(
-        id("proposal.retry"),
-        task_id.clone(),
-        graph.version(),
-        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 2, 2, 2, 2).unwrap(),
-        WorkSizingV1::new(WorkScoreKindV1::Heuristic, 3, 5, 8, "retry fixture").unwrap(),
-        Vec::new(),
-        WorkRouteDecisionV1::selected(
-            route(),
-            Vec::new(),
-            BTreeSet::new(),
-            "selected fixture route".to_owned(),
-        )
-        .unwrap(),
-        "Exercise current-attempt truth".to_owned(),
-        digest('a'),
-    )
-    .unwrap();
-    let graph = graph
-        .apply(WorkGraphChangeV1::ProposalAccepted {
-            proposal: proposal.clone(),
-            accepted_at: UtcMicros(20),
-        })
-        .unwrap();
-    let first = attempt(&task_id, "first");
-    let graph = graph
-        .apply(WorkGraphChangeV1::ProviderAdmitted {
-            task_id: task_id.clone(),
-            proposal_id: proposal.proposal_id().clone(),
-            identity: first.clone(),
-            route: route(),
-            admitted_at: UtcMicros(30),
-        })
-        .unwrap();
-    let graph = graph
-        .apply(WorkGraphChangeV1::ProviderOutcomeRecorded {
-            task_id: task_id.clone(),
-            outcome: WorkProviderOutcomeV1::new(
-                first.clone(),
-                WorkProviderTerminalV1::Failed,
-                digest('b'),
-                UtcMicros(40),
-            ),
-        })
-        .unwrap();
-    let second = attempt(&task_id, "second");
-    let graph = graph
-        .apply(WorkGraphChangeV1::AttemptRetried {
-            task_id: task_id.clone(),
-            prior_identity: first,
-            identity: second.clone(),
-            route: route(),
-            admitted_at: UtcMicros(50),
-        })
-        .unwrap();
-    let projection = WorkProductProjectionBundleV1::from_graph(&graph).unwrap();
-    assert_eq!(
-        projection.kanban().lane_for(&task_id),
-        Some(WorkTimelineLaneV1::Running)
-    );
-    assert_eq!(
-        projection.kanban().legal_actions_for(&task_id),
-        Some(&BTreeSet::from([
-            WorkLegalActionV1::ViewEvidence,
-            WorkLegalActionV1::RecordOutcome,
-            WorkLegalActionV1::CancelAttempt,
-            WorkLegalActionV1::RollbackAdmission,
-            WorkLegalActionV1::Handoff,
-        ]))
-    );
-
-    let graph = graph
-        .apply(WorkGraphChangeV1::ProviderOutcomeRecorded {
-            task_id: task_id.clone(),
-            outcome: WorkProviderOutcomeV1::new(
-                second,
-                WorkProviderTerminalV1::Failed,
-                digest('c'),
-                UtcMicros(60),
-            ),
-        })
-        .unwrap();
-    let evidence = TaskEvidenceLinkV1::new(
-        id("evidence.retry"),
-        1,
-        task_id.clone(),
-        id("anchor.retry"),
-        digest('d'),
-        UtcMicros(70),
-    )
-    .unwrap();
-    let graph = graph
-        .apply(WorkGraphChangeV1::EvidenceLinked {
-            task_id: task_id.clone(),
-            evidence,
-        })
-        .unwrap();
-    let rejected = graph
-        .apply(WorkGraphChangeV1::TaskAccepted {
-            task_id,
-            evidence_by_criterion: BTreeMap::from([(
-                id("criterion.task.retry"),
-                id("evidence.retry"),
-            )]),
-            accepted_at: UtcMicros(80),
-        })
-        .unwrap_err();
-    assert_eq!(rejected, WorkProductContractError::AcceptanceUnsatisfied);
 }

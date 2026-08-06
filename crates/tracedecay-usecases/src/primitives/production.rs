@@ -27,9 +27,8 @@ use tracedecay_application::{
     RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderEvaluationStateV1,
-    RetrievalAnchorId, RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
-    UtcMicros, canonical_sha256,
+    CodeGenerationId, ManifestDigest, ProjectId, ProviderEvaluationStateV1, RetrievalAnchorId,
+    RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
@@ -79,6 +78,12 @@ use tracedecay_temporal_query::ports::{
     TemporalSnapshotRequest, TemporalWatermarks,
 };
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+
+mod managed_test_scope;
+#[cfg(test)]
+#[path = "production/managed_test_scope_tests.rs"]
+mod managed_test_scope_tests;
+use managed_test_scope::ProductionManagedTestRunCurrentScope;
 
 const PRIMITIVE_SORT: &str = "sort.application.primitive.v1";
 
@@ -2207,10 +2212,11 @@ pub async fn open_production_primitive_runtime(
         AuthenticatedSymbolGraphCursorAdapter::new(snapshots, Arc::clone(&authenticator)),
     );
     let test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort> =
-        Arc::new(ProductionManagedTestRunCurrentScope {
+        Arc::new(ProductionManagedTestRunCurrentScope::new(
             project_root,
-            code_index: Arc::clone(&code_index),
-        });
+            scope.clone(),
+            Arc::clone(&code_index),
+        ));
     let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
         Arc::clone(&graph),
         database.clone(),
@@ -2241,49 +2247,6 @@ pub async fn open_production_primitive_runtime(
         operation_events,
         test_run_scope,
     )
-}
-
-#[derive(Clone)]
-struct ProductionManagedTestRunCurrentScope {
-    project_root: PathBuf,
-    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
-}
-
-impl ManagedTestRunCurrentScopePort for ProductionManagedTestRunCurrentScope {
-    fn current_identity(&self) -> ManagedTestRunCurrentIdentityFuture<'_> {
-        let project_root = self.project_root.clone();
-        let code_index = Arc::clone(&self.code_index);
-        Box::pin(async move {
-            let head_commit_id = current_managed_test_run_head(&project_root)?;
-            let current = code_index
-                .current_identity(project_root, None)
-                .await
-                .map_err(|_| ApplicationContractError::Inconsistent {
-                    field: "managed test result code generation",
-                })?;
-            Ok(ManagedTestRunCurrentIdentity {
-                head_commit_id,
-                code_generation_id: current.code_generation_id,
-            })
-        })
-    }
-}
-
-fn current_managed_test_run_head(
-    project_root: &Path,
-) -> Result<CommitId, ApplicationContractError> {
-    let repository =
-        gix::open(project_root).map_err(|_| ApplicationContractError::Inconsistent {
-            field: "managed test result repository",
-        })?;
-    let head_commit_id = repository
-        .head_commit()
-        .ok()
-        .and_then(|commit| CommitId::new(commit.id().to_hex().to_string()).ok())
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "managed test result head",
-        })?;
-    Ok(head_commit_id)
 }
 
 pub fn admitted_root_uri_for_project(

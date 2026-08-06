@@ -205,7 +205,6 @@ pub fn session_authority_table_class(table: &str) -> StoreDurabilityClass {
         | "session_messages"
         | "session_messages_fts"
         | "sessions"
-        | "turns"
         | "observations"
         | "observation_retrieval_anchors"
         | "observation_repository_provenance"
@@ -371,7 +370,6 @@ mod tests {
             "session_messages",
             "session_messages_fts",
             "sessions",
-            "turns",
             "observations",
             "observation_retrieval_anchors",
             "observation_repository_provenance",

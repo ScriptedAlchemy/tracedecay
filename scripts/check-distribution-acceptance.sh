@@ -62,7 +62,7 @@ assert_required_assets() {
     "plugin/.codex-plugin/plugin.json"
     "plugin/.cursor-plugin/plugin.json"
     "plugin/.kimi-plugin/plugin.json"
-    "plugin/cursor-native-extension/dist/extension.js"
+    "plugin/cursor-native-extension/embedded/extension.js"
     "dashboard/app-dist/index.html"
     "tests/fixtures/packaged_host_events/claude.json"
     "tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"

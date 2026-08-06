@@ -556,6 +556,7 @@ enum DurableDatabaseInventoryV1 {
 /// would check the wrong file (or no file) and report "empty" for a store whose
 /// real graph sits elsewhere.
 fn durable_database_inventory(
+    data_root: &Path,
     manifest_bytes: Option<&[u8]>,
     graph_scope_relpaths: &[PathBuf],
 ) -> DurableDatabaseInventoryV1 {
@@ -573,6 +574,34 @@ fn durable_database_inventory(
         }
     }
 
+    // Durable facts are project-wide and outlive the branch they were written
+    // on, so a branch database can hold the only surviving rows. The manifest
+    // does not name them; an unlistable directory is therefore unverifiable,
+    // not empty.
+    let branches = data_root.join("branches");
+    match std::fs::read_dir(&branches) {
+        Ok(entries) => {
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    return DurableDatabaseInventoryV1::Unverifiable;
+                };
+                let path = entry.path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("db") {
+                    continue;
+                }
+                let Some(name) = path.file_name() else {
+                    continue;
+                };
+                let relpath = Path::new("branches").join(name);
+                if !inventory.contains(&relpath) {
+                    inventory.push(relpath);
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return DurableDatabaseInventoryV1::Unverifiable,
+    }
+
     DurableDatabaseInventoryV1::Resolved(inventory)
 }
 
@@ -584,7 +613,8 @@ async fn check_store_durable_memory(
     graph_scope_relpaths: &[PathBuf],
     scratch_root: &Path,
 ) -> DurableMemoryCheck {
-    let inventory = match durable_database_inventory(manifest_bytes, graph_scope_relpaths) {
+    let inventory = match durable_database_inventory(data_root, manifest_bytes, graph_scope_relpaths)
+    {
         DurableDatabaseInventoryV1::Resolved(inventory) => inventory,
         DurableDatabaseInventoryV1::Unverifiable => return DurableMemoryCheck::Unverifiable,
     };

@@ -5,26 +5,6 @@ mod activity;
 mod activity_tests;
 mod mcp_dispatch;
 
-pub mod accounting {
-    /// A single parsed turn from a Claude Code session transcript, ready for
-    /// insertion into the `turns` accounting projection.
-    pub struct CostTurn {
-        pub message_id: String,
-        pub project_hash: String,
-        pub session_id: String,
-        pub model: String,
-        pub timestamp: u64,
-        pub input_tokens: u64,
-        pub output_tokens: u64,
-        pub cache_write_tokens: u64,
-        pub cache_read_tokens: u64,
-        pub cost_usd: f64,
-        pub category: String,
-        pub tool_names: String,
-    }
-}
-
-pub use accounting::CostTurn;
 pub use activity::ActivityObservedV1;
 pub use mcp_dispatch::{
     McpDispatchCancellationV1, McpDispatchDeadlineV1, McpDispatchObservedV1, McpDispatchTerminalV1,

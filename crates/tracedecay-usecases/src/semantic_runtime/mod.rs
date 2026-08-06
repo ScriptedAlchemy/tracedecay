@@ -10,11 +10,13 @@ mod config_store;
 mod configuration_operation;
 mod coordinator;
 mod fair_scheduler;
+mod graph_provider;
 mod owner;
 mod ports;
 mod production;
 mod publish_failure_memo;
 mod redundancy;
+mod retention;
 
 pub(crate) use accepted_profile_authority::SemanticAcceptedProfileAuthorityPortV1;
 pub use accepted_profile_authority::{
@@ -41,6 +43,9 @@ pub use fair_scheduler::{
     SemanticProjectionPublicationLeaseV1, SemanticProjectionScheduleErrorV1,
     SemanticProjectionSchedulerConfigErrorV1, SemanticProjectionSchedulerLimitsV1,
     SemanticProjectionSchedulerStatsV1, SemanticProjectionSchedulingPortV1,
+};
+pub use graph_provider::{
+    RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
 };
 pub use owner::SemanticRuntimeOwnerV1;
 pub use ports::{
@@ -85,6 +90,7 @@ pub(crate) use redundancy::{
     register_project_semantic_redundancy_generation,
     unregister_project_semantic_redundancy_generation,
 };
+pub use retention::SemanticRetainedVectorGenerationsV1;
 
 #[cfg(test)]
 mod tests;

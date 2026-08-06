@@ -97,9 +97,9 @@ pub use overlay::{
     CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority, DebouncedDiagnostic,
     DebouncedDiagnosticKind, DiagnosticSnapshotAdapter, MAX_DIAGNOSTIC_OPERATIONS,
     MAX_OPEN_DOCUMENTS, MAX_OVERLAY_BYTES, MAX_PENDING_OVERLAY_DIAGNOSTICS,
-    ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort, OVERLAY_DIAGNOSTIC_DEBOUNCE_MS,
-    OVERLAY_DIAGNOSTIC_MAX_WAIT_MS, OverlayChange, OverlayDiagnosticDebouncer, OverlayError,
-    OverlaySnapshot, OverlayStore,
+    MAX_TOTAL_OVERLAY_BYTES, ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort,
+    OVERLAY_DIAGNOSTIC_DEBOUNCE_MS, OVERLAY_DIAGNOSTIC_MAX_WAIT_MS, OverlayChange,
+    OverlayDiagnosticDebouncer, OverlayError, OverlayLimits, OverlaySnapshot, OverlayStore,
 };
 pub use protocol::{
     ClientFrameAdmission, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspProtocolSession,

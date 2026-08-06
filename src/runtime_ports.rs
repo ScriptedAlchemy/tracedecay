@@ -90,7 +90,6 @@ fn unregistered_admission(
 fn register_agent_host_ports() {
     use tracedecay_agent_hosts::ports;
 
-    ports::pricing::register(crate::accounting::pricing::cost_of_turn);
     ports::hook_runtime::register_daemon_tool_invoker(daemon_tool_json);
     ports::hook_runtime::register_memory_injection_gate(
         crate::hooks::memory_inject::memory_injection_enabled,
@@ -203,17 +202,12 @@ mod tests {
     }
 
     #[test]
-    fn pricing_port_returns_the_root_price_table_answer() {
+    fn pricing_reader_uses_the_shared_all_provider_table() {
         let _pinned = registered();
-        // Pick a model the bundled table prices; the port and the root reader
-        // must agree, and a priced model must not read as zero.
-        let model = "claude-sonnet-4-20250514";
-        let port = tracedecay_agent_hosts::ports::pricing::cost_of_turn(model, 1_000_000, 0, 0, 0);
-        let root = crate::accounting::pricing::cost_of_turn(model, 1_000_000, 0, 0, 0);
-        assert!((port - root).abs() < f64::EPSILON);
-        assert!(
-            port > 0.0,
-            "a priced model must not report a zero turn cost through the port"
+        let model = "claude-sonnet-4-6";
+        let cost = tracedecay_agent_hosts::ports::pricing::cost_of_turn(
+            "claude", model, 1_000_000, 0, 0, 0,
         );
+        assert!(cost.is_some_and(|cost| cost > 0.0));
     }
 }

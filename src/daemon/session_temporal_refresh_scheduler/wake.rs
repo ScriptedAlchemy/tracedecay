@@ -431,6 +431,14 @@ struct SessionTemporalRefreshWakeRoute {
     target: std::sync::RwLock<std::sync::Weak<SessionTemporalRefreshWakeState>>,
 }
 
+fn enabled_idle_notification(
+    state: &SessionTemporalRefreshWakeState,
+) -> std::pin::Pin<Box<tokio::sync::futures::Notified<'_>>> {
+    let mut idle = Box::pin(state.idle.notified());
+    idle.as_mut().enable();
+    idle
+}
+
 #[derive(Clone)]
 pub(crate) struct SessionTemporalRefreshWake {
     route: Arc<SessionTemporalRefreshWakeRoute>,
@@ -494,6 +502,7 @@ impl SessionTemporalRefreshWake {
         state.wake();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            let idle = enabled_idle_notification(&state);
             let pass_count = state.pass_count.load(Ordering::Acquire);
             let busy = state.busy.load(Ordering::Acquire);
             let dirty = state.dirty.load(Ordering::Acquire);
@@ -501,10 +510,13 @@ impl SessionTemporalRefreshWake {
             if pass_count > before && !busy && !dirty && !pending {
                 return true;
             }
-            if tokio::time::Instant::now() >= deadline {
-                return pass_count > before && !busy && !dirty && !pending;
+            if tokio::time::timeout_at(deadline, idle).await.is_err() {
+                let pass_count = state.pass_count.load(Ordering::Acquire);
+                return pass_count > before
+                    && !state.busy.load(Ordering::Acquire)
+                    && !state.dirty.load(Ordering::Acquire)
+                    && !state.has_requests();
             }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     }
 
@@ -554,6 +566,21 @@ impl SessionTemporalRefreshWake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn idle_waiter_is_registered_before_the_state_recheck() {
+        let state = SessionTemporalRefreshWakeState::default();
+        let idle = enabled_idle_notification(&state);
+
+        state.idle.notify_waiters();
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), idle)
+                .await
+                .is_ok(),
+            "a completion between waiter creation and await must not be lost"
+        );
+    }
 
     #[test]
     fn recovery_without_any_progress_is_reported_as_stalled() {

@@ -16,8 +16,9 @@ use std::{
     },
 };
 
+use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
-use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
+use tracedecay_lsp::LspRuntimeFailure;
 
 use super::{
     CodeIndexArrivalV1, CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1,
@@ -28,6 +29,8 @@ use super::{
     PendingHintsV1, SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
 };
 
+mod lsp_projection;
+
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
 #[derive(Clone)]
@@ -37,8 +40,8 @@ enum CodeGraphActivationAuthorityV1 {
     Memory,
 }
 
-struct SchedulerGraphCancellationV1 {
-    shutting_down: Arc<AtomicBool>,
+pub(super) struct SchedulerGraphCancellationV1 {
+    pub(super) shutting_down: Arc<AtomicBool>,
 }
 
 impl tracedecay_graph_db::GraphCancellation for SchedulerGraphCancellationV1 {
@@ -78,6 +81,15 @@ fn bounded_daemon_admission_permits() -> usize {
     std::thread::available_parallelism().map_or(1, |cores| {
         cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES)
     })
+}
+
+/// One mounted worktree's code scope identity and serving generation, read
+/// without touching the scheduler mutex.
+pub(in crate::daemon) struct CodeIndexServingScopeV1 {
+    pub(in crate::daemon) repository_id: RepositoryId,
+    pub(in crate::daemon) worktree_id: WorktreeId,
+    pub(in crate::daemon) shutting_down: Arc<AtomicBool>,
+    pub(in crate::daemon) serving_generation: Option<Arc<CodeIndexPublishedGenerationV1>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1159,6 +1171,38 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
+    /// Mounted scope identity plus the currently serving generation for one
+    /// project. Daemon authorities that must retain this scope's code-graph
+    /// runtime (semantic vectors, generation retention) resolve through this
+    /// read instead of re-deriving repository/worktree identity themselves.
+    pub(in crate::daemon) async fn serving_code_scope(
+        &self,
+        project_root: &Path,
+    ) -> Option<CodeIndexServingScopeV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let (repository_id, worktree_id, shutting_down, serving) = {
+            let mounted = self.mounted.lock().await;
+            let worktree = mounted.get(&project_root)?;
+            (
+                worktree.repository_id.clone(),
+                worktree.worktree_id.clone(),
+                Arc::clone(&worktree.shutting_down),
+                Arc::clone(&worktree.serving_generation),
+            )
+        };
+        let serving_generation = serving
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|latest| Arc::clone(&latest.generation));
+        Some(CodeIndexServingScopeV1 {
+            repository_id,
+            worktree_id,
+            shutting_down,
+            serving_generation,
+        })
+    }
+
     pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {
         let project_root = project_root.canonicalize().ok()?;
         // Read the O(1) serving slot instead of the scheduler mutex. This used
@@ -2093,53 +2137,6 @@ impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
         crate::code_index::provider::GenerationTestAttributionJoinReadPort::read_test_attribution(
             authority, generation,
         )
-    }
-}
-
-impl crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort
-    for CodeIndexSchedulerRegistryV1
-{
-    fn current_identity(
-        &self,
-        project_root: PathBuf,
-        document_relative_path: Option<String>,
-    ) -> LspRuntimeFuture<
-        Result<crate::application::lsp_runtime::LspCodeIndexProjectionIdentity, LspRuntimeFailure>,
-    > {
-        let registry = self.clone();
-        Box::pin(async move {
-            let root = project_root
-                .canonicalize()
-                .map_err(|_| LspRuntimeFailure::new("lsp-code-index-root-unavailable"))?;
-            let current = registry
-                .latest_complete_ready(&root)
-                .await
-                .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
-            let generation = &current.generation;
-            let document_content_digest = document_relative_path
-                .map(|path| path.replace('\\', "/"))
-                .map(|logical_path| {
-                    generation
-                        .snapshot()
-                        .files
-                        .iter()
-                        .find(|file| file.logical_path == logical_path)
-                        .map(|file| file.content_digest.clone())
-                        .ok_or_else(|| {
-                            LspRuntimeFailure::new("lsp-code-index-document-unavailable")
-                        })
-                })
-                .transpose()?;
-            Ok(
-                crate::application::lsp_runtime::LspCodeIndexProjectionIdentity {
-                    code_generation_id: generation.manifest().generation_id.clone(),
-                    snapshot_digest: generation.manifest().snapshot_digest.clone(),
-                    invalidation_digest: generation.manifest().invalidation_digest.clone(),
-                    snapshot_content_digest: generation.snapshot().content_identity.clone(),
-                    document_content_digest,
-                },
-            )
-        })
     }
 }
 

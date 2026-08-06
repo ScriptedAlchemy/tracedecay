@@ -1061,15 +1061,7 @@ function savingsPayload(): Record<string, unknown> {
         projects_truncated: false,
       },
     },
-    // The session ledger's own accounting, which CostsPage now reads for the
-    // token mix and the measured/estimated split. Both were absent from this
-    // fixture, so both plates were unrenderable under audit.
-    //
-    // The `actual` split carries the real profile's proportions: cache reads
-    // are 98% of every token, which is the whole reason the plate states its
-    // leader instead of drawing it. And `usage_messages` is a SMALL fraction of
-    // `messages` — the previous fixture had it at 71%, which made a "mixed"
-    // cost basis look almost fully measured when in practice it is the reverse.
+    // Session content sizing and provider billing evidence remain separate.
     sessions: {
       available: true,
       db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
@@ -1083,11 +1075,11 @@ function savingsPayload(): Record<string, unknown> {
       unknown_model_messages: 187_066,
       token_counting: true,
       messages: 1_751_214,
-      usage_messages: 138_317,
+      provider_usage_events: 57_704,
       tokenized_messages: 0,
       estimated_messages: 1_612_897,
-      cost_basis: 'mixed',
-      actual: {
+      cost_basis: 'estimated',
+      provider_actual: {
         cache_read_tokens: 365_936_726_111,
         cache_write_tokens: 243_694_418,
         input_tokens: 7_256_407_982,
@@ -1099,38 +1091,33 @@ function savingsPayload(): Record<string, unknown> {
       },
       tokenized: { input_tokens: 0, output_tokens: 0 },
     },
-    turns: {
+    provider_usage: {
       available: true,
       status: null,
       error: null,
-      turn_count: 57_704,
+      usage_event_count: 57_704,
       total_cost_usd: 8148.9744974,
       total_tokens: 683_965_063,
-      cost_basis: 'actual',
+      cost_basis: 'provider_reported_priced',
     },
     pricing: {
-      source: 'cache',
-      fetched_at: nowSecs - 3600,
-      offline: false,
+      source: 'bundled',
+      revision: 'sha256:fixture-pricing',
+      fetched_at: null,
+      offline: true,
       model_count: 214,
     },
     costs: costsReadModel(),
   };
 }
 
-/** The Plan 26 Costs projection `savings_api::overview` embeds
- * (`application::observability::costs_read_model`, called unscoped and from
- * epoch). Its numbers are the same ledger totals the summaries above report,
- * because they are read from the same store.
- *
- * `provider_cost` is deliberately valueless: prices are recorded at ingest and
- * this projection never recomputes them, so with no pricing revision it reports
- * `unavailable_reason` rather than a dollar figure. That one unknown-coverage
- * metric is what makes the model `current: false`. */
+/** The canonical Costs projection embedded by `savings_api::overview`.
+ * Savings and exact project provider usage come from separate retained stores;
+ * the composite read reuses one provider aggregate for every sibling panel. */
 function costsReadModel(): Record<string, unknown> {
   const observedAtMicros = nowMicros;
   const horizon = { since_micros: 0, until_micros: observedAtMicros };
-  const accountingWatermark = 'turns:57704:1784052000';
+  const accountingWatermark = 'provider-usage:57704';
   const savingsWatermark = 'savings:1784052117';
   const known = (eligible: number) => ({
     eligible,
@@ -1180,16 +1167,16 @@ function costsReadModel(): Record<string, unknown> {
     horizon,
     watermark: `${accountingWatermark};${savingsWatermark}`,
     observed_at_micros: observedAtMicros,
-    current: false,
+    current: true,
     usage: [
       measurement(
         'provider_tokens',
         683_965_063,
         'tokens',
-        'ingested_provider_turns',
+        'provider_usage_observations',
         known(57_704),
-        'accounting_turn',
-        'accounting-turn.v1',
+        'provider_usage_observation',
+        'provider-usage-observation.v1',
         accountingWatermark,
         null,
       ),
@@ -1208,25 +1195,17 @@ function costsReadModel(): Record<string, unknown> {
     estimated_cost: [
       measurement(
         'provider_cost',
-        null,
+        8148.9744974,
         'usd',
-        'priced_provider_turns',
-        {
-          eligible: null,
-          observed: 57_704,
-          completed: 57_704,
-          censored: 0,
-          unknown: 1,
-          excluded: 0,
-          state: 'unknown',
-        },
-        'accounting_turn',
-        'accounting-turn.v1',
+        'priced_provider_usage_observations',
+        known(57_704),
+        'provider_usage_observation',
+        'provider-usage-observation.v1',
         accountingWatermark,
-        'pricing_revision_unavailable',
+        null,
       ),
     ],
-    pricing_revision: null,
+    pricing_revision: 'sha256:fixture-pricing',
   };
 }
 
@@ -1963,14 +1942,11 @@ const settingsPayload: Record<string, unknown> = {
   environment: {
     global_accounting_mode: 'auto',
     global_accounting_enabled: true,
-    // `pricing_offline` is derived daemon-side from TRACEDECAY_OFFLINE, so the
-    // active variable below and this value are deliberately consistent: the
-    // fixture exercises an environment override that is actually in force,
-    // which is the one per-value provenance state /api/settings reports.
+    // Pricing is an immutable bundled authority and never performs a network
+    // read, so this is a capability fact rather than an environment override.
     pricing_offline: true,
     variables: [
       { name: 'TRACEDECAY_ENABLE_GLOBAL_DB', active: false, value: null, description: 'Force-enables or disables global savings-ledger recording.' },
-      { name: 'TRACEDECAY_OFFLINE', active: true, value: '1', description: 'Skips network pricing fetches.' },
       { name: 'TRACEDECAY_DATA_DIR', active: false, value: null, description: 'Pins the user-level TraceDecay data directory.' },
     ],
   },
@@ -2106,15 +2082,10 @@ function loomModelRow(model: string | null, messages: number) {
     model,
     messages,
     estimated_messages: messages,
-    usage_messages: 0,
+    provider_usage_events: 0,
     tokenized_messages: 0,
     cost_basis: 'estimated',
-    actual: {
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_read_tokens: 0,
-      cache_write_tokens: 0,
-    },
+    provider_actual: null,
     estimated: { input_tokens: messages * 11, output_tokens: messages * 14 },
     tokenized: { input_tokens: 0, output_tokens: 0 },
     tokenizer: { encoder: 'o200k_base', exact: false },
@@ -2139,7 +2110,7 @@ function loomSessionRows(count = 34): Record<string, unknown>[] {
       is_subagent: i === 5 || i === 17,
       cost_basis: 'estimated',
       estimated_messages: messages,
-      usage_messages: 0,
+      provider_usage_events: 0,
       tokenized_messages: 0,
       models: [
         loomModelRow(null, Math.max(messages - 5, 0)),
@@ -2746,12 +2717,12 @@ function costsEnvelope(): Record<string, unknown> {
       metric: 'provider_tokens',
       value: 41_882_140,
       unit: 'tokens',
-      denominator: 'ingested_provider_turns',
+      denominator: 'provider_usage_observations',
       eligible: 27_401,
-      source: 'accounting_turn',
-      sourceRevision: 'accounting-turn.v1',
+      source: 'provider_usage_observation',
+      sourceRevision: 'provider-usage-observation.v1',
       projectorRevision: 'costs-projector.v1',
-      watermark: 'turns:27401:1752990400',
+      watermark: 'provider-usage:27401',
       descriptorRevision: COST_DESCRIPTOR,
     }),
     metricValue({
@@ -2767,19 +2738,19 @@ function costsEnvelope(): Record<string, unknown> {
       descriptorRevision: COST_DESCRIPTOR,
     }),
   ];
-  // Prices are recorded at ingest. Turns counted without a pricing revision
-  // produce a null cost with this exact reason — never a zero bill.
+  // Usage without an exact provider/model price produces a null cost with
+  // this exact reason — never a zero bill.
   const estimatedCost = [
     metricValue({
       metric: 'provider_cost',
       value: null,
       unit: 'usd',
-      denominator: 'priced_provider_turns',
+      denominator: 'priced_provider_usage_observations',
       eligible: null,
-      source: 'accounting_turn',
-      sourceRevision: 'accounting-turn.v1',
+      source: 'provider_usage_observation',
+      sourceRevision: 'provider-usage-observation.v1',
       projectorRevision: 'costs-projector.v1',
-      watermark: 'turns:27401:1752990400',
+      watermark: 'provider-usage:27401',
       descriptorRevision: COST_DESCRIPTOR,
       unavailableReason: 'pricing_revision_unavailable',
     }),
@@ -2787,7 +2758,7 @@ function costsEnvelope(): Record<string, unknown> {
   const payload = {
     authorized_scope_ref: 'all',
     horizon: { since_micros: 0, until_micros: nowMicros },
-    watermark: 'turns:27401:1752990400;savings:1752990400',
+    watermark: 'provider-usage:27401;savings:1752990400',
     observed_at_micros: nowMicros,
     current: false,
     usage,

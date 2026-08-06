@@ -466,6 +466,7 @@ mod tests {
             output_text: "{\"skills\":[]}".to_string(),
             output_json: Some(json!({"skills": []})),
             model: None,
+            provider: None,
             input_tokens: None,
             output_tokens: None,
         };

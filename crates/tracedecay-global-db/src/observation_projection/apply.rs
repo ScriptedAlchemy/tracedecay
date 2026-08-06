@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, CanonicalObservationIdV1, CanonicalWorkflowSemanticKindV1,
-    DurableObservationV1, ObservationContractError, ObservationScopeV1,
+    CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
+    CanonicalWorkflowSemanticKindV1, DurableObservationV1, ObservationContractError,
+    ObservationScopeV1,
 };
 use tracedecay_store::{
-    ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, SessionMessageRecord,
-    SessionRecord, WorkflowFactProjection, WorkflowFactRecord, derive_canonical_projection,
-    workflow_semantic_kind,
+    ObservationProjection, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectionSkipReason,
+    ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
+    SessionMessageProjection, SessionMessageRecord, SessionRecord, WorkflowFactProjection,
+    WorkflowFactRecord, derive_canonical_projection, workflow_semantic_kind,
 };
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
@@ -1082,11 +1083,327 @@ async fn apply_message_effect(
     apply_provenance(conn, sequence, projection, message_created).await
 }
 
+struct ProviderUsageRow {
+    usage_ordinal: i64,
+    model_json: String,
+    native_scope: &'static str,
+    counter_semantics: &'static str,
+    counters_json: String,
+    request_id: Option<String>,
+    native_kind: String,
+    native_field: String,
+}
+
+fn provider_usage_rows(
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<Vec<ProviderUsageRow>> {
+    let Ok(envelope) =
+        serde_json::from_value::<CanonicalObservationEnvelopeV1>(observation.payload().clone())
+    else {
+        return Ok(Vec::new());
+    };
+    envelope
+        .facts()
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, fact)| {
+            let (
+                model,
+                native_scope,
+                counter_semantics,
+                counters,
+                request_id,
+                native_kind,
+                native_field,
+            ) = match fact {
+                CanonicalObservationFactV1::ProviderUsage {
+                    model,
+                    native_scope,
+                    counter_semantics,
+                    counters,
+                    request_id,
+                    native_kind,
+                    native_field,
+                } => (
+                    model.clone(),
+                    *native_scope,
+                    *counter_semantics,
+                    counters.clone(),
+                    request_id.as_ref().map(|id| id.as_str().to_owned()),
+                    native_kind.clone(),
+                    native_field.clone(),
+                ),
+                CanonicalObservationFactV1::UncorrelatedUsage { .. } => return None,
+                _ => return None,
+            };
+            Some((|| {
+                Ok(ProviderUsageRow {
+                    usage_ordinal: i64::try_from(ordinal).map_err(|_| {
+                        ProjectionStoreError::Contract(
+                            ObservationContractError::InvalidCanonicalPayload,
+                        )
+                    })?,
+                    model_json: serde_json::to_string(&model).map_err(|_| {
+                        ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding)
+                    })?,
+                    native_scope: native_scope.as_str(),
+                    counter_semantics: counter_semantics.as_str(),
+                    counters_json: serde_json::to_string(&counters).map_err(|_| {
+                        ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding)
+                    })?,
+                    request_id,
+                    native_kind,
+                    native_field,
+                })
+            })())
+        })
+        .collect()
+}
+
+fn provider_usage_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
+    match scope {
+        ObservationScopeV1::Profile => ("profile", None),
+        ObservationScopeV1::Project { project_id } => ("project", Some(project_id.as_str())),
+    }
+}
+
+pub(crate) async fn apply_provider_usage_effects(
+    conn: &impl Executor,
+    sequence: u64,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let expected = provider_usage_rows(observation)?;
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let envelope: CanonicalObservationEnvelopeV1 =
+        match serde_json::from_value(observation.payload().clone()) {
+            Ok(envelope) => envelope,
+            Err(_) => return Ok(()),
+        };
+    let sequence =
+        i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
+    let source_start = i64::try_from(envelope.evidence().range().start()).map_err(|_| {
+        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+    })?;
+    let source_end = i64::try_from(envelope.evidence().range().end()).map_err(|_| {
+        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+    })?;
+    let (scope_kind, project_id) = provider_usage_scope(observation.scope());
+    for row in expected {
+        conn.execute(
+            "INSERT INTO observation_provider_usage (
+                projector_version, observation_id, usage_ordinal, receipt_id,
+                observation_sequence, scope_kind, project_id, provider, model_json,
+                native_scope, counter_semantics, counters_json, session_id, turn_id,
+                message_id, request_id, native_kind, native_field, ordering_domain,
+                source_start, source_end, native_timestamp
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+             ) ON CONFLICT DO NOTHING",
+            params![
+                PROVIDER_USAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str(),
+                row.usage_ordinal,
+                observation.receipt().receipt().receipt_id().as_str(),
+                sequence,
+                scope_kind,
+                project_id,
+                envelope.provider().as_str(),
+                row.model_json.as_str(),
+                row.native_scope,
+                row.counter_semantics,
+                row.counters_json.as_str(),
+                envelope.relations().session_id().as_str(),
+                envelope.relations().turn_id().map(|id| id.as_str()),
+                envelope.relations().message_id().map(|id| id.as_str()),
+                row.request_id.as_deref(),
+                row.native_kind.as_str(),
+                row.native_field.as_str(),
+                envelope.evidence().ordering_domain().as_str(),
+                source_start,
+                source_end,
+                envelope.evidence().native_timestamp(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("insert provider usage projection", error))?;
+    }
+    verify_provider_usage_effects(conn, sequence, observation).await
+}
+
+pub(super) async fn stage_provider_usage_effects(
+    conn: &impl Executor,
+    generation: &str,
+    sequence: u64,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let expected = provider_usage_rows(observation)?;
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let envelope: CanonicalObservationEnvelopeV1 =
+        match serde_json::from_value(observation.payload().clone()) {
+            Ok(envelope) => envelope,
+            Err(_) => return Ok(()),
+        };
+    let sequence =
+        i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
+    let source_start = i64::try_from(envelope.evidence().range().start()).map_err(|_| {
+        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+    })?;
+    let source_end = i64::try_from(envelope.evidence().range().end()).map_err(|_| {
+        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+    })?;
+    let (scope_kind, project_id) = provider_usage_scope(observation.scope());
+    for row in expected {
+        conn.execute(
+            "INSERT INTO observation_projection_rebuild_provider_usage (
+                projector_version, generation, observation_id, usage_ordinal, receipt_id,
+                observation_sequence, scope_kind, project_id, provider, model_json,
+                native_scope, counter_semantics, counters_json, session_id, turn_id,
+                message_id, request_id, native_kind, native_field, ordering_domain,
+                source_start, source_end, native_timestamp
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
+             ) ON CONFLICT DO NOTHING",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                generation,
+                observation.observation_id().as_str(),
+                row.usage_ordinal,
+                observation.receipt().receipt().receipt_id().as_str(),
+                sequence,
+                scope_kind,
+                project_id,
+                envelope.provider().as_str(),
+                row.model_json.as_str(),
+                row.native_scope,
+                row.counter_semantics,
+                row.counters_json.as_str(),
+                envelope.relations().session_id().as_str(),
+                envelope.relations().turn_id().map(|id| id.as_str()),
+                envelope.relations().message_id().map(|id| id.as_str()),
+                row.request_id.as_deref(),
+                row.native_kind.as_str(),
+                row.native_field.as_str(),
+                envelope.evidence().ordering_domain().as_str(),
+                source_start,
+                source_end,
+                envelope.evidence().native_timestamp(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("stage provider usage projection", error))?;
+    }
+    Ok(())
+}
+
+async fn verify_provider_usage_effects(
+    conn: &impl QueryExecutor,
+    sequence: i64,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let expected = provider_usage_rows(observation)?;
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let envelope: CanonicalObservationEnvelopeV1 =
+        serde_json::from_value(observation.payload().clone()).map_err(|_| {
+            ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+        })?;
+    let source_start = i64::try_from(envelope.evidence().range().start()).map_err(|_| {
+        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+    })?;
+    let source_end = i64::try_from(envelope.evidence().range().end()).map_err(|_| {
+        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+    })?;
+    let (scope_kind, project_id) = provider_usage_scope(observation.scope());
+    for row in &expected {
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*)
+                 FROM observation_provider_usage
+                 WHERE projector_version = ?1 AND observation_id = ?2
+                   AND usage_ordinal = ?3 AND receipt_id = ?4
+                   AND observation_sequence = ?5 AND scope_kind = ?6
+                   AND project_id IS ?7 AND model_json = ?8
+                   AND native_scope = ?9 AND counter_semantics = ?10
+                   AND counters_json = ?11 AND request_id IS ?12
+                   AND native_kind = ?13 AND native_field = ?14
+                   AND provider = ?15 AND session_id = ?16
+                   AND turn_id IS ?17 AND message_id IS ?18
+                   AND ordering_domain = ?19 AND source_start = ?20
+                   AND source_end = ?21 AND native_timestamp IS ?22",
+                params![
+                    PROVIDER_USAGE_PROJECTOR_VERSION,
+                    observation.observation_id().as_str(),
+                    row.usage_ordinal,
+                    observation.receipt().receipt().receipt_id().as_str(),
+                    sequence,
+                    scope_kind,
+                    project_id,
+                    row.model_json.as_str(),
+                    row.native_scope,
+                    row.counter_semantics,
+                    row.counters_json.as_str(),
+                    row.request_id.as_deref(),
+                    row.native_kind.as_str(),
+                    row.native_field.as_str(),
+                    envelope.provider().as_str(),
+                    envelope.relations().session_id().as_str(),
+                    envelope.relations().turn_id().map(|id| id.as_str()),
+                    envelope.relations().message_id().map(|id| id.as_str()),
+                    envelope.evidence().ordering_domain().as_str(),
+                    source_start,
+                    source_end,
+                    envelope.evidence().native_timestamp(),
+                ],
+            )
+            .await
+            .map_err(|error| storage("verify provider usage projection", error))?;
+        let count = rows
+            .next()
+            .await
+            .map_err(|error| storage("verify provider usage projection", error))?
+            .ok_or(ProjectionStoreError::ProvenanceCollision)?
+            .get::<i64>(0)
+            .map_err(|error| storage("verify provider usage projection", error))?;
+        if count != 1 {
+            return Err(ProjectionStoreError::ProvenanceCollision);
+        }
+    }
+    Ok(())
+}
+
+async fn provider_usage_observation_sequence(
+    conn: &impl QueryExecutor,
+    observation_id: &CanonicalObservationIdV1,
+) -> ProjectionStoreResult<i64> {
+    let mut rows = conn
+        .query(
+            "SELECT sequence FROM observations WHERE observation_id = ?1",
+            (observation_id.as_str(),),
+        )
+        .await
+        .map_err(|error| storage("read provider usage observation sequence", error))?;
+    rows.next()
+        .await
+        .map_err(|error| storage("read provider usage observation sequence", error))?
+        .ok_or(ProjectionStoreError::ObservationNotFound)?
+        .get(0)
+        .map_err(|error| storage("read provider usage observation sequence", error))
+}
+
 pub async fn verify_effect(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
+    let sequence = provider_usage_observation_sequence(conn, observation.observation_id()).await?;
+    verify_provider_usage_effects(conn, sequence, observation).await?;
     match effect {
         ObservationProjection::Message(projection) => verify_message_effect(conn, projection).await,
         ObservationProjection::Composite {
@@ -1125,6 +1442,7 @@ pub(super) async fn apply_effect(
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
+    apply_provider_usage_effects(conn, sequence, observation).await?;
     match effect {
         ObservationProjection::Message(projection) => {
             apply_message_effect(conn, sequence, observation, projection).await

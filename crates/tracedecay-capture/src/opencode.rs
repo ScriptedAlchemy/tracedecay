@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, ObservationId, ObservationOrderingDomainV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProviderId, SessionId,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProviderId, ProviderUsageContractDimensionV1,
+    SessionId,
 };
 
 use crate::ObservationRecordParseErrorV1;
@@ -66,7 +69,12 @@ pub fn normalize_observation(
             ),
         });
     }
-    append_usage(&mut facts, message.get("tokens"));
+    append_usage(
+        &mut facts,
+        message.get("tokens"),
+        "message",
+        "message.tokens",
+    );
     append_parts(&mut facts, parts, &message_id)?;
     if facts.is_empty() {
         return Err(ObservationRecordParseErrorV1::Empty);
@@ -120,14 +128,21 @@ fn append_parts(
                 });
             }
             Some("tool") => append_tool_fact(facts, part, message_id)?,
-            Some("step-finish") => append_usage(facts, part.get("tokens")),
+            Some("step-finish") => {
+                append_usage(facts, part.get("tokens"), "step-finish", "part.tokens")
+            }
             _ => {}
         }
     }
     Ok(())
 }
 
-fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, tokens: Option<&Value>) {
+fn append_usage(
+    facts: &mut Vec<CanonicalObservationFactV1>,
+    tokens: Option<&Value>,
+    native_kind: &str,
+    native_field: &str,
+) {
     let Some(tokens) = tokens else {
         return;
     };
@@ -148,22 +163,32 @@ fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, tokens: Option<&Val
             .pointer("/cache/write")
             .or_else(|| tokens.get("cache_write_tokens")),
     );
+    let total_tokens = canonical_u64(tokens.get("total").or_else(|| tokens.get("total_tokens")));
     if [
         input_tokens,
         output_tokens,
         cache_read_tokens,
         cache_write_tokens,
         reasoning_tokens,
+        total_tokens,
     ]
     .iter()
     .any(Option::is_some)
     {
-        facts.push(CanonicalObservationFactV1::Usage {
+        facts.push(CanonicalObservationFactV1::UncorrelatedUsage {
             input_tokens,
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
             reasoning_tokens,
+            total_tokens,
+            native_kind: native_kind.to_owned(),
+            native_field: native_field.to_owned(),
+            missing_dimensions: BTreeSet::from([
+                ProviderUsageContractDimensionV1::Model,
+                ProviderUsageContractDimensionV1::Scope,
+                ProviderUsageContractDimensionV1::CounterSemantics,
+            ]),
         });
     }
 }
@@ -280,8 +305,13 @@ const fn invalid() -> ObservationRecordParseErrorV1 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use serde_json::json;
-    use tracedecay_domain::{CanonicalObservationFactV1, ObservationId, ObservationSourceRangeV1};
+    use tracedecay_domain::{
+        CanonicalObservationFactV1, ObservationId, ObservationSourceRangeV1,
+        ProviderUsageContractDimensionV1,
+    };
 
     use super::normalize_observation;
 
@@ -373,23 +403,43 @@ mod tests {
         )));
         assert!(envelope.facts().iter().any(|fact| matches!(
             fact,
-            CanonicalObservationFactV1::Usage {
+            CanonicalObservationFactV1::UncorrelatedUsage {
                 input_tokens: Some(11),
                 output_tokens: Some(7),
                 reasoning_tokens: Some(5),
                 cache_read_tokens: Some(3),
                 cache_write_tokens: Some(2),
-            }
+                native_kind,
+                native_field,
+                missing_dimensions,
+                ..
+            } if native_kind == "message"
+                && native_field == "message.tokens"
+                && missing_dimensions == &BTreeSet::from([
+                    ProviderUsageContractDimensionV1::Model,
+                    ProviderUsageContractDimensionV1::Scope,
+                    ProviderUsageContractDimensionV1::CounterSemantics,
+                ])
         )));
         assert!(envelope.facts().iter().any(|fact| matches!(
             fact,
-            CanonicalObservationFactV1::Usage {
+            CanonicalObservationFactV1::UncorrelatedUsage {
                 input_tokens: Some(13),
                 output_tokens: Some(8),
                 reasoning_tokens: Some(6),
                 cache_read_tokens: Some(4),
                 cache_write_tokens: Some(1),
-            }
+                native_kind,
+                native_field,
+                missing_dimensions,
+                ..
+            } if native_kind == "step-finish"
+                && native_field == "part.tokens"
+                && missing_dimensions == &BTreeSet::from([
+                    ProviderUsageContractDimensionV1::Model,
+                    ProviderUsageContractDimensionV1::Scope,
+                    ProviderUsageContractDimensionV1::CounterSemantics,
+                ])
         )));
     }
 }

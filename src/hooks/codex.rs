@@ -293,7 +293,10 @@ pub async fn hook_codex_post_compact() -> i32 {
     0
 }
 
-const CODEX_STOP_INGEST_BUDGET: Duration = Duration::from_secs(3);
+/// Bounds the wait for the daemon's terminal-receipt acknowledgement. The
+/// follow-up work (transcript ingest, user review) is daemon-owned and is not
+/// covered by this budget.
+const CODEX_STOP_RETENTION_BUDGET: Duration = Duration::from_secs(3);
 
 /// Codex `Stop` hook handler.
 ///
@@ -317,10 +320,10 @@ pub async fn hook_codex_stop() -> i32 {
         .await
         .into_recorded_guidance(&hook_telemetry)
     {
-        if ingest_codex_stop_transcript_with_budget(session_id.clone(), Some(&hook_telemetry)).await
-        {
-            super::schedule_user_session_review("codex", session_id.as_deref()).await;
-        }
+        // A daemon-admitted project Stop still hands the provider's historical
+        // session to the daemon; the capture kernel correlates it back to
+        // registered projects.
+        retain_codex_stop_in_daemon(session_id.as_deref(), Some(&hook_telemetry)).await;
         if let Some(guidance) = guidance {
             println!("{}", codex_additional_context_json("Stop", &guidance));
         } else {
@@ -328,53 +331,46 @@ pub async fn hook_codex_stop() -> i32 {
         }
         return 0;
     }
-    let ingested = capture_codex_stop_with_budget(
-        finalize_codex_user_session(root.as_deref(), session_id.clone(), Some(&hook_telemetry)),
-        CODEX_STOP_INGEST_BUDGET,
-        Some(&hook_telemetry),
-    )
-    .await;
-    if ingested {
-        super::schedule_user_session_review("codex", session_id.as_deref()).await;
+    if root.is_none() {
+        retain_codex_stop_in_daemon(session_id.as_deref(), Some(&hook_telemetry)).await;
     }
     println!("{}", serde_json::json!({}));
     0
 }
 
-async fn finalize_codex_user_session(
-    project_root: Option<&Path>,
-    session_id: Option<String>,
+/// Hands the terminal receipt to the daemon, which retains transcript ingest
+/// and user review as cancellable daemon-owned work keyed to this exact
+/// session. The hook only waits (bounded) for the acknowledgement; an
+/// unavailable daemon fails open.
+async fn retain_codex_stop_in_daemon(
+    session_id: Option<&str>,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> bool {
-    if project_root.is_some() {
+    let Some(session_id) = session_id else {
         return false;
-    }
-    ingest_user_codex_session(session_id, telemetry).await
+    };
+    let retain = async {
+        match super::daemon_hook_action(
+            None,
+            serde_json::json!({
+                "action": "codex_stop",
+                "session_id": session_id,
+            }),
+            telemetry,
+        )
+        .await
+        {
+            Ok(result) => result.get("status").and_then(Value::as_str) == Some("accepted"),
+            Err(error) => {
+                eprintln!("[tracedecay] codex stop daemon retention failed: {error}");
+                false
+            }
+        }
+    };
+    await_within_stop_budget(retain, CODEX_STOP_RETENTION_BUDGET, telemetry).await
 }
 
-/// A daemon-admitted project Stop still captures the provider's historical
-/// session through the profile daemon. The capture kernel correlates it back
-/// to registered projects; it is not a diagnostics substitute.
-async fn ingest_codex_stop_transcript(
-    session_id: Option<String>,
-    telemetry: Option<&super::analytics::HookTimingSpan>,
-) -> bool {
-    ingest_user_codex_session(session_id, telemetry).await
-}
-
-async fn ingest_codex_stop_transcript_with_budget(
-    session_id: Option<String>,
-    telemetry: Option<&super::analytics::HookTimingSpan>,
-) -> bool {
-    capture_codex_stop_with_budget(
-        ingest_codex_stop_transcript(session_id, telemetry),
-        CODEX_STOP_INGEST_BUDGET,
-        telemetry,
-    )
-    .await
-}
-
-async fn capture_codex_stop_with_budget(
+async fn await_within_stop_budget(
     capture: impl std::future::Future<Output = bool>,
     budget: Duration,
     telemetry: Option<&super::analytics::HookTimingSpan>,
@@ -953,50 +949,39 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn codex_stop_ingests_final_user_turn_once() {
+    async fn codex_stop_hands_terminal_receipt_to_daemon() {
         let _lock = crate::hooks::lock_test_env();
-        let temp = tempfile::tempdir().unwrap();
-        let general = temp.path().join("general-chat");
-        std::fs::create_dir_all(&general).unwrap();
-        let daemon = crate::hooks::TestDaemonHookActionGuard::install([
-            serde_json::json!({ "messages_upserted": 1 }),
-            serde_json::json!({ "messages_upserted": 0 }),
-            serde_json::json!({ "messages_upserted": 1 }),
-        ]);
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+            "action": "codex_stop",
+            "status": "accepted",
+            "session_id": "final-turn",
+        })]);
 
-        assert!(finalize_codex_user_session(None, Some("final-turn".to_string()), None).await);
         assert!(
-            !finalize_codex_user_session(None, Some("final-turn".to_string()), None).await,
-            "a repeated Stop receipt must not schedule another review"
+            !retain_codex_stop_in_daemon(None, None).await,
+            "a receipt without a session id has nothing to retain"
         );
-        assert!(
-            !finalize_codex_user_session(Some(&general), Some("final-turn".to_string()), None,)
-                .await,
-            "project-scoped Stop receipts must never write the user session store"
-        );
-        assert!(
-            ingest_codex_stop_transcript(Some("final-turn".to_string()), None).await,
-            "a daemon-admitted project Stop must still request canonical historical capture"
-        );
+        assert!(retain_codex_stop_in_daemon(Some("final-turn"), None).await);
 
         let calls = daemon.calls();
-        assert_eq!(calls.len(), 3);
-        for (project_root, arguments) in calls {
-            assert_eq!(project_root, None);
-            assert_eq!(arguments["action"], "ingest_transcript");
-            assert_eq!(arguments["provider"], "codex");
-            assert_eq!(arguments["user_scope"], true);
-            assert_eq!(arguments["session_id"], "final-turn");
-            assert_eq!(arguments["format"], "json");
-        }
+        assert_eq!(
+            calls.len(),
+            1,
+            "a session-less receipt must not reach the daemon"
+        );
+        let (project_root, arguments) = &calls[0];
+        assert_eq!(*project_root, None, "terminal retention is projectless");
+        assert_eq!(arguments["action"], "codex_stop");
+        assert_eq!(arguments["session_id"], "final-turn");
+        assert_eq!(arguments["format"], "json");
     }
 
     #[tokio::test]
-    async fn codex_stop_capture_timeout_is_fail_open() {
-        assert_eq!(CODEX_STOP_INGEST_BUDGET, Duration::from_secs(3));
+    async fn codex_stop_retention_timeout_is_fail_open() {
+        assert_eq!(CODEX_STOP_RETENTION_BUDGET, Duration::from_secs(3));
         assert!(
-            !capture_codex_stop_with_budget(std::future::pending(), Duration::ZERO, None).await,
-            "bounded historical capture must not prevent Stop guidance from returning"
+            !await_within_stop_budget(std::future::pending(), Duration::ZERO, None).await,
+            "bounded daemon retention must not prevent Stop guidance from returning"
         );
     }
 

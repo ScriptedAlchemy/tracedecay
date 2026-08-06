@@ -18,6 +18,7 @@ mod envelope;
 mod errors;
 mod hermes;
 mod ingest;
+mod terminal;
 
 #[cfg(test)]
 mod entry_tests;
@@ -43,6 +44,7 @@ use hermes::{hermes_receipt, user_review};
 use ingest::{
     accounting_receipt, claude_compact, codex_compact, cursor_compact, ingest_transcript,
 };
+use terminal::retain_codex_stop;
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
@@ -55,7 +57,7 @@ pub async fn handle_hook_runtime(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    accounting_db: Option<&RegisteredGlobalDb>,
+    _accounting_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
@@ -64,7 +66,9 @@ pub async fn handle_hook_runtime(
             cg.reset_local_counter().await?;
             json!({ "action": action, "reset": true })
         }
-        "accounting_receipt" => accounting_receipt(cg, accounting_db).await?,
+        "accounting_receipt" => {
+            accounting_receipt(cg, required_project_db(session_authorities)?).await?
+        }
         "hook_v2_admit" | "hook_v2_guidance_lookup" => {
             hook_v2_admit(cg, &args, action, required_project_db(session_authorities)?).await?
         }
@@ -88,7 +92,7 @@ pub async fn handle_hook_runtime(
             }
             ingest_transcript(Some(cg), &args, None, global_db, session_authorities).await?
         }
-        "user_review" | "hermes_receipt" => {
+        "codex_stop" | "user_review" | "hermes_receipt" => {
             return Err(config_error(format!(
                 "hook action `{action}` requires projectless daemon routing"
             )));
@@ -158,6 +162,12 @@ pub(crate) async fn handle_projectless_hook_runtime(
             .await?
         }
         "user_review" => user_review(&args, profile_root, &session_runtime_registry).await?,
+        "codex_stop" => retain_codex_stop(
+            &args,
+            profile_root,
+            &session_runtime_registry,
+            session_authorities,
+        )?,
         "hermes_receipt" => {
             let host_admission_broker =
                 host_admission_broker.map_err(map_host_admission_outcome)?;
@@ -187,7 +197,7 @@ pub(crate) async fn handle_projectless_hook_runtime(
 fn projectless_action_allowed(action: &str, args: &Value) -> bool {
     matches!(
         action,
-        "user_review" | "hermes_receipt" | "hook_v2_profile_admit"
+        "codex_stop" | "user_review" | "hermes_receipt" | "hook_v2_profile_admit"
     ) || (action == "claude_compact"
         && args.get("user_scope").and_then(Value::as_bool) == Some(true))
         || (action == "ingest_transcript"

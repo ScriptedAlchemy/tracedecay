@@ -348,23 +348,46 @@ fn pressure_only_command(
 
 pub(super) async fn accounting_receipt(
     cg: &TraceDecay,
-    global_db: Option<&RegisteredGlobalDb>,
+    provider_usage_db: &RegisteredGlobalDb,
 ) -> Result<Value> {
-    let global_db = global_db.ok_or_else(|| {
-        config_error("daemon accounting database is unavailable; local fallback is forbidden")
-    })?;
-    let stats = crate::accounting::parser::ingest(global_db).await;
-    let tokens_saved = cg.get_tokens_saved().await.unwrap_or(0);
-    let efficiency = if tokens_saved + stats.tokens_consumed > 0 {
-        (tokens_saved as f64 / (tokens_saved + stats.tokens_consumed) as f64) * 100.0
-    } else {
-        0.0
+    let scope = ObservationScopeV1::Project {
+        project_id: project_observation_id(cg)?,
     };
+    let usage = crate::application::provider_usage::provider_usage_aggregate(
+        provider_usage_db,
+        &scope,
+        None,
+        None,
+    )
+    .await;
+    let prices = crate::application::provider_pricing::load_table();
+    let priced = crate::application::provider_usage::price_provider_usage(&usage, prices, 0);
+    let complete =
+        priced.coverage == crate::application::provider_usage::ProviderUsageCoverageV1::Complete;
+    let tokens_consumed = complete
+        .then(|| {
+            priced
+                .total_input_tokens?
+                .checked_add(priced.total_output_tokens?)
+        })
+        .flatten();
+    let tokens_saved = cg
+        .get_tokens_saved()
+        .await
+        .map_err(|error| config_error(format!("failed to read saved tokens: {error}")))?;
+    let efficiency = tokens_consumed.and_then(|consumed| {
+        let denominator = tokens_saved.checked_add(consumed)?;
+        (denominator > 0).then_some((tokens_saved as f64 / denominator as f64) * 100.0)
+    });
     Ok(json!({
         "action": "accounting_receipt",
-        "turns_inserted": stats.turns_inserted,
-        "cost_usd": stats.cost_usd,
-        "tokens_consumed": stats.tokens_consumed,
+        "coverage": priced.coverage,
+        "watermark": usage.upper_observation_sequence,
+        "provider_usage_events": priced.usage_events,
+        "cost_usd": priced.total_cost_usd,
+        "pricing_status": if priced.total_cost_usd.is_some() { "priced" } else { "unavailable" },
+        "pricing_revision": priced.pricing_revision,
+        "tokens_consumed": tokens_consumed,
         "tokens_saved": tokens_saved,
         "efficiency": efficiency,
     }))
@@ -376,6 +399,26 @@ pub(super) async fn ingest_transcript(
     profile_root: Option<&Path>,
     global_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
+) -> Result<Value> {
+    let cancellation = ObservationCancellation::default();
+    ingest_transcript_with_cancellation(
+        cg,
+        args,
+        profile_root,
+        global_db,
+        session_authorities,
+        &cancellation,
+    )
+    .await
+}
+
+pub(crate) async fn ingest_transcript_with_cancellation(
+    cg: Option<&TraceDecay>,
+    args: &Value,
+    profile_root: Option<&Path>,
+    global_db: Option<&RegisteredGlobalDb>,
+    session_authorities: SessionAuthorities<'_>,
+    cancellation: &ObservationCancellation,
 ) -> Result<Value> {
     let provider = required_str(args, "provider")?;
     let user_scope = args
@@ -419,7 +462,6 @@ pub(super) async fn ingest_transcript(
         }
         _ => {}
     }
-    let cancellation = ObservationCancellation::default();
     // Unregistered routes are reported with the same typed `unknown_provider`
     // admission status the probe uses, not a generic configuration error.
     let kernel = transcript_capture_kernel(provider, user_scope).ok_or_else(|| {
@@ -438,7 +480,7 @@ pub(super) async fn ingest_transcript(
             session_authorities,
             facade: &facade,
             max_new_bytes,
-            cancellation: &cancellation,
+            cancellation,
         })
         .await?;
     let TranscriptCaptureOutcome {

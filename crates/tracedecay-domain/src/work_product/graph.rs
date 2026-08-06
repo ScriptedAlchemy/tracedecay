@@ -38,9 +38,10 @@ pub enum WorkProductRelationV1 {
         task_id: TaskId,
         link_id: TaskEvidenceLinkId,
     },
-    Attempt {
+    AcceptedAttempt {
         task_id: TaskId,
         identity: WorkAttemptIdentityV1,
+        link_id: TaskEvidenceLinkId,
     },
     Handoff {
         task_id: TaskId,
@@ -53,10 +54,110 @@ pub enum WorkProductRelationV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+pub struct WorkRelationReplanProposalV1 {
+    pub proposal_id: ProposalId,
+    pub task_id: TaskId,
+    pub based_on_version: WorkGraphVersionV1,
+    dependencies: BTreeSet<TaskId>,
+    informational_relations: BTreeSet<TaskId>,
+    causal_candidates: BTreeSet<TaskId>,
+    pub payload_digest: ManifestDigest,
+}
+
+impl WorkRelationReplanProposalV1 {
+    pub fn new(
+        proposal_id: ProposalId,
+        task_id: TaskId,
+        based_on_version: WorkGraphVersionV1,
+        dependencies: Vec<TaskId>,
+        informational_relations: Vec<TaskId>,
+        causal_candidates: Vec<TaskId>,
+    ) -> Result<Self, WorkProductContractError> {
+        ensure_unique(dependencies.iter())?;
+        ensure_unique(informational_relations.iter())?;
+        ensure_unique(causal_candidates.iter())?;
+        let dependencies = dependencies.into_iter().collect();
+        let informational_relations = informational_relations.into_iter().collect();
+        let causal_candidates = causal_candidates.into_iter().collect();
+        let payload_digest = relation_replan_digest(
+            &task_id,
+            based_on_version,
+            &dependencies,
+            &informational_relations,
+            &causal_candidates,
+        )?;
+        let proposal = Self {
+            proposal_id,
+            task_id,
+            based_on_version,
+            dependencies,
+            informational_relations,
+            causal_candidates,
+            payload_digest,
+        };
+        proposal.validate()?;
+        Ok(proposal)
+    }
+
+    pub fn dependencies(&self) -> &BTreeSet<TaskId> {
+        &self.dependencies
+    }
+
+    pub fn informational_relations(&self) -> &BTreeSet<TaskId> {
+        &self.informational_relations
+    }
+
+    pub fn causal_candidates(&self) -> &BTreeSet<TaskId> {
+        &self.causal_candidates
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), WorkProductContractError> {
+        if self.dependencies.contains(&self.task_id) {
+            return Err(WorkProductContractError::DependencyCycle);
+        }
+        if self.informational_relations.contains(&self.task_id)
+            || self.causal_candidates.contains(&self.task_id)
+        {
+            return Err(WorkProductContractError::IllegalTransition);
+        }
+        if self.payload_digest
+            != relation_replan_digest(
+                &self.task_id,
+                self.based_on_version,
+                &self.dependencies,
+                &self.informational_relations,
+                &self.causal_candidates,
+            )?
+        {
+            return Err(WorkProductContractError::ProposalMismatch);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkRelationReplanDecisionV1 {
+    pub proposal: WorkRelationReplanProposalV1,
+    pub disposition: WorkProposalDispositionV1,
+    pub decided_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkGraphChangeV1 {
     TaskAdded {
         item: WorkItemV1,
+    },
+    RelationReplanDecided {
+        proposal: WorkRelationReplanProposalV1,
+        disposition: WorkProposalDispositionV1,
+        decided_at: UtcMicros,
+    },
+    TaskRelationsReplanned {
+        proposal_id: ProposalId,
+        applied_at: UtcMicros,
     },
     EvidenceLinked {
         task_id: TaskId,
@@ -71,16 +172,12 @@ pub enum WorkGraphChangeV1 {
         proposal: WorkProposalV1,
         accepted_at: UtcMicros,
     },
-    ProviderAdmitted {
+    AcceptedAttemptLinked {
         task_id: TaskId,
-        proposal_id: ProposalId,
+        based_on_version: WorkGraphVersionV1,
         identity: WorkAttemptIdentityV1,
-        route: WorkProviderRouteV1,
-        admitted_at: UtcMicros,
-    },
-    ProviderOutcomeRecorded {
-        task_id: TaskId,
-        outcome: WorkProviderOutcomeV1,
+        evidence: TaskEvidenceLinkV1,
+        linked_at: UtcMicros,
     },
     TaskAccepted {
         task_id: TaskId,
@@ -89,23 +186,6 @@ pub enum WorkGraphChangeV1 {
     },
     HandoffRecorded {
         handoff: WorkHandoffV1,
-    },
-    AttemptCancelled {
-        task_id: TaskId,
-        identity: WorkAttemptIdentityV1,
-        cancelled_at: UtcMicros,
-    },
-    AttemptRetried {
-        task_id: TaskId,
-        prior_identity: WorkAttemptIdentityV1,
-        identity: WorkAttemptIdentityV1,
-        route: WorkProviderRouteV1,
-        admitted_at: UtcMicros,
-    },
-    AdmissionRolledBack {
-        task_id: TaskId,
-        identity: WorkAttemptIdentityV1,
-        rolled_back_at: UtcMicros,
     },
 }
 
@@ -118,6 +198,7 @@ pub struct WorkProductGraphV1 {
     milestones: Vec<WorkMilestoneV1>,
     items: Vec<WorkItemV1>,
     proposal_decisions: Vec<WorkProposalDecisionV1>,
+    relation_replan_decisions: Vec<WorkRelationReplanDecisionV1>,
     evidence: Vec<TaskEvidenceLinkV1>,
 }
 
@@ -130,6 +211,7 @@ struct UncheckedWorkProductGraphV1 {
     milestones: Vec<WorkMilestoneV1>,
     items: Vec<WorkItemV1>,
     proposal_decisions: Vec<WorkProposalDecisionV1>,
+    relation_replan_decisions: Vec<WorkRelationReplanDecisionV1>,
     evidence: Vec<TaskEvidenceLinkV1>,
 }
 
@@ -146,6 +228,7 @@ impl<'de> Deserialize<'de> for WorkProductGraphV1 {
             unchecked.milestones,
             unchecked.items,
             unchecked.proposal_decisions,
+            unchecked.relation_replan_decisions,
             unchecked.evidence,
         )
         .map_err(serde::de::Error::custom)
@@ -166,6 +249,7 @@ impl WorkProductGraphV1 {
             plans,
             milestones,
             items,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         )
@@ -196,10 +280,6 @@ impl WorkProductGraphV1 {
             .binary_search_by(|item| item.task_id().cmp(task_id))
             .ok()
             .map(|index| &self.items[index])
-    }
-
-    pub fn proposal_decisions(&self) -> &[WorkProposalDecisionV1] {
-        &self.proposal_decisions
     }
 
     pub fn evidence(&self) -> &[TaskEvidenceLinkV1] {
@@ -243,12 +323,13 @@ impl WorkProductGraphV1 {
                     effect: item.task_id().clone(),
                 }
             }));
-            if let Some(admission) = item.provider_admission() {
-                relations.push(WorkProductRelationV1::Attempt {
+            relations.extend(item.accepted_attempts().iter().map(|(identity, link_id)| {
+                WorkProductRelationV1::AcceptedAttempt {
                     task_id: item.task_id().clone(),
-                    identity: admission.identity().clone(),
-                });
-            }
+                    identity: identity.clone(),
+                    link_id: link_id.clone(),
+                }
+            }));
             relations.extend(item.handoffs().iter().map(|handoff| {
                 WorkProductRelationV1::Handoff {
                     task_id: item.task_id().clone(),
@@ -270,6 +351,12 @@ impl WorkProductGraphV1 {
                 proposal_id: decision.proposal().proposal_id().clone(),
             }
         }));
+        relations.extend(self.relation_replan_decisions.iter().map(|decision| {
+            WorkProductRelationV1::ProposalDecision {
+                task_id: decision.proposal.task_id.clone(),
+                proposal_id: decision.proposal.proposal_id.clone(),
+            }
+        }));
         relations.sort();
         relations
     }
@@ -277,6 +364,90 @@ impl WorkProductGraphV1 {
     pub fn apply(mut self, change: WorkGraphChangeV1) -> Result<Self, WorkProductContractError> {
         match change {
             WorkGraphChangeV1::TaskAdded { item } => self.items.push(item),
+            WorkGraphChangeV1::RelationReplanDecided {
+                proposal,
+                disposition,
+                decided_at,
+            } => {
+                if proposal.based_on_version != self.version
+                    || self
+                        .relation_replan_decisions
+                        .iter()
+                        .any(|decision| decision.proposal.proposal_id == proposal.proposal_id)
+                    || self
+                        .proposal_decisions
+                        .iter()
+                        .any(|decision| decision.proposal().proposal_id() == &proposal.proposal_id)
+                {
+                    return Err(WorkProductContractError::ProposalMismatch);
+                }
+                proposal.validate()?;
+                let tasks = self
+                    .items
+                    .iter()
+                    .map(WorkItemV1::task_id)
+                    .collect::<BTreeSet<_>>();
+                if !tasks.contains(&proposal.task_id)
+                    || proposal
+                        .dependencies()
+                        .iter()
+                        .chain(proposal.informational_relations())
+                        .chain(proposal.causal_candidates())
+                        .any(|related| !tasks.contains(related))
+                {
+                    return Err(WorkProductContractError::UnknownTask);
+                }
+                if decided_at
+                    < self
+                        .item(&proposal.task_id)
+                        .ok_or(WorkProductContractError::UnknownTask)?
+                        .updated_at()
+                {
+                    return Err(WorkProductContractError::InvalidTime);
+                }
+                let mut proposed_items = self.items.clone();
+                let item = proposed_items
+                    .iter_mut()
+                    .find(|item| item.task_id() == &proposal.task_id)
+                    .ok_or(WorkProductContractError::UnknownTask)?;
+                item.input.dependencies = proposal.dependencies.iter().cloned().collect();
+                validate_acyclic(&proposed_items)?;
+                self.relation_replan_decisions
+                    .push(WorkRelationReplanDecisionV1 {
+                        proposal,
+                        disposition,
+                        decided_at,
+                    });
+            }
+            WorkGraphChangeV1::TaskRelationsReplanned {
+                proposal_id,
+                applied_at,
+            } => {
+                let proposal = self
+                    .relation_replan_decisions
+                    .iter()
+                    .find(|decision| {
+                        decision.proposal.proposal_id == proposal_id
+                            && decision.disposition == WorkProposalDispositionV1::Accepted
+                            && decision
+                                .proposal
+                                .based_on_version
+                                .next()
+                                .ok()
+                                .is_some_and(|version| version == self.version)
+                    })
+                    .map(|decision| &decision.proposal)
+                    .cloned()
+                    .ok_or(WorkProductContractError::ProposalMismatch)?;
+                let item = self.item_mut(&proposal.task_id)?;
+                if applied_at < item.updated_at() {
+                    return Err(WorkProductContractError::InvalidTime);
+                }
+                item.input.dependencies = proposal.dependencies;
+                item.input.informational_relations = proposal.informational_relations;
+                item.input.causal_candidates = proposal.causal_candidates;
+                item.input.updated_at = applied_at;
+            }
             WorkGraphChangeV1::EvidenceLinked { task_id, evidence } => {
                 if evidence.task_id() != &task_id {
                     return Err(WorkProductContractError::EvidenceTaskMismatch);
@@ -291,6 +462,14 @@ impl WorkProductGraphV1 {
                 decided_at,
             } => {
                 self.validate_proposal(&proposal)?;
+                if decided_at
+                    < self
+                        .item(&proposal.task_id)
+                        .ok_or(WorkProductContractError::UnknownTask)?
+                        .updated_at()
+                {
+                    return Err(WorkProductContractError::InvalidTime);
+                }
                 self.proposal_decisions.push(WorkProposalDecisionV1 {
                     proposal,
                     disposition,
@@ -306,6 +485,9 @@ impl WorkProductGraphV1 {
                     .item(&proposal.task_id)
                     .cloned()
                     .ok_or(WorkProductContractError::UnknownTask)?;
+                if accepted_at < parent.updated_at() {
+                    return Err(WorkProductContractError::InvalidTime);
+                }
                 for child in &proposal.children {
                     self.items.push(WorkItemV1::new(WorkItemInputV1 {
                         task_id: child.task_id.clone(),
@@ -332,51 +514,52 @@ impl WorkProductGraphV1 {
                     decided_at: accepted_at,
                 });
             }
-            WorkGraphChangeV1::ProviderAdmitted {
+            WorkGraphChangeV1::AcceptedAttemptLinked {
                 task_id,
-                proposal_id,
+                based_on_version,
                 identity,
-                route,
-                admitted_at,
+                evidence,
+                linked_at,
             } => {
                 if identity.task_id() != &task_id {
-                    return Err(WorkProductContractError::InvalidProviderTransition);
+                    return Err(WorkProductContractError::IllegalTransition);
+                }
+                if based_on_version != self.version {
+                    return Err(WorkProductContractError::IllegalTransition);
+                }
+                let evidence = TaskEvidenceLinkV1::new(
+                    evidence.link_id().clone(),
+                    evidence.revision(),
+                    evidence.task_id().clone(),
+                    evidence.anchor_id().clone(),
+                    evidence.evidence_digest().clone(),
+                    evidence.observed_at(),
+                )?;
+                if evidence.task_id() != &task_id {
+                    return Err(WorkProductContractError::EvidenceTaskMismatch);
+                }
+                if evidence.observed_at() > linked_at {
+                    return Err(WorkProductContractError::InvalidTime);
+                }
+                if self
+                    .evidence
+                    .iter()
+                    .any(|prior| prior.link_id() == evidence.link_id())
+                {
+                    return Err(WorkProductContractError::DuplicateIdentity);
                 }
                 let item = self.item_mut(&task_id)?;
-                if item.accepted_proposal.as_ref() != Some(&proposal_id)
-                    || item
-                        .accepted_route
-                        .as_ref()
-                        .and_then(WorkRouteDecisionV1::recommended)
-                        != Some(&route)
-                    || item.provider_admission.is_some()
-                {
-                    return Err(WorkProductContractError::RouteNotSelected);
+                if linked_at < item.updated_at() {
+                    return Err(WorkProductContractError::InvalidTime);
                 }
-                item.provider_admission = Some(WorkProviderAdmissionV1::Admitted {
-                    identity,
-                    proposal_id,
-                    route,
-                    admitted_at,
-                });
-                item.input.updated_at = admitted_at;
-            }
-            WorkGraphChangeV1::ProviderOutcomeRecorded { task_id, outcome } => {
-                let item = self.item_mut(&task_id)?;
-                if item
-                    .provider_admission
-                    .as_ref()
-                    .map(WorkProviderAdmissionV1::identity)
-                    != Some(outcome.identity())
-                    || item
-                        .provider_outcomes
-                        .iter()
-                        .any(|prior| prior.identity() == outcome.identity())
-                {
-                    return Err(WorkProductContractError::InvalidProviderTransition);
+                if item.accepted_attempts.contains_key(&identity) {
+                    return Err(WorkProductContractError::DuplicateIdentity);
                 }
-                item.input.updated_at = outcome.observed_at;
-                item.provider_outcomes.push(outcome);
+                item.accepted_attempts
+                    .insert(identity, evidence.link_id().clone());
+                item.evidence_links.insert(evidence.link_id().clone());
+                item.input.updated_at = linked_at;
+                self.evidence.push(evidence);
             }
             WorkGraphChangeV1::TaskAccepted {
                 task_id,
@@ -384,17 +567,16 @@ impl WorkProductGraphV1 {
                 accepted_at,
             } => {
                 let item = self.item_mut(&task_id)?;
+                if accepted_at < item.updated_at() {
+                    return Err(WorkProductContractError::InvalidTime);
+                }
                 let required = item
                     .acceptance_criteria()
                     .iter()
                     .filter(|criterion| criterion.evidence_required())
                     .map(|criterion| criterion.criterion_id().clone())
                     .collect::<BTreeSet<_>>();
-                if !matches!(
-                    item.current_provider_outcome()
-                        .map(WorkProviderOutcomeV1::terminal),
-                    Some(WorkProviderTerminalV1::Completed)
-                ) || evidence_by_criterion.keys().collect::<BTreeSet<_>>()
+                if evidence_by_criterion.keys().collect::<BTreeSet<_>>()
                     != required.iter().collect::<BTreeSet<_>>()
                     || evidence_by_criterion
                         .values()
@@ -409,96 +591,11 @@ impl WorkProductGraphV1 {
             WorkGraphChangeV1::HandoffRecorded { handoff } => {
                 let handed_off_at = handoff.handed_off_at;
                 let item = self.item_mut(handoff.task_id())?;
+                if handed_off_at < item.updated_at() {
+                    return Err(WorkProductContractError::InvalidTime);
+                }
                 item.input.updated_at = handed_off_at;
                 item.handoffs.push(handoff);
-            }
-            WorkGraphChangeV1::AttemptCancelled {
-                task_id,
-                identity,
-                cancelled_at,
-            } => {
-                let item = self.item_mut(&task_id)?;
-                if item
-                    .provider_admission
-                    .as_ref()
-                    .map(WorkProviderAdmissionV1::identity)
-                    != Some(&identity)
-                    || item.current_provider_outcome().is_some()
-                {
-                    return Err(WorkProductContractError::InvalidProviderTransition);
-                }
-                item.provider_admission = Some(WorkProviderAdmissionV1::Cancelled {
-                    identity,
-                    cancelled_at,
-                });
-                item.input.updated_at = cancelled_at;
-            }
-            WorkGraphChangeV1::AttemptRetried {
-                task_id,
-                prior_identity,
-                identity,
-                route,
-                admitted_at,
-            } => {
-                let item = self.item_mut(&task_id)?;
-                if identity.task_id() != &task_id
-                    || identity == prior_identity
-                    || item
-                        .provider_admission
-                        .as_ref()
-                        .map(WorkProviderAdmissionV1::identity)
-                        != Some(&prior_identity)
-                    || !(matches!(
-                        item.provider_admission,
-                        Some(WorkProviderAdmissionV1::Cancelled { .. })
-                    ) || item.current_provider_outcome().is_some())
-                {
-                    return Err(WorkProductContractError::InvalidProviderTransition);
-                }
-                let proposal_id = item
-                    .accepted_proposal
-                    .clone()
-                    .ok_or(WorkProductContractError::ProposalMismatch)?;
-                if item
-                    .accepted_route
-                    .as_ref()
-                    .and_then(WorkRouteDecisionV1::recommended)
-                    != Some(&route)
-                {
-                    return Err(WorkProductContractError::RouteNotSelected);
-                }
-                item.provider_admission = Some(WorkProviderAdmissionV1::Admitted {
-                    identity,
-                    proposal_id,
-                    route,
-                    admitted_at,
-                });
-                item.input.updated_at = admitted_at;
-            }
-            WorkGraphChangeV1::AdmissionRolledBack {
-                task_id,
-                identity,
-                rolled_back_at,
-            } => {
-                let item = self.item_mut(&task_id)?;
-                if item
-                    .provider_admission
-                    .as_ref()
-                    .map(WorkProviderAdmissionV1::identity)
-                    != Some(&identity)
-                    || !matches!(
-                        item.provider_admission,
-                        Some(WorkProviderAdmissionV1::Admitted { .. })
-                    )
-                    || item.current_provider_outcome().is_some()
-                {
-                    return Err(WorkProductContractError::InvalidProviderTransition);
-                }
-                item.provider_admission = Some(WorkProviderAdmissionV1::RolledBack {
-                    identity,
-                    rolled_back_at,
-                });
-                item.input.updated_at = rolled_back_at;
             }
         }
         self.version = self.version.next()?;
@@ -550,6 +647,16 @@ impl WorkProductGraphV1 {
         ensure_unique(self.milestones.iter().map(|value| value.id()))?;
         ensure_unique(self.items.iter().map(WorkItemV1::task_id))?;
         ensure_unique(self.evidence.iter().map(TaskEvidenceLinkV1::link_id))?;
+        ensure_unique(
+            self.proposal_decisions
+                .iter()
+                .map(|decision| decision.proposal().proposal_id())
+                .chain(
+                    self.relation_replan_decisions
+                        .iter()
+                        .map(|decision| &decision.proposal.proposal_id),
+                ),
+        )?;
         for item in &self.items {
             validate_item_state(item)?;
         }
@@ -608,6 +715,23 @@ impl WorkProductGraphV1 {
         }) {
             return Err(WorkProductContractError::UnknownTask);
         }
+        for decision in &self.relation_replan_decisions {
+            let proposal = &decision.proposal;
+            proposal.validate()?;
+            if proposal.based_on_version >= self.version {
+                return Err(WorkProductContractError::ProposalMismatch);
+            }
+            if !tasks.contains(&proposal.task_id)
+                || proposal
+                    .dependencies()
+                    .iter()
+                    .chain(proposal.informational_relations())
+                    .chain(proposal.causal_candidates())
+                    .any(|related| !tasks.contains(related))
+            {
+                return Err(WorkProductContractError::UnknownTask);
+            }
+        }
         if self
             .evidence
             .iter()
@@ -638,6 +762,7 @@ impl WorkProductGraphV1 {
         mut milestones: Vec<WorkMilestoneV1>,
         mut items: Vec<WorkItemV1>,
         mut proposal_decisions: Vec<WorkProposalDecisionV1>,
+        mut relation_replan_decisions: Vec<WorkRelationReplanDecisionV1>,
         mut evidence: Vec<TaskEvidenceLinkV1>,
     ) -> Result<Self, WorkProductContractError> {
         initiatives.sort_by(|left, right| left.id.cmp(&right.id));
@@ -645,6 +770,12 @@ impl WorkProductGraphV1 {
         milestones.sort_by(|left, right| left.id.cmp(&right.id));
         items.sort_by(|left, right| left.input.task_id.cmp(&right.input.task_id));
         proposal_decisions.sort_by(|left, right| {
+            left.proposal
+                .proposal_id
+                .cmp(&right.proposal.proposal_id)
+                .then_with(|| left.decided_at.cmp(&right.decided_at))
+        });
+        relation_replan_decisions.sort_by(|left, right| {
             left.proposal
                 .proposal_id
                 .cmp(&right.proposal.proposal_id)
@@ -658,6 +789,7 @@ impl WorkProductGraphV1 {
             milestones,
             items,
             proposal_decisions,
+            relation_replan_decisions,
             evidence,
         };
         graph.validate()?;
@@ -668,27 +800,15 @@ impl WorkProductGraphV1 {
 fn validate_item_state(item: &WorkItemV1) -> Result<(), WorkProductContractError> {
     WorkItemV1::new(item.input.clone())?;
     if item.accepted_proposal.is_some() != item.accepted_route.is_some()
-        || item
-            .provider_admission
-            .as_ref()
-            .is_some_and(|admission| admission.identity().task_id() != item.task_id())
-        || item
-            .provider_outcomes
-            .iter()
-            .any(|outcome| outcome.identity().task_id() != item.task_id())
-        || item
-            .provider_outcomes
-            .iter()
-            .map(WorkProviderOutcomeV1::identity)
-            .collect::<BTreeSet<_>>()
-            .len()
-            != item.provider_outcomes.len()
+        || item.accepted_attempts.iter().any(|(identity, link_id)| {
+            identity.task_id() != item.task_id() || !item.evidence_links.contains(link_id)
+        })
         || item
             .handoffs
             .iter()
             .any(|handoff| handoff.task_id() != item.task_id())
     {
-        return Err(WorkProductContractError::InvalidProviderTransition);
+        return Err(WorkProductContractError::IllegalTransition);
     }
     let required = item
         .acceptance_criteria()
@@ -697,11 +817,6 @@ fn validate_item_state(item: &WorkItemV1) -> Result<(), WorkProductContractError
         .map(WorkAcceptanceCriterionV1::criterion_id)
         .collect::<BTreeSet<_>>();
     let acceptance_is_valid = item.accepted_at.is_some()
-        && matches!(
-            item.current_provider_outcome()
-                .map(WorkProviderOutcomeV1::terminal),
-            Some(WorkProviderTerminalV1::Completed)
-        )
         && item.accepted_criteria.keys().collect::<BTreeSet<_>>() == required
         && item
             .accepted_criteria
@@ -760,4 +875,22 @@ fn ensure_unique<'a, T: Ord + 'a>(
     } else {
         Err(WorkProductContractError::DuplicateIdentity)
     }
+}
+
+fn relation_replan_digest(
+    task_id: &TaskId,
+    version: WorkGraphVersionV1,
+    dependencies: &BTreeSet<TaskId>,
+    informational: &BTreeSet<TaskId>,
+    causal: &BTreeSet<TaskId>,
+) -> Result<ManifestDigest, WorkProductContractError> {
+    crate::canonical_sha256(&(
+        "tracedecay.work-product.relation-replan.v1",
+        task_id,
+        version,
+        dependencies,
+        informational,
+        causal,
+    ))
+    .map_err(|_| WorkProductContractError::ProposalMismatch)
 }

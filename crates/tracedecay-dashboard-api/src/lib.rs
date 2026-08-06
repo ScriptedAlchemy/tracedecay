@@ -100,7 +100,7 @@ pub mod project_registry;
 mod projects;
 mod read_model;
 mod savings_api;
-mod savings_pricing;
+use tracedecay_usecases::provider_pricing as savings_pricing;
 pub mod scope;
 mod settings_api;
 pub use settings_api::{
@@ -301,8 +301,9 @@ pub struct DashboardState {
     /// Daemon-owned canonical session retrieval authority used by LCM browse
     /// routes. Those routes never retain or open a session database.
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
-    /// Global accounting DB (savings ledger, lifetime counters, turns) used
-    /// by the Savings & Cost tab, when available.
+    /// Global accounting DB for the savings ledger and lifetime counters used
+    /// by the Savings & Cost tab. Provider usage lives in the retained project
+    /// session store exposed separately through `lcm_db`.
     pub savings_db: Option<Arc<RegisteredGlobalDb>>,
     /// Display path of the global accounting DB.
     pub savings_db_path: String,
@@ -2425,7 +2426,7 @@ mod authority_tests {
         assert_eq!(value["domain_state"], "unknown");
         assert_eq!(value["payload"]["savings"]["available"], false);
         assert_eq!(value["payload"]["sessions"]["available"], false);
-        assert_eq!(value["payload"]["turns"]["available"], false);
+        assert_eq!(value["payload"]["provider_usage"]["available"], false);
     }
 
     #[test]

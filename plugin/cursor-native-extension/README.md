@@ -13,5 +13,8 @@ receipt-backed Doctor check verifies the deployed `package.json` and
 binary path from that lifecycle; `tracedecay.binaryPath` and `TRACEDECAY_BIN`
 remain explicit overrides.
 
-`npm run package` removes its previous generated VSIX before rebuilding, so
-repeat packaging cannot recursively include the output artifact.
+`embedded/extension.js` is the sole checked-in compiled asset. The Rust host
+bundle embeds it at compile time and the published crate must build with stock
+Cargo without Node, so this generated file is an explicit offline-packaging
+exception. `npm run build` regenerates it from TypeScript; `npm run
+check:embedded` performs a byte-for-byte drift check. `dist/` remains ignored.

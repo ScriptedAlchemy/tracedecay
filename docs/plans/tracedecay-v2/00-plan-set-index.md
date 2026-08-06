@@ -21,6 +21,12 @@ compatibility reader, migration, backfill, dual write, or census path, even for
 data written by an older installed binary. Delivery sequence, branch history, tests,
 historical plans, and a `V1` suffix alone do not establish a public release.
 
+The root package and every workspace crate, including `tracedecay-sdk`, are
+private Cargo packages (`publish = false`) and ship only as tested GitHub
+release assets. The TypeScript SDK is packaged and tested for npm trusted
+publishing through GitHub Actions OIDC; acceptance covers workflow, package,
+and real-daemon conformance rather than a live registry publication.
+
 Core Work and the complete callable Plan 24/32 runtime ship as one product;
 advanced workflow behavior is not deferred to a later delivery stage.
 Dashboard acceptance is desktop-first, not desktop-only: desktop visual

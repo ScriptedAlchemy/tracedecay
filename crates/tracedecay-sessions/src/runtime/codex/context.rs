@@ -27,6 +27,7 @@ const CODEX_TURN_LOCATION_KEYS: TranscriptLocationMetadataKeys =
 
 #[derive(Clone)]
 pub(super) struct CodexContextState {
+    pub(super) turn_id: Option<String>,
     pub(super) model: Option<String>,
     pub(super) cwd: Option<PathBuf>,
     pub(super) git: Option<Value>,
@@ -36,6 +37,7 @@ pub(super) struct CodexContextState {
 impl CodexContextState {
     pub(super) fn from_meta(meta: &CodexMeta) -> Self {
         Self {
+            turn_id: None,
             model: meta.model.clone(),
             cwd: Some(meta.cwd.clone()),
             git: meta.git.clone(),
@@ -114,9 +116,11 @@ impl CodexContextState {
             return true;
         }
         if let Some(context) = turn_context_from_record(record) {
-            if context.model.is_some() {
-                self.model = context.model;
-            }
+            // A turn context is a new native correlation boundary. Missing
+            // identity/model evidence must become unknown for that turn
+            // instead of inheriting a prior turn's values.
+            self.turn_id = context.turn_id;
+            self.model = context.model;
             if context.cwd.is_some() {
                 self.cwd = context.cwd;
             }
@@ -297,5 +301,56 @@ fn insert_git_metadata(metadata: &mut serde_json::Map<String, Value>, git: Optio
             "codex_git_repository_url".to_string(),
             Value::String(remote.to_string()),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use serde_json::json;
+
+    use super::{CodexContextState, CodexMeta};
+
+    fn meta() -> CodexMeta {
+        CodexMeta {
+            cwd: PathBuf::from("/workspace"),
+            session_id: "session.fixture".to_owned(),
+            model: None,
+            git: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            agent_nickname: None,
+            agent_role: None,
+            thread_source: None,
+        }
+    }
+
+    #[test]
+    fn new_turn_context_clears_missing_turn_and_model_evidence() {
+        let meta = meta();
+        let mut state = CodexContextState::from_meta(&meta);
+        assert!(state.observe_context_record(
+            &json!({
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "turn.first",
+                    "model": "gpt-5.6-codex"
+                }
+            }),
+            Path::new("/tmp/rollout.jsonl"),
+            &meta,
+        ));
+        assert_eq!(state.turn_id.as_deref(), Some("turn.first"));
+        assert_eq!(state.model.as_deref(), Some("gpt-5.6-codex"));
+
+        assert!(state.observe_context_record(
+            &json!({"type": "turn_context", "payload": {}}),
+            Path::new("/tmp/rollout.jsonl"),
+            &meta,
+        ));
+        assert_eq!(state.turn_id, None);
+        assert_eq!(state.model, None);
     }
 }
