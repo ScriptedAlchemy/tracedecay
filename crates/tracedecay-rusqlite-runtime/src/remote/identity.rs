@@ -7,7 +7,9 @@ use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1};
 
 use crate::exact_sql::{ExactSqlHandle, ExactSqlStatement};
 
-use super::{READ_WAIT, RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1, one_row, row_text, text};
+use super::{
+    READ_WAIT, RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1, one_row, row_text, text,
+};
 
 /// Loads one text column from an identity row; any shape mismatch means the
 /// singleton table does not have the exact final persisted layout.

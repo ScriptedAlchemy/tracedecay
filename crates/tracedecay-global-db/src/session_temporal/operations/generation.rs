@@ -6,21 +6,33 @@ use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_sessions::runtime::lcm::types::{LcmError, LcmImmutableSummaryPublication};
 
 use super::PUBLICATION_ROUTE;
+use crate::session_temporal::relations::{SessionRelationProjection, SummarySourceRef};
 
 const MAX_LINEAGE_DEPTH: usize = 64;
 const MAX_LINEAGE_NODES: usize = 4_096;
 
-#[derive(Clone, Copy)]
-enum Traversal {
-    Sources,
-    Dependents,
-}
-
-pub(super) async fn validate_lineage_graph(
-    conn: &impl Executor,
+pub(super) fn validate_lineage_projection(
+    projection: &SessionRelationProjection,
     publication: &LcmImmutableSummaryPublication,
 ) -> Result<(), LcmError> {
     let summary_id = publication.summary_id.as_str();
+    let sources = projection
+        .summaries
+        .iter()
+        .map(|summary| {
+            (
+                summary.summary_id.as_str(),
+                summary
+                    .sources
+                    .iter()
+                    .filter_map(|source| match source {
+                        SummarySourceRef::Summary { summary_id } => Some(summary_id.as_str()),
+                        SummarySourceRef::Anchor { .. } => None,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     for source in &publication.draft.source_refs {
         let tracedecay_sessions::runtime::lcm::types::LcmSourceRef::SummaryNode { node_id } =
             source
@@ -30,9 +42,24 @@ pub(super) async fn validate_lineage_graph(
         if node_id == summary_id {
             return Err(cycle(summary_id));
         }
-        let graph = bounded_graph(conn, node_id, Traversal::Sources, summary_id).await?;
-        if graph_contains_cycle(&graph) {
-            return Err(cycle(summary_id));
+        let mut queue = VecDeque::from([(node_id.as_str(), 0_usize)]);
+        let mut expanded = BTreeSet::new();
+        while let Some((node, depth)) = queue.pop_front() {
+            if depth > MAX_LINEAGE_DEPTH {
+                return Err(lineage_limit(summary_id, "lineage_depth_exceeded"));
+            }
+            if !expanded.insert(node) {
+                continue;
+            }
+            if expanded.len() > MAX_LINEAGE_NODES {
+                return Err(lineage_limit(summary_id, "lineage_node_limit_exceeded"));
+            }
+            if node == summary_id {
+                return Err(cycle(summary_id));
+            }
+            for next in sources.get(node).into_iter().flatten() {
+                queue.push_back((next, depth + 1));
+            }
         }
     }
     if publication.predecessor_summary_id.as_deref() == Some(summary_id) {
@@ -43,10 +70,16 @@ pub(super) async fn validate_lineage_graph(
 
 pub(super) async fn validate_current_predecessor(
     conn: &impl Executor,
+    projection: &SessionRelationProjection,
     publication: &LcmImmutableSummaryPublication,
     logical_identity_digest: &str,
 ) -> Result<(), LcmError> {
     let summary_id = publication.summary_id.as_str();
+    let superseded = projection
+        .summaries
+        .iter()
+        .filter_map(|summary| summary.predecessor_summary_id.as_deref())
+        .collect::<BTreeSet<_>>();
     let mut matching = conn
         .query(
             "SELECT summary_id, publication_json
@@ -67,15 +100,7 @@ pub(super) async fn validate_current_predecessor(
         if manifest.logical_identity_digest != logical_identity_digest {
             continue;
         }
-        let mut successor_rows = conn
-            .query(
-                "SELECT successor_summary_id
-                 FROM session_summary_successors
-                 WHERE predecessor_summary_id = ?1",
-                params![candidate_id.as_str()],
-            )
-            .await?;
-        if successor_rows.next().await?.is_none() {
+        if !superseded.contains(candidate_id.as_str()) {
             current_for_identity.push(candidate_id);
         }
     }
@@ -116,6 +141,7 @@ pub(super) async fn publish_candidate_generation(
     predecessor: Option<&str>,
     source_horizon_json: &str,
     now: i64,
+    relation_projection: &SessionRelationProjection,
 ) -> Result<i64, LcmError> {
     let active = active_generation(conn, session_id).await?;
     let mut max_rows = conn
@@ -186,7 +212,7 @@ pub(super) async fn publish_candidate_generation(
         .await?;
     }
     if let Some(predecessor) = predecessor {
-        for affected in stale_closure(conn, predecessor, summary_id).await? {
+        for affected in stale_closure(relation_projection, predecessor, summary_id)? {
             let mut rows = conn
                 .query(
                     "SELECT source_horizon_json
@@ -272,90 +298,51 @@ async fn stale_generation(
     })
 }
 
-async fn stale_closure(
-    conn: &impl Executor,
+fn stale_closure(
+    projection: &SessionRelationProjection,
     predecessor: &str,
     conflict_id: &str,
 ) -> Result<Vec<String>, LcmError> {
-    let graph = bounded_graph(conn, predecessor, Traversal::Dependents, conflict_id).await?;
-    if graph_contains_cycle(&graph) {
-        return Err(cycle(conflict_id));
-    }
-    Ok(graph.keys().cloned().collect())
-}
-
-async fn bounded_graph(
-    conn: &impl Executor,
-    start: &str,
-    traversal: Traversal,
-    conflict_id: &str,
-) -> Result<BTreeMap<String, Vec<String>>, LcmError> {
-    let mut queue = VecDeque::from([(start.to_string(), 0usize)]);
+    let dependents = projection
+        .summaries
+        .iter()
+        .flat_map(|summary| {
+            summary
+                .sources
+                .iter()
+                .filter_map(move |source| match source {
+                    SummarySourceRef::Summary { summary_id } => {
+                        Some((summary_id.as_str(), summary.summary_id.as_str()))
+                    }
+                    SummarySourceRef::Anchor { .. } => None,
+                })
+        })
+        .fold(
+            BTreeMap::<_, Vec<_>>::new(),
+            |mut graph, (source, dependent)| {
+                graph.entry(source).or_default().push(dependent);
+                graph
+            },
+        );
+    let mut queue = VecDeque::from([(predecessor, 0usize)]);
     let mut expanded = BTreeSet::new();
-    let mut graph = BTreeMap::new();
+    let mut affected = Vec::new();
     while let Some((node, depth)) = queue.pop_front() {
         if depth > MAX_LINEAGE_DEPTH {
             return Err(lineage_limit(conflict_id, "lineage_depth_exceeded"));
         }
-        if !expanded.insert(node.clone()) {
+        if !expanded.insert(node) {
             continue;
         }
         if expanded.len() > MAX_LINEAGE_NODES {
             return Err(lineage_limit(conflict_id, "lineage_node_limit_exceeded"));
         }
-        let sql = match traversal {
-            Traversal::Sources => {
-                "SELECT source_summary_id FROM session_summary_sources
-                 WHERE summary_id = ?1 AND source_summary_id IS NOT NULL
-                 ORDER BY source_ordinal"
-            }
-            Traversal::Dependents => {
-                "SELECT summary_id FROM session_summary_sources
-                 WHERE source_summary_id = ?1 ORDER BY summary_id"
-            }
-        };
-        let mut rows = conn.query(sql, params![node.as_str()]).await?;
-        let mut adjacent = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let next: String = row.get(0)?;
-            adjacent.push(next.clone());
+        affected.push(node.to_owned());
+        for next in dependents.get(node).into_iter().flatten() {
             queue.push_back((next, depth + 1));
         }
-        graph.insert(node, adjacent);
     }
-    Ok(graph)
-}
-
-fn graph_contains_cycle(graph: &BTreeMap<String, Vec<String>>) -> bool {
-    fn visit(
-        node: &str,
-        graph: &BTreeMap<String, Vec<String>>,
-        visiting: &mut BTreeSet<String>,
-        visited: &mut BTreeSet<String>,
-        depth: usize,
-    ) -> bool {
-        if depth > MAX_LINEAGE_DEPTH || visiting.contains(node) {
-            return true;
-        }
-        if visited.contains(node) {
-            return false;
-        }
-        visiting.insert(node.to_string());
-        let cyclic = graph.get(node).is_some_and(|adjacent| {
-            adjacent
-                .iter()
-                .any(|next| visit(next, graph, visiting, visited, depth + 1))
-        });
-        visiting.remove(node);
-        visited.insert(node.to_string());
-        cyclic
-    }
-
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    graph
-        .keys()
-        .any(|node| visit(node, graph, &mut visiting, &mut visited, 0))
+    Ok(affected)
 }
 
 fn lineage_limit(summary_id: &str, reason: &str) -> LcmError {
@@ -408,30 +395,11 @@ async fn copy_active_projection(
                 sanitized_content_digest, sanitized_content_bytes,
                 snippet_text, index_text
          FROM session_occurrences WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_logical_copy_edges (
-            session_id, generation, occurrence_id, copied_from_occurrence_id,
-            proof_json, knowledge_at, valid_time_json, created_at
-         )
-         SELECT session_id, ?2, occurrence_id, copied_from_occurrence_id,
-                proof_json, knowledge_at, valid_time_json, created_at
-         FROM session_logical_copy_edges WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_turn_members (
             session_id, generation, turn_id, occurrence_id, ordinal
          )
          SELECT session_id, ?2, turn_id, occurrence_id, ordinal
          FROM session_turn_members WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_thread_hierarchy_edges (
-            session_id, generation, parent_thread_id, child_thread_id, ordinal
-         )
-         SELECT session_id, ?2, parent_thread_id, child_thread_id, ordinal
-         FROM session_thread_hierarchy_edges
-         WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_agent_hierarchy_edges (
-            session_id, generation, parent_agent_id, child_agent_id, ordinal
-         )
-         SELECT session_id, ?2, parent_agent_id, child_agent_id, ordinal
-         FROM session_agent_hierarchy_edges
-         WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_assertions (
             session_id, generation, assertion_id, assertion_kind,
             subject_anchor_id, object_anchor_id, knowledge_at,

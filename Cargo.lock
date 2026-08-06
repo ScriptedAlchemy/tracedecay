@@ -5877,6 +5877,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-capture",
  "tracedecay-domain",
+ "tracedecay-graph-db",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -6217,6 +6218,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tracedecay-domain",
+ "tracedecay-temporal-query",
 ]
 
 [[package]]

@@ -17,6 +17,7 @@ use tracedecay_store::{
     SessionRefreshStateV1, SessionRefreshTerminalStateV1, SessionStoreError, SessionStoreResult,
     SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::super::RegisteredGlobalDb;
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
@@ -29,7 +30,10 @@ use super::query::{
     encode_watermarks, frontier_i64, generation_i64, now_micros, read_generation, storage,
     storage_message,
 };
-use super::rebuild::validate_candidate_frontier;
+use super::rebuild::{
+    checkpoint_relation_rebuild_control, rebuild_candidate_session_relations,
+    validate_candidate_frontier,
+};
 
 const BEGIN_REFRESH: &str = "begin or join session refresh";
 const PERSIST_REFRESH: &str = "persist session refresh progress";
@@ -449,7 +453,52 @@ impl RegisteredGlobalDb {
     pub async fn complete_session_refresh_result(
         &self,
         request: SessionRefreshCompletionRequestV1,
+        execution_control: ExecutionControl,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        checkpoint_relation_rebuild_control(&execution_control)?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        if let Some(receipt) =
+            read_receipt(&snapshot, request.session_id(), request.operation_id()).await?
+        {
+            require_exact_completion(&receipt, &request)?;
+            checkpoint_relation_rebuild_control(&execution_control)?;
+            return Ok(receipt);
+        }
+        drop(snapshot);
+
+        let preflight = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        let binding = require_running_binding(
+            &preflight,
+            request.session_id(),
+            request.operation_id(),
+            COMPLETE_REFRESH,
+        )
+        .await?;
+        if request.frontier().committed_through() != binding.target_frontier {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "refresh completion target coverage",
+            });
+        }
+        preflight
+            .commit()
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+
+        let relation_projection = rebuild_candidate_session_relations(
+            self,
+            request.session_id(),
+            binding.generation,
+            &execution_control,
+            COMPLETE_REFRESH,
+        )
+        .await?;
+
         let transaction = self
             .begin_write_transaction()
             .await
@@ -495,6 +544,7 @@ impl RegisteredGlobalDb {
             request.session_id(),
             binding.generation,
             &binding.watermarks,
+            &relation_projection,
         )
         .await?;
         validate_candidate_frontier(
@@ -502,6 +552,7 @@ impl RegisteredGlobalDb {
             request.session_id().as_str(),
             generation_i64(binding.generation, COMPLETE_REFRESH)?,
             binding.target_frontier,
+            &relation_projection,
         )
         .await?;
         let terminal_at = terminal_timestamp(&progress, COMPLETE_REFRESH)?;
@@ -1312,9 +1363,16 @@ async fn validate_next_progress(
             });
         }
     } else {
-        let materialized_records =
-            session_temporal_projection_record_count(conn, progress.session_id(), generation)
+        let copy_count =
+            projection_receipt_copy_count(conn, progress.session_id(), generation, batch_ordinal)
                 .await?;
+        let materialized_records = session_temporal_projection_record_count(
+            conn,
+            progress.session_id(),
+            generation,
+            copy_count,
+        )
+        .await?;
         if batch_ordinal != 0 || progress.committed_records() != materialized_records {
             return Err(SessionStoreError::InvalidStateTransition {
                 context: "initial refresh progress projection accounting",
@@ -1322,6 +1380,40 @@ async fn validate_next_progress(
         }
     }
     Ok(())
+}
+
+async fn projection_receipt_copy_count(
+    conn: &impl QueryExecutor,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    batch_ordinal: u64,
+) -> SessionStoreResult<u64> {
+    let mut rows = conn
+        .query(
+            "SELECT copy_count
+             FROM session_temporal_projection_receipts
+             WHERE session_id = ?1 AND generation = ?2 AND batch_ordinal = ?3",
+            params![
+                session_id.as_str(),
+                generation_i64(generation, PERSIST_REFRESH)?,
+                frontier_i64(batch_ordinal, PERSIST_REFRESH)?,
+            ],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    let value = rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_REFRESH, error))?
+        .ok_or_else(|| {
+            storage_message(
+                PERSIST_REFRESH,
+                "refresh projection copy receipt is unavailable",
+            )
+        })?
+        .get::<i64>(0)
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    u64::try_from(value).map_err(|error| storage(PERSIST_REFRESH, error))
 }
 
 async fn insert_progress_and_binding(
@@ -1431,9 +1523,16 @@ async fn projection_receipt_item_count(
 ) -> SessionStoreResult<usize> {
     let mut rows = conn
         .query(
-            "SELECT occurrence_count + copy_count + assertion_count
-             FROM session_temporal_projection_receipts
-             WHERE session_id = ?1 AND generation = ?2 AND batch_ordinal = ?3",
+            "SELECT current.occurrence_count + current.copy_count + current.assertion_count,
+                    previous.occurrence_count + previous.copy_count + previous.assertion_count
+             FROM session_temporal_projection_receipts AS current
+             LEFT JOIN session_temporal_projection_receipts AS previous
+               ON previous.session_id = current.session_id
+              AND previous.generation = current.generation
+              AND previous.batch_ordinal = current.batch_ordinal - 1
+             WHERE current.session_id = ?1
+               AND current.generation = ?2
+               AND current.batch_ordinal = ?3",
             params![
                 session_id.as_str(),
                 generation_i64(generation, PERSIST_REFRESH)?,
@@ -1451,10 +1550,26 @@ async fn projection_receipt_item_count(
             context: "refresh progress projection receipt",
         });
     };
-    let value: i64 = row
+    let current: i64 = row
         .get(0)
         .map_err(|error| storage(PERSIST_REFRESH, error))?;
-    usize::try_from(value).map_err(|error| storage(PERSIST_REFRESH, error))
+    let previous: Option<i64> = row
+        .get(1)
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    let delta = if batch_ordinal == 0 {
+        current
+    } else {
+        let previous = previous.ok_or(SessionStoreError::InvalidStateTransition {
+            context: "refresh progress predecessor projection receipt",
+        })?;
+        current
+            .checked_sub(previous)
+            .filter(|value| *value >= 0)
+            .ok_or(SessionStoreError::InvalidStateTransition {
+                context: "refresh progress projection receipt is non-monotonic",
+            })?
+    };
+    usize::try_from(delta).map_err(|error| storage(PERSIST_REFRESH, error))
 }
 
 async fn read_progress(

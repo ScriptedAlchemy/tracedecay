@@ -14,7 +14,7 @@
 //! are mounted. Every payload and read operation an application actually
 //! constructs today routes through here: facts, observations and cursor
 //! advances, diagnostics, evidence assembly, external sources, retrieval-anchor
-//! dispositions and derivatives, and session projections and summaries. Three
+//! dispositions and derivatives. Three
 //! surfaces are wired and tested but not yet constructed by any production
 //! caller, and are retained as the landing zone for their migration:
 //!
@@ -40,7 +40,6 @@ mod project;
 mod remote;
 mod retrieval_anchor;
 mod scope_set;
-mod session;
 mod support;
 
 use rusqlite::{Savepoint, Transaction};
@@ -68,7 +67,6 @@ pub use scope_set::{
     AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetExecutor, AuthorizedScopeSetSqliteStorage,
     AuthorizedScopeSetStoreError,
 };
-pub use session::SessionExecutor;
 
 // The read operation/result contract now lives in `tracedecay-store`. Re-export
 // the moved types so existing `repository::` paths keep resolving across the
@@ -78,15 +76,13 @@ pub use tracedecay_store::{
     EffectsReadOperationV1, EffectsReadResultV1, ExternalSourceReadOperationV1,
     ExternalSourceReadResultV1, FactReadOperationV1, FactReadResultV1, ObservationReadOperationV1,
     ObservationReadResultV1, ProfileReadOperationV1, ProfileReadResultV1, ProjectReadOperationV1,
-    ProjectReadResultV1, RepositoryReadOperationV1, RepositoryReadResultV1, SessionReadOperationV1,
-    SessionReadResultV1, StoredObservationRowV1,
+    ProjectReadResultV1, RepositoryReadOperationV1, RepositoryReadResultV1, StoredObservationRowV1,
 };
 
 #[derive(Default)]
 pub struct ConcreteRepositoryWriteExecutor {
     configuration: ConfigurationExecutor,
     project: ProjectExecutor,
-    session: SessionExecutor,
 }
 
 impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
@@ -138,12 +134,6 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::RetrievalAnchorDerivative(derivative) => self
                 .project
                 .execute_retrieval_anchor_derivative_write(savepoint, derivative),
-            RepositoryWritePayloadV1::SessionProjection(batch) => {
-                self.session.execute_projection_write(savepoint, batch)
-            }
-            RepositoryWritePayloadV1::SessionSummary(request) => {
-                self.session.execute_summary_write(savepoint, request)
-            }
             RepositoryWritePayloadV1::GitIndexTransaction(_)
             | RepositoryWritePayloadV1::EnqueueOutbox(_)
             | RepositoryWritePayloadV1::ApplyInbox(_)
@@ -161,7 +151,6 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
 pub struct ConcreteRepositoryReadExecutor {
     configuration: ConfigurationExecutor,
     project: ProjectExecutor,
-    session: SessionExecutor,
 }
 
 impl ConcreteRepositoryReadExecutor {
@@ -183,10 +172,6 @@ impl ConcreteRepositoryReadExecutor {
                 .project
                 .execute_external_source_read(snapshot, operation)
                 .map(RepositoryReadResultV1::ExternalSource),
-            RepositoryReadOperationV1::Session(operation) => self
-                .session
-                .execute_read(snapshot, operation)
-                .map(RepositoryReadResultV1::Session),
             RepositoryReadOperationV1::Code(_) => Err(rusqlite::Error::InvalidParameterName(
                 "repository attachment does not own code reads".to_owned(),
             )),

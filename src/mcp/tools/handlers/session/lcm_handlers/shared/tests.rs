@@ -10,9 +10,9 @@ use crate::mcp::tools::handlers::session::message_search::SessionRetrievalServic
 async fn unsupported_filters_are_typed_and_never_call_the_service() {
     // `branch` is a supported git-correlation filter, so only non-relevance
     // sort orders remain typed-unsupported for lcm_grep.
-    for args in [
-        json!({"query": "x", "sort": "recency", "include_summaries": false, "format": "json"}),
-    ] {
+    for args in
+        [json!({"query": "x", "sort": "recency", "include_summaries": false, "format": "json"})]
+    {
         let service = RecordingService::new(complete("unused", "user", None));
         let context = LcmHandlerContext::user(Some(&service));
         let response = payload(handle_lcm_grep(context, args).await.unwrap());

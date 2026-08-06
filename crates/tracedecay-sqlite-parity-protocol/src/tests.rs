@@ -111,11 +111,8 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreTable::SessionTemporalObservationEffects,
         SessionStoreTable::SessionTemporalProjectionReceipts,
         SessionStoreTable::SessionOccurrences,
-        SessionStoreTable::SessionLogicalCopyEdges,
         SessionStoreTable::SessionAssertions,
         SessionStoreTable::SessionSummaryNodes,
-        SessionStoreTable::SessionSummarySources,
-        SessionStoreTable::SessionSummarySuccessors,
         SessionStoreTable::MemoryV2Facts,
         SessionStoreTable::MemoryV2CurrentFacts,
         SessionStoreTable::MemoryV2Assertions,
@@ -170,12 +167,6 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
             generation: 1,
             occurrence_id: "occurrence".to_owned(),
         },
-        SessionStoreCursor::SessionLogicalCopyEdges {
-            session_id: "session".to_owned(),
-            generation: 1,
-            occurrence_id: "occurrence".to_owned(),
-            copied_from_occurrence_id: "origin".to_owned(),
-        },
         SessionStoreCursor::SessionAssertions {
             session_id: "session".to_owned(),
             generation: 1,
@@ -183,14 +174,6 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         },
         SessionStoreCursor::SessionSummaryNodes {
             summary_id: "summary".to_owned(),
-        },
-        SessionStoreCursor::SessionSummarySources {
-            summary_id: "summary".to_owned(),
-            source_ordinal: 0,
-        },
-        SessionStoreCursor::SessionSummarySuccessors {
-            predecessor_summary_id: "summary".to_owned(),
-            successor_summary_id: "successor".to_owned(),
         },
         SessionStoreCursor::MemoryV2Facts {
             fact_id: "fact".to_owned(),
@@ -385,7 +368,7 @@ fn every_session_journal_and_response_result_variant_round_trips() {
     });
 }
 
-fn session_rows() -> [SessionStoreRow; 27] {
+fn session_rows() -> [SessionStoreRow; 24] {
     [
         SessionStoreRow::Observations {
             sequence: 1,
@@ -456,13 +439,6 @@ fn session_rows() -> [SessionStoreRow; 27] {
             role: "user".to_owned(),
             row_digest: "row".to_owned(),
         },
-        SessionStoreRow::SessionLogicalCopyEdges {
-            session_id: "session".to_owned(),
-            generation: 1,
-            occurrence_id: "occurrence".to_owned(),
-            copied_from_occurrence_id: "origin".to_owned(),
-            row_digest: "row".to_owned(),
-        },
         SessionStoreRow::SessionAssertions {
             session_id: "session".to_owned(),
             generation: 1,
@@ -474,17 +450,6 @@ fn session_rows() -> [SessionStoreRow; 27] {
             summary_id: "summary".to_owned(),
             session_id: "session".to_owned(),
             summary_anchor_id: "anchor".to_owned(),
-            row_digest: "row".to_owned(),
-        },
-        SessionStoreRow::SessionSummarySources {
-            summary_id: "summary".to_owned(),
-            source_ordinal: 0,
-            source_kind: "anchor".to_owned(),
-            row_digest: "row".to_owned(),
-        },
-        SessionStoreRow::SessionSummarySuccessors {
-            predecessor_summary_id: "summary".to_owned(),
-            successor_summary_id: "successor".to_owned(),
             row_digest: "row".to_owned(),
         },
         SessionStoreRow::MemoryV2Facts {

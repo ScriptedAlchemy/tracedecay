@@ -7,6 +7,7 @@ use tracedecay_domain::{
     SessionId, SessionRefreshKeyV1, SessionRefreshOperationIdV1, SessionSourceCoverageReceiptV1,
     SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::common::{
     SessionRefreshBeginOrJoinPermit, SessionRefreshCancelPermit, SessionRefreshCompletePermit,
@@ -787,10 +788,11 @@ pub trait SessionRefreshStore: SessionTemporalCapabilityProvider + Send + Sync {
     fn complete_session_refresh(
         &self,
         request: SessionRefreshCompletionRequestV1,
+        execution_control: ExecutionControl,
     ) -> impl Future<Output = SessionStoreResult<SessionRefreshReceiptV1>> + Send {
         async move {
             let permit = SessionRefreshCompletePermit::grant(self.session_temporal_capabilities())?;
-            self.complete_session_refresh_supported(permit, request)
+            self.complete_session_refresh_supported(permit, request, execution_control)
                 .await
         }
     }
@@ -799,6 +801,7 @@ pub trait SessionRefreshStore: SessionTemporalCapabilityProvider + Send + Sync {
         &self,
         permit: SessionRefreshCompletePermit,
         request: SessionRefreshCompletionRequestV1,
+        execution_control: ExecutionControl,
     ) -> impl Future<Output = SessionStoreResult<SessionRefreshReceiptV1>> + Send;
 
     fn fail_session_refresh(

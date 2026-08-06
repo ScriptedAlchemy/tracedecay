@@ -1341,11 +1341,9 @@ mod durable_inventory {
         std::fs::write(store.path().join("branches/main.db"), b"").unwrap();
         std::fs::write(store.path().join("branches/notes.txt"), b"").unwrap();
 
-        let DurableDatabaseInventoryV1::Resolved(inventory) = durable_database_inventory(
-            store.path(),
-            Some(&manifest_bytes("code.db")),
-            &[],
-        ) else {
+        let DurableDatabaseInventoryV1::Resolved(inventory) =
+            durable_database_inventory(store.path(), Some(&manifest_bytes("code.db")), &[])
+        else {
             panic!("a readable manifest must resolve an inventory");
         };
 

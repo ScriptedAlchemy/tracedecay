@@ -8,7 +8,6 @@ use crate::{
     EvidenceAssemblyWriteV1, FactWriteBatch, GitIndexTransactionRecordV1, ObservationCursorAdvance,
     RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1, RetrievalAnchorDerivativeV1,
     RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1,
-    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1,
     SourceAcquisitionQueueCasV1, SourceCommitV1, SourceProjectionCommitV1,
     TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
@@ -779,8 +778,6 @@ pub enum RepositoryWritePayloadV1 {
     ExternalSourceAcquisition(Box<SourceAcquisitionQueueCasV1>),
     RetrievalAnchorDisposition(Box<RetrievalAnchorDispositionRecordV1>),
     RetrievalAnchorDerivative(Box<RetrievalAnchorDerivativeV1>),
-    SessionProjection(Box<SessionTemporalProjectionBatchV1>),
-    SessionSummary(Box<SessionSummaryPublicationRequestV1>),
     GitIndexTransaction(Box<GitIndexTransactionRecordV1>),
     EnqueueOutbox(Box<TransactionalOutboxEntryV1>),
     ApplyInbox(Box<TransactionalOutboxEntryV1>),
@@ -804,8 +801,6 @@ impl RepositoryWritePayloadV1 {
             Self::ExternalSourceAcquisition(_) => "schedule external source acquisition",
             Self::RetrievalAnchorDisposition(_) => "append retrieval anchor disposition",
             Self::RetrievalAnchorDerivative(_) => "publish retrieval anchor derivative",
-            Self::SessionProjection(_) => "persist temporal projection",
-            Self::SessionSummary(_) => "publish summary",
             Self::GitIndexTransaction(_) => "record git index transaction",
             Self::EnqueueOutbox(_) => "enqueue outbox effect",
             Self::ApplyInbox(_) => "apply inbox effect",
@@ -833,7 +828,6 @@ impl RepositoryWritePayloadV1 {
             Self::ExternalSource(_)
             | Self::ExternalSourceProjection(_)
             | Self::ExternalSourceAcquisition(_) => "external_source",
-            Self::SessionProjection(_) | Self::SessionSummary(_) => "sessions",
             Self::GitIndexTransaction(_) => "code",
             Self::EnqueueOutbox(_) | Self::ApplyInbox(_) | Self::AcknowledgeOutbox(_) => "effects",
         }
@@ -907,12 +901,6 @@ impl RepositoryWritePayloadV1 {
                     | StoreShardScopeV1::ProjectSessions { .. }
                     | StoreShardScopeV1::ProfileSessions
             ),
-            Self::SessionProjection(_) | Self::SessionSummary(_) => {
-                matches!(
-                    scope,
-                    StoreShardScopeV1::ProfileSessions | StoreShardScopeV1::ProjectSessions { .. }
-                )
-            }
             Self::GitIndexTransaction(_) => matches!(
                 scope,
                 StoreShardScopeV1::Code {
@@ -981,9 +969,7 @@ impl RepositoryWritePayloadV1 {
             Self::Fact(_)
             | Self::Observation(_)
             | Self::ObservationCursorAdvance(_)
-            | Self::Diagnostics(_)
-            | Self::SessionProjection(_)
-            | Self::SessionSummary(_) => Ok(()),
+            | Self::Diagnostics(_) => Ok(()),
         }
     }
 }

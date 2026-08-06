@@ -12,10 +12,9 @@ use tracedecay::store::vector_generation_test_support::{
     CanonicalChunkVectorEncoderV1, GraphVectorGenerationStoreV1, ProjectionRequestBatchV1,
     SemanticProjectionErrorV1, VectorGenerationIdV1, VectorGenerationPlanV1,
     VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1,
-    fail_before_publication_swap_once, prepare_vector_generation,
-    prepare_vector_generation_async, split_projection_request,
+    fail_before_publication_swap_once, prepare_vector_generation, prepare_vector_generation_async,
+    split_projection_request,
 };
-use tracedecay_graph_db::{GraphCancellation, GraphDbOwner, NeverCancelled};
 use tracedecay_domain::{
     BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
@@ -26,6 +25,7 @@ use tracedecay_domain::{
     ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1, SanitizerRevision,
     SemanticSearchIndexProfileV1, SensitivityDecision, SensitivityLevelV1, SourceSpan,
 };
+use tracedecay_graph_db::{GraphCancellation, GraphDbOwner, NeverCancelled};
 
 fn id<T>(value: &str) -> T
 where
@@ -1260,7 +1260,10 @@ async fn graph_store_survives_reopen_and_preserves_superseded_generations() {
     );
     assert_eq!(
         restarted
-            .generation(&initial_publication.generation_id, Arc::clone(&cancellation))
+            .generation(
+                &initial_publication.generation_id,
+                Arc::clone(&cancellation)
+            )
             .await
             .unwrap()
             .expect("initial immutable generation")
@@ -1340,7 +1343,10 @@ async fn graph_store_survives_reopen_and_preserves_superseded_generations() {
     );
     assert!(
         restarted
-            .generation(&initial_publication.generation_id, Arc::clone(&cancellation))
+            .generation(
+                &initial_publication.generation_id,
+                Arc::clone(&cancellation)
+            )
             .await
             .unwrap()
             .expect("superseded generation remains addressable")

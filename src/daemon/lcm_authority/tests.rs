@@ -610,7 +610,6 @@ async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages(
         "lcm_summary_sources",
         "lcm_lifecycle_state",
         "session_summary_nodes",
-        "session_summary_sources",
     ] {
         assert_eq!(
             table_row_count(&database, table).await,

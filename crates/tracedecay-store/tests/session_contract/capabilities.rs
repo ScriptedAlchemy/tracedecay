@@ -1,5 +1,6 @@
 use super::common::*;
 use super::*;
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 struct CapabilityDeniedSessionPorts {
     capabilities: SessionTemporalCapabilitiesV1,
@@ -92,6 +93,7 @@ impl SessionRefreshStore for CapabilityDeniedSessionPorts {
         &self,
         _permit: SessionRefreshCompletePermit,
         _request: SessionRefreshCompletionRequestV1,
+        _execution_control: ExecutionControl,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
         panic!("capability guard was bypassed")
     }
@@ -176,7 +178,7 @@ fn refresh_ports_deny_every_unsupported_capability() {
         .map(|_| ()),
         ready(ports.persist_session_refresh_progress(progress)).map(|_| ()),
         ready(ports.session_refresh_progress(progress_request)).map(|_| ()),
-        ready(ports.complete_session_refresh(completion)).map(|_| ()),
+        ready(ports.complete_session_refresh(completion, ExecutionControl::default())).map(|_| ()),
         ready(ports.fail_session_refresh(failure)).map(|_| ()),
         ready(ports.cancel_session_refresh(cancellation)).map(|_| ()),
         ready(ports.session_refresh_receipt(receipt_request)).map(|_| ()),
@@ -218,6 +220,7 @@ fn adapter_capabilities_override_forged_snapshot_capabilities() {
         forged_snapshot,
         1,
         None,
+        ExecutionControl::default(),
     )
     .unwrap();
 
@@ -236,6 +239,7 @@ fn adapter_capabilities_override_forged_snapshot_capabilities() {
         session_id.clone(),
         generation(8),
         forged.clone(),
+        ExecutionControl::default(),
     )
     .unwrap();
     let projection = projection_batch(&session_id);
@@ -312,6 +316,7 @@ fn yielding_in_memory_adapter_exercises_every_guarded_port() {
         session_id.clone(),
         generation(8),
         snapshot.clone(),
+        ExecutionControl::default(),
     )
     .unwrap();
     assert_eq!(
@@ -330,6 +335,7 @@ fn yielding_in_memory_adapter_exercises_every_guarded_port() {
                 snapshot,
                 10,
                 None,
+                ExecutionControl::default(),
             )
             .unwrap(),
         ),
@@ -373,6 +379,7 @@ fn yielding_in_memory_adapter_exercises_every_guarded_port() {
                 coverage(),
             )
             .unwrap(),
+            ExecutionControl::default(),
         ),
     )
     .unwrap();

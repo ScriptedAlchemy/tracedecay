@@ -1,5 +1,23 @@
 use super::common::*;
 use super::*;
+use tracedecay_temporal_query::ports::ExecutionControl;
+
+#[test]
+fn activation_request_retains_the_explicit_execution_control() {
+    let session_id = session("session.controlled-activation");
+    let control = ExecutionControl::default();
+    let request = SessionGenerationActivationRequestV1::new(
+        session_id.clone(),
+        generation(8),
+        snapshot_for(session_id, 7),
+        control.clone(),
+    )
+    .expect("valid controlled activation request");
+
+    assert!(!request.execution_control().is_cancelled());
+    control.cancel();
+    assert!(request.execution_control().is_cancelled());
+}
 
 #[test]
 fn rebuild_and_activation_validate_session_capability_and_generation_transition() {
@@ -17,6 +35,7 @@ fn rebuild_and_activation_validate_session_capability_and_generation_transition(
             session("session.other"),
             generation(8),
             snapshot.clone(),
+            ExecutionControl::default(),
         )
         .map(|_| ()),
     ] {
@@ -33,6 +52,7 @@ fn rebuild_and_activation_validate_session_capability_and_generation_transition(
             session_id.clone(),
             generation(7),
             snapshot.clone(),
+            ExecutionControl::default(),
         )
         .map(|_| ()),
     ] {
@@ -57,7 +77,12 @@ fn rebuild_and_activation_validate_session_capability_and_generation_transition(
         })
     ));
     assert!(matches!(
-        SessionGenerationActivationRequestV1::new(session_id, generation(8), unsupported),
+        SessionGenerationActivationRequestV1::new(
+            session_id,
+            generation(8),
+            unsupported,
+            ExecutionControl::default(),
+        ),
         Err(SessionStoreError::UnsupportedCapability {
             capability: SessionTemporalCapabilityV1::GenerationRebuild
         })
@@ -81,9 +106,13 @@ fn generation_receipts_derive_identity_and_reject_activation_mismatch() {
     assert_eq!(rebuild.generation(), generation(8));
 
     let activated_watermarks = SessionFrozenWatermarksV1::new(generation(8), 51, 47, 43);
-    let activation_request =
-        SessionGenerationActivationRequestV1::new(session_id.clone(), generation(8), snapshot)
-            .unwrap();
+    let activation_request = SessionGenerationActivationRequestV1::new(
+        session_id.clone(),
+        generation(8),
+        snapshot,
+        ExecutionControl::default(),
+    )
+    .unwrap();
     assert!(matches!(
         SessionGenerationActivationReceiptV1::new(
             &activation_request,

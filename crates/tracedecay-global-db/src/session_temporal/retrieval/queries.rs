@@ -227,52 +227,23 @@ pub(super) const SUMMARY_CANDIDATE_QUERY: &str = "
      AND a.session_id = ?1
      AND a.generation = ?2
     WHERE n.session_id = ?1
-      AND (?3 IS NULL OR EXISTS (
-          WITH RECURSIVE retained_sources(source_anchor_id, source_summary_id, depth) AS (
-              SELECT source_anchor_id, source_summary_id, 0
-              FROM session_summary_sources
-              WHERE summary_id = n.summary_id
-              UNION ALL
-              SELECT nested.source_anchor_id, nested.source_summary_id, retained.depth + 1
-              FROM retained_sources AS retained
-              JOIN session_summary_nodes AS retained_summary
-                ON retained_summary.summary_id = retained.source_summary_id
-               AND retained_summary.session_id = n.session_id
-              JOIN session_summary_sources AS nested
-                ON nested.summary_id = retained_summary.summary_id
-              WHERE retained.depth < 63
-              LIMIT 257
-          )
-          SELECT 1
-          FROM retained_sources AS retained
-          JOIN session_occurrences AS source_occurrence
-            ON source_occurrence.retrieval_anchor_id = retained.source_anchor_id
-           AND source_occurrence.session_id = n.session_id
-           AND source_occurrence.generation = ?2
-          JOIN observations AS source_observation
-            ON source_observation.observation_id = source_occurrence.source_observation_id
-          WHERE COALESCE(json_extract(
-              source_observation.observation_json, '$.identity.source.provider'
-          ), 'claude') = ?3
-          LIMIT 1
-      ))
-      AND session_summary_nodes_fts MATCH ?4
+      AND session_summary_nodes_fts MATCH ?3
       AND a.availability <> 'unavailable'
-      AND (n.created_at < ?5 OR (n.created_at = ?5 AND n.summary_id > ?6))
-      AND length(CAST(n.summary_id AS BLOB)) <= ?7
-      AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?8
-      AND length(CAST(n.session_id AS BLOB)) <= ?9
+      AND (n.created_at < ?4 OR (n.created_at = ?4 AND n.summary_id > ?5))
+      AND length(CAST(n.summary_id AS BLOB)) <= ?6
+      AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?7
+      AND length(CAST(n.session_id AS BLOB)) <= ?8
       AND length(CAST(COALESCE(
           json_extract(n.publication_json, '$.provider'), ''
-      ) AS BLOB)) <= ?9
+      ) AS BLOB)) <= ?8
       AND length(CAST(n.summary_id AS BLOB))
           + length(CAST(n.summary_anchor_id AS BLOB))
           + length(CAST(n.session_id AS BLOB))
           + length(CAST(COALESCE(
               json_extract(n.publication_json, '$.provider'), ''
-          ) AS BLOB)) <= ?10
+          ) AS BLOB)) <= ?9
     ORDER BY n.created_at DESC, n.summary_id
-    LIMIT ?11";
+    LIMIT ?10";
 
 pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
@@ -487,59 +458,30 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = "
            AND json_extract(authority_anchor.owner_json, '$.project_id')
                = authority_session.project_key)
       )
-      AND (?2 IS NULL OR EXISTS (
-          WITH RECURSIVE retained_sources(source_anchor_id, source_summary_id, depth) AS (
-              SELECT source_anchor_id, source_summary_id, 0
-              FROM session_summary_sources
-              WHERE summary_id = n.summary_id
-              UNION ALL
-              SELECT nested.source_anchor_id, nested.source_summary_id, retained.depth + 1
-              FROM retained_sources AS retained
-              JOIN session_summary_nodes AS retained_summary
-                ON retained_summary.summary_id = retained.source_summary_id
-               AND retained_summary.session_id = n.session_id
-              JOIN session_summary_sources AS nested
-                ON nested.summary_id = retained_summary.summary_id
-              WHERE retained.depth < 63
-              LIMIT 257
-          )
-          SELECT 1
-          FROM retained_sources AS retained
-          JOIN session_occurrences AS source_occurrence
-            ON source_occurrence.retrieval_anchor_id = retained.source_anchor_id
-           AND source_occurrence.session_id = n.session_id
-           AND source_occurrence.generation = frozen.generation
-          JOIN observations AS source_observation
-            ON source_observation.observation_id = source_occurrence.source_observation_id
-          WHERE COALESCE(json_extract(
-              source_observation.observation_json, '$.identity.source.provider'
-          ), 'claude') = ?2
-          LIMIT 1
-      ))
-      AND session_summary_nodes_fts MATCH ?3
+      AND session_summary_nodes_fts MATCH ?2
       AND a.availability <> 'unavailable'
       AND (
-          n.created_at < ?4
+          n.created_at < ?3
           OR (
-              n.created_at = ?4
+              n.created_at = ?3
               AND (
-                  n.session_id > ?5
-                  OR (n.session_id = ?5 AND n.summary_id > ?6)
+                  n.session_id > ?4
+                  OR (n.session_id = ?4 AND n.summary_id > ?5)
               )
           )
       )
-      AND length(CAST(n.summary_id AS BLOB)) <= ?7
-      AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?8
-      AND length(CAST(n.session_id AS BLOB)) <= ?9
-      AND length(CAST(authority_session.provider AS BLOB)) <= ?9
+      AND length(CAST(n.summary_id AS BLOB)) <= ?6
+      AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?7
+      AND length(CAST(n.session_id AS BLOB)) <= ?8
+      AND length(CAST(authority_session.provider AS BLOB)) <= ?8
       AND length(CAST(n.summary_id AS BLOB))
           + length(CAST(n.summary_anchor_id AS BLOB))
           + length(CAST(n.session_id AS BLOB))
-          + length(CAST(authority_session.provider AS BLOB)) <= ?10
+          + length(CAST(authority_session.provider AS BLOB)) <= ?9
       AND length(CAST(n.summary_id AS BLOB))
-          + length(CAST(n.session_id AS BLOB)) + 9 <= ?11
+          + length(CAST(n.session_id AS BLOB)) + 9 <= ?10
     ORDER BY n.created_at DESC, n.session_id, n.summary_id
-    LIMIT ?12";
+    LIMIT ?11";
 
 pub(super) const DERIVED_CANDIDATE_QUERY: &str = "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,

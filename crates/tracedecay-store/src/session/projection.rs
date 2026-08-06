@@ -5,6 +5,7 @@ use tracedecay_domain::{
     LogicalCopyRecordV1, MessageOccurrenceRecordV1, SessionId, SessionProjectionGenerationV1,
     TemporalAssertionRecordV1, UtcMicros,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::common::{
     SessionFrozenWatermarksV1, SessionGenerationActivatePermit,
@@ -459,6 +460,7 @@ pub struct SessionGenerationActivationRequestV1 {
     session_id: SessionId,
     generation: SessionProjectionGenerationV1,
     snapshot: SessionTemporalSnapshotV1,
+    execution_control: ExecutionControl,
 }
 
 impl SessionGenerationActivationRequestV1 {
@@ -466,6 +468,7 @@ impl SessionGenerationActivationRequestV1 {
         session_id: SessionId,
         generation: SessionProjectionGenerationV1,
         snapshot: SessionTemporalSnapshotV1,
+        execution_control: ExecutionControl,
     ) -> SessionStoreResult<Self> {
         require_snapshot_session(&session_id, &snapshot, "generation activation request")?;
         require_capability(&snapshot, SessionTemporalCapabilityV1::GenerationRebuild)?;
@@ -474,6 +477,7 @@ impl SessionGenerationActivationRequestV1 {
             session_id,
             generation,
             snapshot,
+            execution_control,
         })
     }
 
@@ -487,6 +491,10 @@ impl SessionGenerationActivationRequestV1 {
 
     pub fn snapshot(&self) -> &SessionTemporalSnapshotV1 {
         &self.snapshot
+    }
+
+    pub fn execution_control(&self) -> &ExecutionControl {
+        &self.execution_control
     }
 }
 

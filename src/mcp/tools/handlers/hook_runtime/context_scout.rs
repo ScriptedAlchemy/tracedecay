@@ -325,10 +325,11 @@ pub(super) async fn hook_v2_feedback_notice_delivery(
             return Ok(hook_v2_catchup_response(ACTION));
         }
     }
-    let notice = serde_json::from_value::<
-        crate::application::advisory::AdvisoryHookLookupNoticeV1,
-    >(required_value(args, "feedback_notice")?)
-    .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
+    let notice =
+        serde_json::from_value::<crate::application::advisory::AdvisoryHookLookupNoticeV1>(
+            required_value(args, "feedback_notice")?,
+        )
+        .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
     let status = if crate::application::advisory::acknowledge_advisory_hook_notice(
         envelope.project_id,
         envelope.worktree_id,

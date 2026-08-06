@@ -235,7 +235,6 @@ async fn normalized_trigger_sql(db_path: &Path, trigger: &str) -> String {
 }
 
 const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
-    ("index", "idx_session_agent_hierarchy_edges_child"),
     ("index", "idx_session_assertion_supersession_successor"),
     ("index", "idx_session_assertions_generation_order"),
     ("index", "idx_session_assertions_kind_order"),
@@ -244,7 +243,6 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_session_current_entities_assertion"),
     ("index", "idx_session_current_entities_occurrence"),
     ("index", "idx_session_external_payload_manifests_session"),
-    ("index", "idx_session_logical_copy_edges_target"),
     ("index", "idx_session_occurrences_agent"),
     ("index", "idx_session_occurrences_anchor_order"),
     ("index", "idx_session_occurrences_generation_order"),
@@ -258,27 +256,22 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_session_refresh_operations_one_running"),
     ("index", "idx_session_refresh_operations_state"),
     ("index", "idx_session_refresh_receipts_session"),
+    ("index", "idx_session_relation_receipts_pending"),
     ("index", "idx_session_summary_availability_generation"),
     ("index", "idx_session_summary_nodes_root_created_order"),
     ("index", "idx_session_summary_nodes_session_created"),
-    ("index", "idx_session_summary_sources_anchor"),
-    ("index", "idx_session_summary_sources_summary"),
-    ("index", "idx_session_summary_successors_successor"),
     ("index", "idx_session_temporal_generations_one_active"),
     ("index", "idx_session_temporal_generations_session_state"),
     ("index", "idx_session_temporal_migration_dispositions_kind"),
     ("index", "idx_session_temporal_migration_dispositions_row"),
     ("index", "idx_session_temporal_migration_receipts_source"),
     ("index", "idx_session_temporal_observation_effects_session"),
-    ("index", "idx_session_thread_hierarchy_edges_child"),
     ("index", "idx_session_turn_members_occurrence"),
-    ("table", "session_agent_hierarchy_edges"),
     ("table", "session_agents"),
     ("table", "session_assertion_supersession"),
     ("table", "session_assertions"),
     ("table", "session_current_entities"),
     ("table", "session_external_payload_manifests"),
-    ("table", "session_logical_copy_edges"),
     ("table", "session_occurrences"),
     ("table", "session_occurrences_fts"),
     ("table", "session_query_cursor_keys"),
@@ -287,18 +280,17 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("table", "session_refresh_operations"),
     ("table", "session_refresh_progress"),
     ("table", "session_refresh_receipts"),
+    ("table", "session_relation_effect_journal"),
+    ("table", "session_relation_receipts"),
     ("table", "session_summary_availability"),
     ("table", "session_summary_nodes"),
     ("table", "session_summary_nodes_fts"),
-    ("table", "session_summary_sources"),
-    ("table", "session_summary_successors"),
     ("table", "session_temporal_generations"),
     ("table", "session_temporal_migration_dispositions"),
     ("table", "session_temporal_migration_receipts"),
     ("table", "session_temporal_observation_effects"),
     ("table", "session_temporal_projection_receipts"),
     ("table", "session_temporal_schema_migrations"),
-    ("table", "session_thread_hierarchy_edges"),
     ("table", "session_threads"),
     ("table", "session_turn_members"),
     ("table", "session_turns"),
@@ -349,12 +341,6 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
         "trigger",
         "session_external_payload_manifests_owner_guard_v1",
     ),
-    ("trigger", "session_summary_sources_immutable_delete_v1"),
-    ("trigger", "session_summary_sources_immutable_update_v1"),
-    ("trigger", "session_summary_sources_owner_guard_v1"),
-    ("trigger", "session_summary_successors_immutable_delete_v1"),
-    ("trigger", "session_summary_successors_immutable_update_v1"),
-    ("trigger", "session_summary_successors_owner_guard_v1"),
     ("trigger", "session_temporal_generations_delete_guard_v1"),
     ("trigger", "session_temporal_generations_insert_guard_v1"),
     (
@@ -435,6 +421,7 @@ async fn temporal_schema_object_catalog(db_path: &Path) -> Vec<(String, String)>
             || table_name.starts_with("session_occurrence")
             || table_name.starts_with("session_query_cursor")
             || table_name.starts_with("session_refresh")
+            || table_name.starts_with("session_relation")
             || table_name.starts_with("session_summary_")
             || table_name.starts_with("session_temporal_")
             || table_name.starts_with("session_thread")

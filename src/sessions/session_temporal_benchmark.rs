@@ -58,6 +58,7 @@ use tracedecay_runtime_core::storage::{
 };
 use tracedecay_runtime_core::timeutil::nearest_rank;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::ports::ExecutionControl;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
 const SCHEMA_VERSION: u64 = 2;
@@ -761,7 +762,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         *progress.coverage(),
     )
     .map_err(|error| format!("complete request: {error}"))?;
-    db.complete_session_refresh_result(complete_request.clone())
+    db.complete_session_refresh_result(complete_request.clone(), ExecutionControl::new(None))
         .await
         .map_err(|error| format!("complete refresh: {error:?}"))?;
     let rebuild_activate_ns = elapsed_ns(started);
@@ -792,7 +793,10 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurem
     let replay_started = Instant::now();
     prepared
         .registered
-        .complete_session_refresh_result(prepared.complete_request.clone())
+        .complete_session_refresh_result(
+            prepared.complete_request.clone(),
+            ExecutionControl::new(None),
+        )
         .await
         .map_err(|error| format!("exact replay complete: {error:?}"))?;
     let exact_replay_ns = elapsed_ns(replay_started);

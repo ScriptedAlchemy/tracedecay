@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
@@ -9,6 +11,9 @@ use tracedecay::sessions::lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandRequest, LcmExpandTarget,
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSourceRef, LcmSummaryNodeDraft,
 };
+use tracedecay_graph_db::NeverCancelled;
+use tracedecay_runtime_core::db::engine::QueryExecutor;
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use crate::common::{lcm_dag_message, lcm_dag_session};
 
@@ -640,55 +645,116 @@ async fn summary_source_owner_must_match_its_frozen_publication_owner() {
 }
 
 #[tokio::test]
-async fn generation_stale_closure_rejects_corrupt_cycles() {
+async fn pending_relation_receipt_requires_explicit_recovery_before_read() {
     let tmp = TempDir::new().unwrap();
-    let db = registered_lcm_runtime(&tmp).await;
-    let store_ids = insert_messages(&db, "cursor", "session-cycle", &["alpha"]).await;
-    let raw_sources = vec![LcmSourceRef::RawMessage {
-        store_id: store_ids[0],
-    }];
-    let leaf = db
-        .lcm_publish_immutable_summary(publication(
-            "summary.cycle.leaf",
-            None,
-            draft("cursor", "session-cycle", 0, "leaf", raw_sources.clone()),
-        ))
-        .await
-        .unwrap();
-    let parent = db
-        .lcm_publish_immutable_summary(publication(
-            "summary.cycle.parent",
-            None,
-            draft(
-                "cursor",
-                "session-cycle",
-                1,
-                "parent",
-                vec![LcmSourceRef::SummaryNode {
-                    node_id: leaf.summary.node_id.clone(),
-                }],
+    let runtime = registered_lcm_runtime(&tmp).await;
+    let store_ids =
+        insert_messages(&runtime, "cursor", "session-relation-recovery", &["alpha"]).await;
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let control = ExecutionControl::default();
+    let cancel_after_commit = control.clone();
+
+    database
+        .lcm_publish_immutable_summary_guarded(
+            publication(
+                "summary.relation-recovery",
+                None,
+                draft(
+                    "cursor",
+                    "session-relation-recovery",
+                    0,
+                    "pending graph publication",
+                    vec![LcmSourceRef::RawMessage {
+                        store_id: store_ids[0],
+                    }],
+                ),
             ),
-        ))
+            &control,
+            || {
+                cancel_after_commit.cancel();
+                Ok(())
+            },
+        )
         .await
-        .unwrap();
+        .expect_err("post-commit cancellation must leave graph recovery pending");
 
-    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ReplaceSummarySourceWithSummary {
-        summary_id: leaf.summary.node_id.clone(),
-        ordinal: 0,
-        source_summary_id: parent.summary.node_id,
-    })
-    .await
-    .unwrap();
-
-    let error = db
-        .lcm_publish_immutable_summary(publication(
-            "summary.cycle.successor",
-            Some(leaf.summary.node_id),
-            draft("cursor", "session-cycle", 0, "successor", raw_sources),
-        ))
+    let session_id =
+        tracedecay_domain::SessionId::new("session-relation-recovery").expect("session id");
+    let snapshot = database.read_snapshot().await.expect("relation snapshot");
+    let mut journal_rows = snapshot
+        .query(
+            "SELECT projection_json
+             FROM session_relation_effect_journal
+             WHERE session_id = ?1",
+            [session_id.as_str()],
+        )
         .await
-        .expect_err("bounded stale closure must reject a corrupt dependency cycle");
-    assert!(matches!(error, LcmError::SummaryCycle { .. }));
+        .expect("relation effect journal query");
+    let projection_json = journal_rows
+        .next()
+        .await
+        .expect("relation effect journal row")
+        .expect("pending relation effect");
+    let projection_json: String = projection_json.get(0).expect("projection JSON");
+    assert!(
+        projection_json.contains("summary.relation-recovery"),
+        "the durable effect must retain the exact committed topology"
+    );
+    drop(journal_rows);
+    drop(snapshot);
+    assert!(
+        database
+            .active_session_summary_relations(
+                &session_id,
+                &["summary.relation-recovery".to_owned()],
+                10,
+                Arc::new(NeverCancelled),
+            )
+            .await
+            .is_err(),
+        "a relation read must not repair a pending graph projection"
+    );
+
+    assert_eq!(
+        database
+            .recover_pending_session_relation_projections(10, Arc::new(NeverCancelled))
+            .await
+            .expect("recover pending graph projection"),
+        1
+    );
+    let snapshot = database.read_snapshot().await.expect("recovered snapshot");
+    let mut journal_rows = snapshot
+        .query(
+            "SELECT COUNT(*)
+             FROM session_relation_effect_journal
+             WHERE session_id = ?1",
+            [session_id.as_str()],
+        )
+        .await
+        .expect("recovered effect journal query");
+    assert_eq!(
+        journal_rows
+            .next()
+            .await
+            .expect("recovered journal count")
+            .expect("recovered journal count row")
+            .get::<i64>(0)
+            .expect("recovered journal count value"),
+        0
+    );
+    let (_, relations) = database
+        .active_session_summary_relations(
+            &session_id,
+            &["summary.relation-recovery".to_owned()],
+            10,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("read recovered graph projection");
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].summary_id, "summary.relation-recovery");
 }
 
 #[tokio::test]

@@ -15,6 +15,8 @@ use tracedecay_runtime_core::db::engine::{Error as EngineError, QueryExecutor};
 
 use super::schema::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
+mod relation_health;
+
 const MAX_FINDING_COUNT: u64 = 1_000_000;
 const SQLITE_CORRUPT_VTAB: i32 = 267;
 const SESSION_TEMPORAL_HEALTH_CACHE_TTL: Duration = Duration::from_secs(2);
@@ -177,7 +179,6 @@ fn required_table_names() -> impl Iterator<Item = &'static str> {
 }
 
 const REQUIRED_INDEXES: &[&str] = &[
-    "idx_session_agent_hierarchy_edges_child",
     "idx_session_assertion_supersession_successor",
     "idx_session_assertions_generation_order",
     "idx_session_assertions_kind_order",
@@ -186,7 +187,6 @@ const REQUIRED_INDEXES: &[&str] = &[
     "idx_session_current_entities_assertion",
     "idx_session_current_entities_occurrence",
     "idx_session_external_payload_manifests_session",
-    "idx_session_logical_copy_edges_target",
     "idx_session_occurrences_agent",
     "idx_session_occurrences_anchor_order",
     "idx_session_occurrences_generation_order",
@@ -203,14 +203,10 @@ const REQUIRED_INDEXES: &[&str] = &[
     "idx_session_summary_availability_generation",
     "idx_session_summary_nodes_root_created_order",
     "idx_session_summary_nodes_session_created",
-    "idx_session_summary_sources_anchor",
-    "idx_session_summary_sources_summary",
-    "idx_session_summary_successors_successor",
     "idx_session_temporal_generations_one_active",
     "idx_session_temporal_generations_session_state",
     "idx_session_temporal_migration_receipts_source",
     "idx_session_temporal_observation_effects_session",
-    "idx_session_thread_hierarchy_edges_child",
     "idx_session_turn_members_occurrence",
 ];
 
@@ -297,73 +293,18 @@ const CHECKS: &[HealthCheck] = &[
         sql: SUMMARY_FTS_CHECK_SQL,
     },
     HealthCheck {
-        kind: SessionTemporalHealthFindingKind::SummaryCycle,
-        tables: &["session_summary_sources"],
-        sql: "WITH RECURSIVE reachable(origin, current) AS (
-                SELECT summary_id, source_summary_id
-                FROM session_summary_sources
-                WHERE source_summary_id IS NOT NULL
-                UNION
-                SELECT reachable.origin, source.source_summary_id
-                FROM reachable
-                JOIN session_summary_sources AS source
-                  ON source.summary_id = reachable.current
-                WHERE source.source_summary_id IS NOT NULL
-            )
-            SELECT COUNT(*) FROM reachable WHERE origin = current",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::StaleClosure,
-        tables: &[
-            "session_summary_availability",
-            "session_summary_nodes",
-            "session_summary_sources",
-            "session_summary_successors",
-            "session_temporal_generations",
-        ],
-        sql: "WITH RECURSIVE expected_stale(session_id, summary_id) AS (
-                SELECT predecessor.session_id, dependent.summary_id
-                FROM session_summary_successors AS successor
-                JOIN session_summary_nodes AS predecessor
-                  ON predecessor.summary_id = successor.predecessor_summary_id
-                JOIN session_summary_sources AS dependent
-                  ON dependent.source_summary_id = successor.predecessor_summary_id
-                UNION
-                SELECT expected_stale.session_id, dependent.summary_id
-                FROM expected_stale
-                JOIN session_summary_sources AS dependent
-                  ON dependent.source_summary_id = expected_stale.summary_id
-            )
-            SELECT COUNT(*)
-            FROM expected_stale
-            JOIN session_temporal_generations AS generation
-              ON generation.session_id = expected_stale.session_id
-             AND generation.state = 'active'
-            LEFT JOIN session_summary_availability AS availability
-              ON availability.session_id = expected_stale.session_id
-             AND availability.generation = generation.generation
-             AND availability.summary_id = expected_stale.summary_id
-            WHERE availability.availability IS NULL
-               OR availability.availability <> 'stale'",
-    },
-    HealthCheck {
         kind: SessionTemporalHealthFindingKind::MissingAnchor,
         tables: &[
             "retrieval_anchors",
             "session_assertions",
             "session_occurrences",
             "session_summary_nodes",
-            "session_summary_sources",
         ],
         sql: "SELECT
             (SELECT COUNT(*) FROM session_summary_nodes AS node
              LEFT JOIN retrieval_anchors AS anchor
                ON anchor.anchor_id = node.summary_anchor_id
              WHERE anchor.anchor_id IS NULL)
-            + (SELECT COUNT(*) FROM session_summary_sources AS source
-               LEFT JOIN retrieval_anchors AS anchor
-                 ON anchor.anchor_id = source.source_anchor_id
-               WHERE source.source_kind = 'anchor' AND anchor.anchor_id IS NULL)
             + (SELECT COUNT(*) FROM session_occurrences AS occurrence
                LEFT JOIN retrieval_anchors AS anchor
                  ON anchor.anchor_id = occurrence.retrieval_anchor_id
@@ -507,31 +448,9 @@ const CHECKS: &[HealthCheck] = &[
             "session_refresh_bindings",
             "session_summary_availability",
             "session_summary_nodes",
-            "session_summary_sources",
-            "session_summary_successors",
         ],
         sql: "SELECT
             (SELECT COUNT(*)
-             FROM session_summary_sources AS source
-             JOIN session_summary_nodes AS owner
-               ON owner.summary_id = source.summary_id
-             LEFT JOIN session_summary_nodes AS dependency
-               ON dependency.summary_id = source.source_summary_id
-             WHERE source.source_kind = 'summary'
-               AND (
-                   dependency.summary_id IS NULL
-                   OR owner.session_id IS NOT dependency.session_id
-               ))
-            + (SELECT COUNT(*)
-               FROM session_summary_successors AS edge
-               LEFT JOIN session_summary_nodes AS predecessor
-                 ON predecessor.summary_id = edge.predecessor_summary_id
-               LEFT JOIN session_summary_nodes AS successor
-                 ON successor.summary_id = edge.successor_summary_id
-               WHERE predecessor.summary_id IS NULL
-                  OR successor.summary_id IS NULL
-                  OR predecessor.session_id IS NOT successor.session_id)
-            + (SELECT COUNT(*)
                FROM session_summary_availability AS availability
                LEFT JOIN session_summary_nodes AS summary
                  ON summary.summary_id = availability.summary_id
@@ -648,8 +567,6 @@ pub enum SessionTemporalHealthFindingKind {
     TriggerAuditDrift,
     OccurrenceFtsCorruption,
     SummaryFtsCorruption,
-    SummaryCycle,
-    StaleClosure,
     MissingAnchor,
     MissingReceipt,
     InvalidGeneration,
@@ -663,6 +580,10 @@ pub enum SessionTemporalHealthFindingKind {
     StuckReceipt,
     MigrationGap,
     CompatibilityDrift,
+    RelationGraphUnavailable,
+    RelationGraphCorruption,
+    RelationGraphCycle,
+    StaleSummaryClosure,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -732,7 +653,9 @@ impl RegisteredGlobalDb {
             && observed.fingerprint == fingerprint
             && observed.observed_at.elapsed() <= SESSION_TEMPORAL_HEALTH_CACHE_TTL
         {
-            return observed.report.clone();
+            return self
+                .with_relation_graph_health(observed.report.clone())
+                .await;
         }
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
@@ -749,7 +672,7 @@ impl RegisteredGlobalDb {
         } else {
             *cached = None;
         }
-        report
+        self.with_relation_graph_health(report).await
     }
 }
 
@@ -1042,6 +965,7 @@ fn unavailable_report_with_reason(
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+    use crate::tests::harness::{RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime};
 
     #[test]
     fn session_temporal_fingerprint_tracks_database_and_wal_changes() {
@@ -1073,5 +997,42 @@ mod cache_tests {
             .set_len(MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES)
             .expect("wal size");
         assert!(!permits_synchronous_session_temporal_health(&database));
+    }
+
+    #[tokio::test]
+    async fn registered_doctor_reports_an_unbound_relation_graph_as_partial() {
+        let harness = RegisteredGlobalDbHarness::open("doctor-unbound-relation-graph").await;
+
+        let report = harness.registered.session_temporal_doctor_health().await;
+
+        assert_eq!(report.status, SessionTemporalHealthStatus::Partial);
+        assert!(report.findings.contains(&SessionTemporalHealthFinding {
+            kind: SessionTemporalHealthFindingKind::RelationGraphUnavailable,
+            count: 1,
+        }));
+    }
+
+    #[tokio::test]
+    async fn registered_doctor_accepts_a_bound_clean_relation_graph() {
+        let profile = tempfile::tempdir().expect("profile root");
+        let runtime = RegisteredGlobalDbTestRuntime::profile(profile.path())
+            .await
+            .expect("registered profile runtime");
+
+        let report = runtime
+            .profile_database()
+            .session_temporal_doctor_health()
+            .await;
+
+        assert_eq!(report.status, SessionTemporalHealthStatus::Complete);
+        assert!(!report.findings.iter().any(|finding| {
+            matches!(
+                finding.kind,
+                SessionTemporalHealthFindingKind::RelationGraphUnavailable
+                    | SessionTemporalHealthFindingKind::RelationGraphCorruption
+                    | SessionTemporalHealthFindingKind::RelationGraphCycle
+                    | SessionTemporalHealthFindingKind::StaleSummaryClosure
+            )
+        }));
     }
 }

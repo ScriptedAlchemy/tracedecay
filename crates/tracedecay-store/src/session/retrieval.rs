@@ -5,6 +5,7 @@ use tracedecay_domain::{
     SessionId, SessionSummaryRecordV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1,
     TemporalModeV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::common::{
     SessionSnapshotFreezePermit, SessionStoreError, SessionStoreResult,
@@ -25,6 +26,7 @@ pub struct SessionTemporalRetrievalRequestV1 {
     snapshot: SessionTemporalSnapshotV1,
     page_size: usize,
     after_occurrence_id: Option<MessageOccurrenceIdV1>,
+    execution_control: ExecutionControl,
 }
 
 impl SessionTemporalRetrievalRequestV1 {
@@ -35,6 +37,7 @@ impl SessionTemporalRetrievalRequestV1 {
         snapshot: SessionTemporalSnapshotV1,
         page_size: usize,
         after_occurrence_id: Option<MessageOccurrenceIdV1>,
+        execution_control: ExecutionControl,
     ) -> SessionStoreResult<Self> {
         require_snapshot_session(&session_id, &snapshot, "temporal retrieval request")?;
         require_capability(&snapshot, SessionTemporalCapabilityV1::FrozenWatermarks)?;
@@ -54,6 +57,7 @@ impl SessionTemporalRetrievalRequestV1 {
             snapshot,
             page_size,
             after_occurrence_id,
+            execution_control,
         })
     }
 
@@ -79,6 +83,10 @@ impl SessionTemporalRetrievalRequestV1 {
 
     pub fn after_occurrence_id(&self) -> Option<&MessageOccurrenceIdV1> {
         self.after_occurrence_id.as_ref()
+    }
+
+    pub fn execution_control(&self) -> &ExecutionControl {
+        &self.execution_control
     }
 }
 

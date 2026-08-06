@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{
@@ -18,6 +18,7 @@ use tracedecay_store::{
     SessionRetrievalStore, SessionStoreError, SessionTemporalProjectionBatchV1,
     SessionTemporalSnapshotRequestV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 fn session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
@@ -314,12 +315,30 @@ async fn complete_activates_the_bound_generation_and_terminal_retry_is_exact() {
     .unwrap();
 
     let receipt = store
-        .complete_session_refresh(request.clone())
+        .complete_session_refresh(request.clone(), ExecutionControl::default())
         .await
         .unwrap();
     assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+    let cancelled = ExecutionControl::new(None);
+    cancelled.cancel();
+    assert!(matches!(
+        store
+            .complete_session_refresh(request.clone(), cancelled)
+            .await,
+        Err(SessionStoreError::Cancelled)
+    ));
+    let expired = ExecutionControl::new(Some(Instant::now()));
+    assert!(matches!(
+        store
+            .complete_session_refresh(request.clone(), expired)
+            .await,
+        Err(SessionStoreError::DeadlineExceeded)
+    ));
     assert_eq!(
-        store.complete_session_refresh(request).await.unwrap(),
+        store
+            .complete_session_refresh(request, ExecutionControl::default())
+            .await
+            .unwrap(),
         receipt
     );
     assert_eq!(
@@ -615,7 +634,10 @@ async fn cross_terminal_retry_is_idempotency_conflict() {
         *progress.coverage(),
     )
     .unwrap();
-    store.complete_session_refresh(complete).await.unwrap();
+    store
+        .complete_session_refresh(complete, ExecutionControl::default())
+        .await
+        .unwrap();
 
     assert!(matches!(
         store

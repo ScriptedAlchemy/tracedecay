@@ -12,6 +12,11 @@ mod refresh;
 /// LCM compatibility rendering over one frozen registered-store snapshot. The
 /// DB-free shaping it applies is owned by [`self::render`].
 mod registered_lcm_render;
+mod relation_projection;
+mod relation_receipts;
+pub(crate) use relation_projection::seed_session_relation_projection;
+pub(crate) use relation_receipts::apply_relation_projection;
+pub mod relations;
 pub mod render;
 mod retrieval;
 mod schema;
@@ -359,8 +364,16 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
             .db_path()
             .parent()
             .ok_or(SessionTemporalExecutionError::Unavailable)?;
-        let authority =
-            GlobalDbTemporalHydrationPort::for_registered_snapshot(&read_snapshot, storage_root);
+        let (relation_scope, relation_store) = self
+            .db
+            .session_relation_store()
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let authority = GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
+            &read_snapshot,
+            storage_root,
+            relation_scope,
+            relation_store,
+        );
         let batch = hydrate_selected(&authority, snapshot, &anchors)
             .await
             .map_err(|error| {
@@ -785,11 +798,21 @@ impl SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution
                 .db_path()
                 .parent()
                 .ok_or(SessionTemporalExecutionError::Unavailable)?;
+            let (relation_scope, relation_store) = self
+                .db
+                .session_relation_store()
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
             let kernel_request = request.into_kernel_request(snapshot);
-            let read = GlobalDbTemporalReadPort::new_registered(&read_snapshot);
-            let hydration = GlobalDbTemporalHydrationPort::for_registered_snapshot(
+            let read = GlobalDbTemporalReadPort::new_registered_with_relations(
+                &read_snapshot,
+                relation_scope,
+                relation_store.clone(),
+            );
+            let hydration = GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
                 &read_snapshot,
                 storage_root,
+                relation_scope,
+                relation_store,
             );
             let result = execute_temporal_kernel(
                 &kernel_request,

@@ -99,6 +99,44 @@ impl DaemonSessionRuntimeRegistryV1 {
             authority,
         })
     }
+
+    /// Retains the daemon-owned native relation graph for one exact session
+    /// shard and opens it through the shared graph registry.
+    pub(crate) async fn retain_session_relation_graph_runtime(
+        &self,
+        shard_id: StoreShardIdV1,
+    ) -> Result<Arc<GraphDb>> {
+        let authority = self
+            .registry
+            .retain_graph_store(StoreRuntimeKey::new(shard_id, self.incarnation))
+            .await
+            .map_err(|failure| {
+                session_registry_error(
+                    "retain exact session relation graph authority",
+                    format!("{failure:?}"),
+                )
+            })?;
+        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = authority;
+        let registration = GraphDbRegistration {
+            authority_lease,
+            cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                &self.graph_lifecycle_cancelled,
+            ))),
+            lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                &self.graph_lifecycle_cancelled,
+            ))),
+            deadline: Instant::now() + GRAPH_OPEN_DEADLINE,
+        };
+        let graph_registry = self.graph_registry.clone();
+        tokio::task::spawn_blocking(move || graph_registry.resolve(registration))
+            .await
+            .map_err(|error| {
+                session_registry_error("join session relation graph open", error.to_string())
+            })?
+            .map_err(|error| {
+                session_registry_error("open session relation graph runtime", error.to_string())
+            })
+    }
 }
 
 impl Drop for DaemonSessionRuntimeRegistryV1 {

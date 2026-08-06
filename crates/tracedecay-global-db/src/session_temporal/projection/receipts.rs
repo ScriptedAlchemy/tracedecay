@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{CanonicalObservationEnvelopeV1, RetrievalAnchorRecord};
+use tracedecay_graph_db::NeverCancelled;
 use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_store::{
     ObservationProjection, ProjectionStoreError, ProjectionStoreResult, SessionStoreResult,
@@ -11,13 +14,18 @@ use tracedecay_store::{
 use super::super::query::{
     PERSIST_OPERATION, encode_watermarks, frontier_i64, generation_i64, storage, storage_message,
 };
+use super::super::relation_projection::reconstruct_logical_copy_relations;
+use super::super::relations::{LogicalCopyRelation, SessionRelationProjection};
 use super::persist::*;
+
+const MAX_RECEIPT_COPY_ENTITIES: usize = 100_000;
 
 pub async fn validate_final_projection_receipt(
     conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
     watermarks: &tracedecay_store::SessionFrozenWatermarksV1,
+    relation_projection: &SessionRelationProjection,
 ) -> SessionStoreResult<()> {
     let generation_i64 = generation_i64(generation, super::super::query::ACTIVATE_OPERATION)?;
     let mut rows = conn
@@ -129,6 +137,12 @@ pub async fn validate_final_projection_receipt(
         return Err(storage_message(
             super::super::query::ACTIVATE_OPERATION,
             "candidate projection rows do not match the immutable final receipt",
+        ));
+    }
+    if copy_identity_coverage(&relation_projection.logical_copies)? != expected.copies {
+        return Err(storage_message(
+            super::super::query::ACTIVATE_OPERATION,
+            "native relation graph copies do not match the immutable final receipt",
         ));
     }
     validate_canonical_assertion_completeness(
@@ -642,28 +656,19 @@ pub(super) async fn projection_coverage(
             UNION ALL
             SELECT 'member:' || json_array(turn_id, occurrence_id, ordinal)
             FROM session_turn_members WHERE session_id = ?1 AND generation = ?2
-            UNION ALL
-            SELECT 'agent-edge:' || json_array(parent_agent_id, child_agent_id, ordinal)
-            FROM session_agent_hierarchy_edges WHERE session_id = ?1 AND generation = ?2
-            UNION ALL
-            SELECT 'thread-edge:' || json_array(parent_thread_id, child_thread_id, ordinal)
-            FROM session_thread_hierarchy_edges WHERE session_id = ?1 AND generation = ?2
          ) ORDER BY encoded",
         batch,
     )
     .await?;
-    let copies = digest_query_rows(
+    let copies = reconstruct_logical_copy_relations(
         conn,
-        "SELECT json_array(
-            occurrence_id, copied_from_occurrence_id, proof_json,
-            knowledge_at, valid_time_json, created_at
-         )
-         FROM session_logical_copy_edges
-         WHERE session_id = ?1 AND generation = ?2
-         ORDER BY occurrence_id, copied_from_occurrence_id",
-        batch,
+        batch.session_id(),
+        batch.generation(),
+        MAX_RECEIPT_COPY_ENTITIES,
+        Arc::new(NeverCancelled),
     )
-    .await?;
+    .await
+    .and_then(|copies| copy_identity_coverage(&copies))?;
     let assertions = digest_query_rows(
         conn,
         "SELECT json_array(assertion_id, assertion_kind, subject_anchor_id,
@@ -710,6 +715,11 @@ pub(super) async fn projection_coverage(
         current,
         fts,
     })
+}
+
+fn copy_identity_coverage(copies: &[LogicalCopyRelation]) -> SessionStoreResult<(usize, String)> {
+    let encoded = sorted_json(copies)?;
+    Ok((encoded.len(), digest_bytes(encoded.join("\n").as_bytes())))
 }
 
 pub(super) async fn insert_projection_receipt(

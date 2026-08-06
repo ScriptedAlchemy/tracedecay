@@ -401,13 +401,8 @@ impl DaemonFeedbackRuntimeRegistrar {
                 #[cfg(test)]
                 producer_constructions.fetch_add(1, Ordering::SeqCst);
                 let runtime = Arc::new(
-                    open_feedback_runtime(
-                        database,
-                        runtime_root.clone(),
-                        scope.clone(),
-                        access,
-                    )
-                    .await?,
+                    open_feedback_runtime(database, runtime_root.clone(), scope.clone(), access)
+                        .await?,
                 );
                 let publications = runtime.publication_store();
                 let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
@@ -915,10 +910,8 @@ impl DaemonAdvisoryRuntimeRegistrar {
         input: AdvisoryRuntimeOpenV1,
         production: AdvisoryProductionOpenV1,
         lsp_session_factory: Arc<DaemonLspSessionFactory>,
-    ) -> Result<
-        Arc<AdvisoryProductionStartupRegistrationV1>,
-        DaemonAdvisoryRuntimeRegistrationError,
-    > {
+    ) -> Result<Arc<AdvisoryProductionStartupRegistrationV1>, DaemonAdvisoryRuntimeRegistrationError>
+    {
         let authorities = open_advisory_production_authorities(production)?;
         let (providers, hook_delivery_port) = authorities.into_registrar_parts();
         self.register(

@@ -7,19 +7,23 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::now_micros;
 use tracedecay_domain::{
     AnchorDurabilityClass, DurableObservationV1, HydrationStateV1, ObservationScopeV1,
-    PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord,
+    PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord, SessionId,
 };
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::SessionMessageRecord;
 use zeroize::Zeroizing;
 
 use crate::observation_projection::derive_projection;
+use crate::session_temporal::relations::{
+    SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
+};
 use tracedecay_query::temporal::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationError, HydrationFuture, HydrationGrant,
     HydrationSink, TemporalHydrationPort,
 };
 use tracedecay_query::temporal::ports::{
-    ExecutionControl, TemporalExecutionSnapshot, TemporalRetrievalScope, TemporalSourceAccess,
+    ExecutionControl, TemporalExecutionSnapshot, TemporalPortError, TemporalRetrievalScope,
+    TemporalSourceAccess,
 };
 use tracedecay_runtime_core::db::engine;
 use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content;
@@ -27,8 +31,10 @@ use tracedecay_sessions::runtime::lcm::{LcmStorageKind, raw};
 
 use super::operations::CanonicalPublicationManifest;
 use super::sql::TemporalSqlRead;
+use super::store::execution_control_graph_cancellation;
 
 type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, HydrationError>> + Send + 'a>>;
+const MAX_SUMMARY_SOURCE_RELATIONS: usize = 256;
 
 mod external;
 use external::resolve_external_manifest;
@@ -270,9 +276,16 @@ impl<B: TemporalHydrationBackend> TemporalHydrationPort for SessionTemporalHydra
 pub struct GlobalDbHydrationBackend<'snapshot> {
     read: TemporalSqlRead<'snapshot>,
     storage_root: &'snapshot Path,
+    relation_authority: Option<SessionHydrationRelationAuthority<'snapshot>>,
+}
+
+struct SessionHydrationRelationAuthority<'snapshot> {
+    scope: &'snapshot SessionRelationScope,
+    store: SessionRelationGraphStore,
 }
 
 impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
+    #[cfg(test)]
     pub const fn new_registered(
         read: &'snapshot engine::ReadSnapshot,
         storage_root: &'snapshot Path,
@@ -280,6 +293,20 @@ impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
         Self {
             read: TemporalSqlRead::registered(read),
             storage_root,
+            relation_authority: None,
+        }
+    }
+
+    pub const fn new_registered_with_relations(
+        read: &'snapshot engine::ReadSnapshot,
+        storage_root: &'snapshot Path,
+        scope: &'snapshot SessionRelationScope,
+        store: SessionRelationGraphStore,
+    ) -> Self {
+        Self {
+            read: TemporalSqlRead::registered(read),
+            storage_root,
+            relation_authority: Some(SessionHydrationRelationAuthority { scope, store }),
         }
     }
 }
@@ -288,11 +315,26 @@ pub type GlobalDbTemporalHydrationPort<'snapshot> =
     SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>>;
 
 impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>> {
+    #[cfg(test)]
     pub const fn for_registered_snapshot(
         read: &'snapshot engine::ReadSnapshot,
         storage_root: &'snapshot Path,
     ) -> Self {
         Self::new(GlobalDbHydrationBackend::new_registered(read, storage_root))
+    }
+
+    pub const fn for_registered_snapshot_with_relations(
+        read: &'snapshot engine::ReadSnapshot,
+        storage_root: &'snapshot Path,
+        scope: &'snapshot SessionRelationScope,
+        store: SessionRelationGraphStore,
+    ) -> Self {
+        Self::new(GlobalDbHydrationBackend::new_registered_with_relations(
+            read,
+            storage_root,
+            scope,
+            store,
+        ))
     }
 }
 
@@ -462,11 +504,16 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
         Box::pin(async move {
             let control = snapshot.request().execution_control();
             control.checkpoint()?;
-            let resolution = resolve_current(&self.read, snapshot, anchor_id)
-                .await
-                .unwrap_or(HydrationResolution::Unavailable(
-                    HydrationStateV1::RetainedButUnavailable,
-                ));
+            let resolution = resolve_current(
+                &self.read,
+                self.relation_authority.as_ref(),
+                snapshot,
+                anchor_id,
+            )
+            .await
+            .unwrap_or(HydrationResolution::Unavailable(
+                HydrationStateV1::RetainedButUnavailable,
+            ));
             control.checkpoint()?;
             Ok(resolution)
         })
@@ -665,6 +712,7 @@ fn content_matches_descriptor(content: &[u8], descriptor: &PayloadDescriptor) ->
 
 async fn resolve_current(
     conn: &TemporalSqlRead<'_>,
+    relation_authority: Option<&SessionHydrationRelationAuthority<'_>>,
     snapshot: &TemporalExecutionSnapshot,
     requested_anchor: &RetrievalAnchorId,
 ) -> Result<HydrationResolution, ()> {
@@ -731,8 +779,15 @@ async fn resolve_current(
     {
         return Ok(resolution);
     }
-    if let Some(resolution) =
-        resolve_summary(conn, snapshot, requested_anchor, &anchor, &owner_json).await?
+    if let Some(resolution) = resolve_summary(
+        conn,
+        relation_authority,
+        snapshot,
+        requested_anchor,
+        &anchor,
+        &owner_json,
+    )
+    .await?
     {
         return Ok(resolution);
     }
@@ -859,6 +914,7 @@ async fn resolve_occurrence(
 
 async fn resolve_summary(
     conn: &TemporalSqlRead<'_>,
+    relation_authority: Option<&SessionHydrationRelationAuthority<'_>>,
     snapshot: &TemporalExecutionSnapshot,
     anchor_id: &RetrievalAnchorId,
     anchor: &RetrievalAnchorRecord,
@@ -955,8 +1011,20 @@ async fn resolve_summary(
         && serde_json::to_string(anchor.owner()).ok().as_deref() == Some(owner_json);
     let provider_matches = match snapshot.provider_scope() {
         Some(provider) => {
-            summary_has_provider_evidence(conn, &session_id, generation, &summary_id, provider)
-                .await?
+            let relation_authority = relation_authority.ok_or(())?;
+            let session = SessionId::new(session_id.clone()).map_err(|_| ())?;
+            summary_has_provider_evidence(
+                conn,
+                &relation_authority.store,
+                relation_authority.scope,
+                &session,
+                u64::try_from(generation).map_err(|_| ())?,
+                &summary_id,
+                provider,
+                snapshot.request().execution_control(),
+            )
+            .await
+            .map_err(|_| ())?
         }
         None => true,
     };
@@ -989,48 +1057,102 @@ async fn resolve_summary(
 
 async fn summary_has_provider_evidence(
     conn: &TemporalSqlRead<'_>,
-    session_id: &str,
-    generation: i64,
+    relation_store: &SessionRelationGraphStore,
+    scope: &SessionRelationScope,
+    session_id: &SessionId,
+    generation: u64,
     summary_id: &str,
     provider: &str,
-) -> Result<bool, ()> {
+    control: &ExecutionControl,
+) -> Result<bool, HydrationError> {
+    control.checkpoint()?;
+    let visits = relation_store
+        .summary_sources(
+            scope,
+            session_id,
+            generation,
+            summary_id,
+            MAX_SUMMARY_SOURCE_RELATIONS,
+            execution_control_graph_cancellation(control),
+        )
+        .map_err(|error| hydration_relation_error(error, control))?;
+    control.checkpoint()?;
+    let source_anchors = visits
+        .into_iter()
+        .filter_map(|visit| match visit.source {
+            SummarySourceVisitKind::Anchor { anchor_id } => Some(anchor_id.to_string()),
+            SummarySourceVisitKind::Summary { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    if source_anchors.is_empty() {
+        return Ok(false);
+    }
+    let encoded_anchors =
+        serde_json::to_string(&source_anchors).map_err(|_| HydrationError::Unavailable)?;
     let mut rows = conn
         .query(
-            "WITH RECURSIVE retained_sources(
-                 source_anchor_id, source_summary_id, depth
-             ) AS (
-                 SELECT source_anchor_id, source_summary_id, 0
-                 FROM session_summary_sources
-                 WHERE summary_id = ?1
-                 UNION ALL
-                 SELECT nested.source_anchor_id, nested.source_summary_id,
-                        retained.depth + 1
-                 FROM retained_sources AS retained
-                 JOIN session_summary_nodes AS retained_summary
-                   ON retained_summary.summary_id = retained.source_summary_id
-                  AND retained_summary.session_id = ?2
-                 JOIN session_summary_sources AS nested
-                   ON nested.summary_id = retained_summary.summary_id
-                 WHERE retained.depth < 63
-                 LIMIT 257
-             )
-             SELECT EXISTS (
+            "SELECT EXISTS (
                  SELECT 1
-                 FROM retained_sources AS retained
+                 FROM json_each(?1) AS retained
                  JOIN session_occurrences AS source_occurrence
                    ON source_occurrence.retrieval_anchor_id =
-                      retained.source_anchor_id
+                      CAST(retained.value AS TEXT)
                   AND source_occurrence.session_id = ?2
                   AND source_occurrence.generation = ?3
                  WHERE source_occurrence.source_provider = ?4
                  LIMIT 1
              )",
-            params![summary_id, session_id, generation, provider],
+            params![
+                encoded_anchors,
+                session_id.as_str(),
+                i64::try_from(generation).map_err(|_| HydrationError::Unavailable)?,
+                provider
+            ],
         )
         .await
-        .map_err(|_| ())?;
-    let row = rows.next().await.map_err(|_| ())?.ok_or(())?;
-    row.get::<i64>(0).map(|value| value == 1).map_err(|_| ())
+        .map_err(|_| HydrationError::Unavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| HydrationError::Unavailable)?
+        .ok_or(HydrationError::Unavailable)?;
+    let matched = row
+        .get::<i64>(0)
+        .map(|value| value == 1)
+        .map_err(|_| HydrationError::Unavailable)?;
+    control.checkpoint()?;
+    Ok(matched)
+}
+
+fn hydration_relation_error(
+    error: SessionRelationError,
+    control: &ExecutionControl,
+) -> HydrationError {
+    if error == SessionRelationError::Cancelled
+        && let Err(control_error) = control.checkpoint()
+    {
+        return HydrationError::Interrupted(control_error);
+    }
+    match error {
+        SessionRelationError::BudgetExhausted => HydrationError::BudgetExceeded {
+            resource: "summary source relations",
+        },
+        SessionRelationError::Cancelled => {
+            HydrationError::Interrupted(TemporalPortError::Cancelled)
+        }
+        SessionRelationError::DeadlineExceeded => {
+            HydrationError::Interrupted(TemporalPortError::DeadlineExceeded)
+        }
+        SessionRelationError::Invalid
+        | SessionRelationError::Cycle
+        | SessionRelationError::NotFound
+        | SessionRelationError::Unavailable
+        | SessionRelationError::Conflict
+        | SessionRelationError::ResetRequired
+        | SessionRelationError::DurabilityUncertain
+        | SessionRelationError::Corrupt
+        | SessionRelationError::Storage(_) => HydrationError::Unavailable,
+    }
 }
 
 fn authorized_root_owner(snapshot: &TemporalExecutionSnapshot) -> Option<ObservationScopeV1> {
@@ -1189,6 +1311,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
     }
     actual
 }
+
+#[cfg(test)]
+#[path = "hydration/graph_relation_tests.rs"]
+mod graph_relation_tests;
 
 #[cfg(test)]
 mod tests {

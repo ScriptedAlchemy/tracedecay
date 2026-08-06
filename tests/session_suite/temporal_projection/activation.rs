@@ -48,6 +48,7 @@ async fn activation_rejects_omitted_canonical_assertion_lineage() {
                     session_id.clone(),
                     generation(2),
                     snapshot(&session_id, 1, 2),
+                    ExecutionControl::default(),
                 )
                 .unwrap(),
             )
@@ -103,6 +104,7 @@ async fn activation_accepts_complete_canonical_graph_and_receipt_coverage() {
                 session_id.clone(),
                 generation(2),
                 snapshot(&session_id, 1, 2),
+                ExecutionControl::default(),
             )
             .unwrap(),
         )
@@ -274,6 +276,7 @@ async fn failed_activation_leaves_the_prior_generation_active() {
                     session_id.clone(),
                     generation(2),
                     snapshot(&session_id, 1, 0),
+                    ExecutionControl::default(),
                 )
                 .unwrap(),
             )
@@ -349,6 +352,7 @@ async fn activation_is_pinned_to_the_snapshot_active_generation() {
                     session_id.clone(),
                     generation(2),
                     snapshot(&session_id, 1, 1),
+                    ExecutionControl::default(),
                 )
                 .unwrap(),
             )
@@ -405,6 +409,7 @@ async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
                     session_id.clone(),
                     generation(2),
                     snapshot(&session_id, 1, 2),
+                    ExecutionControl::default(),
                 )
                 .unwrap(),
             )
@@ -449,6 +454,7 @@ async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
                     session_id.clone(),
                     generation(3),
                     snapshot(&session_id, 1, 2),
+                    ExecutionControl::default(),
                 )
                 .unwrap(),
             )

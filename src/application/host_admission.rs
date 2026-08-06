@@ -41,7 +41,6 @@ pub use profile_registry_test_support::HostAdmissionDatabaseIdentityV1;
 pub enum SessionTemporalFixtureCountV1 {
     ProjectionReceipts,
     Occurrences,
-    LogicalCopyEdges,
     Assertions,
     RefreshReceipts,
     RefreshProgress,
@@ -295,7 +294,6 @@ impl HostAdmissionTestRuntimeV1 {
                 "session_temporal_projection_receipts"
             }
             SessionTemporalFixtureCountV1::Occurrences => "session_occurrences",
-            SessionTemporalFixtureCountV1::LogicalCopyEdges => "session_logical_copy_edges",
             SessionTemporalFixtureCountV1::Assertions => "session_assertions",
             SessionTemporalFixtureCountV1::RefreshReceipts => "session_refresh_receipts",
             SessionTemporalFixtureCountV1::RefreshProgress => "session_refresh_progress",

@@ -8,6 +8,7 @@ use tracedecay_store::{
     SessionGenerationRebuildReceiptV1, SessionGenerationRebuildRequestV1, SessionStoreError,
     SessionStoreResult,
 };
+use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::super::RegisteredGlobalDb;
 use super::super::observation_projection::derive_projection;
@@ -16,6 +17,12 @@ use super::query::{
     ACTIVATE_OPERATION, BEGIN_OPERATION, encode_watermarks, frontier_i64, generation_i64,
     now_micros, read_generation, require_active_generation, storage, storage_message,
 };
+use super::relation_projection::reconstruct_session_relation_projection;
+use super::relation_receipts::{apply_relation_projection, record_relation_receipt};
+use super::relations::{SessionRelationError, SessionRelationProjection};
+use super::store::execution_control_graph_cancellation;
+
+const MAX_REBUILD_RELATION_PROJECTION_ITEMS: usize = 100_000;
 
 impl RegisteredGlobalDb {
     pub async fn begin_session_generation_rebuild_result(
@@ -93,6 +100,14 @@ impl RegisteredGlobalDb {
         &self,
         request: SessionGenerationActivationRequestV1,
     ) -> SessionStoreResult<SessionGenerationActivationReceiptV1> {
+        let relation_projection = rebuild_candidate_session_relations(
+            self,
+            request.session_id(),
+            request.generation(),
+            request.execution_control(),
+            ACTIVATE_OPERATION,
+        )
+        .await?;
         let transaction = self
             .begin_write_transaction()
             .await
@@ -132,6 +147,7 @@ impl RegisteredGlobalDb {
             request.session_id(),
             request.generation(),
             request.snapshot().watermarks(),
+            &relation_projection,
         )
         .await?;
         validate_candidate_frontier(
@@ -139,6 +155,7 @@ impl RegisteredGlobalDb {
             request.session_id().as_str(),
             generation,
             request.snapshot().watermarks().source_frontier(),
+            &relation_projection,
         )
         .await?;
 
@@ -205,6 +222,110 @@ impl RegisteredGlobalDb {
     }
 }
 
+pub(super) async fn rebuild_candidate_session_relations(
+    database: &RegisteredGlobalDb,
+    session_id: &tracedecay_domain::SessionId,
+    generation: tracedecay_domain::SessionProjectionGenerationV1,
+    control: &ExecutionControl,
+    operation: &'static str,
+) -> SessionStoreResult<SessionRelationProjection> {
+    checkpoint_relation_rebuild_control(control)?;
+    let (scope, relation_store) = database
+        .session_relation_store()
+        .map_err(|error| storage(operation, error))?;
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| storage(operation, error))?;
+    let reconstruction_cancellation = execution_control_graph_cancellation(control);
+    checkpoint_relation_rebuild_control(control)?;
+    let reconstructed = reconstruct_session_relation_projection(
+        &snapshot,
+        scope,
+        session_id,
+        generation,
+        MAX_REBUILD_RELATION_PROJECTION_ITEMS,
+        MAX_REBUILD_RELATION_PROJECTION_ITEMS,
+        reconstruction_cancellation,
+    )
+    .await;
+    checkpoint_relation_rebuild_control(control)?;
+    let reconstructed = reconstructed?;
+    drop(snapshot);
+
+    checkpoint_relation_rebuild_control(control)?;
+    let receipt = database
+        .begin_write_transaction()
+        .await
+        .map_err(|error| storage(operation, error))?;
+    record_relation_receipt(&receipt, &reconstructed, now_micros(operation)?.0).await?;
+    receipt
+        .commit()
+        .await
+        .map_err(|error| storage(operation, error))?;
+    checkpoint_relation_rebuild_control(control)?;
+
+    let apply_cancellation = execution_control_graph_cancellation(control);
+    checkpoint_relation_rebuild_control(control)?;
+    let applied = apply_relation_projection(database, &reconstructed, apply_cancellation).await;
+    checkpoint_relation_rebuild_control(control)?;
+    applied?;
+
+    let load_cancellation = execution_control_graph_cancellation(control);
+    checkpoint_relation_rebuild_control(control)?;
+    let loaded = relation_store.load_projection(
+        scope,
+        session_id,
+        generation.value(),
+        MAX_REBUILD_RELATION_PROJECTION_ITEMS,
+        MAX_REBUILD_RELATION_PROJECTION_ITEMS,
+        load_cancellation,
+    );
+    checkpoint_relation_rebuild_control(control)?;
+    let loaded = loaded.map_err(|error| map_relation_rebuild_error(operation, error))?;
+    if loaded != reconstructed {
+        return Err(storage_message(
+            operation,
+            "native session relation graph did not preserve the canonical reconstruction",
+        ));
+    }
+    Ok(loaded)
+}
+
+pub(super) fn checkpoint_relation_rebuild_control(
+    control: &ExecutionControl,
+) -> SessionStoreResult<()> {
+    control
+        .checkpoint()
+        .map_err(map_relation_rebuild_control_error)
+}
+
+fn map_relation_rebuild_control_error(error: TemporalPortError) -> SessionStoreError {
+    match error {
+        TemporalPortError::Cancelled => SessionStoreError::Cancelled,
+        TemporalPortError::DeadlineExceeded => SessionStoreError::DeadlineExceeded,
+        TemporalPortError::BudgetExceeded { resource } => {
+            SessionStoreError::BudgetExceeded { resource }
+        }
+        _ => SessionStoreError::InvalidStateTransition {
+            context: "session relation reconstruction execution control checkpoint",
+        },
+    }
+}
+
+fn map_relation_rebuild_error(
+    operation: &'static str,
+    error: SessionRelationError,
+) -> SessionStoreError {
+    match error {
+        SessionRelationError::Cancelled => SessionStoreError::Cancelled,
+        SessionRelationError::BudgetExhausted => SessionStoreError::BudgetExceeded {
+            resource: "session relation reconstruction",
+        },
+        error => storage(operation, error),
+    }
+}
+
 async fn bootstrap_first_active_generation(
     conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
@@ -268,7 +389,18 @@ pub(super) async fn validate_candidate_frontier(
     session_id: &str,
     generation: i64,
     source_frontier: u64,
+    relation_projection: &SessionRelationProjection,
 ) -> SessionStoreResult<()> {
+    if relation_projection.session_id.as_str() != session_id
+        || i64::try_from(relation_projection.generation)
+            .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+            != generation
+    {
+        return Err(storage_message(
+            ACTIVATE_OPERATION,
+            "native relation projection identity does not match the candidate generation",
+        ));
+    }
     let mut expected = BTreeSet::new();
     let mut expected_copies = BTreeSet::new();
     let parent_resolver =
@@ -298,7 +430,7 @@ pub(super) async fn validate_candidate_frontier(
         let envelope = serde_json::from_value::<tracedecay_domain::CanonicalObservationEnvelopeV1>(
             observation.payload().clone(),
         )
-        .ok();
+        .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
         let projection =
             derive_projection(&observation).map_err(|error| storage(ACTIVATE_OPERATION, error))?;
         for output in projection
@@ -316,8 +448,8 @@ pub(super) async fn validate_candidate_frontier(
             // link to a *different* message is conversation threading and must
             // not be demanded as copy coverage.
             let parent_message_id = envelope
-                .as_ref()
-                .and_then(|value| value.relations().parent_message_id())
+                .relations()
+                .parent_message_id()
                 .filter(|parent| parent.as_str() == output.message().message_id)
                 .map(|value| value.as_str().to_owned());
             canonical_outputs.push((occurrence_id, parent_message_id));
@@ -365,29 +497,16 @@ pub(super) async fn validate_candidate_frontier(
             "candidate occurrence coverage does not equal the frozen source frontier",
         ));
     }
-    let mut actual_copies = BTreeSet::new();
-    let mut rows = conn
-        .query(
-            "SELECT occurrence_id, copied_from_occurrence_id
-             FROM session_logical_copy_edges
-             WHERE session_id = ?1 AND generation = ?2
-             ORDER BY occurrence_id, copied_from_occurrence_id",
-            params![session_id, generation],
-        )
-        .await
-        .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(ACTIVATE_OPERATION, error))?
-    {
-        actual_copies.insert((
-            row.get::<String>(0)
-                .map_err(|error| storage(ACTIVATE_OPERATION, error))?,
-            row.get::<String>(1)
-                .map_err(|error| storage(ACTIVATE_OPERATION, error))?,
-        ));
-    }
+    let actual_copies = relation_projection
+        .logical_copies
+        .iter()
+        .map(|copy| {
+            (
+                copy.occurrence_id.as_str().to_owned(),
+                copy.copied_from_occurrence_id.as_str().to_owned(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
     // Parent-message copies are mandatory canonical coverage. Additional copy
     // edges are allowed only because batch persistence already validated their
     // typed retained-evidence proof and the final immutable receipt re-hashed

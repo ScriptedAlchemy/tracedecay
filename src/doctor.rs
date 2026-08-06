@@ -691,13 +691,13 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
             tracedecay_automation::backend::classify_agent_task_error_message(&error.to_string())
                 .is_retryable()
         }
-        crate::errors::TraceDecayError::File { .. }
+        crate::errors::TraceDecayError::ResetRequired { .. }
+        | crate::errors::TraceDecayError::File { .. }
         | crate::errors::TraceDecayError::Parse { .. }
         | crate::errors::TraceDecayError::Database { .. }
         | crate::errors::TraceDecayError::DatabaseOperation { .. }
         | crate::errors::TraceDecayError::Search { .. }
         | crate::errors::TraceDecayError::ProfileResetRequired { .. }
-        | crate::errors::TraceDecayError::ResetRequired { .. }
         | crate::errors::TraceDecayError::SyncLock { .. }
         | crate::errors::TraceDecayError::Sqlite(_)
         | crate::errors::TraceDecayError::Json(_) => false,

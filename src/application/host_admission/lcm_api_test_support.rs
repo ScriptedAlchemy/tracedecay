@@ -9,10 +9,11 @@ impl HostAdmissionTestRuntimeV1 {
         crate::sessions::lcm::LcmCompressionResponse,
         crate::sessions::lcm::LcmError,
     > {
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
-            .lcm_compress(request)
+            .lcm_compress_guarded(request, &control, || Ok(()))
             .await
     }
 
@@ -274,10 +275,11 @@ impl HostAdmissionTestRuntimeV1 {
         Vec<crate::global_db::PendingCodexCompactionSummary>,
         crate::sessions::lcm::LcmError,
     > {
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
-            .pending_codex_compaction_summary_requests(session_id, limit)
+            .pending_codex_compaction_summary_requests(session_id, limit, &control)
             .await
     }
 
@@ -290,10 +292,18 @@ impl HostAdmissionTestRuntimeV1 {
         model: Option<&str>,
     ) -> std::result::Result<crate::sessions::lcm::LcmSummaryNode, crate::sessions::lcm::LcmError>
     {
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
-            .publish_codex_compaction_summary_successor(node_id, summary_text, route, model)
+            .publish_codex_compaction_summary_successor(
+                node_id,
+                summary_text,
+                route,
+                model,
+                &control,
+                || Ok(()),
+            )
             .await
     }
 }

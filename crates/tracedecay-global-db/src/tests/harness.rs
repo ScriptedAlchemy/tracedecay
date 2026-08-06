@@ -73,6 +73,7 @@ impl RegisteredGlobalDbTestRuntime {
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
         )
         .await?;
+        bind_test_session_relation_graph(&profile_registered)?;
         let project_registered = match project {
             Some((project_root, project_id)) => {
                 let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
@@ -84,15 +85,15 @@ impl RegisteredGlobalDbTestRuntime {
                     profile_root,
                     &marker,
                 )?;
-                Some(
-                    open_registered_test_database(
-                        &layout.sessions_db_path,
-                        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
-                            project_id,
-                        },
-                    )
-                    .await?,
+                let registered = open_registered_test_database(
+                    &layout.sessions_db_path,
+                    tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
+                        project_id,
+                    },
                 )
+                .await?;
+                bind_test_session_relation_graph(&registered)?;
+                Some(registered)
             }
             None => None,
         };
@@ -195,7 +196,6 @@ pub use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) enum SessionTemporalFixtureCountV1 {
     ProjectionReceipts,
     Occurrences,
-    LogicalCopyEdges,
     Assertions,
     RefreshReceipts,
     RefreshProgress,
@@ -295,6 +295,7 @@ impl HostAdmissionTestRuntimeV1 {
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
         )
         .await?;
+        bind_test_session_relation_graph(&profile_registered)?;
         let project_registered = match project {
             Some((project_root, project_id)) => {
                 let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
@@ -306,15 +307,15 @@ impl HostAdmissionTestRuntimeV1 {
                     profile_root,
                     &marker,
                 )?;
-                Some(
-                    open_registered_test_database(
-                        &layout.sessions_db_path,
-                        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
-                            project_id,
-                        },
-                    )
-                    .await?,
+                let registered = open_registered_test_database(
+                    &layout.sessions_db_path,
+                    tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
+                        project_id,
+                    },
                 )
+                .await?;
+                bind_test_session_relation_graph(&registered)?;
+                Some(registered)
             }
             None => None,
         };
@@ -534,7 +535,6 @@ impl HostAdmissionTestRuntimeV1 {
                 "session_temporal_projection_receipts"
             }
             SessionTemporalFixtureCountV1::Occurrences => "session_occurrences",
-            SessionTemporalFixtureCountV1::LogicalCopyEdges => "session_logical_copy_edges",
             SessionTemporalFixtureCountV1::Assertions => "session_assertions",
             SessionTemporalFixtureCountV1::RefreshReceipts => "session_refresh_receipts",
             SessionTemporalFixtureCountV1::RefreshProgress => "session_refresh_progress",
@@ -553,39 +553,6 @@ impl HostAdmissionTestRuntimeV1 {
             }
         })?;
         row.get(0).map_err(Into::into)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn session_temporal_copy_edge_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        session_id: &tracedecay_domain::SessionId,
-    ) -> tracedecay_runtime_core::errors::Result<Option<(i64, tracedecay_domain::TemporalValidityV1)>>
-    {
-        let snapshot = self
-            .session_database_for_test(scope)?
-            .read_snapshot()
-            .await?;
-        let mut rows = snapshot
-            .query(
-                "SELECT knowledge_at, valid_time_json
-                 FROM session_logical_copy_edges
-                 WHERE session_id = ?1",
-                [session_id.as_str()],
-            )
-            .await?;
-        let Some(row) = rows.next().await? else {
-            return Ok(None);
-        };
-        let knowledge_at = row.get::<i64>(0)?;
-        let valid_time_json = row.get::<String>(1)?;
-        let valid_time = serde_json::from_str(&valid_time_json).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "parse session-temporal copy edge valid time".to_owned(),
-                message: error.to_string(),
-            }
-        })?;
-        Ok(Some((knowledge_at, valid_time)))
     }
 
     #[cfg(test)]
@@ -665,8 +632,7 @@ impl HostAdmissionTestRuntimeV1 {
         // at ingest; a receipt-free row is refused by `verify_raw_message_receipt`.
         let raw_message_metadata =
             lcm_render_fixture_sanitization_metadata("canonical raw message")?;
-        let external_message_metadata =
-            lcm_render_fixture_sanitization_metadata(external_content)?;
+        let external_message_metadata = lcm_render_fixture_sanitization_metadata(external_content)?;
 
         database
             .writer_connection()?
@@ -751,9 +717,150 @@ fn lcm_render_fixture_sanitization_metadata(
             message: format!("sanitization receipt encoding failed: {error}"),
         }
     })?;
-    let metadata =
-        serde_json::json!({ "ingest_protection": { "sanitization_receipt": receipt } });
+    let metadata = serde_json::json!({ "ingest_protection": { "sanitization_receipt": receipt } });
     Ok(metadata.to_string().replace('\'', "''"))
+}
+
+/// Publishes an empty session relation projection for a fixture session, the
+/// step the production refresh pipeline performs when it activates a
+/// generation. Fixtures that seed `session_temporal_generations` directly must
+/// call this so relation reads see the published (empty) topology instead of a
+/// missing projection.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn publish_test_session_relation_projection(
+    database: &RegisteredGlobalDb,
+    session_id: &str,
+    generation: u64,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    use crate::session_temporal::relations::SessionRelationProjection;
+    use tracedecay_domain::SessionId;
+
+    let session_id = SessionId::new(session_id).map_err(|error| {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "publish test session relation projection".to_owned(),
+            message: error.to_string(),
+        }
+    })?;
+    let (scope, store) = database.session_relation_store()?;
+    let projection = SessionRelationProjection {
+        scope: scope.clone(),
+        session_id,
+        generation,
+        summaries: Vec::new(),
+        logical_copies: Vec::new(),
+        thread_hierarchy: Vec::new(),
+        agent_hierarchy: Vec::new(),
+        parent_session_id: None,
+        workflow_agents: Vec::new(),
+    };
+    store.replace(&projection).map(|_| ()).map_err(|error| {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "publish test session relation projection".to_owned(),
+            message: format!("{error:?}"),
+        }
+    })
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn bind_test_session_relation_graph(
+    database: &RegisteredGlobalDb,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use crate::session_temporal::relations::SessionRelationScope;
+    use tracedecay_graph_db::{
+        GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, NeverCancelled,
+    };
+    use tracedecay_store::{
+        RetainedGraphStoreLeaseV1, StoreRuntimeBindingV1, StoreShardScopeV1,
+        VerifiedStoreLocatorV1, canonical_store_locator_digest, graph_store_locator_path,
+    };
+
+    #[derive(Debug)]
+    struct TestSessionGraphLease {
+        binding: StoreRuntimeBindingV1,
+        verified_locator: VerifiedStoreLocatorV1,
+        canonical_path: PathBuf,
+    }
+
+    impl RetainedGraphStoreLeaseV1 for TestSessionGraphLease {
+        fn binding(&self) -> &StoreRuntimeBindingV1 {
+            &self.binding
+        }
+
+        fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+            &self.verified_locator
+        }
+
+        fn canonical_path(&self) -> &std::path::Path {
+            &self.canonical_path
+        }
+    }
+
+    let binding = database.binding();
+    let scope = match &binding.shard_id.scope {
+        StoreShardScopeV1::ProjectSessions { project_id } => {
+            SessionRelationScope::project_sessions(project_id.clone())
+        }
+        StoreShardScopeV1::ProfileSessions => {
+            SessionRelationScope::profile_sessions(binding.shard_id.profile_id.clone())
+        }
+        _ => {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "bind test session relation graph".to_owned(),
+                message: "registered test database is not a session shard".to_owned(),
+            });
+        }
+    };
+    let store_root = database.db_path().parent().ok_or_else(|| {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "bind test session relation graph".to_owned(),
+            message: "registered session database has no storage root".to_owned(),
+        }
+    })?;
+    let registry =
+        GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "create test session relation graph registry".to_owned(),
+                message: error.to_string(),
+            }
+        })?;
+    let canonical_path =
+        graph_store_locator_path(store_root, database.db_path()).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "derive test session relation graph path".to_owned(),
+                message: format!("{error:?}"),
+            }
+        })?;
+    let verified_locator = VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        binding.incarnation,
+        canonical_store_locator_digest(&canonical_path).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "digest test session relation graph path".to_owned(),
+                message: format!("{error:?}"),
+            }
+        })?,
+    );
+    let graph = registry
+        .resolve(GraphDbRegistration {
+            authority_lease: Arc::new(TestSessionGraphLease {
+                binding: binding.clone(),
+                verified_locator,
+                canonical_path,
+            }),
+            cancellation: Arc::new(NeverCancelled),
+            lifecycle_cancellation: Arc::new(NeverCancelled),
+            deadline: Instant::now() + Duration::from_secs(30),
+        })
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "resolve test session relation graph".to_owned(),
+                message: error.to_string(),
+            },
+        )?;
+    database.bind_session_relation_graph(scope, graph)
 }
 
 #[cfg(any(test, feature = "test-helpers"))]

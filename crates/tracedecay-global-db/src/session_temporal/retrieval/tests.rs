@@ -16,10 +16,14 @@ use tracedecay_runtime_core::db::engine::{
 use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::ports::{
     BindingDigest, KernelVersions, PageRequest, TemporalAuthorizedRoot, TemporalExecutionSnapshot,
-    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalWatermarks,
+    TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
+    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalSourceAccess,
+    TemporalWatermarks,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
+
+mod relation_graph_tests;
 
 fn normalize_plan_detail(detail: &str) -> String {
     detail
@@ -156,6 +160,56 @@ fn root_snapshot_with_mode(
     .expect("snapshot")
 }
 
+fn participant(
+    session_id: &str,
+    source_id: &str,
+    generation: u64,
+) -> TemporalParticipantGeneration {
+    TemporalParticipantGeneration::new(
+        SessionId::new(session_id).expect("participant session"),
+        source_id,
+        TemporalWatermarks {
+            generation,
+            source: generation,
+            projection: generation,
+            index: generation,
+            summary: generation,
+        },
+        generation,
+        &BindingDigest::new("configuration", digest('4')).expect("configuration"),
+        &BindingDigest::new("authorization", digest('2')).expect("authorization"),
+        TemporalParticipantAuthorization::Authorized,
+        TemporalSourceAccess::Available,
+    )
+    .expect("participant")
+}
+
+#[test]
+fn root_relation_reads_bind_each_frozen_participant_generation() {
+    let snapshot = root_snapshot_with_mode(99, None, TemporalModeV1::Forensic)
+        .with_participant_manifest(
+            TemporalParticipantManifest::new(vec![
+                participant("session-a", "claude", 2),
+                participant("session-b", "codex", 7),
+            ])
+            .expect("participant manifest"),
+        )
+        .expect("root snapshot");
+
+    assert_eq!(
+        participant_generation(&snapshot, &SessionId::new("session-a").unwrap(), "claude").unwrap(),
+        2
+    );
+    assert_eq!(
+        participant_generation(&snapshot, &SessionId::new("session-b").unwrap(), "codex").unwrap(),
+        7
+    );
+    assert!(
+        participant_generation(&snapshot, &SessionId::new("session-a").unwrap(), "codex").is_err(),
+        "a candidate must never inherit the root anchor generation"
+    );
+}
+
 fn record_request() -> PageRequest {
     PageRequest::for_test(32, 64 * 1024, 8 * 1024, 32, 512)
 }
@@ -192,7 +246,7 @@ impl RegisteredTemporalRead {
         candidate: RankingCandidate,
         request: &PageRequest,
     ) -> Vec<String> {
-        let query = build_record_query(
+        let query = build_record_query_with_relations(
             snapshot.retrieval_scope(),
             snapshot,
             &[candidate],
@@ -205,6 +259,7 @@ impl RegisteredTemporalRead {
             },
             request.page_item_limit().saturating_add(1),
             request,
+            &RecordRelationBatch::empty(),
         )
         .expect("record query");
         let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
@@ -227,7 +282,7 @@ impl RegisteredTemporalRead {
         candidate: RankingCandidate,
         request: &PageRequest,
     ) -> Vec<TemporalRecord> {
-        let query = build_record_query(
+        let query = build_record_query_with_relations(
             snapshot.retrieval_scope(),
             snapshot,
             &[candidate],
@@ -240,6 +295,7 @@ impl RegisteredTemporalRead {
             },
             request.page_item_limit().saturating_add(1),
             request,
+            &RecordRelationBatch::empty(),
         )
         .expect("record query");
         let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
@@ -480,19 +536,6 @@ impl HostAdmissionTestRuntimeV1 {
                     'needle summary outside', 'needle summary outside', '{}',
                     '{\"provider\":\"claude\"}', 35
                 );
-             INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES
-                (
-                    'summary-plan-inside', 0, 'anchor', 'anchor-plan-inside', NULL
-                ),
-                (
-                    'summary-plan-inside-old', 0, 'anchor',
-                    'anchor-plan-inside-old', NULL
-                ),
-                (
-                    'summary-plan-outside', 0, 'anchor', 'anchor-plan-outside', NULL
-                );
              INSERT INTO session_summary_availability (
                 session_id, generation, summary_id, availability,
                 source_horizon_json, reason, checked_at
@@ -702,13 +745,6 @@ impl HostAdmissionTestRuntimeV1 {
                     '0000000000000000000000000000000000000000000000000000000000000000', 6,
                     'source', 'source'
                 );
-             INSERT INTO session_logical_copy_edges (
-                session_id, generation, occurrence_id, copied_from_occurrence_id,
-                proof_json, knowledge_at, valid_time_json, created_at
-             ) VALUES (
-                'session-b', 1, 'same-id', 'source-b', '{}', 5,
-                '{\"kind\":\"unknown\"}', 5
-             );
              INSERT INTO session_assertions (
                 session_id, generation, assertion_id, assertion_kind,
                 subject_anchor_id, object_anchor_id, knowledge_at,
@@ -829,11 +865,7 @@ impl HostAdmissionTestRuntimeV1 {
              );
              INSERT INTO retrieval_anchors (
                 anchor_id, anchor_json, owner_json, projection_generation
-             ) VALUES
-                ('anchor-evidence', '{}', '{}', 'fixture'),
-                ('anchor-publication', '{}', '{}', 'fixture'),
-                ('source-short', '{}', '{}', 'fixture'),
-                ('anchor-source', '{}', '{}', 'fixture');",
+             ) VALUES ('anchor-evidence', '{}', '{}', 'fixture');",
         )
         .await
         .expect("oversized observation fixture");
@@ -857,127 +889,7 @@ impl HostAdmissionTestRuntimeV1 {
         )
         .await
         .expect("oversized occurrence fixture");
-        Executor::execute(
-            &writer,
-            "INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
-                source_horizon_json, publication_json, created_at
-             ) VALUES (
-                'summary-publication', 'session-snapshot', 'anchor-publication',
-                'summary', 'summary', '{}', ?1, 1
-             )",
-            [oversized_json],
-        )
-        .await
-        .expect("oversized publication fixture");
-        Executor::execute_batch(
-            &writer,
-            "INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES ('summary-publication', 0, 'anchor', 'source-short', NULL);
-             INSERT INTO session_summary_availability (
-                session_id, generation, summary_id, availability,
-                source_horizon_json, reason, checked_at
-             ) VALUES (
-                'session-snapshot', 1, 'summary-publication', 'available',
-                '{}', NULL, 1
-             );
-             INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
-                source_horizon_json, publication_json, created_at
-             ) VALUES (
-                'summary-source', 'session-snapshot', 'anchor-source',
-                'summary', 'summary', '{}', NULL, 1
-             );",
-        )
-        .await
-        .expect("oversized summary fixtures");
-        let oversized_source = format!("source-{}", "y".repeat(512));
-        Executor::execute(
-            &writer,
-            "INSERT INTO retrieval_anchors (
-                anchor_id, anchor_json, owner_json, projection_generation
-             ) VALUES (?1, '{}', '{}', 'fixture')",
-            [oversized_source.as_str()],
-        )
-        .await
-        .expect("oversized source anchor fixture");
-        Executor::execute(
-            &writer,
-            "INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES ('summary-source', 0, 'anchor', ?1, NULL)",
-            [oversized_source],
-        )
-        .await
-        .expect("oversized source fixture");
-        Executor::execute_batch(
-            &writer,
-            "INSERT INTO session_summary_availability (
-                session_id, generation, summary_id, availability,
-                source_horizon_json, reason, checked_at
-             ) VALUES (
-                'session-snapshot', 1, 'summary-source', 'available',
-                '{}', NULL, 1
-             );",
-        )
-        .await
-        .expect("oversized summary availability");
-    }
-
-    async fn seed_summary_source_cap_fixture_for_test(&self) {
-        self.activate_temporal_generation_for_retrieval_test("session-snapshot", 1)
-            .await;
-        let database = self
-            .registered_database(HostAdmissionScope::Profile)
-            .expect("registered profile database");
-        let writer = database
-            .writer_connection()
-            .expect("registered profile writer");
-        Executor::execute_batch(
-            &writer,
-            "INSERT INTO retrieval_anchors (
-                anchor_id, anchor_json, owner_json, projection_generation
-             ) VALUES ('anchor-many-sources', '{}', '{}', 'fixture');
-             INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
-                source_horizon_json, publication_json, created_at
-             ) VALUES (
-                'summary-many-sources', 'session-snapshot', 'anchor-many-sources',
-                'summary', 'summary', '{}', NULL, 1
-             );
-             INSERT INTO session_summary_availability (
-                session_id, generation, summary_id, availability,
-                source_horizon_json, reason, checked_at
-             ) VALUES (
-                'session-snapshot', 1, 'summary-many-sources', 'available',
-                '{}', NULL, 1
-             );",
-        )
-        .await
-        .expect("many-source summary fixture");
-        for ordinal in 0..=MAX_SUMMARY_SOURCES_PER_RECORD {
-            let source_anchor = format!("source-{ordinal:03}");
-            Executor::execute(
-                &writer,
-                "INSERT INTO retrieval_anchors (
-                    anchor_id, anchor_json, owner_json, projection_generation
-                 ) VALUES (?1, '{}', '{}', 'fixture')",
-                [source_anchor.as_str()],
-            )
-            .await
-            .expect("many-source anchor fixture");
-            Executor::execute(
-                &writer,
-                "INSERT INTO session_summary_sources (
-                    summary_id, source_ordinal, source_kind,
-                    source_anchor_id, source_summary_id
-                 ) VALUES ('summary-many-sources', ?1, 'anchor', ?2, NULL)",
-                (i64::try_from(ordinal).unwrap(), source_anchor),
-            )
-            .await
-            .expect("many-source edge fixture");
-        }
+        drop(oversized_json);
     }
 
     async fn seed_provider_summary_fixture_for_test(&self) {
@@ -1026,17 +938,15 @@ impl HostAdmissionTestRuntimeV1 {
                 source_horizon_json, publication_json, created_at
              ) VALUES (
                 'summary-provider', 'session-snapshot', 'anchor-summary-provider',
-                'summary', 'summary', '{}', NULL, 1
+                'summary', 'summary',
+                '{\"knowledge_through\":1,\"valid_through\":null}', NULL, 1
              );
-             INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES ('summary-provider', 0, 'anchor', 'source-claude', NULL);
              INSERT INTO session_summary_availability (
                 session_id, generation, summary_id, availability,
                 source_horizon_json, reason, checked_at
              ) VALUES (
                 'session-snapshot', 1, 'summary-provider', 'available',
-                '{}', NULL, 1
+                '{\"knowledge_through\":1,\"valid_through\":null}', NULL, 1
              );",
         )
         .await
@@ -1113,14 +1023,6 @@ impl HostAdmissionTestRuntimeV1 {
                     'successor', 'successor',
                     '{\"knowledge_through\":10,\"valid_through\":10}', NULL, 10
                 );
-             INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES
-                ('historical-summary', 0, 'anchor', 'shared-summary-source', NULL),
-                ('successor-summary', 0, 'anchor', 'shared-summary-source', NULL);
-             INSERT INTO session_summary_successors (
-                predecessor_summary_id, successor_summary_id, created_at
-             ) VALUES ('historical-summary', 'successor-summary', 10);
              INSERT INTO session_summary_availability (
                 session_id, generation, summary_id, availability,
                 source_horizon_json, reason, checked_at
@@ -1138,19 +1040,6 @@ impl HostAdmissionTestRuntimeV1 {
         .await
         .expect("historical summary successor fixture");
     }
-}
-
-#[test]
-fn adapter_contains_only_the_borrowed_engine_handle() {
-    fn assert_exact_fields(adapter: &GlobalDbTemporalReadPort<'_>) {
-        let GlobalDbTemporalReadPort { read: _ } = adapter;
-    }
-
-    let _ = assert_exact_fields;
-    assert_eq!(
-        std::mem::size_of::<GlobalDbTemporalReadPort<'static>>(),
-        std::mem::size_of::<super::super::sql::TemporalSqlRead<'static>>()
-    );
 }
 
 #[tokio::test]
@@ -1397,7 +1286,6 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     let summary_params = vec![
         SqlValue::Text("session-plan-inside".to_string()),
         SqlValue::Integer(1),
-        SqlValue::Text("claude".to_string()),
         SqlValue::Text(fts_phrase("needle summary")),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
@@ -1512,7 +1400,6 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
 
     let root_summary_params = vec![
         SqlValue::Text("user".to_string()),
-        SqlValue::Text("claude".to_string()),
         SqlValue::Text(fts_phrase("needle summary")),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
@@ -1556,29 +1443,8 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
             .all(|detail| !detail.contains("SCAN N")),
         "root summaries must never scan the summary node table: {root_summary_plan:?}"
     );
-    let root_summary_wrong_provider = vec![
-        SqlValue::Text("user".to_string()),
-        SqlValue::Text("codex".to_string()),
-        SqlValue::Text(fts_phrase("needle summary")),
-        SqlValue::Integer(i64::MAX),
-        SqlValue::Text(String::new()),
-        SqlValue::Text(String::new()),
-        SqlValue::Integer(128),
-        SqlValue::Integer(128),
-        SqlValue::Integer(128),
-        SqlValue::Integer(1_024),
-        SqlValue::Integer(128),
-        SqlValue::Integer(10),
-    ];
-    assert!(
-        read.text_column(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_wrong_provider, 0)
-            .await
-            .is_empty(),
-        "root summaries must fail closed for a provider without retained source evidence"
-    );
     let root_summary_missing_phrase = vec![
         SqlValue::Text("user".to_string()),
-        SqlValue::Text("claude".to_string()),
         SqlValue::Text(fts_phrase("absent summary phrase")),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
@@ -2420,7 +2286,6 @@ async fn root_record_hydration_rejects_cross_session_copy_and_assertion_traps() 
         .await;
     assert!(kinds_b.contains(&"occurrence".to_string()));
     assert!(kinds_b.contains(&"assertion".to_string()));
-    assert!(kinds_b.contains(&"copy".to_string()));
 }
 
 #[tokio::test]
@@ -2443,50 +2308,6 @@ async fn current_record_hydration_retains_non_superseding_assertions_for_resolut
     assert!(
         kinds.contains(&"assertion".to_string()),
         "Current must pass conflict/support assertions to the shared resolver"
-    );
-}
-
-#[tokio::test]
-async fn as_of_summary_source_uses_frozen_horizon_not_later_current_occurrence() {
-    let dir = tempdir().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
-        .await
-        .expect("registered profile runtime");
-    runtime
-        .seed_historical_summary_successor_fixture_for_test()
-        .await;
-    let read = runtime.retrieval_read_for_test().await;
-    let snapshot = scoped_snapshot_with_mode(
-        1,
-        None,
-        TemporalModeV1::AsOf {
-            cutoff: UtcMicros(6),
-        },
-    );
-
-    let records = read
-        .records(
-            &snapshot,
-            candidate_for_anchor("historical-summary-anchor"),
-            &record_request(),
-        )
-        .await;
-    let source = records
-        .iter()
-        .find_map(|record| match record {
-            TemporalRecord::SummarySource(source) => Some(source),
-            _ => None,
-        })
-        .expect("historical summary source");
-
-    assert_eq!(
-        source.state,
-        SummarySourceState::Covered {
-            knowledge_at: UtcMicros(5),
-            valid_time: TemporalValidityV1::Known {
-                valid_at: UtcMicros(5),
-            },
-        }
     );
 }
 
@@ -2527,7 +2348,7 @@ async fn derived_candidate_materializes_members_with_canonical_evidence_linkage(
 }
 
 #[tokio::test]
-async fn oversized_evidence_publication_and_source_json_never_reach_record_rows() {
+async fn oversized_evidence_json_never_reaches_occurrence_rows() {
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
@@ -2543,66 +2364,6 @@ async fn oversized_evidence_publication_and_source_json_never_reach_record_rows(
             .await
             .contains(&"occurrence".to_string())
     );
-    for anchor in ["anchor-publication", "anchor-source"] {
-        assert!(
-            !read
-                .record_kinds(&snapshot, candidate_for_anchor(anchor), &request)
-                .await
-                .contains(&"summary".to_string()),
-            "oversized summary JSON for {anchor} must be rejected in its UNION arm"
-        );
-    }
-}
-
-#[tokio::test]
-async fn summary_source_count_cap_rejects_before_group_array() {
-    let dir = tempdir().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
-        .await
-        .expect("registered profile runtime");
-    runtime.seed_summary_source_cap_fixture_for_test().await;
-    let read = runtime.retrieval_read_for_test().await;
-
-    let snapshot = scoped_snapshot_with_mode(1, None, TemporalModeV1::Forensic);
-    let request = PageRequest::for_test(32, 2 * 1024 * 1024, 1024 * 1024, 32, 512);
-    let kinds = read
-        .record_kinds(
-            &snapshot,
-            candidate_for_anchor("anchor-many-sources"),
-            &request,
-        )
-        .await;
-    assert!(
-        !kinds.contains(&"summary".to_string()),
-        "257 sources must not be truncated into a 256-source summary JSON array"
-    );
-}
-
-#[tokio::test]
-async fn provider_specific_summary_requires_retained_provider_evidence() {
-    let dir = tempdir().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
-        .await
-        .expect("registered profile runtime");
-    runtime.seed_provider_summary_fixture_for_test().await;
-    let read = runtime.retrieval_read_for_test().await;
-    let request = record_request();
-    let candidate = || candidate_for_anchor("anchor-summary-provider");
-
-    let claude = read
-        .record_kinds(&scoped_snapshot(1, Some("claude")), candidate(), &request)
-        .await;
-    assert!(claude.contains(&"summary".to_string()));
-
-    let codex = read
-        .record_kinds(&scoped_snapshot(1, Some("codex")), candidate(), &request)
-        .await;
-    assert!(!codex.contains(&"summary".to_string()));
-
-    let all = read
-        .record_kinds(&scoped_snapshot(1, None), candidate(), &request)
-        .await;
-    assert!(all.contains(&"summary".to_string()));
 }
 
 #[tokio::test]
@@ -2657,7 +2418,7 @@ async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
         Some("claude"),
         TemporalModeV1::Forensic,
     );
-    let query = build_record_query(
+    let query = build_record_query_with_relations(
         &TemporalRetrievalScope::Session(SessionId::new("session-plan-inside").expect("session")),
         &snapshot,
         &candidates,
@@ -2670,6 +2431,7 @@ async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
         },
         38,
         &request,
+        &RecordRelationBatch::empty(),
     )
     .expect("bounded record query");
     assert_eq!(
@@ -2696,7 +2458,7 @@ async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
         "record hydration must index-seek every candidate occurrence: {plan:?}"
     );
 
-    let page_after_first = build_record_query(
+    let page_after_first = build_record_query_with_relations(
         snapshot.retrieval_scope(),
         &snapshot,
         &candidates,
@@ -2709,6 +2471,7 @@ async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
         },
         38,
         &request,
+        &RecordRelationBatch::empty(),
     )
     .expect("record keyset query");
     assert_eq!(

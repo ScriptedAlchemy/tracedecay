@@ -1,4 +1,10 @@
-use std::{future::Future, sync::LazyLock};
+use std::{
+    future::Future,
+    sync::{Arc, LazyLock},
+};
+
+use tracedecay_graph_db::GraphCancellation;
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use tracedecay_store::{
     SessionGenerationActivatePermit, SessionGenerationActivationReceiptV1,
@@ -28,6 +34,29 @@ use tracedecay_store::SessionStoreError;
 /// Session-temporal projection adapter over an already-open authoritative database.
 pub struct GlobalDbSessionTemporalStore<'a> {
     db: &'a RegisteredGlobalDb,
+}
+
+#[derive(Clone, Debug)]
+struct ExecutionControlGraphCancellation(ExecutionControl);
+
+impl GraphCancellation for ExecutionControlGraphCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.checkpoint().is_err()
+    }
+}
+
+/// Adapts the request's live cancellation signal for bounded Grafeo calls.
+///
+/// `GraphCancellation` has no error channel, so it treats cancellation,
+/// deadline expiry, and work-budget exhaustion as an interruption. Every
+/// caller must checkpoint the same [`ExecutionControl`] immediately before and
+/// after its graph operation to restore the original typed reason. This
+/// adapter preserves all three interruption paths during traversal without
+/// manufacturing a default control.
+pub(crate) fn execution_control_graph_cancellation(
+    control: &ExecutionControl,
+) -> Arc<dyn GraphCancellation> {
+    Arc::new(ExecutionControlGraphCancellation(control.clone()))
 }
 
 impl<'a> GlobalDbSessionTemporalStore<'a> {
@@ -117,7 +146,8 @@ impl<'a> GlobalDbSessionTemporalStore<'a> {
                     {
                         request = request.with_source_coverage(source_coverage);
                     }
-                    self.complete_session_refresh(request).await?;
+                    self.complete_session_refresh(request, ExecutionControl::default())
+                        .await?;
                     return Ok(());
                 }
                 SessionRefreshRestartStateV1::BeginProjection
@@ -227,8 +257,10 @@ impl SessionRefreshStore for GlobalDbSessionTemporalStore<'_> {
         &self,
         _permit: SessionRefreshCompletePermit,
         request: SessionRefreshCompletionRequestV1,
+        execution_control: ExecutionControl,
     ) -> impl Future<Output = SessionStoreResult<SessionRefreshReceiptV1>> + Send {
-        self.db.complete_session_refresh_result(request)
+        self.db
+            .complete_session_refresh_result(request, execution_control)
     }
 
     fn fail_session_refresh_supported(
@@ -271,5 +303,29 @@ mod tests {
             std::mem::size_of::<GlobalDbSessionTemporalStore<'static>>(),
             std::mem::size_of::<&'static RegisteredGlobalDb>()
         );
+    }
+
+    #[test]
+    fn graph_cancellation_observes_the_callers_execution_control() {
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        let cancellation = execution_control_graph_cancellation(&control);
+
+        assert!(!cancellation.is_cancelled());
+        control.cancel();
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn graph_cancellation_observes_deadlines_and_work_budgets() {
+        let expired = tracedecay_temporal_query::ports::ExecutionControl::new(Some(
+            std::time::Instant::now(),
+        ));
+        assert!(execution_control_graph_cancellation(&expired).is_cancelled());
+
+        let budgeted =
+            tracedecay_temporal_query::ports::ExecutionControl::default().with_work_limit(1);
+        let cancellation = execution_control_graph_cancellation(&budgeted);
+        assert!(!cancellation.is_cancelled());
+        assert!(cancellation.is_cancelled());
     }
 }
