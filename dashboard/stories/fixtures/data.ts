@@ -1349,10 +1349,10 @@ function automationRunsPayload(): Record<string, unknown> {
     {
       run_id: 'run-20260805-193042-memory-curator',
       task: 'memory_curator',
-      trigger: 'scheduled',
+      trigger: 'scheduler',
       backend: 'claude',
       model: 'claude-sonnet-5',
-      status: 'applied',
+      status: 'succeeded',
       reviewed_count: 6,
       accepted_count: 4,
       rejected_count: 2,
@@ -1365,7 +1365,7 @@ function automationRunsPayload(): Record<string, unknown> {
     {
       run_id: 'run-20260804-071133-skill-writing',
       task: 'skill_writing',
-      trigger: 'manual',
+      trigger: 'manual_cli',
       backend: 'codex',
       model: null,
       status: 'failed',

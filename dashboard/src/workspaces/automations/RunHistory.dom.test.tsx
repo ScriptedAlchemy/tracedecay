@@ -29,14 +29,14 @@ describe('RunHistory', () => {
   it('renders each run with its own status word and review tally', async () => {
     stubRuns({
       runs: runsBody([
-        run('run-1', { task: 'memory_curator', status: 'applied', accepted: 3, reviewed: 4 }),
+        run('run-1', { task: 'memory_curator', status: 'succeeded', accepted: 3, reviewed: 4 }),
         run('run-2', { task: 'skill_writing', status: 'failed', error: 'backend refused' }),
       ]),
     });
     renderRunHistory();
     await screen.findByText('memory_curator');
 
-    expect(screen.getByText('applied')).toBeTruthy();
+    expect(screen.getByText('succeeded')).toBeTruthy();
     expect(screen.getByText('3/4 accepted')).toBeTruthy();
     expect(screen.getByText('failed')).toBeTruthy();
     expect(screen.getByText('backend refused')).toBeTruthy();
@@ -47,7 +47,7 @@ describe('RunHistory', () => {
       runs: runsBody([
         run('run-1', {
           task: 'memory_curator',
-          status: 'applied',
+          status: 'succeeded',
           artifactKinds: ['traces'],
         }),
       ]),
@@ -87,7 +87,7 @@ describe('RunHistory', () => {
 
   it('marks a capped page as the newest slice rather than the whole ledger', async () => {
     const rows = Array.from({ length: 50 }, (_, index) =>
-      run(`run-${index}`, { task: 'memory_curator', status: 'applied' }),
+      run(`run-${index}`, { task: 'memory_curator', status: 'succeeded' }),
     );
     stubRuns({ runs: { runs: rows, count: 50, limit: 50, error: '' } });
     renderRunHistory();
@@ -115,7 +115,7 @@ function run(
   return {
     run_id: id,
     task: options.task,
-    trigger: 'manual',
+    trigger: 'manual_cli',
     backend: 'claude',
     model: null,
     status: options.status,

@@ -256,10 +256,10 @@ mod run_list_tests {
         let record: AutomationRunLedgerRecord = serde_json::from_value(json!({
             "schema_version": 1,
             "run_id": "run-1",
-            "trigger": "manual",
+            "trigger": "scheduler",
             "task": "memory_curator",
             "backend": "claude",
-            "status": "applied",
+            "status": "succeeded",
             "reviewed_count": 4,
             "accepted_count": 3,
             "rejected_count": 1,
@@ -279,7 +279,7 @@ mod run_list_tests {
         let row = run_history_row(&record);
         assert_eq!(row["run_id"], json!("run-1"));
         assert_eq!(row["task"], json!("memory_curator"));
-        assert_eq!(row["status"], json!("applied"));
+        assert_eq!(row["status"], json!("succeeded"));
         assert_eq!(row["accepted_count"], json!(3));
         assert_eq!(row["error"], json!("quota exhausted"));
         assert_eq!(row["artifact_kinds"], json!(["traces"]));
