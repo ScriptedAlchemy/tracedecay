@@ -143,6 +143,9 @@ const CREATE_CURSOR_ADVANCE_DELETE_TRIGGER: &str = "CREATE TRIGGER \
      source_cursor_advances BEGIN SELECT RAISE(ABORT, \
      'source cursor advances are immutable'); END";
 
+mod restore;
+pub use restore::replay_current_release_state_for_restore;
+
 fn db_error(source: impl std::error::Error + Send + Sync + 'static) -> TraceDecayError {
     TraceDecayError::database_operation(OPERATION, source)
 }

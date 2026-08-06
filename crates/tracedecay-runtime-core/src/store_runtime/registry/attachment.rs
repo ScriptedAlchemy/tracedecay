@@ -166,6 +166,31 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
         })
     }
 
+    fn snapshot_to_interruptible<'a>(
+        &'a self,
+        destination: PathBuf,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_rusqlite_runtime::OnlineBackupReceipt,
+                        StoreRuntimeRegistryFailure,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = (destination, probe, authority);
+        Box::pin(async {
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "snapshot database",
+                message: "physical runtime has no interruptible online-backup port".to_owned(),
+            })
+        })
+    }
+
     fn dispatch_submit<'a>(
         &'a self,
         request: RuntimeSubmitRequestV1,

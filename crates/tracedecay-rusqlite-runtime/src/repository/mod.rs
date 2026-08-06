@@ -37,6 +37,7 @@ mod external_source;
 mod fact;
 mod observation;
 mod project;
+mod remote;
 mod retrieval_anchor;
 mod scope_set;
 mod session;
@@ -107,6 +108,12 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::ObservationCursorAdvance(advance) => self
                 .project
                 .execute_observation_cursor_advance(savepoint, advance),
+            RepositoryWritePayloadV1::RemoteObservationReplay(write) => self
+                .project
+                .execute_remote_observation_replay(savepoint, write),
+            RepositoryWritePayloadV1::RemoteWriterFenceInstall(install) => self
+                .project
+                .execute_remote_writer_fence_install(savepoint, install),
             RepositoryWritePayloadV1::Diagnostics(snapshot) => {
                 self.project.execute_diagnostic_write(savepoint, snapshot)
             }
