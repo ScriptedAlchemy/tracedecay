@@ -27,13 +27,19 @@ const client = createClient({
 
 const snapshot = await client.operations.work_snapshot(
   { page_size: 25 },
-  { page: { size: 25 } },
+  {
+    page: { size: 25 },
+    deadlineMicros: 1_800_000_000_000_000,
+  },
 );
 ```
 
 Request and result types, decoders, and operation methods are generated from
-the Rust contracts that own the wire format. Malformed or unavailable
-contracts fail closed.
+the Rust contracts that own the wire format. Deadline metadata is retained on
+each operation descriptor and invocation deadlines are forwarded to daemon
+admission. `UNAVAILABLE_OPERATIONS` reports cataloged operations that still
+lack a canonical schema or SDK transport without creating callable methods.
+Malformed or unavailable contracts fail closed.
 
 ## Publishing
 

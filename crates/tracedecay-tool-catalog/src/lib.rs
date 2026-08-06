@@ -22,9 +22,9 @@ pub use binding::{
 };
 pub use executable::{
     ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableCodecV1, ExecutableUnavailableDispositionV1, ExecutionOwnerV1, RouteExposureV1,
-    SchemaBodyAuthorityV1, SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1,
-    SdkExecutableBindingV1, SdkTransportBindingV1,
+    ExecutableCodecV1, ExecutableSchemaAuthority, ExecutableUnavailableDispositionV1,
+    ExecutionOwnerV1, RouteExposureV1, SchemaBodyAuthorityV1, SdkExecutableBindingAvailabilityV1,
+    SdkExecutableBindingRegistryV1, SdkExecutableBindingV1, SdkTransportBindingV1,
 };
 pub use id::{
     BindingId, CapabilityId, CatalogDigest, CatalogDigestError, CodecBindingKey, ContributionId,

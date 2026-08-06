@@ -6,8 +6,8 @@ use crate::validation::CatalogValidationError;
 
 /// A reviewed reference to a typed request or result schema.
 ///
-/// The catalog never carries schema bodies. Identity and revision bind each
-/// capability to its reviewed request and result contracts.
+/// Manifests carry only schema identity. An owning contribution may separately
+/// attach generated schema bodies when an executable consumer needs them.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct SchemaRef {
     schema_id: SchemaId,

@@ -4,8 +4,10 @@ use std::thread;
 
 use serde_json::{Value, json};
 use tracedecay_sdk::client::{
-    CancellationStatus, Client, ClientError, ConnectionMode, StreamOptions, StreamResume,
+    CancellationStatus, Client, ClientError, ConnectionMode, OperationRequestOptions,
+    StreamOptions, StreamResume,
 };
+use tracedecay_sdk::operation::DeadlineBehavior;
 use tracedecay_sdk::operations::{TypedOperation, WorkCreate, WorkSnapshot};
 
 fn request(stream: &mut TcpStream) -> String {
@@ -149,8 +151,22 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
         "title": "SDK task"
     }))
     .unwrap();
-    let local_result = local.execute::<WorkCreate>(&request).unwrap();
-    let remote_result = remote.execute::<WorkCreate>(&request).unwrap();
+    let local_result = local
+        .execute_with_options::<WorkCreate>(
+            &request,
+            OperationRequestOptions {
+                deadline_micros: Some(1_800_000_000_000_001),
+            },
+        )
+        .unwrap();
+    let remote_result = remote
+        .execute_with_options::<WorkCreate>(
+            &request,
+            OperationRequestOptions {
+                deadline_micros: Some(1_800_000_000_000_002),
+            },
+        )
+        .unwrap();
 
     assert_eq!(
         serde_json::to_value(local_result.result).unwrap()["task_id"],
@@ -163,9 +179,11 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
     let requests = server.join().unwrap();
     assert!(requests[0].contains("authorization: Bearer sdk-token"));
     assert!(requests[0].contains(&format!("origin: {base_url}")));
+    assert!(requests[0].contains("x-tracedecay-deadline-micros: 1800000000000001"));
     assert!(requests[0].contains("/application/work/create"));
     assert!(!requests[0].contains("/application/work/create?"));
     assert!(requests[1].contains("origin: https://client.example"));
+    assert!(requests[1].contains("x-tracedecay-deadline-micros: 1800000000000002"));
 }
 
 #[test]
@@ -229,6 +247,40 @@ fn typed_work_descriptors_retain_canonical_contract_identity() {
     assert_eq!(WorkCreate::OPERATION_ID, "operation.work.create");
     assert_eq!(WorkCreate::ROUTE, "/application/work/create");
     assert_eq!(WorkCreate::BINDING_ID, "binding.http.work.create");
+    assert_eq!(WorkCreate::MAXIMUM_DEADLINE_MILLIS, 30_000);
+    assert_eq!(
+        WorkCreate::DEADLINE_BEHAVIOR,
+        DeadlineBehavior::ReturnEffectReceipt
+    );
+}
+
+#[test]
+fn invalid_typed_deadline_is_rejected_before_transport() {
+    let client = Client::builder(ConnectionMode::local(
+        "http://127.0.0.1:1",
+        "project.sdk",
+        "sdk-token",
+    ))
+    .build()
+    .unwrap();
+    let request = serde_json::from_value(json!({
+        "command_id": "command.sdk",
+        "occurred_at": 1,
+        "task_id": "task.sdk",
+        "title": "SDK task"
+    }))
+    .unwrap();
+
+    let error = client
+        .execute_with_options::<WorkCreate>(
+            &request,
+            OperationRequestOptions {
+                deadline_micros: Some(0),
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, ClientError::InvalidRequest(_)));
 }
 
 #[test]

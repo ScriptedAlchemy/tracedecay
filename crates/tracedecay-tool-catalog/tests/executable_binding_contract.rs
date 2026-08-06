@@ -2,8 +2,9 @@ mod common;
 
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    BindingId, CodecBindingKey, ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1,
-    ExecutableBindingV1, ExecutableUnavailableDispositionV1, ExecutionOwnerV1, OperationId,
+    BindingId, CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
+    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    ExecutableSchemaAuthority, ExecutableUnavailableDispositionV1, ExecutionOwnerV1, OperationId,
     RouteExposureV1, SchemaBodyAuthorityV1, SdkExecutableBindingV1, SdkTransportBindingV1,
     ServiceId, SurfaceOperationName,
 };
@@ -76,6 +77,89 @@ fn schema_bodies_are_derived_from_rust_type_authority() {
         .unwrap()
         .digest()
     );
+}
+
+#[test]
+fn contribution_retains_schema_bodies_beside_the_owning_manifest() {
+    let manifest = read_manifest(
+        capability_id("capability.source.read"),
+        use_case_id("use-case.source.read"),
+        schema("schema.source.read.request"),
+        schema("schema.source.read.result"),
+        Vec::new(),
+        vec![profile_id("profile.default")],
+    );
+    let authority = ExecutableSchemaAuthority::for_types::<ReadRequest, ReadResult>(&manifest)
+        .expect("schema authority");
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
+        contribution_id: ContributionId::new("contribution.source").unwrap(),
+        depends_on: Vec::new(),
+        capabilities: vec![manifest.clone()],
+        retrieval_primitives: Vec::new(),
+        bindings: Vec::new(),
+    })
+    .unwrap()
+    .with_executable_schemas(vec![authority])
+    .expect("schema-backed contribution");
+
+    let retained = contribution
+        .executable_schema(manifest.capability_id())
+        .expect("retained schema authority");
+    assert_eq!(
+        retained.request_schema().schema_ref(),
+        manifest.request_schema()
+    );
+    assert_eq!(
+        retained.result_schema().schema_ref(),
+        manifest.result_schema()
+    );
+    assert_eq!(
+        retained.request_schema().body()["properties"]["path"]["type"],
+        "string"
+    );
+}
+
+#[test]
+fn contribution_rejects_schema_bodies_without_their_owning_manifest() {
+    let owned_manifest = read_manifest(
+        capability_id("capability.source.read"),
+        use_case_id("use-case.source.read"),
+        schema("schema.source.read.request"),
+        schema("schema.source.read.result"),
+        Vec::new(),
+        vec![profile_id("profile.default")],
+    );
+    let foreign_manifest = read_manifest(
+        capability_id("capability.source.foreign"),
+        use_case_id("use-case.source.foreign"),
+        schema("schema.source.foreign.request"),
+        schema("schema.source.foreign.result"),
+        Vec::new(),
+        vec![profile_id("profile.default")],
+    );
+    let foreign_authority =
+        ExecutableSchemaAuthority::for_types::<ReadRequest, ReadResult>(&foreign_manifest)
+            .expect("schema authority");
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
+        contribution_id: ContributionId::new("contribution.source").unwrap(),
+        depends_on: Vec::new(),
+        capabilities: vec![owned_manifest],
+        retrieval_primitives: Vec::new(),
+        bindings: Vec::new(),
+    })
+    .unwrap();
+
+    let error = contribution
+        .with_executable_schemas(vec![foreign_authority])
+        .expect_err("foreign schema authority must be rejected");
+
+    assert!(matches!(
+        error,
+        tracedecay_tool_catalog::CatalogValidationError::InvalidCapability {
+            reason: "executable schema authority has no owning manifest",
+            ..
+        }
+    ));
 }
 
 #[test]
