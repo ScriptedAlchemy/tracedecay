@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -24,6 +24,10 @@ use tracedecay_application::{DirectorySyncPolicy, atomic_write};
 // became uncollectable.
 use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
 use tracedecay_domain::{CodeGenerationId, UtcMicros, canonical_sha256};
+
+mod generation_scan;
+
+use generation_scan::read_generation_metadata;
 
 pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 3;
 
@@ -86,6 +90,8 @@ pub enum CodeGenerationRetentionErrorV1 {
     Storage(String),
     #[error("code-generation retention refused unsafe state: {0}")]
     UnsafeState(String),
+    #[error("code-generation retention cancelled")]
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,6 +260,42 @@ pub fn plan_code_generation_retention_with_verification(
     rollback_floor: usize,
     verification: GenerationDigestVerificationV1,
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
+    plan_code_generation_retention_with_verification_cancellable(
+        store_root,
+        vector_readable_sources,
+        rollback_floor,
+        verification,
+        &|| false,
+    )
+}
+
+pub fn plan_next_code_generation_retention_cancellable(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    rollback_floor: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
+    let mut plan = plan_code_generation_retention_with_verification_cancellable(
+        store_root,
+        vector_readable_sources,
+        rollback_floor,
+        GenerationDigestVerificationV1::Full,
+        is_cancelled,
+    )?;
+    plan.collectable_generations.truncate(1);
+    Ok(plan)
+}
+
+fn plan_code_generation_retention_with_verification_cancellable(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    rollback_floor: usize,
+    verification: GenerationDigestVerificationV1,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
+    if is_cancelled() {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
     if transaction_path(store_root).exists() {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "code-generation retention recovery is pending".to_owned(),
@@ -269,13 +311,16 @@ pub fn plan_code_generation_retention_with_verification(
     let mut active_state_digest = None;
 
     for entry in entries {
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
         let entry = entry.map_err(storage)?;
         let path = entry.path();
         let Some(file_name) = generation_file_name(&path) else {
             continue;
         };
         let (format_revision, manifest, raw_state_digest, size_bytes) =
-            read_generation_metadata(&path, verification)?;
+            read_generation_metadata(&path, verification, is_cancelled)?;
         let expected_file = format!(
             "generation-{}.json",
             raw_state_digest
@@ -378,151 +423,6 @@ pub fn plan_code_generation_retention_with_verification(
     })
 }
 
-fn read_generation_metadata(
-    path: &Path,
-    verification: GenerationDigestVerificationV1,
-) -> Result<(u32, SealedGenerationManifestMetadataV1, String, u64), CodeGenerationRetentionErrorV1>
-{
-    let mut file = File::open(path).map_err(storage)?;
-    let size_bytes = file.metadata().map_err(storage)?.len();
-    let mut hasher = Sha256::new();
-    let mut prefix = Vec::with_capacity(MAX_GENERATION_METADATA_PREFIX_BYTES);
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let bytes_read = file.read(&mut buffer).map_err(storage)?;
-        if bytes_read == 0 {
-            break;
-        }
-        if verification == GenerationDigestVerificationV1::Full {
-            hasher.update(&buffer[..bytes_read]);
-        }
-        let remaining = MAX_GENERATION_METADATA_PREFIX_BYTES.saturating_sub(prefix.len());
-        prefix.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
-        // A metadata-only census never needs a byte past the manifest prefix.
-        // This is the entire difference between a cheap Doctor read and
-        // re-hashing every gigabyte the store holds.
-        if verification == GenerationDigestVerificationV1::MetadataOnly
-            && prefix.len() >= MAX_GENERATION_METADATA_PREFIX_BYTES
-        {
-            break;
-        }
-    }
-    let format_revision = parse_json_u32_field(&prefix, b"format_revision").ok_or_else(|| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "generation file '{}' has no readable format revision in its metadata prefix",
-            path.display()
-        ))
-    })?;
-    let manifest_bytes = extract_json_object_field(&prefix, b"manifest").ok_or_else(|| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "generation file '{}' has no complete manifest within its bounded metadata prefix",
-            path.display()
-        ))
-    })?;
-    let manifest = serde_json::from_slice(manifest_bytes).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "generation file '{}' has unreadable manifest metadata: {error}",
-            path.display()
-        ))
-    })?;
-    let state_digest = match verification {
-        GenerationDigestVerificationV1::Full => {
-            format!("sha256:{}", hex::encode(hasher.finalize()))
-        }
-        GenerationDigestVerificationV1::MetadataOnly => named_state_digest(path)?,
-    };
-    Ok((format_revision, manifest, state_digest, size_bytes))
-}
-
-/// The content digest a sealed generation file *claims*, read from its name.
-///
-/// Only valid under [`GenerationDigestVerificationV1::MetadataOnly`]: it makes
-/// the file-name/digest cross-check a tautology for that file, so it proves
-/// nothing about content. The active-pointer digest comparison still holds,
-/// because the pointer's digest is compared against the named file.
-fn named_state_digest(path: &Path) -> Result<String, CodeGenerationRetentionErrorV1> {
-    let named = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix("generation-"))
-        .and_then(|name| name.strip_suffix(".json"))
-        .filter(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        })
-        .ok_or_else(|| {
-            CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "generation file '{}' does not name a SHA-256 content digest",
-                path.display()
-            ))
-        })?;
-    Ok(format!("sha256:{named}"))
-}
-
-fn parse_json_u32_field(prefix: &[u8], field: &[u8]) -> Option<u32> {
-    let start = json_field_value_start(prefix, field)?;
-    let end = prefix[start..]
-        .iter()
-        .position(|byte| !byte.is_ascii_digit())
-        .map_or(prefix.len(), |offset| start + offset);
-    std::str::from_utf8(&prefix[start..end]).ok()?.parse().ok()
-}
-
-fn extract_json_object_field<'a>(prefix: &'a [u8], field: &[u8]) -> Option<&'a [u8]> {
-    let start = json_field_value_start(prefix, field)?;
-    if prefix.get(start) != Some(&b'{') {
-        return None;
-    }
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (offset, byte) in prefix[start..].iter().copied().enumerate() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match byte {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(&prefix[start..=start + offset]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn json_field_value_start(prefix: &[u8], field: &[u8]) -> Option<usize> {
-    let quoted = [b"\"".as_slice(), field, b"\"".as_slice()].concat();
-    let key_start = prefix
-        .windows(quoted.len())
-        .position(|window| window == quoted)?;
-    let mut cursor = key_start + quoted.len();
-    while prefix.get(cursor).is_some_and(u8::is_ascii_whitespace) {
-        cursor += 1;
-    }
-    if prefix.get(cursor) != Some(&b':') {
-        return None;
-    }
-    cursor += 1;
-    while prefix.get(cursor).is_some_and(u8::is_ascii_whitespace) {
-        cursor += 1;
-    }
-    Some(cursor)
-}
-
 pub fn execute_code_generation_retention(
     store_root: &Path,
     plan: CodeGenerationRetentionPlanV1,
@@ -545,11 +445,12 @@ pub fn execute_code_generation_retention(
     }
 
     let vector_readable_sources = plan.vector_readable_sources.clone();
-    let rollback_floor = plan.rollback_floor;
     let _store_lock = acquire_code_generation_store_lock(store_root)?;
-    recover_pending_transaction_unlocked(store_root, &vector_readable_sources)?;
-    let plan =
-        plan_code_generation_retention(store_root, &vector_readable_sources, rollback_floor)?;
+    if transaction_path(store_root).exists() {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "code-generation retention recovery is pending".to_owned(),
+        ));
+    }
     if plan.collectable_generations.is_empty() {
         return Ok(CodeGenerationRetentionReportV1 {
             plan,
@@ -628,7 +529,17 @@ pub fn run_code_generation_retention(
     if mode == CodeGenerationRetentionModeV1::Apply {
         recover_code_generation_retention(store_root, vector_readable_sources)?;
     }
-    let plan = plan_code_generation_retention(store_root, vector_readable_sources, rollback_floor)?;
+    let plan = match mode {
+        CodeGenerationRetentionModeV1::Apply => plan_next_code_generation_retention_cancellable(
+            store_root,
+            vector_readable_sources,
+            rollback_floor,
+            &|| false,
+        )?,
+        CodeGenerationRetentionModeV1::DryRun => {
+            plan_code_generation_retention(store_root, vector_readable_sources, rollback_floor)?
+        }
+    };
     execute_code_generation_retention(store_root, plan, mode, completed_at)
 }
 
@@ -2082,6 +1993,104 @@ mod tests {
         .expect("write active pointer");
 
         (store, generations)
+    }
+
+    fn pad_generation_file(
+        store: &tempfile::TempDir,
+        generation: &mut FixtureGeneration,
+        padding_bytes: usize,
+        active: bool,
+    ) {
+        let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+        let old_path = generations_root.join(&generation.file);
+        let mut bytes = std::fs::read(&old_path).expect("read generation fixture");
+        bytes.extend(std::iter::repeat_n(b' ', padding_bytes));
+        let state_digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        let file = format!(
+            "generation-{}.json",
+            state_digest.strip_prefix("sha256:").expect("digest prefix")
+        );
+        std::fs::write(generations_root.join(&file), bytes).expect("write padded generation");
+        std::fs::remove_file(old_path).expect("remove unpadded generation");
+        generation.file = file.clone();
+        generation.state_digest = state_digest.clone();
+        if active {
+            let pointer_path = store.path().join(ACTIVE_POINTER_FILE);
+            let mut pointer: DurablePublicationPointerV1 =
+                serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
+                    .expect("decode active pointer");
+            pointer.generation_file = file;
+            pointer.state_digest = state_digest;
+            std::fs::write(
+                pointer_path,
+                serde_json::to_vec(&pointer).expect("serialize active pointer"),
+            )
+            .expect("write active pointer");
+        }
+    }
+
+    #[test]
+    fn next_retention_plan_limits_collection_to_one_generation() {
+        let (store, _generations) = fixture_store(8);
+
+        let plan = plan_next_code_generation_retention_cancellable(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            &|| false,
+        )
+        .expect("plan one retention unit");
+
+        assert_eq!(plan.collectable_generations.len(), 1);
+        assert_eq!(plan.superseded_generations.len(), 7);
+    }
+
+    #[test]
+    fn cancellable_plan_stops_during_generation_verification_without_a_journal() {
+        let (store, mut generations) = fixture_store(1);
+        pad_generation_file(&store, &mut generations[0], 3 * 1024 * 1024, true);
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+
+        let error = plan_next_code_generation_retention_cancellable(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            &|| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2,
+        )
+        .expect_err("cancellation must interrupt full-file verification");
+
+        assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
+        assert!(checks.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+        assert!(!transaction_path(store.path()).exists());
+        assert!(!store.path().join(RECEIPTS_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn executing_a_prevalidated_unit_collects_only_that_generation() {
+        let (store, _generations) = fixture_store(8);
+        let plan = plan_next_code_generation_retention_cancellable(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            &|| false,
+        )
+        .expect("plan one retention unit");
+
+        let report = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(99),
+        )
+        .expect("execute one retention unit");
+
+        assert_eq!(report.deleted_generations.len(), 1);
+        assert_eq!(
+            std::fs::read_dir(store.path().join(GENERATIONS_DIRECTORY))
+                .expect("generation directory")
+                .count(),
+            7
+        );
     }
 
     #[test]
