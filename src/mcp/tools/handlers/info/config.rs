@@ -16,7 +16,7 @@ pub(crate) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
 
     if path.is_none() && glob_pat.is_none() {
         return Err(TraceDecayError::Config {
-            message: "tracedecay_config requires either 'path' or 'glob'".to_string(),
+            message: "missing required parameter: 'path' or 'glob'".to_string(),
         });
     }
     if path.is_some() && glob_pat.is_some() {

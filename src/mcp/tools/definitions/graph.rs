@@ -235,7 +235,7 @@ pub(super) fn def_impls() -> ToolDefinition {
 }
 
 pub(super) fn def_signature() -> ToolDefinition {
-    def_object(
+    def(
         "tracedecay_signature",
         "Signature",
         "Return the signature-level metadata for symbols matching a qualified \
@@ -245,8 +245,15 @@ pub(super) fn def_signature() -> ToolDefinition {
          surface of a function, method, or type. Multiple rows can be \
          returned (overloads, separate impls).",
         json!({
-            "qualified_name": string_property("The exact qualified name to look up."),
-            "node_id": string_property("Optional: look up a single node by its ID instead of qualified_name.")
+            "type": "object",
+            "properties": {
+                "qualified_name": string_property("The exact qualified name to look up."),
+                "node_id": string_property("Optional: look up a single node by its ID instead of qualified_name.")
+            },
+            "anyOf": [
+                { "required": ["qualified_name"] },
+                { "required": ["node_id"] }
+            ]
         }),
     )
 }
@@ -406,7 +413,11 @@ pub(super) fn def_derives() -> ToolDefinition {
                     "type": "string",
                     "description": "Optional: look up the type by node ID instead."
                 }
-            }
+            },
+            "anyOf": [
+                { "required": ["qualified_name"] },
+                { "required": ["node_id"] }
+            ]
         }),
     )
 }
@@ -536,7 +547,12 @@ pub(super) fn def_signature_search() -> ToolDefinition {
                     "type": "number",
                     "description": "Maximum matches to return (default: 50, max: 500)."
                 }
-            }
+            },
+            "anyOf": [
+                { "required": ["returns"] },
+                { "required": ["params"] },
+                { "required": ["async"] }
+            ]
         }),
     )
 }
@@ -569,7 +585,11 @@ pub(super) fn def_config() -> ToolDefinition {
                     "description": "Dot-separated key path (e.g. 'package.version', 'dependencies.tokio.version'). Required."
                 }
             },
-            "required": ["key"]
+            "required": ["key"],
+            "anyOf": [
+                { "required": ["glob"] },
+                { "required": ["path"] }
+            ]
         }),
     )
 }
@@ -598,7 +618,11 @@ pub(super) fn def_implementations() -> ToolDefinition {
                     "type": "number",
                     "description": "Maximum number of implementations to return (default: 20, max: 200)"
                 }
-            }
+            },
+            "anyOf": [
+                { "required": ["trait"] },
+                { "required": ["method"] }
+            ]
         }),
     )
 }

@@ -394,7 +394,14 @@ pub(super) fn def_workflows() -> ToolDefinition {
                     "maximum": 100,
                     "description": "Maximum runs or agents to return (default: 20)."
                 }
-            }
+            },
+            "anyOf": [
+                { "required": ["session_id"] },
+                { "required": ["run_id"] },
+                { "required": ["branch"] },
+                { "required": ["worktree"] },
+                { "required": ["commit"] }
+            ]
         }),
     )
 }

@@ -87,9 +87,11 @@ pub(super) async fn handle_application_surface(
                 &error,
             )
             .await;
-            return Err(TraceDecayError::Config {
-                message: error.to_string(),
-            });
+            return Err(TraceDecayError::project_route(
+                "application_surface_invalid_request",
+                false,
+                error.to_string(),
+            ));
         }
     };
     let controls =
@@ -120,11 +122,31 @@ pub(super) async fn handle_application_surface(
             .await
         }
     }
-    .map_err(|error| TraceDecayError::Config {
-        message: error.to_string(),
-    })?;
+    .map_err(application_surface_dispatch_error)?;
 
     render_result(cg, result)
+}
+
+/// Map surface-resolution failures to typed reason codes so MCP clients see
+/// truthful unavailable/denied states instead of an untyped internal error.
+fn application_surface_dispatch_error(
+    error: crate::application_surface::ApplicationSurfaceAdapterError,
+) -> TraceDecayError {
+    use crate::application_surface::ApplicationSurfaceAdapterError as AdapterError;
+    let (reason_code, retryable) = match &error {
+        AdapterError::DaemonUnavailable => ("application_surface_unavailable", true),
+        AdapterError::UnknownOrNotAuthorized => {
+            ("application_surface_not_found_or_not_authorized", false)
+        }
+        AdapterError::InvalidRequestHandle | AdapterError::InvalidSurfaceRequest => {
+            ("application_surface_invalid_request", false)
+        }
+        AdapterError::Catalog(_)
+        | AdapterError::Contract(_)
+        | AdapterError::Identifier(_)
+        | AdapterError::CatalogValidation(_) => ("application_surface_catalog_invalid", false),
+    };
+    TraceDecayError::project_route(reason_code, retryable, error.to_string())
 }
 
 fn render_result(
@@ -158,7 +180,21 @@ fn render_result(
         &value,
         || markdown.unwrap_or_default(),
     );
-    let rendered = super::text_tool_result(&text);
+    let mut rendered = super::text_tool_result(&text);
+    if let Err(problem) = &result.result {
+        // Keep the typed problem machine-readable in every presentation
+        // format: markdown rendering alone would strand the kind/code in
+        // prose that clients cannot classify.
+        if let Some(object) = rendered.value.as_object_mut() {
+            object.insert(
+                "problem".to_string(),
+                serde_json::json!({
+                    "kind": problem.problem.kind,
+                    "code": problem.problem.code,
+                }),
+            );
+        }
+    }
     Ok(match failure_message {
         Some(failure_message) => rendered
             .with_semantic_error(true)

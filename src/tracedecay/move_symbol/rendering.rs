@@ -84,7 +84,11 @@ pub(super) fn insert_imports(dest_source: &str, imports: &[String]) -> String {
 
 /// Drops imports already present verbatim in the destination and de-duplicates
 /// within the batch, preserving order.
-pub(super) fn dedup_preserve(imports: &[String], dest_original: &str) -> Vec<String> {
+pub(super) fn dedup_preserve(
+    imports: &[String],
+    dest_original: &str,
+    dest_module: Option<&str>,
+) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     for imp in imports {
@@ -92,9 +96,50 @@ pub(super) fn dedup_preserve(imports: &[String], dest_original: &str) -> Vec<Str
         if dest_original.lines().any(|l| l.trim() == trimmed) {
             continue;
         }
+        // An import of an item the destination module itself declares
+        // (`use crate::SweepType;` inserted into `src/lib.rs`) would be a
+        // self-import: the name is already in scope at the destination.
+        if let Some(dest_module) = dest_module
+            && let Some(rest) = trimmed
+                .strip_prefix("use ")
+                .and_then(|rest| rest.strip_suffix(';'))
+            && rest
+                .strip_prefix(dest_module)
+                .and_then(|tail| tail.strip_prefix("::"))
+                .is_some_and(|leaf| !leaf.contains("::"))
+        {
+            continue;
+        }
         if seen.insert(trimmed.to_string()) {
             out.push(imp.clone());
         }
+    }
+    out
+}
+
+/// Removes each orphaned single-leaf `use` line (only the moved symbol needed
+/// it) from the residual source so the move does not leave dead imports.
+pub(super) fn strip_orphaned_imports(source_modified: &str, orphaned: &[String]) -> String {
+    if orphaned.is_empty() {
+        return source_modified.to_string();
+    }
+    let ends_with_newline = source_modified.ends_with('\n');
+    let mut remaining: Vec<&str> = orphaned.iter().map(String::as_str).collect();
+    let lines: Vec<&str> = source_modified
+        .lines()
+        .filter(|line| {
+            match remaining.iter().position(|import| line.trim() == *import) {
+                Some(index) => {
+                    remaining.swap_remove(index);
+                    false
+                }
+                None => true,
+            }
+        })
+        .collect();
+    let mut out = lines.join("\n");
+    if ends_with_newline && !out.is_empty() {
+        out.push('\n');
     }
     out
 }
@@ -212,7 +257,30 @@ mod tests {
                 "use c::D;".to_string(),
             ],
             "use c::D;\n",
+            None,
         );
         assert_eq!(out, vec!["use a::B;".to_string()]);
+    }
+
+    #[test]
+    fn strip_orphaned_imports_removes_only_the_orphaned_use_lines() {
+        let out = super::strip_orphaned_imports(
+            "use crate::SweepType;\nuse std::fmt::Debug;\npub fn keep() {}\n",
+            &["use crate::SweepType;".to_string()],
+        );
+        assert_eq!(out, "use std::fmt::Debug;\npub fn keep() {}\n");
+    }
+
+    #[test]
+    fn dedup_preserve_skips_destination_self_imports() {
+        let out = dedup_preserve(
+            &[
+                "use crate::SweepType;".to_string(),
+                "use crate::nested::Other;".to_string(),
+            ],
+            "pub struct SweepType { pub value: i32 }\n",
+            Some("crate"),
+        );
+        assert_eq!(out, vec!["use crate::nested::Other;".to_string()]);
     }
 }

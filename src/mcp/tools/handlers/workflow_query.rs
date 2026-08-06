@@ -54,8 +54,8 @@ fn parse_mode(args: &Value) -> Result<WorkflowMode> {
     .count();
     if selectors == 0 {
         return Err(argument_error(
-            "provide one of: run_id (show/drill), session_id (list runs for a thread), \
-             or branch/worktree/commit (list runs on a git ref)",
+            "missing required parameter: one of run_id (show/drill), session_id (list runs \
+             for a thread), or branch/worktree/commit (list runs on a git ref)",
         ));
     }
     if selectors > 1 {
