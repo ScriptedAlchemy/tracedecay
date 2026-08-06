@@ -339,7 +339,7 @@ fn current_frontier(
             reason: UnavailableReasonV1::DeadlineExceeded,
             ..
         } => Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed),
-        RuntimeReadCoverageV1::Latest { observed: None }
+        RuntimeReadCoverageV1::Latest { .. }
         | RuntimeReadCoverageV1::Complete { .. }
         | RuntimeReadCoverageV1::Partial { .. }
         | RuntimeReadCoverageV1::Stale { .. }

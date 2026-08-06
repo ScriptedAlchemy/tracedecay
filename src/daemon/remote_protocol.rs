@@ -14,6 +14,11 @@ use thiserror::Error;
 use tracedecay_application::remote::auth::{
     OpaqueRemoteCredential, RemoteEnrollmentProtocolAdapterV1,
 };
+use tracedecay_application::remote::capture::RemoteCaptureReceiptV1;
+use tracedecay_application::remote::capture_protocol::{
+    RemoteCaptureRequestV1, RemoteOfflineCaptureProtocolAdapterV1,
+    RemoteOfflineCaptureProtocolServiceV1,
+};
 use tracedecay_application::remote::credential_admission::{
     RemoteCredentialAdmissionServiceV1, RemoteCredentialAuthorityRecordV1, RemoteCredentialClassV1,
     RemoteCredentialLookupErrorV1, RemoteCredentialLookupPortV1, RemoteSessionBoundProtocolBodyV1,
@@ -21,8 +26,9 @@ use tracedecay_application::remote::credential_admission::{
 use tracedecay_application::remote::protocol::{
     EnrollmentRequestV1, REMOTE_PROTOCOL_VERSION_V1, RemoteEnrollmentProtocolPortV1,
     RemoteProtocolExecutionControlV1, RemoteProtocolFailureV1, RemoteProtocolPortV1,
-    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_enrollment_result_contract_v1,
-    remote_protocol_problem, remote_replay_result_contract_v1,
+    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_capture_result_contract_v1,
+    remote_enrollment_result_contract_v1, remote_protocol_problem,
+    remote_replay_result_contract_v1,
 };
 use tracedecay_application::remote::protocol_owner::RemoteProtocolOwnerV1;
 use tracedecay_application::remote::query::{
@@ -44,8 +50,9 @@ use tracedecay_domain::{
     RemoteAuthorityUnavailableReasonV1, RemoteCredentialFingerprintV1, UserProfileId, UtcMicros,
 };
 use tracedecay_rusqlite_runtime::remote::{
-    RemoteCredentialInventoryErrorV1, RemoteCredentialRegistrationV1,
-    RemoteRecoverySqliteAuthorityV1, RemoteSqliteStorageV1,
+    CredentialDerivedSpoolKeyringV1, RemoteCredentialInventoryErrorV1,
+    RemoteCredentialRegistrationV1, RemoteRecoverySqliteAuthorityV1, RemoteSpoolKeyringV1,
+    RemoteSqliteStorageV1,
 };
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::SchemaId;
@@ -471,6 +478,66 @@ impl RemoteEnrollmentProtocolPortV1 for DaemonRemoteEnrollmentProtocolPortV1 {
     }
 }
 
+/// Request-scoped spool keyring derived from the presented enrollment
+/// credential. Spool frames stay encrypted at rest; the key exists only while
+/// the authenticated request executes.
+fn presented_spool_keyring(
+    credential: &OpaqueRemoteCredential,
+    enrollment_revision: u64,
+) -> Option<Arc<dyn RemoteSpoolKeyringV1>> {
+    let bytes = credential.derive_spool_key_bytes().ok()?;
+    let keyring =
+        CredentialDerivedSpoolKeyringV1::from_secret_bytes(enrollment_revision, bytes).ok()?;
+    Some(Arc::new(keyring))
+}
+
+struct DaemonRemoteCaptureProtocolPortV1 {
+    credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
+}
+
+impl RemoteProtocolPortV1<RemoteCaptureRequestV1> for DaemonRemoteCaptureProtocolPortV1 {
+    type Output = RemoteCaptureReceiptV1;
+
+    fn execute(
+        &self,
+        request: RemoteProtocolRequestV1<RemoteCaptureRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<Self::Output> {
+        let request_id = request.request_id.clone();
+        let observed_at = request.sent_at;
+        let registered = match self
+            .credentials
+            .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
+        {
+            Ok(registered) => registered,
+            Err(_) => {
+                return unavailable_response(
+                    request_id,
+                    observed_at,
+                    remote_capture_result_contract_v1(),
+                );
+            }
+        };
+        let Some(keyring) = presented_spool_keyring(&credential, request.enrollment_revision)
+        else {
+            return unavailable_response(
+                request_id,
+                observed_at,
+                remote_capture_result_contract_v1(),
+            );
+        };
+        let storage = registered.storage.with_keyring(keyring);
+        let shared = Arc::new(storage.clone());
+        RemoteOfflineCaptureProtocolAdapterV1::new(RemoteOfflineCaptureProtocolServiceV1::new(
+            shared.clone(),
+            shared,
+            storage,
+            tracedecay_application::clock::now_micros,
+        ))
+        .execute(request, credential)
+    }
+}
+
 struct DaemonRemoteReplayProtocolPortV1 {
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
     transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
@@ -499,7 +566,15 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for DaemonRemoteReplayProtocolP
                 );
             }
         };
-        let storage = Arc::new(registered.storage);
+        let Some(keyring) = presented_spool_keyring(&credential, request.enrollment_revision)
+        else {
+            return unavailable_response(
+                request_id,
+                observed_at,
+                remote_replay_result_contract_v1(),
+            );
+        };
+        let storage = Arc::new(registered.storage.with_keyring(keyring));
         RemoteReplayProtocolAdapterV1::new(RemoteReplayServiceV1::new(
             storage.clone(),
             storage.clone(),
@@ -695,6 +770,9 @@ pub(crate) fn build_daemon_remote_protocol_router(
     });
     let owner = RemoteProtocolOwnerV1::new(
         Arc::new(DaemonRemoteEnrollmentProtocolPortV1 {
+            credentials: Arc::clone(&credentials),
+        }),
+        Arc::new(DaemonRemoteCaptureProtocolPortV1 {
             credentials: Arc::clone(&credentials),
         }),
         Arc::new(DaemonRemoteReplayProtocolPortV1 {

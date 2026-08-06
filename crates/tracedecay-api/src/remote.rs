@@ -21,6 +21,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::remote::auth::OpaqueRemoteCredential;
+use tracedecay_application::remote::capture::RemoteCaptureReceiptV1;
+use tracedecay_application::remote::capture_protocol::RemoteCaptureRequestV1;
 use tracedecay_application::remote::credential_admission::{
     RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionPortV1, RemoteSessionBoundProtocolBodyV1,
 };
@@ -232,6 +234,7 @@ pub fn remote_protocol_router<Port>(
 ) -> Router
 where
     Port: RemoteEnrollmentProtocolPortV1
+        + RemoteProtocolPortV1<RemoteCaptureRequestV1, Output = RemoteCaptureReceiptV1>
         + RemoteProtocolPortV1<RemoteReplayRequestV1, Output = RemoteReplayOutcomeV1>
         + RemoteProtocolPortV1<RemoteQueryRequestV1, Output = RemoteQueryResultV1>
         + RemoteProtocolPortV1<BackupRequestV1, Output = BackupOperationStateV1>
@@ -248,6 +251,10 @@ where
     };
     Router::new()
         .route("/enrollment", post(enrollment_route::<Port>))
+        .route(
+            "/capture",
+            post(protocol_route::<Port, RemoteCaptureRequestV1>),
+        )
         .route(
             "/replay",
             post(protocol_route::<Port, RemoteReplayRequestV1>),

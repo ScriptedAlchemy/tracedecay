@@ -13,6 +13,8 @@ use tower::ServiceExt;
 use tracedecay_application::remote::auth::{
     RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentCommitReceiptV1,
 };
+use tracedecay_application::remote::capture::RemoteCaptureReceiptV1;
+use tracedecay_application::remote::capture_protocol::RemoteCaptureRequestV1;
 use tracedecay_application::remote::composition::ExpectedRemoteShardV1;
 use tracedecay_application::remote::credential_admission::{
     RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionErrorV1,
@@ -138,6 +140,7 @@ macro_rules! unreachable_protocol_port {
     };
 }
 
+unreachable_protocol_port!(RemoteCaptureRequestV1, RemoteCaptureReceiptV1);
 unreachable_protocol_port!(RemoteReplayRequestV1, RemoteReplayOutcomeV1);
 unreachable_protocol_port!(RemoteQueryRequestV1, RemoteQueryResultV1);
 unreachable_protocol_port!(BackupRequestV1, BackupOperationStateV1);
