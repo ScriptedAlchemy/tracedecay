@@ -267,8 +267,7 @@ impl DashboardTestRuntimeV1 {
         }
         let mut store_ids = Vec::with_capacity(messages.len());
         for message in messages {
-            let raw = database
-                .lcm_load_raw_message(&message.provider, &message.message_id)
+            let raw = load_registered_raw_message(database, &message.provider, &message.message_id)
                 .await
                 .ok_or_else(|| TraceDecayError::Database {
                     operation: "read dashboard test transcript store id".to_owned(),
@@ -326,9 +325,7 @@ impl DashboardTestRuntimeV1 {
         provider: &str,
         message_id: &str,
     ) -> Option<tracedecay::sessions::lcm::LcmRawMessage> {
-        self.primary_session_database()
-            .lcm_load_raw_message(provider, message_id)
-            .await
+        load_registered_raw_message(self.primary_session_database(), provider, message_id).await
     }
 
     pub(crate) async fn lcm_ingest_raw_message_for_test(
@@ -435,4 +432,18 @@ impl DashboardTestRuntimeV1 {
             .lcm_doctor(provider, session_id)
             .await
     }
+}
+
+async fn load_registered_raw_message(
+    database: &RegisteredGlobalDb,
+    provider: &str,
+    message_id: &str,
+) -> Option<tracedecay::sessions::lcm::LcmRawMessage> {
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .expect("dashboard test raw-message snapshot must remain registered");
+    tracedecay::sessions::lcm::schema::load_raw_message(&snapshot, provider, message_id)
+        .await
+        .expect("dashboard test raw-message load must not hide database or receipt failure")
 }
