@@ -959,7 +959,7 @@ impl McpServer {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) async fn shutdown_background_tasks(&self) {
         let failures = self
             .shutdown_background_tasks_until(
