@@ -7,8 +7,7 @@
 //! session layer back at the composition root.
 //!
 //! Each capability is therefore a process-global slot the composition root
-//! fills once during startup, in the same shape as
-//! `tracedecay_runtime_core::ports::branch_admin_recovery`. Every slot has a
+//! fills once during startup. Every slot has a
 //! conservative default so an unwired process still runs — it just does less.
 //!
 //! Root wiring needed: `tracedecay::sessions` install must call

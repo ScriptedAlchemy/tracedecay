@@ -201,8 +201,7 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
         "pr-autotrack-removal-test",
     )
     .unwrap();
-    let daemon_administration = StoreAdministration::with_external_holder_verifier(|_| Ok(()))
-        .with_profile_identity(identity);
+    let daemon_administration = StoreAdministration::default().with_profile_identity(identity);
     let administration = PrStoreAdministration::state_only(&daemon_administration);
     let report = reconcile_project_with_administration(
         repo_root.path(),

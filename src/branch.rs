@@ -10,30 +10,13 @@ pub use admin::{
     BranchAdminAction, BranchAdminOutcome, BranchAdminReport, PreparedBranchAdminMutation,
     prepare_branch_admin_mutation, remove_tracked_branch_store_checked,
 };
-pub(crate) use admin::{BranchAdminRecoveryDisposition, prepare_pending_branch_admin_recovery};
-
-/// Installs the root-owned pending branch-admin recovery gate into the kernel
-/// lock primitives.
-///
-/// The gate reads `branch::admin::transaction`'s journal, which stayed in this
-/// crate, so the kernel calls back through
-/// `tracedecay_runtime_core::ports::branch_admin_recovery`. Idempotent; every
-/// process entry point that can take a branch lock must call it before doing
-/// so.
-pub fn register_branch_admin_recovery_gate() {
-    tracedecay_runtime_core::ports::branch_admin_recovery::register(
-        admin::ensure_no_pending_branch_admin_recovery,
-    );
-}
-
 /// The shared branch-add lock, its retry policy, and the current-branch read
 /// moved into `tracedecay_runtime_core::branch`: `branch_meta` and `worktree`
 /// depend on them and now live in that crate. Re-exported so every historical
 /// `crate::branch::<item>` path keeps resolving.
 pub use tracedecay_runtime_core::branch::{
     BRANCH_LOCK_RETRY_ATTEMPTS, BRANCH_LOCK_RETRY_INTERVAL, BranchMemo,
-    acquire_branch_add_lock_blocking_raw, acquire_branch_lock_blocking, current_branch,
-    try_acquire_branch_add_lock, try_acquire_branch_add_lock_raw,
+    acquire_branch_lock_blocking, current_branch, try_acquire_branch_add_lock,
 };
 
 /// Default-branch detection, branch-name sanitisation, and branch DB-path
@@ -600,14 +583,14 @@ fn rollback_keeps_database_when_metadata_removal_cannot_be_saved() {
     let persisted = crate::branch_meta::load_branch_meta(data_dir).unwrap();
     assert!(persisted.is_tracked("feature"));
     assert!(
-        error.to_string().contains("branch metadata"),
+        error.to_string().contains("cannot retire failed branch"),
         "unexpected rollback error: {error}"
     );
 }
 
 #[cfg(test)]
 #[test]
-fn rollback_quarantines_complete_database_family() {
+fn rollback_retires_metadata_and_leaves_database_family_for_collection() {
     let temp = tempfile::tempdir().unwrap();
     let data_dir = temp.path();
     let branches_dir = data_dir.join("branches");
@@ -627,27 +610,24 @@ fn rollback_quarantines_complete_database_family() {
 
     rollback_branch_tracking(data_dir, "feature", "branches/feature.db", &db_path).unwrap();
 
-    assert!(!db_path.exists());
-    assert!(!db_path.with_extension("db-wal").exists());
-    assert!(!db_path.with_extension("db-shm").exists());
+    assert!(db_path.exists());
+    assert!(db_path.with_extension("db-wal").exists());
+    assert!(db_path.with_extension("db-shm").exists());
     assert!(
         !crate::branch_meta::load_branch_meta(data_dir)
             .unwrap()
             .is_tracked("feature")
     );
-    assert!(!data_dir.join(".branch-delete-transaction.json").exists());
 }
 
 /// A branch sync mounts the new branch database through the process-wide store
 /// runtime registry, and that mount keeps the database authority lease alive
-/// after the failed graph handle is dropped. Rollback fences the same `SQLite`
-/// family for deletion, so the runtime must be retired before rollback.
-///
-/// Retiring the registered runtime first must make the exact same rollback
-/// succeed in this process, and must leave the pre-sync branch metadata intact.
+/// after the failed graph handle is dropped. Rollback only retires branch
+/// metadata, so it must succeed without retiring the runtime and must leave
+/// the database family on disk for canonical orphan collection.
 #[cfg(test)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rollback_succeeds_after_the_failed_sync_retires_its_branch_runtime() {
+async fn rollback_retires_metadata_without_touching_live_branch_runtime() {
     use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
     use crate::db::{DatabaseAccessMode, DatabaseAuthority};
     use tracedecay_store::ProjectId;
@@ -700,38 +680,24 @@ async fn rollback_succeeds_after_the_failed_sync_retires_its_branch_runtime() {
         .expect("branch publication");
 
     // The sync failed: its graph handle is gone, but the registry still holds
-    // the mount and the authority behind it.
+    // the mount and the authority behind it. Metadata-only rollback must not
+    // require retiring that runtime.
     drop(database);
-    let fenced = rollback_branch_tracking(&data_root, "feature", "branches/feature.db", &db_path)
-        .expect_err("a retained branch runtime must still fence rollback");
-    assert!(
-        fenced
-            .to_string()
-            .contains("incompatible database authority or deletion fence"),
-        "unexpected rollback denial: {fenced}"
-    );
-    assert!(db_path.exists());
-    assert!(
-        crate::branch_meta::load_branch_meta(&data_root)
-            .expect("branch metadata")
-            .is_tracked("feature")
-    );
-
-    registry
-        .close_code_graph_paths([db_path.clone()])
-        .await
-        .expect("retire the failed branch runtime");
-
     rollback_branch_tracking(&data_root, "feature", "branches/feature.db", &db_path)
-        .expect("rollback must not require a second process");
+        .expect("rollback must not require retiring the branch runtime");
 
-    assert!(!db_path.exists());
+    assert!(db_path.exists());
     let persisted = crate::branch_meta::load_branch_meta(&data_root).expect("branch metadata");
     assert!(!persisted.is_tracked("feature"));
     assert_eq!(
         persisted.default_branch, "main",
         "rollback must leave the pre-sync branch family intact"
     );
+
+    registry
+        .close_code_graph_paths([db_path.clone()])
+        .await
+        .expect("retire the failed branch runtime");
 }
 
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {

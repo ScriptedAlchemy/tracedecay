@@ -7,10 +7,7 @@
 //! resolving on both sides of the split.
 //!
 //! Everything else about branch tracking (admin mutations, snapshots, GC)
-//! stays in the root module. The one piece that could not follow — the
-//! pending branch-admin recovery gate, which reaches into
-//! `branch::admin::transaction` — is injected through
-//! [`crate::ports::branch_admin_recovery`].
+//! stays in the root module.
 
 use std::path::Path;
 
@@ -101,9 +98,8 @@ impl BranchMemo {
     }
 }
 
-/// Acquires the shared branch-add lock without consulting the pending
-/// branch-admin recovery journal.
-pub fn try_acquire_branch_add_lock_raw(tracedecay_dir: &Path) -> Result<std::fs::File> {
+/// Acquires the shared branch-add lock.
+pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<std::fs::File> {
     use fs2::FileExt;
 
     std::fs::create_dir_all(tracedecay_dir)?;
@@ -120,25 +116,11 @@ pub fn try_acquire_branch_add_lock_raw(tracedecay_dir: &Path) -> Result<std::fs:
     Ok(file)
 }
 
-/// Acquires the shared branch-add lock and refuses to hand it out while a
-/// branch-admin mutation is still pending recovery.
-pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<std::fs::File> {
-    let file = try_acquire_branch_add_lock_raw(tracedecay_dir)?;
-    crate::ports::branch_admin_recovery::ensure_no_pending_recovery(tracedecay_dir)?;
-    Ok(file)
-}
-
 /// Blocking-with-timeout variant of [`try_acquire_branch_add_lock`] for
 /// synchronous callers. Retries a briefly-contended lock (a concurrent branch
 /// add is only holding it for the duration of a DB clone) before giving up.
 pub fn acquire_branch_lock_blocking(tracedecay_dir: &Path) -> Result<std::fs::File> {
     acquire_branch_add_lock_blocking_with(tracedecay_dir, try_acquire_branch_add_lock)
-}
-
-/// Blocking acquisition that skips the pending-recovery gate; the recovery
-/// path itself needs the lock before it can clear the journal.
-pub fn acquire_branch_add_lock_blocking_raw(tracedecay_dir: &Path) -> Result<std::fs::File> {
-    acquire_branch_add_lock_blocking_with(tracedecay_dir, try_acquire_branch_add_lock_raw)
 }
 
 fn acquire_branch_add_lock_blocking_with(
