@@ -5,10 +5,12 @@ one local daemon authority. It registers a project, captures exact code
 generations, and returns typed results with provenance and coverage instead of
 requiring clients to inspect or synchronize a database themselves.
 
-The durable split is intentional: embedded Grafeo owns admitted graph relations,
-traversals, and vectors; SQLite owns relational and content records, manifests,
-journals, leases, receipts, and watermarks. Clients never choose a store by
-path or open either store directly.
+The persisted split is intentional: embedded Grafeo owns the admitted
+graph/vector query projection, while canonical events, facts, content,
+reconstruction manifests, journals, leases, receipts, and verified watermarks
+remain in their domain/relational stores. A Grafeo projection is served only
+after recovered-state verification. Clients never choose a store by path or
+open either store directly.
 
 ## What users can rely on
 

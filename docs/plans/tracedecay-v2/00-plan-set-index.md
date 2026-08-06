@@ -564,8 +564,9 @@ preflight/preview/apply/receipt through the same authorized scope.
 
 **Library-first implementation defaults.** Retain existing `gix`, `notify`,
 and Tokio for Git object/ref intelligence, filesystem observation, and bounded
-async work. Persist and query branch-stack relationships through the canonical
-embedded Grafeo authority in `tracedecay-graph-db`; use small standard-library
+async work. Persist and query the rebuildable branch-stack projection through
+the canonical embedded Grafeo projection authority in `tracedecay-graph-db`;
+use small standard-library
 collections only to validate one bounded admitted snapshot. This replaces new
 Git parsers, watcher loops, async coordination, and a second graph model while
 retaining TraceDecay's stable identities, frozen scope, exact native snapshots,
@@ -677,9 +678,10 @@ retry, review, outcome, and calibration, and returns a non-auto-applied replan.
   task-specific databases/projector runtimes, board query DSLs, and universal
   query ASTs.
 
-**Library-first implementation defaults.** Persist and query task/workflow DAGs
-through the canonical embedded Grafeo authority in `tracedecay-graph-db`; use
-small standard-library collections only to validate one immutable definition.
+**Library-first implementation defaults.** Persist and query rebuildable
+task/workflow DAG projections through the canonical embedded Grafeo projection
+authority in `tracedecay-graph-db`; use small standard-library collections only
+to validate one immutable definition.
 Use `tokio-util` for cancellation, existing Tokio timers and `DelayQueue` only
 for mechanical waiting, Serde plus
 `schemars`/`jsonschema` for definition validation, rusqlite transactions for
