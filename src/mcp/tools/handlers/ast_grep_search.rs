@@ -18,20 +18,12 @@ use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};
-use super::support::unique_file_paths;
+use super::support::{CancelSearchOnDrop, unique_file_paths};
 
 /// Hard cap on `max_results` regardless of what the caller requests.
 const MAX_RESULTS_CAP: usize = 200;
 /// Default `max_results` when the caller omits it.
 const DEFAULT_MAX_RESULTS: usize = 50;
-
-struct CancelSearchOnDrop(Arc<AtomicBool>);
-
-impl Drop for CancelSearchOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
 
 async fn search_tree_off_thread(
     project_root: std::path::PathBuf,
@@ -43,7 +35,7 @@ async fn search_tree_off_thread(
 ) -> Result<crate::ast_grep_search::AstGrepSearchResult> {
     let query = pattern.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
-    let cancel_on_drop = CancelSearchOnDrop(cancelled.clone());
+    let cancel_on_drop = CancelSearchOnDrop::new(cancelled.clone());
     let result = tokio::task::spawn_blocking(move || {
         search_tree_scoped_with_cancel(
             &project_root,
@@ -224,7 +216,7 @@ mod tests {
     fn cancellation_guard_signals_worker_on_drop() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
-            let _guard = CancelSearchOnDrop(cancelled.clone());
+            let _guard = CancelSearchOnDrop::new(cancelled.clone());
         }
         assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
     }

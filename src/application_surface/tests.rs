@@ -30,8 +30,8 @@ use super::{
     application_negotiated_features, application_surface_dispatch_input_with_controls,
     current_micros, execute_application_surface, http_operation_event_router,
     normalize_application_tool_args, parse_application_surface_request, plan26_sse_stream_event,
-    resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
-    surface_rejection_metadata,
+    resolve_application_binding, resolve_application_surface_dispatch,
+    resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
 use crate::application::feedback::observations::{
     Plan26ArgumentRejectionClassV1, Plan26FeedbackOutcomeV1, Plan26RejectedArgumentV1,
@@ -86,6 +86,26 @@ fn workflow_http_descriptors_match_every_executable_manifest_route() {
 #[test]
 fn handoff_http_descriptors_match_every_executable_manifest_route() {
     validate_handoff_catalog_bindings().expect("every handoff descriptor has one mounted route");
+}
+
+#[test]
+fn every_http_exposed_operation_resolves_from_the_canonical_catalog() {
+    let catalog = super::application_surface_catalog_ref().expect("application catalog");
+    let resolver = crate::daemon_client::CatalogBindingResolver::new(catalog);
+
+    for operation in tracedecay_api::HttpApplicationOperation::ALL {
+        if operation.is_http_exposed() {
+            assert!(
+                resolve_application_binding(
+                    &resolver,
+                    tracedecay_tool_catalog::BindingSurface::Http,
+                    operation,
+                )
+                .is_some(),
+                "{operation:?} must resolve on the public HTTP surface",
+            );
+        }
+    }
 }
 
 async fn response_text(response: axum::response::Response) -> String {
