@@ -21,7 +21,8 @@ use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};
 
 use super::artifact_store::{
     ArtifactImportErrorV1, ArtifactInventoryRecordV1, ArtifactLeaseKindV1, ArtifactLeaseV1,
-    ConfiguredHttpsArtifactSourceV1, ExplicitHttpsArtifactTransportV1, GcReceiptV1,
+    ConfiguredHttpsArtifactSourceV1, ExplicitHttpsArtifactTransportV1,
+    FASTEMBED_RUNTIME_BUILD_REVISION_V1, FASTEMBED_RUNTIME_FAMILY_V1, GcReceiptV1,
     ModelArtifactStore, RetentionPolicyV1, RuntimeEnvironmentV1,
 };
 use super::manifest::{ArtifactMemberRoleV1, ModelArtifactManifestV1};

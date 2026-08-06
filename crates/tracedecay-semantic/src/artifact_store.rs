@@ -115,9 +115,11 @@ pub struct RuntimeEnvironmentV1 {
     pub available_threads: u32,
 }
 
-#[cfg(any(test, feature = "semantic-fastembed"))]
 pub const FASTEMBED_RUNTIME_FAMILY_V1: &str = "fastembed-ort";
-#[cfg(any(test, feature = "semantic-fastembed"))]
+/// Exact runtime identity recorded in manifests, projection keys, and runtime
+/// admission evidence. It must name the crate versions this binary actually
+/// links (`fastembed` is pinned exactly in Cargo.toml); a runtime upgrade must
+/// update this revision so vector generations replay under the new identity.
 pub const FASTEMBED_RUNTIME_BUILD_REVISION_V1: &str = "fastembed-5.17.3+ort-2.0.0-rc.12";
 
 impl RuntimeEnvironmentV1 {
@@ -3548,6 +3550,25 @@ mod tests {
                 .admit_for_runtime_by_digest(&digest, &runtime)
                 .unwrap_err(),
             SemanticCapabilityDisabledV1::IncompatibleRuntime
+        );
+    }
+
+    #[test]
+    fn runtime_build_revision_names_the_pinned_fastembed_version() {
+        let manifest = include_str!("../Cargo.toml");
+        let pinned = manifest
+            .lines()
+            .find_map(|line| {
+                let dependency = line.trim().strip_prefix("fastembed = ")?;
+                let (_, rest) = dependency.split_once("version = \"=")?;
+                rest.split_once('"').map(|(version, _)| version)
+            })
+            .expect("tracedecay-semantic must pin an exact fastembed version");
+        assert!(
+            FASTEMBED_RUNTIME_BUILD_REVISION_V1.starts_with(&format!("fastembed-{pinned}+")),
+            "FASTEMBED_RUNTIME_BUILD_REVISION_V1 ({FASTEMBED_RUNTIME_BUILD_REVISION_V1}) must \
+             record the exact pinned fastembed version ({pinned}); a runtime upgrade must bump \
+             the recorded revision so projection keys replay"
         );
     }
 

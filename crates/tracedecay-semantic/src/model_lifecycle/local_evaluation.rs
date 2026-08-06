@@ -137,8 +137,8 @@ fn local_evaluation_manifest(
             },
             precision: EmbeddingPrecisionV1::Fp32,
             runtime: RuntimeCompatibilityV1 {
-                runtime: "fastembed-ort".to_owned(),
-                build_revision: "fastembed-v5".to_owned(),
+                runtime: FASTEMBED_RUNTIME_FAMILY_V1.to_owned(),
+                build_revision: FASTEMBED_RUNTIME_BUILD_REVISION_V1.to_owned(),
                 platforms: vec![PlatformTargetV1 {
                     os: std::env::consts::OS.to_owned(),
                     arch: std::env::consts::ARCH.to_owned(),
