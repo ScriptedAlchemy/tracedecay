@@ -1,17 +1,17 @@
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitIndexCommitIntentV1,
     GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewDispositionV1,
-    GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
-    GitIndexSigningPolicyV1, GitIndexTransactionId, GitIndexTransactionJournalV1,
-    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
-    ManifestDigest, ProjectId, RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1,
-    RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
-    UtcMicros, WorktreeId,
+    GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId,
+    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+    GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    GitObjectFormatV1, GitOidV1, ManifestDigest, ProjectId, RepositoryId,
+    RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
+    RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
 use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior, params};
 use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesQueryV1,
-    CodeRecoveryRepositoriesQueryV1, GitIndexTransactionBeginRequestV1,
+    CodeRecoveryRepositoriesQueryV1, GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
     GitIndexTransactionBeginResultV1, GitIndexTransactionStoreError,
     GitIndexTransactionTerminalWriteV1,
 };
@@ -73,6 +73,32 @@ fn preview() -> GitIndexPreviewV1 {
         "preview.git-transaction.fixture",
         UtcMicros(100),
     )
+}
+
+fn preview_input() -> GitIndexPreviewInputV1 {
+    let preview = preview();
+    GitIndexPreviewInputV1::new_commit(
+        preview.preview_id,
+        preview.repository_snapshot,
+        GitIndexCommitIntentV1::new(
+            "restart-stable private commit intent\n".to_owned(),
+            GitCommitIdentityV1 {
+                name: "Preview Author".to_owned(),
+                email: "preview-author@example.com".to_owned(),
+                at: UtcMicros(1_000_000),
+            },
+            GitCommitIdentityV1 {
+                name: "Preview Committer".to_owned(),
+                email: "preview-committer@example.com".to_owned(),
+                at: UtcMicros(1_000_000),
+            },
+            GitIndexSigningPolicyV1::UnsignedPermitted,
+        )
+        .expect("private commit intent"),
+        UtcMicros(10),
+        UtcMicros(30_000_010),
+    )
+    .expect("preview input")
 }
 
 fn preview_for(repository_id: &str, preview_id: &str, expires_at: UtcMicros) -> GitIndexPreviewV1 {
@@ -328,6 +354,7 @@ async fn canonical_schema_persists_only_commit_intent_digest() {
         tables,
         vec![
             "git_index_preview_commitments",
+            "git_index_preview_inputs",
             "git_index_repository_quarantines",
             "git_index_transaction_inputs",
             "git_index_transaction_journals",
@@ -368,6 +395,81 @@ async fn canonical_schema_persists_only_commit_intent_digest() {
             "persistent preview commitment leaked {secret:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn preview_input_survives_restart_then_gc_retains_typed_expiry_without_private_payload() {
+    let (_directory, path, database) = open_database().await;
+    let input = preview_input();
+    let preview_id = input.preview_id.clone();
+    {
+        let store = test_store(&database);
+        store
+            .save_preview_input(input.clone())
+            .await
+            .expect("save private preview input");
+        assert_eq!(
+            store
+                .next_live_preview_input_expiry()
+                .await
+                .expect("read next expiry"),
+            Some(UtcMicros(30_000_010))
+        );
+        assert_eq!(
+            store
+                .read_preview_input(&preview_id, UtcMicros(30_000_009))
+                .await
+                .expect("read current input"),
+            GitIndexPreviewInputReadV1::Available(Box::new(input.clone()))
+        );
+    }
+    drop(database);
+
+    let reopened = TestConnection::open(&path);
+    let store = test_store(&reopened);
+    assert_eq!(
+        store
+            .read_preview_input(&preview_id, UtcMicros(30_000_009))
+            .await
+            .expect("read input after restart"),
+        GitIndexPreviewInputReadV1::Available(Box::new(input))
+    );
+    let gc = store
+        .purge_expired_preview_inputs_and_next(UtcMicros(30_000_010), 1)
+        .await
+        .expect("purge one expired payload");
+    assert_eq!(gc.purged, 1);
+    assert_eq!(gc.next_expiry, None);
+    assert!(matches!(
+        store
+            .read_preview_input(&preview_id, UtcMicros(30_000_010))
+            .await
+            .expect("read expired tombstone"),
+        GitIndexPreviewInputReadV1::Expired {
+            expired_at: UtcMicros(30_000_010),
+            purged_at: Some(UtcMicros(30_000_010)),
+        }
+    ));
+
+    let snapshot = reopened.read_snapshot().await.expect("schema snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT input_json, purged_at
+             FROM git_index_preview_inputs WHERE preview_id = ?1",
+            params![preview_id.as_str()],
+        )
+        .await
+        .expect("read purged input row");
+    let row = rows
+        .next()
+        .await
+        .expect("read purged input")
+        .expect("purged input tombstone");
+    assert_eq!(row.get::<Option<String>>(0).expect("private payload"), None);
+    assert_eq!(
+        row.get::<Option<i64>>(1).expect("purged at"),
+        Some(30_000_010)
+    );
 }
 
 #[tokio::test]

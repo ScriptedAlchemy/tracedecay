@@ -456,8 +456,7 @@ fn application_request(
         ApplicationSurfaceOperation::GitHunks => git_read_request(
             tracedecay::application::git_reads::GitReadRequestV1::Hunks {
                 scope: GitDiffScopeV1::WorkingTree,
-                preview_id: "preview.transport-parity".to_owned(),
-                snapshot_digest: digest('a'),
+                daemon_binding: None,
             },
         ),
         ApplicationSurfaceOperation::GitPreview => git_requests().0,
@@ -570,13 +569,13 @@ fn git_requests() -> (ApplicationSurfaceRequest, ApplicationSurfaceRequest) {
     (
         ApplicationSurfaceRequest::GitPreview(GitPreviewSurfaceRequest {
             operation: GitIndexTransactionOperationV1::CommitIndex,
-            preview_id,
-            repository_snapshot: snapshot,
-            selected_hunks: Vec::new(),
+            preview_input_id: None,
+            selected_hunk_digests: Vec::new(),
             commit_intent: Some(commit_intent),
         }),
         ApplicationSurfaceRequest::GitApply(GitApplySurfaceRequest {
-            preview,
+            preview_id: preview.preview_id,
+            preview_digest: preview.preview_digest,
             idempotency_key: IdempotencyKey::new("idempotency.pr12-parity")
                 .expect("idempotency key"),
         }),

@@ -10,9 +10,10 @@ use tracedecay_application::{
 #[cfg(test)]
 use tracedecay_domain::GitIndexIdempotencyKey;
 use tracedecay_domain::{
-    GitIndexJournalPhaseV1, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
-    GitIndexTransactionId, GitIndexTransactionJournalV1, GitIndexTransactionOperationV1,
-    GitIndexTransactionReceiptV1, ManifestDigest, canonical_sha256,
+    GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
+    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
+    GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    ManifestDigest, UtcMicros, canonical_sha256,
 };
 use tracedecay_policy::{
     GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassificationInputV1,
@@ -20,8 +21,8 @@ use tracedecay_policy::{
     GitRepositoryStateFactV1,
 };
 use tracedecay_store::{
-    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1, GitIndexTransactionStore,
-    GitIndexTransactionStoreError,
+    GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
 };
 
 use super::{
@@ -85,13 +86,9 @@ pub(crate) trait GitIndexNativeExecutor {
         &self,
         transaction_id: &GitIndexTransactionId,
         preview: &GitIndexPreviewV1,
+        input: &GitIndexPreviewInputV1,
         request: &GitIndexApplyRequestV1,
     ) -> Result<NativeGitIndexApplyOutcomeV1, GitIndexTransactionPortError>;
-
-    /// Forget process-local preview material without entering a native Git
-    /// boundary. In particular, commit messages, identities, and signing key
-    /// references must not outlive a rejected one-shot apply attempt.
-    fn discard_preview(&self, preview_id: &tracedecay_domain::GitIndexPreviewId);
 }
 
 /// One daemon instance owns the queue, journal transitions, policy recheck,
@@ -124,6 +121,48 @@ impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A> {
     #[cfg(test)]
     pub(super) fn mutation_queue_for_test(&self) -> &std::sync::Arc<RepositoryMutationQueue> {
         &self.queue
+    }
+}
+
+impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A>
+where
+    S: GitIndexTransactionStore,
+{
+    pub(crate) fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> Result<(), GitIndexTransactionPortError> {
+        self.store
+            .save_preview_input(input)
+            .map_err(map_store_error)
+    }
+
+    pub(crate) fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> Result<GitIndexPreviewInputV1, GitIndexTransactionPortError> {
+        match self
+            .store
+            .read_preview_input(preview_id, observed_at)
+            .map_err(map_store_error)?
+        {
+            GitIndexPreviewInputReadV1::Available(input) => Ok(*input),
+            GitIndexPreviewInputReadV1::Expired { .. } => {
+                Err(GitIndexTransactionPortError::ExpiredPreview)
+            }
+            GitIndexPreviewInputReadV1::Missing => Err(GitIndexTransactionPortError::StalePreview),
+        }
+    }
+
+    pub(crate) fn read_preview(
+        &self,
+        preview_id: &GitIndexPreviewId,
+    ) -> Result<GitIndexPreviewV1, GitIndexTransactionPortError> {
+        self.store
+            .read_preview(preview_id)
+            .map_err(map_store_error)?
+            .ok_or(GitIndexTransactionPortError::StalePreview)
     }
 }
 
@@ -186,11 +225,9 @@ where
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
         let result = self.native.preview(request)?;
         if result.validate_for(request).is_err() {
-            self.native.discard_preview(&result.preview.preview_id);
             return Err(GitIndexTransactionPortError::StalePreview);
         }
         if let Err(error) = self.store.save_preview(result.preview.clone()) {
-            self.native.discard_preview(&result.preview.preview_id);
             return Err(map_store_error(error));
         }
         Ok(result)
@@ -248,16 +285,13 @@ where
         let preview = match self.store.read_preview(&request.preview_id) {
             Ok(Some(preview)) => preview,
             Ok(None) => {
-                self.native.discard_preview(&request.preview_id);
                 return Err(GitIndexTransactionPortError::StalePreview);
             }
             Err(error) => {
-                self.native.discard_preview(&request.preview_id);
                 return Err(map_store_error(error));
             }
         };
         if preview.validate().is_err() {
-            self.native.discard_preview(&request.preview_id);
             return Err(GitIndexTransactionPortError::StalePreview);
         }
         let repository_id = preview.repository_snapshot.repository_id.clone();
@@ -267,9 +301,6 @@ where
                 self.apply_serialized(request, &preview, cancelled_at, &cancellation_requested)
             })
             .map_err(map_queue_error);
-        if result.is_err() {
-            self.native.discard_preview(&request.preview_id);
-        }
         result?
     }
 }
@@ -291,6 +322,29 @@ where
         let idempotency_key = request
             .native_idempotency_key()
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        let input_digest = request
+            .input_digest()
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        if let Some(existing) = self
+            .store
+            .read_record(&idempotency_key)
+            .map_err(map_store_error)?
+        {
+            if existing.input_digest != input_digest || existing.preview != *preview {
+                return Err(GitIndexTransactionPortError::IdempotencyConflict);
+            }
+            return match existing.terminal_receipt {
+                Some(receipt) => replay_result(request, &receipt),
+                None => Err(GitIndexTransactionPortError::RecoveryRequired),
+            };
+        }
+        let input = self.read_preview_input(&request.preview_id, request.observed_at)?;
+        if input.operation != preview.operation
+            || input.repository_snapshot != preview.repository_snapshot
+            || input.repository_snapshot_digest != preview.repository_snapshot_digest
+        {
+            return Err(GitIndexTransactionPortError::StalePreview);
+        }
         let transaction_id = transaction_id(request, &preview.preview_digest)?;
         let journal = GitIndexTransactionJournalV1::prepared(
             transaction_id.clone(),
@@ -300,27 +354,20 @@ where
         .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
         let begin = GitIndexTransactionBeginRequestV1 {
             idempotency_key: idempotency_key.clone(),
-            input_digest: request
-                .input_digest()
-                .map_err(|_| GitIndexTransactionPortError::StalePreview)?,
+            input_digest,
             preview: preview.clone(),
             journal,
         };
         let durable = DurableGitIndexJournal::new(&self.store);
         let begin = match durable.begin_or_replay(begin) {
             Ok(begin) => begin,
-            Err(error) => {
-                self.native.discard_preview(&preview.preview_id);
-                return Err(map_journal_error(error));
-            }
+            Err(error) => return Err(map_journal_error(error)),
         };
         let record = match begin {
             GitIndexTransactionBeginResultV1::Replay(receipt) => {
-                self.native.discard_preview(&preview.preview_id);
                 return replay_result(request, &receipt);
             }
             GitIndexTransactionBeginResultV1::RecoveryRequired(_) => {
-                self.native.discard_preview(&preview.preview_id);
                 return Err(GitIndexTransactionPortError::RecoveryRequired);
             }
             GitIndexTransactionBeginResultV1::Started(record) => record,
@@ -328,7 +375,6 @@ where
         if let Some(cancelled_at) =
             cancellation_observed_while_queued.or_else(cancellation_requested)
         {
-            self.native.discard_preview(&preview.preview_id);
             return finish_aborted_no_change(
                 &self.store,
                 &durable,
@@ -347,7 +393,6 @@ where
         if request.validate_for_preview(preview).is_err()
             || self.recheck_policy(request, preview).is_err()
         {
-            self.native.discard_preview(&preview.preview_id);
             return finish_aborted_no_change(
                 &self.store,
                 &durable,
@@ -361,7 +406,6 @@ where
             );
         }
         if let Some(cancelled_at) = cancellation_requested() {
-            self.native.discard_preview(&preview.preview_id);
             return finish_aborted_no_change(
                 &self.store,
                 &durable,
@@ -383,7 +427,6 @@ where
             // No native boundary was entered. Prefer a durable no-change
             // terminal receipt; quarantine only if that safe terminal
             // write cannot be proven.
-            self.native.discard_preview(&preview.preview_id);
             return finish_aborted_no_change(
                 &self.store,
                 &durable,
@@ -400,7 +443,6 @@ where
             });
         };
         if let Some(cancelled_at) = cancellation_requested() {
-            self.native.discard_preview(&preview.preview_id);
             return finish_aborted_no_change(
                 &self.store,
                 &durable,
@@ -413,7 +455,7 @@ where
                 Some(cancelled_at),
             );
         }
-        match self.native.apply(&transaction_id, preview, request) {
+        match self.native.apply(&transaction_id, preview, &input, request) {
             Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation) => finish_aborted_no_change(
                 &self.store,
                 &durable,
@@ -827,7 +869,11 @@ fn map_store_error(error: GitIndexTransactionStoreError) -> GitIndexTransactionP
         GitIndexTransactionStoreError::Unavailable => {
             GitIndexTransactionPortError::DaemonUnavailable
         }
-        GitIndexTransactionStoreError::PreviewConflict
+        GitIndexTransactionStoreError::PreviewInputTooLarge => {
+            GitIndexTransactionPortError::Unsupported
+        }
+        GitIndexTransactionStoreError::PreviewInputConflict
+        | GitIndexTransactionStoreError::PreviewConflict
         | GitIndexTransactionStoreError::JournalConflict
         | GitIndexTransactionStoreError::ReceiptConflict
         | GitIndexTransactionStoreError::InvalidData(_) => {

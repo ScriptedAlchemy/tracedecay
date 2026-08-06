@@ -13,8 +13,8 @@ use tracedecay_application::{
 use tracedecay_domain::{
     ActorId, ComponentVersion, GitBlobExpectationV1, GitCommitIdentityV1, GitCoverageV1,
     GitHeadStateV1, GitIndexCommitIntentV1, GitIndexEntryExpectationV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptId,
-    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
+    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
     GitOperationStateV1, HunkDirectionV1, HunkRefV1, ManifestDigest, ProjectId, RefId,
     RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
@@ -22,6 +22,7 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
+use tracedecay_store::GitIndexTransactionStore;
 
 use super::DaemonGitIndexTransactionPort;
 use super::recovery::{GitIndexRecoveryError, GitIndexRecoveryExecutor};
@@ -46,7 +47,6 @@ pub(super) struct TestHarness {
     pub(super) request: GitIndexApplyRequestV1,
     pub(super) apply_calls: Arc<AtomicUsize>,
     pub(super) recovery_calls: Arc<AtomicUsize>,
-    pub(super) discard_calls: Arc<AtomicUsize>,
     pub(super) entered_native: Arc<AtomicBool>,
     pub(super) allow: Arc<std::sync::atomic::AtomicBool>,
     pub(super) policy_calls: Arc<AtomicUsize>,
@@ -73,7 +73,6 @@ pub(super) struct FakeNative {
     recovery_modes: Mutex<VecDeque<RecoveryMode>>,
     pub(super) apply_calls: Arc<AtomicUsize>,
     pub(super) recovery_calls: Arc<AtomicUsize>,
-    pub(super) discard_calls: Arc<AtomicUsize>,
     pub(super) entered_native: Arc<AtomicBool>,
 }
 
@@ -110,7 +109,6 @@ impl FakeNative {
             recovery_modes: Mutex::new(recovery_modes.into_iter().collect()),
             apply_calls: Arc::new(AtomicUsize::new(0)),
             recovery_calls: Arc::new(AtomicUsize::new(0)),
-            discard_calls: Arc::new(AtomicUsize::new(0)),
             entered_native: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -132,6 +130,7 @@ impl GitIndexNativeExecutor for FakeNative {
         &self,
         transaction_id: &GitIndexTransactionId,
         preview: &GitIndexPreviewV1,
+        _input: &tracedecay_domain::GitIndexPreviewInputV1,
         request: &GitIndexApplyRequestV1,
     ) -> Result<NativeGitIndexApplyOutcomeV1, GitIndexTransactionPortError> {
         self.entered_native.store(true, Ordering::SeqCst);
@@ -154,10 +153,6 @@ impl GitIndexNativeExecutor for FakeNative {
                 }),
             )),
         }
-    }
-
-    fn discard_preview(&self, _preview_id: &GitIndexPreviewId) {
-        self.discard_calls.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -275,7 +270,7 @@ pub(super) fn snapshot() -> RepositoryStateSnapshotV1 {
         Some(digest('2')),
         Some(digest('3')),
         Some(digest('4')),
-        UtcMicros(1),
+        fixture_time(1),
         GitCoverageV1::complete(),
     )
     .expect("snapshot")
@@ -291,7 +286,7 @@ pub(super) fn commit_intent() -> GitIndexCommitIntentV1 {
     let identity = GitCommitIdentityV1 {
         name: "TraceDecay Test".to_owned(),
         email: "tracedecay@example.com".to_owned(),
-        at: UtcMicros(1_000_000),
+        at: fixture_time(1_000_000),
     };
     GitIndexCommitIntentV1::new(
         "transaction fixture\n".to_owned(),
@@ -371,18 +366,52 @@ fn preview_for_operation(
         candidate_index_tree,
         intent.as_ref(),
         GitIndexPreviewDispositionV1::Applicable,
-        UtcMicros(10),
+        fixture_time(10),
         expires_at,
     )
     .expect("preview")
 }
 
+/// Fixture timeline anchored at a fixed far-future epoch (2100-01-01 UTC) so
+/// the store actor's autonomous wall-clock preview-input GC never observes
+/// fixture expiries as already elapsed. Ordinals are spaced 200ms apart: wide
+/// enough to preserve every strict ordering the tests assert, narrow enough
+/// that fixture preview lifetimes stay inside the domain's 30s maximum.
+pub(super) fn fixture_time(ordinal: i64) -> UtcMicros {
+    const FIXTURE_EPOCH_MICROS: i64 = 4_102_444_800_000_000;
+    UtcMicros(FIXTURE_EPOCH_MICROS.saturating_add(ordinal.saturating_mul(200_000)))
+}
+
 pub(super) fn preview() -> GitIndexPreviewV1 {
-    preview_with_expiry(UtcMicros(100))
+    preview_with_expiry(fixture_time(100))
 }
 
 pub(super) fn preview_with_expiry(expires_at: UtcMicros) -> GitIndexPreviewV1 {
     preview_for_operation(GitIndexTransactionOperationV1::CommitIndex, expires_at)
+}
+
+pub(super) fn preview_input(preview: &GitIndexPreviewV1) -> GitIndexPreviewInputV1 {
+    match preview.operation {
+        GitIndexTransactionOperationV1::CommitIndex => GitIndexPreviewInputV1::new_commit(
+            preview.preview_id.clone(),
+            preview.repository_snapshot.clone(),
+            commit_intent(),
+            preview.created_at,
+            preview.expires_at,
+        ),
+        GitIndexTransactionOperationV1::StageHunks
+        | GitIndexTransactionOperationV1::UnstageHunks => {
+            GitIndexPreviewInputV1::new_hunk_selection(
+                preview.preview_id.clone(),
+                preview.operation,
+                preview.repository_snapshot.clone(),
+                preview.selected_hunks.clone(),
+                preview.created_at,
+                preview.expires_at,
+            )
+        }
+    }
+    .expect("preview input")
 }
 
 pub(super) fn apply_request(preview: &GitIndexPreviewV1, key: &str) -> GitIndexApplyRequestV1 {
@@ -400,8 +429,8 @@ pub(super) fn apply_request(preview: &GitIndexPreviewV1, key: &str) -> GitIndexA
         1,
         digest('6'),
         id::<ActorId>("actor.issuer"),
-        UtcMicros(1),
-        UtcMicros(1_000),
+        fixture_time(1),
+        fixture_time(1_000),
         scope.clone(),
         BTreeSet::from([binding.capability_id.clone()]),
         BTreeSet::from([binding.use_case_id.clone()]),
@@ -413,7 +442,7 @@ pub(super) fn apply_request(preview: &GitIndexPreviewV1, key: &str) -> GitIndexA
         scope,
         grant,
         RequestId::new("request.fixture").expect("request id"),
-        Deadline::new(UtcMicros(500)).expect("deadline"),
+        Deadline::new(fixture_time(500)).expect("deadline"),
         CancellationContext::active("cancel.fixture").expect("cancellation"),
     )
     .expect("context");
@@ -426,7 +455,7 @@ pub(super) fn apply_request(preview: &GitIndexPreviewV1, key: &str) -> GitIndexA
             ComponentVersion::new("policy.evaluator.v1").expect("policy version"),
         )
         .expect("policy"),
-        UtcMicros(2),
+        fixture_time(2),
     )
     .expect("authority");
     GitIndexApplyRequestV1 {
@@ -443,7 +472,7 @@ pub(super) fn apply_request(preview: &GitIndexPreviewV1, key: &str) -> GitIndexA
             privacy_digest: digest('a'),
             external_proof: None,
         },
-        observed_at: UtcMicros(15),
+        observed_at: fixture_time(15),
     }
 }
 
@@ -517,7 +546,7 @@ pub(super) fn receipt_for(
         new_head,
         created_commit,
         outcome,
-        UtcMicros(15),
+        fixture_time(15),
     )
     .expect("receipt")
 }
@@ -543,8 +572,22 @@ pub(super) fn execution_for(
 
 fn transaction_store(directory: &TempDir) -> DaemonGitIndexTransactionStore {
     let path = directory.path().join("canonical-project.db");
-    DaemonGitIndexTransactionStore::open_engine_test(TestConnection::open(&path))
-        .expect("canonical store actor")
+    let connection = TestConnection::open(&path);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("schema runtime");
+    runtime.block_on(async {
+        let transaction = connection
+            .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
+            .await
+            .expect("schema transaction");
+        crate::global_db::ensure_git_index_transaction_schema(&transaction)
+            .await
+            .expect("install final Git transaction schema");
+        transaction.commit().await.expect("commit final Git schema");
+    });
+    DaemonGitIndexTransactionStore::open_engine_test(connection).expect("canonical store actor")
 }
 
 pub(super) fn test_store(directory: &TempDir) -> DaemonGitIndexTransactionStore {
@@ -558,14 +601,16 @@ pub(super) fn test_port_from_preview(
 ) -> TestHarness {
     let directory = tempfile::tempdir().expect("store directory");
     let store = transaction_store(&directory);
-    let preview_template = preview_for_operation(operation, UtcMicros(100));
+    let preview_template = preview_for_operation(operation, fixture_time(100));
     let authority_request = apply_request(&preview_template, "idempotency.transport");
     let preview_request = preview_request(&preview_template, &authority_request);
+    store
+        .save_preview_input(preview_input(&preview_template))
+        .expect("save daemon preview input");
     let native =
         FakeNative::with_preview(Some(preview_template.clone()), native_modes, recovery_modes);
     let apply_calls = Arc::clone(&native.apply_calls);
     let recovery_calls = Arc::clone(&native.recovery_calls);
-    let discard_calls = Arc::clone(&native.discard_calls);
     let entered_native = Arc::clone(&native.entered_native);
     let policy = TestPolicy::allowing();
     let allow = Arc::clone(&policy.allow);
@@ -590,7 +635,6 @@ pub(super) fn test_port_from_preview(
         request,
         apply_calls,
         recovery_calls,
-        discard_calls,
         entered_native,
         allow,
         policy_calls,

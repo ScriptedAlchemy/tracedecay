@@ -1,14 +1,12 @@
 //! Concrete bridge from daemon transaction orchestration to fixed native Git.
 //!
-//! Preview material stays only in daemon memory. A restart therefore forces a
-//! fresh preview for any unstarted apply; the durable journal handles only
-//! transactions that reached native admission.
+//! Apply rematerializes fixed native patch/commit state from the daemon's
+//! expiring durable preview input, so a daemon restart never invalidates an
+//! otherwise current immutable preview.
 
-use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 
 use serde::Serialize;
 use tracedecay_application::{
@@ -17,8 +15,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     GitCommitIdentityV1, GitDegradationV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptId,
-    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+    GitIndexPreviewDispositionV1, GitIndexPreviewInputV1, GitIndexPreviewV1,
+    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitIndexUnsupportedStateV1,
     GitStatusEntryV1, ManifestDigest, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
     RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
@@ -1185,7 +1183,10 @@ fn same_stable_native_evidence(
         && current.sparse_digest == old.sparse_digest
         && current.filesystem_capabilities_digest == old.filesystem_capabilities_digest
         && current.captured_at == old.captured_at
-        && current.coverage == old.coverage
+    // Coverage is a typed explanation of the live status, not independent
+    // repository identity. For example, an ignored collision disappears when
+    // the intended commit clears the last staged entry in that directory.
+    // Every underlying stable authority is compared explicitly above.
 }
 
 /// A restart may prove an unsigned commit by reconstructing every durable
@@ -1291,19 +1292,15 @@ fn read_git_value(repository_root: &Path, expression: &str) -> Option<String> {
 }
 
 /// Fixed native implementation used by the daemon coordinator. It accepts
-/// only preview-bound material and rejects a cache miss after restart rather
-/// than reconstructing or guessing a patch.
+/// only preview-bound durable input and rematerializes exact patches after
+/// restart without accepting transport-supplied native state.
 pub(crate) struct FixedDaemonGitIndexExecutor<A> {
     assembler: A,
-    previews: Mutex<BTreeMap<GitIndexPreviewId, MaterializedGitIndexPreview>>,
 }
 
 impl<A> FixedDaemonGitIndexExecutor<A> {
     pub(crate) fn new(assembler: A) -> Self {
-        Self {
-            assembler,
-            previews: Mutex::new(BTreeMap::new()),
-        }
+        Self { assembler }
     }
 }
 
@@ -1320,65 +1317,69 @@ where
             .preview
             .validate()
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        let result = GitIndexPreviewPortResultV1 {
+        Ok(GitIndexPreviewPortResultV1 {
             preview: materialized.preview.clone(),
             execution: materialized.execution.clone(),
-        };
-        let mut previews = self
-            .previews
-            .lock()
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-        previews.retain(|_, cached| !cached.preview.is_expired_at(request.observed_at));
-        match previews.get(&materialized.preview.preview_id) {
-            Some(existing)
-                if existing.preview.preview_digest != materialized.preview.preview_digest =>
-            {
-                return Err(GitIndexTransactionPortError::StalePreview);
-            }
-            None if materialized.preview.disposition.is_applicable() => {
-                previews.insert(materialized.preview.preview_id.clone(), materialized);
-            }
-            Some(_) | None => {}
-        }
-        Ok(result)
+        })
     }
 
     fn apply(
         &self,
         transaction_id: &GitIndexTransactionId,
         preview: &GitIndexPreviewV1,
+        input: &GitIndexPreviewInputV1,
         request: &GitIndexApplyRequestV1,
     ) -> Result<NativeGitIndexApplyOutcomeV1, GitIndexTransactionPortError> {
         if request.validate().is_err() {
             return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
         }
-        let Ok(mut previews) = self.previews.lock() else {
-            return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
-        };
-        let scope = request.context.scope();
-        let Some(cached) = previews.get(&request.preview_id) else {
-            return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
-        };
-        if scope.project_id != cached.preview.repository_snapshot.project_id
-            || scope.repository_id != cached.preview.repository_snapshot.repository_id
-            || cached.preview.repository_snapshot.worktree_id.as_ref() != Some(&scope.worktree_id)
+        if input.validate().is_err()
+            || input.preview_id != preview.preview_id
+            || input.operation != preview.operation
+            || input.repository_snapshot != preview.repository_snapshot
+            || input.repository_snapshot_digest != preview.repository_snapshot_digest
         {
             return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
         }
-        // Commit messages, identities, and signing keys are process-local
-        // ephemeral material. An authorized apply attempt consumes the one-shot
-        // materialization before preview validation or native work so no stale
-        // or terminal attempt retains plaintext.
-        let Some(materialized) = previews.remove(&request.preview_id) else {
+        let scope = request.context.scope();
+        if scope.project_id != preview.repository_snapshot.project_id
+            || scope.repository_id != preview.repository_snapshot.repository_id
+            || preview.repository_snapshot.worktree_id.as_ref() != Some(&scope.worktree_id)
+        {
             return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
-        };
-        drop(previews);
+        }
         if request.validate_for_preview(preview).is_err() {
             return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
         }
-        if materialized.preview != *preview {
+        for selected in &preview.selected_hunks {
+            if !input.hunks.iter().any(|candidate| candidate == selected) {
+                return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
+            }
+        }
+        let rematerialize_request = GitIndexPreviewRequestV1 {
+            context: request.context.clone(),
+            authority: request.authority.clone(),
+            binding: request.binding.clone(),
+            preview_id: input.preview_id.clone(),
+            repository_snapshot: input.repository_snapshot.clone(),
+            selected_hunks: preview.selected_hunks.clone(),
+            commit_intent: input.commit_intent.clone(),
+            observed_at: request.observed_at,
+        };
+        let Ok(mut materialized) = self.assembler.materialize(&rematerialize_request) else {
+            return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
+        };
+        if materialized.preview.operation != preview.operation
+            || materialized.preview.repository_snapshot != preview.repository_snapshot
+            || materialized.preview.repository_snapshot_digest != preview.repository_snapshot_digest
+            || materialized.preview.selected_hunks != preview.selected_hunks
+            || materialized.preview.candidate_index_tree != preview.candidate_index_tree
+            || materialized.preview.commit_intent_digest != preview.commit_intent_digest
+            || materialized.preview.disposition != preview.disposition
+        {
             return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
         }
+        materialized.preview = preview.clone();
         let Ok(mut index_lock) = materialized.runner.acquire_index_lock() else {
             return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
         };
@@ -1438,13 +1439,6 @@ where
             Err(_) => Ok(NativeGitIndexApplyOutcomeV1::CommitBoundaryUnknown),
         }
     }
-
-    fn discard_preview(&self, preview_id: &GitIndexPreviewId) {
-        self.previews
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(preview_id);
-    }
 }
 
 impl<A> GitIndexRecoveryExecutor for FixedDaemonGitIndexExecutor<A>
@@ -1492,33 +1486,32 @@ fn classify_native_failure(error: &NativeGitIndexError) -> NativeGitIndexApplyOu
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
-#[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
-pub(crate) fn capture_exact_snapshot_for_test(
+pub(crate) fn capture_exact_snapshot(
     repository_root: &std::path::Path,
     project_id: ProjectId,
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
     captured_at: UtcMicros,
-) -> crate::errors::Result<RepositoryStateSnapshotV1> {
+) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
     // Same canonical root the daemon owner mounts; alias paths must not mint a
     // divergent snapshot that later fails exact preview CAS.
-    let repository_root = super::canonicalize_repository_root(repository_root)?;
+    let repository_root = super::canonicalize_repository_root(repository_root)
+        .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
     let assembler = NativeGitIndexPreviewAssembler::new(
         &repository_root,
         project_id,
         repository_id,
         worktree_id,
     );
-    let runner = FixedGitIndexRunner::new(&repository_root).map_err(test_snapshot_error)?;
+    let runner = FixedGitIndexRunner::new(&repository_root).map_err(map_native_error)?;
     let status = assembler
         .read_authority()
         .status()
-        .map_err(test_snapshot_error)?;
-    let lock = runner.acquire_index_lock().map_err(test_snapshot_error)?;
+        .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
+    let lock = runner.acquire_index_lock().map_err(map_native_error)?;
     let tree = runner
         .index_tree_under_lock(&lock)
-        .map_err(test_snapshot_error)?;
+        .map_err(map_native_error)?;
     let placeholder = RepositoryStateSnapshotV1::new(
         assembler.project_id.clone(),
         assembler.repository_id.clone(),
@@ -1527,7 +1520,8 @@ pub(crate) fn capture_exact_snapshot_for_test(
         tree.format(),
         status.head,
         RepositoryIndexSnapshotV1 {
-            checksum: canonical_sha256(&b"placeholder".as_slice()).map_err(test_snapshot_error)?,
+            checksum: canonical_sha256(&b"placeholder".as_slice())
+                .map_err(|_| GitIndexTransactionPortError::NativeFailure)?,
             tree_id: Some(tree),
             state: RepositoryIndexStateV1::Clean,
             unmerged_stage_digest: None,
@@ -1535,7 +1529,7 @@ pub(crate) fn capture_exact_snapshot_for_test(
         RepositoryWorkingTreeSnapshotV1 {
             state: RepositoryWorkingTreeStateV1::Clean,
             tracked_digest: canonical_sha256(&b"placeholder".as_slice())
-                .map_err(test_snapshot_error)?,
+                .map_err(|_| GitIndexTransactionPortError::NativeFailure)?,
             untracked_name_digest: None,
             ignored_collision_digest: None,
         },
@@ -1548,10 +1542,27 @@ pub(crate) fn capture_exact_snapshot_for_test(
         captured_at,
         tracedecay_domain::GitCoverageV1::complete(),
     )
-    .map_err(test_snapshot_error)?;
-    assembler
-        .capture_snapshot(&placeholder, &runner, &lock)
-        .map_err(test_snapshot_error)
+    .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
+    assembler.capture_snapshot(&placeholder, &runner, &lock)
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+#[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
+pub(crate) fn capture_exact_snapshot_for_test(
+    repository_root: &std::path::Path,
+    project_id: ProjectId,
+    repository_id: RepositoryId,
+    worktree_id: WorktreeId,
+    captured_at: UtcMicros,
+) -> crate::errors::Result<RepositoryStateSnapshotV1> {
+    capture_exact_snapshot(
+        repository_root,
+        project_id,
+        repository_id,
+        worktree_id,
+        captured_at,
+    )
+    .map_err(test_snapshot_error)
 }
 
 #[cfg(any(test, feature = "test-transport"))]
@@ -1569,11 +1580,12 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_application::{
         AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-        Deadline, DisclosureClass, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
+        Deadline, DisclosureClass, GitIndexEffectProofV1, IdempotencyKey, PolicyDecisionRef,
+        RequestContext, RequestId, ResolvedScope,
     };
     use tracedecay_domain::{
         ActorId, ComponentVersion, GitCommitIdentityV1, GitCoverageV1, GitIndexIdempotencyKey,
-        GitIndexJournalPhaseV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+        GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexSigningPolicyV1, GitIndexTransactionId,
         GitIndexTransactionJournalV1, GitObjectFormatV1, GitOperationStateV1, RefId,
     };
     use tracedecay_store::GitIndexTransactionRecordV1;
@@ -2170,6 +2182,79 @@ mod tests {
             .expect("unstage exact hunk");
         drop(lock);
         assert_eq!(runner.write_tree().expect("unstaged tree"), original_tree);
+    }
+
+    /// Ref publication is typed-unavailable (`AtomicRefNamespaceUnavailable`),
+    /// so a rematerialized commit input after a daemon restart must resolve to
+    /// a proven no-mutation outcome and leave the repository untouched.
+    #[test]
+    fn apply_rematerializes_exact_commit_input_after_executor_restart() {
+        let (directory, assembler, runner) = repository_fixture();
+        fs::write(directory.path().join("packet.txt"), "after restart\n").expect("change worktree");
+        git(directory.path(), &["add", "packet.txt"]);
+        let head_before = git_value(directory.path(), &["rev-parse", "HEAD"]);
+        let snapshot = exact_snapshot(&assembler, &runner);
+        let intent = commit_intent("commit after daemon restart\n");
+        let preview_request = commit_request(
+            snapshot.clone(),
+            intent.clone(),
+            "git-index-preview.restart",
+        );
+        let first_executor = FixedDaemonGitIndexExecutor::new(assembler);
+        let preview = first_executor
+            .preview(&preview_request)
+            .expect("preview before restart")
+            .preview;
+        drop(first_executor);
+
+        let input = GitIndexPreviewInputV1::new_commit(
+            preview.preview_id.clone(),
+            snapshot,
+            intent,
+            preview.created_at,
+            preview.expires_at,
+        )
+        .expect("durable private preview input");
+        let policy_digest = preview_request.authority.policy.digest.clone();
+        let apply_request = GitIndexApplyRequestV1 {
+            context: preview_request.context,
+            authority: preview_request.authority,
+            binding: preview_request.binding,
+            preview_id: preview.preview_id.clone(),
+            preview_digest: preview.preview_digest.clone(),
+            idempotency_key: IdempotencyKey::new("idempotency.restart").expect("idempotency"),
+            proof: GitIndexEffectProofV1 {
+                policy_digest,
+                configuration_digest: canonical_sha256(&"configuration").expect("digest"),
+                catalog_digest: canonical_sha256(&"catalog").expect("digest"),
+                privacy_digest: canonical_sha256(&"privacy").expect("digest"),
+                external_proof: None,
+            },
+            observed_at: UtcMicros(20),
+        };
+        let restarted = FixedDaemonGitIndexExecutor::new(NativeGitIndexPreviewAssembler::new(
+            directory.path(),
+            ProjectId::new("project.fixture").expect("project id"),
+            RepositoryId::new("repository.fixture").expect("repository id"),
+            WorktreeId::new("worktree.fixture").expect("worktree id"),
+        ));
+        let outcome = restarted
+            .apply(
+                &GitIndexTransactionId::new("transaction.restart").expect("transaction"),
+                &preview,
+                &input,
+                &apply_request,
+            )
+            .expect("restart-safe native apply");
+        assert!(matches!(
+            outcome,
+            NativeGitIndexApplyOutcomeV1::ProvenNoMutation
+        ));
+        assert_eq!(
+            git_value(directory.path(), &["rev-parse", "HEAD"]),
+            head_before,
+            "unavailable commit publication must not move HEAD"
+        );
     }
 
     #[test]

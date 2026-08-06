@@ -57,7 +57,8 @@ pub use session_temporal::operations as session_temporal_operations;
 mod transcript;
 
 pub use git_index_transactions::{
-    GitIndexReadExecutor, GlobalDbGitIndexTransactionStore, ensure_git_index_transaction_schema,
+    GitIndexPreviewInputGcResult, GitIndexReadExecutor, GlobalDbGitIndexTransactionStore,
+    ensure_git_index_transaction_schema,
 };
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
 use project_registry::project_path_alias_key;

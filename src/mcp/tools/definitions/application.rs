@@ -203,17 +203,15 @@ pub(super) fn def_git_hunks() -> ToolDefinition {
     git_read_definition(
         "hunks",
         "Read typed Git hunks",
-        "Mint bounded HunkRef evidence for a working-tree or staged diff; commit-range hunks are not applicable.",
+        "Capture exact daemon-owned repository state and mint a bounded, expiring preview input with canonical selection digests and HunkRef evidence.",
         json!({
             "scope": {
                 "type": "string",
                 "enum": ["working_tree", "staged"],
                 "default": "working_tree"
-            },
-            "preview_id": string_property("Opaque preview identity bound into every HunkRef."),
-            "snapshot_digest": string_property("Exact sha256 repository snapshot digest.")
+            }
         }),
-        &["preview_id", "snapshot_digest"],
+        &[],
     )
 }
 
@@ -245,7 +243,7 @@ pub(super) fn def_git_preview() -> ToolDefinition {
     def(
         "tracedecay_git_preview",
         "Preview Git index changes",
-        "Preview one typed stage_hunks, unstage_hunks, or commit_index request through the daemon-owned Git transaction service. The daemon mints the preview identity; no generic Git arguments are accepted.",
+        "Preview one typed stage_hunks, unstage_hunks, or commit_index request through daemon-captured native state. Clients never submit repository snapshots or full HunkRef objects.",
         required_object_schema(
             json!({
                 "operation": {
@@ -253,21 +251,25 @@ pub(super) fn def_git_preview() -> ToolDefinition {
                     "enum": ["stage_hunks", "unstage_hunks", "commit_index"],
                     "description": "Closed internal operation selected by the public preview facade."
                 },
-                "repository_snapshot": {
-                    "type": "object",
-                    "description": "Exact repository state snapshot used for compare-and-swap validation."
+                "preview_input_id": {
+                    "type": ["string", "null"],
+                    "description": "Opaque expiring input returned by git_hunks; required for stage/unstage and omitted for commit."
                 },
-                "selected_hunks": {
+                "selected_hunk_digests": {
                     "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Exact HunkRef objects; required for stage/unstage and empty for commit."
+                    "maxItems": 256,
+                    "items": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$"
+                    },
+                    "description": "Sorted exact HunkRef digests; required for stage/unstage and empty for commit."
                 },
                 "commit_intent": {
                     "type": ["object", "null"],
                     "description": "Structured commit intent; required only for commit_index."
                 }
             }),
-            &["operation", "repository_snapshot"],
+            &["operation"],
         ),
     )
 }
@@ -276,16 +278,18 @@ pub(super) fn def_git_apply() -> ToolDefinition {
     def_rw(
         "tracedecay_git_apply",
         "Apply Git index preview",
-        "Apply one exact immutable Git preview through the daemon-owned transaction service with CAS, policy recheck, idempotency, and a durable receipt.",
+        "Apply one exact immutable Git preview by opaque identity and digest with CAS, policy recheck, restart-safe rematerialization, idempotency, and a durable receipt.",
         required_object_schema(
             json!({
-                "preview": {
-                    "type": "object",
-                    "description": "Exact git_preview result payload, including preview identity, digest, and CAS evidence."
+                "preview_id": string_property("Opaque identity returned by git_preview."),
+                "preview_digest": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "description": "Exact immutable digest returned by git_preview."
                 },
                 "idempotency_key": string_property("Stable key for safe apply retry and terminal receipt replay.")
             }),
-            &["preview", "idempotency_key"],
+            &["preview_id", "preview_digest", "idempotency_key"],
         ),
     )
 }

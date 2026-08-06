@@ -82,8 +82,8 @@ pub enum GitIndexSigningPolicyV1 {
 
 /// Structured, bounded commit input for the `commit_index` operation.
 ///
-/// The message is retained only while the native transaction is in flight;
-/// previews and durable receipts retain its digest rather than the text.
+/// The daemon retains this exact input only in its expiring private preview
+/// authority. Public previews and durable receipts expose only its digest.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitIndexCommitIntentV1 {
@@ -192,6 +192,256 @@ fn validate_git_commit_identity(identity: &GitCommitIdentityV1) -> Result<(), Do
     validate_path_label(&identity.email, "git index commit identity email")
 }
 
+const GIT_INDEX_PREVIEW_INPUT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.preview-input.v1";
+pub const MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS: usize = 256;
+pub const MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS: i64 = 30_000_000;
+
+/// Private, expiring material captured by the daemon before it can construct
+/// an immutable public preview. The eventual preview uses the same opaque ID.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitIndexPreviewInputV1 {
+    pub preview_id: GitIndexPreviewId,
+    pub operation: GitIndexTransactionOperationV1,
+    pub repository_snapshot: RepositoryStateSnapshotV1,
+    pub repository_snapshot_digest: ManifestDigest,
+    pub hunks: Vec<HunkRefV1>,
+    pub commit_intent: Option<GitIndexCommitIntentV1>,
+    pub created_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub input_digest: ManifestDigest,
+}
+
+#[derive(Serialize)]
+struct GitIndexPreviewInputDigestMaterial<'a> {
+    domain: &'static str,
+    preview_id: &'a GitIndexPreviewId,
+    operation: GitIndexTransactionOperationV1,
+    repository_snapshot_id: &'a RepositoryStateSnapshotId,
+    repository_snapshot_digest: &'a ManifestDigest,
+    hunk_digests: &'a [ManifestDigest],
+    commit_intent_digest: Option<&'a ManifestDigest>,
+    created_at: UtcMicros,
+    expires_at: UtcMicros,
+}
+
+impl GitIndexPreviewInputV1 {
+    pub fn new_hunk_selection(
+        preview_id: GitIndexPreviewId,
+        operation: GitIndexTransactionOperationV1,
+        repository_snapshot: RepositoryStateSnapshotV1,
+        hunks: Vec<HunkRefV1>,
+        created_at: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
+        if operation.hunk_direction().is_none() {
+            return Err(DomainError::NonCanonical {
+                field: "git index preview input operation",
+            });
+        }
+        Self::new(
+            preview_id,
+            operation,
+            repository_snapshot,
+            hunks,
+            None,
+            created_at,
+            expires_at,
+        )
+    }
+
+    pub fn new_commit(
+        preview_id: GitIndexPreviewId,
+        repository_snapshot: RepositoryStateSnapshotV1,
+        commit_intent: GitIndexCommitIntentV1,
+        created_at: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
+        Self::new(
+            preview_id,
+            GitIndexTransactionOperationV1::CommitIndex,
+            repository_snapshot,
+            Vec::new(),
+            Some(commit_intent),
+            created_at,
+            expires_at,
+        )
+    }
+
+    fn new(
+        preview_id: GitIndexPreviewId,
+        operation: GitIndexTransactionOperationV1,
+        repository_snapshot: RepositoryStateSnapshotV1,
+        hunks: Vec<HunkRefV1>,
+        commit_intent: Option<GitIndexCommitIntentV1>,
+        created_at: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
+        let repository_snapshot_digest =
+            GitIndexPreviewV1::repository_snapshot_digest(&repository_snapshot)?;
+        let mut input = Self {
+            preview_id,
+            operation,
+            repository_snapshot,
+            repository_snapshot_digest,
+            hunks,
+            commit_intent,
+            created_at,
+            expires_at,
+            input_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))?,
+        };
+        input.validate_fields()?;
+        input.input_digest = input.compute_input_digest()?;
+        Ok(input)
+    }
+
+    pub fn is_expired_at(&self, observed_at: UtcMicros) -> bool {
+        observed_at >= self.expires_at
+    }
+
+    pub fn compute_input_digest(&self) -> Result<ManifestDigest, DomainError> {
+        self.validate_fields()?;
+        let hunk_digests = self.hunk_digests()?;
+        let commit_intent_digest = self
+            .commit_intent
+            .as_ref()
+            .map(GitIndexCommitIntentV1::compute_digest)
+            .transpose()?;
+        canonical_sha256(&GitIndexPreviewInputDigestMaterial {
+            domain: GIT_INDEX_PREVIEW_INPUT_DIGEST_DOMAIN_V1,
+            preview_id: &self.preview_id,
+            operation: self.operation,
+            repository_snapshot_id: self.repository_snapshot.snapshot_id(),
+            repository_snapshot_digest: &self.repository_snapshot_digest,
+            hunk_digests: &hunk_digests,
+            commit_intent_digest: commit_intent_digest.as_ref(),
+            created_at: self.created_at,
+            expires_at: self.expires_at,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.input_digest.validate()?;
+        self.validate_fields()?;
+        if self.input_digest != self.compute_input_digest()? {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    fn hunk_digests(&self) -> Result<Vec<ManifestDigest>, DomainError> {
+        self.hunks.iter().map(HunkRefV1::compute_digest).collect()
+    }
+
+    fn validate_fields(&self) -> Result<(), DomainError> {
+        self.preview_id.validate()?;
+        self.repository_snapshot.validate()?;
+        self.repository_snapshot_digest.validate()?;
+        if self.repository_snapshot_digest
+            != GitIndexPreviewV1::repository_snapshot_digest(&self.repository_snapshot)?
+        {
+            return Err(DomainError::SnapshotMismatch {
+                field: "git index preview input repository snapshot digest",
+            });
+        }
+        if self.expires_at <= self.created_at
+            || self.expires_at.0.saturating_sub(self.created_at.0)
+                > MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS
+        {
+            return Err(DomainError::InvalidTimeInterval);
+        }
+        if self.hunks.len() > MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS {
+            return Err(DomainError::NonCanonical {
+                field: "git index preview input hunk count",
+            });
+        }
+        let hunk_digests = self.hunk_digests()?;
+        if hunk_digests.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(DomainError::DuplicateId {
+                field: "git index preview input hunk digest order",
+            });
+        }
+        for hunk in &self.hunks {
+            hunk.validate()?;
+            if self.operation.hunk_direction() != Some(hunk.direction)
+                || hunk.repository != self.repository_snapshot.repository_id
+                || self.repository_snapshot.worktree_id.as_ref() != Some(&hunk.worktree)
+                || hunk.preview_id != self.preview_id.as_str()
+                || hunk.snapshot_digest != self.repository_snapshot_digest
+            {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "git index preview input hunk binding",
+                });
+            }
+        }
+        match self.operation {
+            GitIndexTransactionOperationV1::CommitIndex => {
+                if !self.hunks.is_empty() {
+                    return Err(DomainError::NonCanonical {
+                        field: "git index commit preview input hunks",
+                    });
+                }
+                self.commit_intent
+                    .as_ref()
+                    .ok_or(DomainError::NonCanonical {
+                        field: "git index commit preview input intent",
+                    })?
+                    .validate()
+            }
+            GitIndexTransactionOperationV1::StageHunks
+            | GitIndexTransactionOperationV1::UnstageHunks => {
+                if self.commit_intent.is_some() {
+                    return Err(DomainError::NonCanonical {
+                        field: "git index hunk preview input intent",
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GitIndexPreviewInputV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            preview_id: GitIndexPreviewId,
+            operation: GitIndexTransactionOperationV1,
+            repository_snapshot: RepositoryStateSnapshotV1,
+            repository_snapshot_digest: ManifestDigest,
+            hunks: Vec<HunkRefV1>,
+            commit_intent: Option<GitIndexCommitIntentV1>,
+            created_at: UtcMicros,
+            expires_at: UtcMicros,
+            input_digest: ManifestDigest,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let input = Self::new(
+            wire.preview_id,
+            wire.operation,
+            wire.repository_snapshot,
+            wire.hunks,
+            wire.commit_intent,
+            wire.created_at,
+            wire.expires_at,
+        )
+        .map_err(serde::de::Error::custom)?;
+        if input.repository_snapshot_digest != wire.repository_snapshot_digest
+            || input.input_digest != wire.input_digest
+        {
+            return Err(serde::de::Error::custom(
+                "git index preview input digest does not match its immutable payload",
+            ));
+        }
+        Ok(input)
+    }
+}
+
 /// Immutable, content-bound preview for one daemon-serialized index
 /// transaction. Applicability is only a precondition: the daemon must capture
 /// and compare the entire snapshot and every contained `HunkRefV1` again
@@ -207,7 +457,7 @@ pub struct GitIndexPreviewV1 {
     pub candidate_index_tree: Option<GitOidV1>,
     /// Canonical commitment to the full commit input. It is present exactly
     /// for `commit_index`; plaintext message, identity, timestamp, key, and
-    /// signing policy remain process-local ephemeral material.
+    /// signing policy remain in the private expiring preview-input authority.
     pub commit_intent_digest: Option<ManifestDigest>,
     pub disposition: GitIndexPreviewDispositionV1,
     pub created_at: UtcMicros,

@@ -388,11 +388,7 @@ fn git_reads_parse_the_existing_mcp_shapes_into_catalog_owned_requests() {
         ),
         (
             ApplicationSurfaceOperation::GitHunks,
-            serde_json::json!({
-                "scope": "staged",
-                "preview_id": "preview.catalog-owned",
-                "snapshot_digest": format!("sha256:{}", "c".repeat(64)),
-            }),
+            serde_json::json!({"scope": "staged"}),
             "capability.application.git.hunks",
         ),
     ];
@@ -414,6 +410,43 @@ fn git_reads_parse_the_existing_mcp_shapes_into_catalog_owned_requests() {
         assert_eq!(request.max_entries, 1_000);
         assert_eq!(request.max_bytes, 4 * 1024 * 1024);
     }
+}
+
+#[test]
+fn git_mutation_surface_rejects_caller_minted_native_authority() {
+    assert!(
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::GitHunks,
+            serde_json::json!({
+                "scope": "staged",
+                "preview_id": "preview.caller",
+                "snapshot_digest": format!("sha256:{}", "a".repeat(64)),
+            }),
+        )
+        .is_err()
+    );
+    assert!(
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::GitPreview,
+            serde_json::json!({
+                "operation": "commit_index",
+                "repository_snapshot": {},
+                "selected_hunks": [],
+                "commit_intent": null,
+            }),
+        )
+        .is_err()
+    );
+    assert!(
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::GitApply,
+            serde_json::json!({
+                "preview": {},
+                "idempotency_key": "idempotency.caller",
+            }),
+        )
+        .is_err()
+    );
 }
 
 #[test]

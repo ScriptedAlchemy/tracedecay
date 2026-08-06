@@ -114,14 +114,49 @@ impl Drop for NativeIndexLock {
     }
 }
 
+/// Resolves the identity of a bare repository rooted exactly at `directory`.
+/// Returns `None` unless git confirms the directory is itself bare, so
+/// non-repositories and worktree misresolutions keep their typed outcome.
+fn bare_repository_identity(directory: &Path) -> Option<GitRepositoryIdentity> {
+    let root = directory.canonicalize().ok()?;
+    let output = git_command(&root)
+        .args(["rev-parse", "--is-bare-repository", "--absolute-git-dir"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let mut lines = text.lines();
+    if lines.next()?.trim() != "true" {
+        return None;
+    }
+    let git_dir = PathBuf::from(lines.next()?.trim()).canonicalize().ok()?;
+    Some(GitRepositoryIdentity {
+        worktree_root: root,
+        git_dir: git_dir.clone(),
+        common_dir: git_dir,
+    })
+}
+
 impl FixedGitIndexRunner {
     pub(crate) fn new(repository_root: impl AsRef<Path>) -> Result<Self, NativeGitIndexError> {
-        let GitRepositoryIdentityOutcome::Resolved(identity) =
-            discover_repository_identity_bounded(repository_root.as_ref())
-        else {
-            return Err(NativeGitIndexError::RepositoryUnavailable(
-                "bounded Git repository identity discovery did not resolve".to_owned(),
-            ));
+        let identity = match discover_repository_identity_bounded(repository_root.as_ref()) {
+            GitRepositoryIdentityOutcome::Resolved(identity) => identity,
+            // Bounded discovery is worktree-shaped and cannot resolve a bare
+            // repository, but preflight must still construct a runner there to
+            // classify bare as a mutation blocker rather than an outage.
+            outcome => match bare_repository_identity(repository_root.as_ref()) {
+                Some(identity) => identity,
+                None => {
+                    return Err(NativeGitIndexError::RepositoryUnavailable(format!(
+                        "bounded Git repository identity discovery did not resolve: {outcome:?}"
+                    )));
+                }
+            },
         };
         let GitRepositoryIdentity {
             worktree_root: repository_root,
@@ -649,10 +684,16 @@ impl FixedGitIndexRunner {
 
     fn command(&self) -> Command {
         let mut command = git_command(&self.repository_root);
-        command
-            .env("GIT_DIR", &self.git_dir)
-            .env("GIT_COMMON_DIR", &self.common_dir)
-            .env("GIT_WORK_TREE", &self.repository_root);
+        // Exporting GIT_DIR without GIT_WORK_TREE makes git adopt the current
+        // directory as a work tree, and exporting either onto a bare root
+        // silently un-bares it, defeating bare-blocker preflight. A bare
+        // runner therefore relies on cwd resolution alone.
+        if self.repository_root != self.git_dir {
+            command
+                .env("GIT_DIR", &self.git_dir)
+                .env("GIT_COMMON_DIR", &self.common_dir)
+                .env("GIT_WORK_TREE", &self.repository_root);
+        }
         command
     }
 

@@ -13,8 +13,8 @@ use thiserror::Error;
 use tracedecay_application::{AuthorizedScopeSet, ResolvedScope};
 use tracedecay_domain::git::{GitBlameV1, GitDiffScopeV1, GitDiffV1, GitHistoryV1, HunkRefV1};
 use tracedecay_domain::{
-    ManifestDigest, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1, ScopeSetId,
-    ScopeSetRevision, ScopeUnavailableReasonV1,
+    GitIndexPreviewId, ManifestDigest, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1,
+    ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, UtcMicros,
 };
 
 use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest};
@@ -53,9 +53,34 @@ pub enum GitReadRequestV1 {
     },
     Hunks {
         scope: GitDiffScopeV1,
-        preview_id: String,
-        snapshot_digest: ManifestDigest,
+        #[serde(skip)]
+        daemon_binding: Option<DaemonGitHunkPreviewBindingV1>,
     },
+}
+
+/// Daemon-private binding injected only after exact native snapshot capture.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DaemonGitHunkPreviewBindingV1 {
+    pub preview_id: GitIndexPreviewId,
+    pub snapshot_digest: ManifestDigest,
+    pub expires_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHunkPreviewEntryV1 {
+    pub digest: ManifestDigest,
+    pub hunk: HunkRefV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHunkPreviewInputV1 {
+    pub preview_input_id: GitIndexPreviewId,
+    pub repository_snapshot_digest: ManifestDigest,
+    pub expires_at: UtcMicros,
+    pub hunks: Vec<GitHunkPreviewEntryV1>,
 }
 
 impl GitReadRequestV1 {
@@ -87,7 +112,7 @@ pub enum GitReadResultV1 {
     Diff(GitQueryEnvelopeV1<GitDiffV1>),
     History(GitQueryEnvelopeV1<GitHistoryV1>),
     Blame(GitQueryEnvelopeV1<GitBlameV1>),
-    Hunks(GitQueryEnvelopeV1<Vec<HunkRefV1>>),
+    Hunks(GitQueryEnvelopeV1<GitHunkPreviewInputV1>),
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -319,11 +344,41 @@ impl GitReadAuthorityV1 {
                 .map(GitReadResultV1::Blame),
             GitReadRequestV1::Hunks {
                 scope,
-                preview_id,
-                snapshot_digest,
-            } => engine
-                .hunk_refs(bounds, scope, preview_id, snapshot_digest)
-                .map(GitReadResultV1::Hunks),
+                daemon_binding,
+            } => daemon_binding.as_ref().map_or_else(
+                || Err(GitQueryError::DaemonPreviewBindingAbsent),
+                |binding| {
+                    engine
+                        .hunk_refs(
+                            bounds,
+                            scope,
+                            binding.preview_id.as_str(),
+                            &binding.snapshot_digest,
+                        )
+                        .and_then(|envelope| {
+                            let hunks = envelope
+                                .value
+                                .into_iter()
+                                .map(|hunk| {
+                                    let digest = hunk.compute_digest().map_err(|error| {
+                                        GitQueryError::Serialization(error.to_string())
+                                    })?;
+                                    Ok(GitHunkPreviewEntryV1 { digest, hunk })
+                                })
+                                .collect::<Result<Vec<_>, GitQueryError>>()?;
+                            Ok(GitReadResultV1::Hunks(GitQueryEnvelopeV1 {
+                                value: GitHunkPreviewInputV1 {
+                                    preview_input_id: binding.preview_id.clone(),
+                                    repository_snapshot_digest: binding.snapshot_digest.clone(),
+                                    expires_at: binding.expires_at,
+                                    hunks,
+                                },
+                                coverage: envelope.coverage,
+                                truncated_by_bound: envelope.truncated_by_bound,
+                            }))
+                        })
+                },
+            ),
         };
 
         match result {
@@ -504,7 +559,16 @@ mod tests {
             GitReadOutcomeV1::Complete {
                 scope: self.scope.clone(),
                 result: GitReadResultV1::Hunks(GitQueryEnvelopeV1 {
-                    value: Vec::new(),
+                    value: GitHunkPreviewInputV1 {
+                        preview_input_id: GitIndexPreviewId::new("preview.test").unwrap(),
+                        repository_snapshot_digest: ManifestDigest::new(format!(
+                            "sha256:{}",
+                            "a".repeat(64)
+                        ))
+                        .unwrap(),
+                        expires_at: UtcMicros(10),
+                        hunks: Vec::new(),
+                    },
                     coverage: GitCoverageV1::complete(),
                     truncated_by_bound: false,
                 }),
@@ -525,6 +589,33 @@ mod tests {
                 reason: GitReadUnavailableReasonV1::AuthorityAbsent,
             }
         );
+    }
+
+    #[test]
+    fn hunk_request_wire_never_accepts_or_exposes_daemon_preview_binding() {
+        let request = GitReadRequestV1::Hunks {
+            scope: tracedecay_domain::GitDiffScopeV1::Staged,
+            daemon_binding: Some(DaemonGitHunkPreviewBindingV1 {
+                preview_id: GitIndexPreviewId::new("preview.private").unwrap(),
+                snapshot_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+                expires_at: UtcMicros(30),
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({"query": "hunks", "scope": {"scope": "staged"}})
+        );
+        let decoded: GitReadRequestV1 = serde_json::from_value(
+            serde_json::json!({"query": "hunks", "scope": {"scope": "staged"}}),
+        )
+        .unwrap();
+        assert!(matches!(
+            decoded,
+            GitReadRequestV1::Hunks {
+                daemon_binding: None,
+                ..
+            }
+        ));
     }
 
     #[test]

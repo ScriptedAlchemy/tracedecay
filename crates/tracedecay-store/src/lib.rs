@@ -80,9 +80,11 @@ pub use external_source::{
     apply_source_commit, apply_source_projection, build_source_projection,
 };
 pub use git_index_transactions::{
-    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,
-    GitIndexTransactionRecordV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
-    GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
+    GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionRecordV1, GitIndexTransactionStore,
+    GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
+    GitIndexTransactionTerminalWriteV1, MAX_GIT_INDEX_PREVIEW_INPUT_BYTES,
+    MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
 };
 pub use memory::{
     CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,

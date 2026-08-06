@@ -9,25 +9,25 @@
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
-    GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewV1, GitIndexTransactionId,
-    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, RepositoryId,
+    GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
+    GitIndexTransactionId, GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1,
+    RepositoryId, UtcMicros,
 };
 use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesQueryV1,
-    CodeRecoveryRepositoriesQueryV1, GitIndexTransactionBeginRequestV1,
+    CodeRecoveryRepositoriesQueryV1, GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
     GitIndexTransactionBeginResultV1, GitIndexTransactionRecordV1, GitIndexTransactionStore,
     GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
-    GitIndexTransactionTerminalWriteV1,
+    GitIndexTransactionTerminalWriteV1, MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
 };
 
 #[cfg(test)]
 use crate::db::engine::TestConnection;
 use crate::global_db::{
     GitIndexReadExecutor, GlobalDbGitIndexTransactionStore, RegisteredGlobalDb,
-    ensure_git_index_transaction_schema,
 };
 
 /// The actor queue is intentionally finite: saturation fails closed instead of
@@ -41,6 +41,13 @@ const GIT_INDEX_TRANSACTION_STORE_ACTOR_TIMEOUT: Duration = Duration::from_secs(
 type Reply<T> = SyncSender<GitIndexTransactionStoreResult<T>>;
 
 enum StoreCommand {
+    SavePreviewInput(GitIndexPreviewInputV1, Reply<()>),
+    ReadPreviewInput(
+        GitIndexPreviewId,
+        UtcMicros,
+        Reply<GitIndexPreviewInputReadV1>,
+    ),
+    PurgeExpiredPreviewInputs(UtcMicros, usize, Reply<usize>),
     SavePreview(GitIndexPreviewV1, Reply<()>),
     ReadCode(CodeReadOperationV1, Reply<CodeReadResultV1>),
     BeginOrReplay(
@@ -80,7 +87,10 @@ pub(crate) struct DaemonGitIndexTransactionStore {
 enum ActorDatabase {
     Registered(Arc<RegisteredGlobalDb>),
     #[cfg(test)]
-    Engine(Box<TestConnection>),
+    Engine {
+        database: Box<TestConnection>,
+        gc_observer: Option<Arc<PreviewGcTestObserver>>,
+    },
 }
 
 impl ActorDatabase {
@@ -88,41 +98,52 @@ impl ActorDatabase {
         match self {
             Self::Registered(database) => database.git_index_transaction_store(),
             #[cfg(test)]
-            Self::Engine(database) => GlobalDbGitIndexTransactionStore::for_engine_test(database),
+            Self::Engine { database, .. } => {
+                GlobalDbGitIndexTransactionStore::for_engine_test(database)
+            }
         }
     }
 
-    async fn ensure_schema(&self) -> GitIndexTransactionStoreResult<()> {
-        match self {
-            Self::Registered(database) => {
-                let transaction = database
-                    .begin_write_transaction()
-                    .await
-                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-                ensure_git_index_transaction_schema(&transaction)
-                    .await
-                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)
-            }
-            #[cfg(test)]
-            Self::Engine(database) => {
-                let transaction = database
-                    .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
-                    .await
-                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-                ensure_git_index_transaction_schema(&transaction)
-                    .await
-                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)
+    async fn next_live_preview_input_expiry(
+        &self,
+    ) -> GitIndexTransactionStoreResult<Option<UtcMicros>> {
+        self.git_index_transaction_store()
+            .next_live_preview_input_expiry()
+            .await
+    }
+
+    async fn purge_expired_preview_inputs(
+        &self,
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> GitIndexTransactionStoreResult<crate::global_db::GitIndexPreviewInputGcResult> {
+        #[cfg(test)]
+        if let Self::Engine {
+            gc_observer: Some(observer),
+            ..
+        } = self
+        {
+            observer
+                .purge_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if observer
+                .fail_purge
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(GitIndexTransactionStoreError::Unavailable);
             }
         }
+        self.git_index_transaction_store()
+            .purge_expired_preview_inputs_and_next(observed_at, limit)
+            .await
     }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct PreviewGcTestObserver {
+    purge_attempts: std::sync::atomic::AtomicUsize,
+    fail_purge: std::sync::atomic::AtomicBool,
 }
 
 impl DaemonGitIndexTransactionStore {
@@ -134,7 +155,21 @@ impl DaemonGitIndexTransactionStore {
     pub(crate) fn open_engine_test(
         database: TestConnection,
     ) -> GitIndexTransactionStoreResult<Self> {
-        Self::open_actor(ActorDatabase::Engine(Box::new(database)))
+        Self::open_actor(ActorDatabase::Engine {
+            database: Box::new(database),
+            gc_observer: None,
+        })
+    }
+
+    #[cfg(test)]
+    fn open_engine_test_with_gc_observer(
+        database: TestConnection,
+        observer: Arc<PreviewGcTestObserver>,
+    ) -> GitIndexTransactionStoreResult<Self> {
+        Self::open_actor(ActorDatabase::Engine {
+            database: Box::new(database),
+            gc_observer: Some(observer),
+        })
     }
 
     fn open_actor(database: ActorDatabase) -> GitIndexTransactionStoreResult<Self> {
@@ -150,12 +185,15 @@ impl DaemonGitIndexTransactionStore {
                     let _ = ready.send(Err(GitIndexTransactionStoreError::Unavailable));
                     return;
                 };
-                let schema = runtime.block_on(database.ensure_schema());
-                let schema_ready = schema.is_ok();
-                if ready.send(schema).is_err() || !schema_ready {
+                let next_expiry = runtime.block_on(database.next_live_preview_input_expiry());
+                let Ok(next_expiry) = next_expiry else {
+                    let _ = ready.send(Err(GitIndexTransactionStoreError::Unavailable));
+                    return;
+                };
+                if ready.send(Ok(())).is_err() {
                     return;
                 }
-                run_store_actor(&runtime, &database, &receiver);
+                run_store_actor(&runtime, &database, &receiver, next_expiry);
             })
             .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
         let startup = started
@@ -207,22 +245,71 @@ impl DaemonGitIndexTransactionStore {
         self.submit(StoreCommand::ReadCode(operation, reply))?;
         Self::await_reply(&receiver)
     }
+
+    pub(crate) fn shutdown(&self) -> GitIndexTransactionStoreResult<bool> {
+        self.commands
+            .lock()
+            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?
+            .take();
+        let worker = self
+            .worker
+            .lock()
+            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?
+            .take();
+        let Some(worker) = worker else {
+            return Ok(false);
+        };
+        worker
+            .join()
+            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+        Ok(true)
+    }
 }
 
 impl Drop for DaemonGitIndexTransactionStore {
     fn drop(&mut self) {
-        if let Ok(commands) = self.commands.get_mut() {
-            commands.take();
-        }
-        if let Ok(worker) = self.worker.get_mut()
-            && let Some(worker) = worker.take()
-        {
-            let _ = worker.join();
-        }
+        let _ = self.shutdown();
     }
 }
 
 impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
+    fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> GitIndexTransactionStoreResult<()> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::SavePreviewInput(input, reply))?;
+        Self::await_reply(&receiver)
+    }
+
+    fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::ReadPreviewInput(
+            preview_id.clone(),
+            observed_at,
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
+
+    fn purge_expired_preview_inputs(
+        &self,
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> GitIndexTransactionStoreResult<usize> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::PurgeExpiredPreviewInputs(
+            observed_at,
+            limit,
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
+
     fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
         let (reply, receiver) = sync_channel(1);
         self.submit(StoreCommand::SavePreview(preview, reply))?;
@@ -235,6 +322,18 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
     ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
         match self.execute_code_read(CodeReadOperationV1::Preview(preview_id.clone()))? {
             CodeReadResultV1::Preview(preview) => Ok(*preview),
+            _ => Err(GitIndexTransactionStoreError::Unavailable),
+        }
+    }
+
+    fn read_record(
+        &self,
+        idempotency_key: &GitIndexIdempotencyKey,
+    ) -> GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>> {
+        match self.execute_code_read(CodeReadOperationV1::TransactionRecord(
+            idempotency_key.clone(),
+        ))? {
+            CodeReadResultV1::TransactionRecord(record) => Ok(*record),
             _ => Err(GitIndexTransactionStoreError::Unavailable),
         }
     }
@@ -336,9 +435,106 @@ fn run_store_actor(
     runtime: &tokio::runtime::Runtime,
     database: &ActorDatabase,
     receiver: &Receiver<StoreCommand>,
+    mut next_expiry: Option<UtcMicros>,
 ) {
-    while let Ok(command) = receiver.recv() {
+    let mut gc_due = false;
+    loop {
+        let timeout = if gc_due {
+            None
+        } else if let Some(expires_at) = next_expiry {
+            let observed_at = match current_utc_micros() {
+                Ok(observed_at) => observed_at,
+                Err(_) => match receiver.recv() {
+                    Ok(command) => {
+                        reject_store_command(command);
+                        continue;
+                    }
+                    Err(_) => break,
+                },
+            };
+            Some(duration_until(expires_at, observed_at))
+        } else {
+            None
+        };
+        let command = match timeout {
+            Some(timeout) => match receiver.recv_timeout(timeout) {
+                Ok(command) => Some(command),
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => None,
+            },
+            None => match receiver.recv() {
+                Ok(command) => Some(command),
+                Err(_) => break,
+            },
+        };
+
+        let observed_at = match current_utc_micros() {
+            Ok(observed_at) => observed_at,
+            Err(_) => {
+                if let Some(command) = command {
+                    reject_store_command(command);
+                }
+                continue;
+            }
+        };
+        gc_due |= next_expiry.is_some_and(|expires_at| expires_at <= observed_at);
+        if gc_due {
+            match runtime.block_on(
+                database.purge_expired_preview_inputs(
+                    observed_at,
+                    MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
+                ),
+            ) {
+                Ok(result) => {
+                    next_expiry = result.next_expiry;
+                    gc_due = false;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "git index preview input GC failed");
+                    if let Some(command) = command {
+                        reject_store_command(command);
+                    }
+                    continue;
+                }
+            }
+        }
+        let Some(command) = command else {
+            continue;
+        };
         match command {
+            StoreCommand::SavePreviewInput(input, reply) => {
+                let expires_at = input.expires_at;
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .save_preview_input(input),
+                );
+                if result.is_ok() && next_expiry.is_none_or(|current| expires_at < current) {
+                    next_expiry = Some(expires_at);
+                }
+                let _ = reply.send(result);
+            }
+            StoreCommand::ReadPreviewInput(preview_id, observed_at, reply) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .read_preview_input(&preview_id, observed_at),
+                );
+                let _ = reply.send(result);
+            }
+            StoreCommand::PurgeExpiredPreviewInputs(observed_at, limit, reply) => {
+                let result =
+                    runtime.block_on(database.purge_expired_preview_inputs(observed_at, limit));
+                match result {
+                    Ok(result) => {
+                        next_expiry = result.next_expiry;
+                        let _ = reply.send(Ok(result.purged));
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
             StoreCommand::SavePreview(preview, reply) => {
                 let result =
                     runtime.block_on(database.git_index_transaction_store().save_preview(preview));
@@ -396,6 +592,58 @@ fn run_store_actor(
     }
 }
 
+fn duration_until(expires_at: UtcMicros, observed_at: UtcMicros) -> Duration {
+    if expires_at <= observed_at {
+        return Duration::ZERO;
+    }
+    Duration::from_micros(expires_at.0.saturating_sub(observed_at.0).unsigned_abs())
+}
+
+fn reject_store_command(command: StoreCommand) {
+    let error = || GitIndexTransactionStoreError::Unavailable;
+    match command {
+        StoreCommand::SavePreviewInput(_, reply) => {
+            let _ = reply.send(Err(error()));
+        }
+        StoreCommand::ReadPreviewInput(_, _, reply) => {
+            let _ = reply.send(Err(error()));
+        }
+        StoreCommand::PurgeExpiredPreviewInputs(_, _, reply) => {
+            let _ = reply.send(Err(error()));
+        }
+        StoreCommand::SavePreview(_, reply) => {
+            let _ = reply.send(Err(error()));
+        }
+        StoreCommand::ReadCode(_, reply) => {
+            let _ = reply.send(Err(error()));
+        }
+        StoreCommand::BeginOrReplay(_, reply) => {
+            let _ = reply.send(Err(error()));
+        }
+        StoreCommand::CompareAndSwapJournal(_, _, _, reply) => {
+            let _ = reply.send(Err(error()));
+        }
+        StoreCommand::WriteTerminal(_, reply) => {
+            let _ = reply.send(Err(error()));
+        }
+        StoreCommand::QuarantineRepository(_, _, reply) => {
+            let _ = reply.send(Err(error()));
+        }
+        StoreCommand::ClearRepositoryQuarantine(_, _, _, reply) => {
+            let _ = reply.send(Err(error()));
+        }
+    }
+}
+
+fn current_utc_micros() -> GitIndexTransactionStoreResult<UtcMicros> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+    let micros = i64::try_from(elapsed.as_micros())
+        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+    Ok(UtcMicros(micros))
+}
+
 /// Shared handle to the one daemon-owned store actor for a project database.
 ///
 /// This local newtype exists so the foreign `GitIndexTransactionStore` trait
@@ -410,9 +658,36 @@ impl SharedDaemonGitIndexTransactionStore {
     pub(crate) fn from_arc(inner: Arc<DaemonGitIndexTransactionStore>) -> Self {
         Self { inner }
     }
+
+    pub(crate) fn shutdown(&self) -> GitIndexTransactionStoreResult<bool> {
+        self.inner.shutdown()
+    }
 }
 
 impl GitIndexTransactionStore for SharedDaemonGitIndexTransactionStore {
+    fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> GitIndexTransactionStoreResult<()> {
+        self.inner.save_preview_input(input)
+    }
+
+    fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1> {
+        self.inner.read_preview_input(preview_id, observed_at)
+    }
+
+    fn purge_expired_preview_inputs(
+        &self,
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> GitIndexTransactionStoreResult<usize> {
+        self.inner.purge_expired_preview_inputs(observed_at, limit)
+    }
+
     fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
         self.inner.save_preview(preview)
     }
@@ -422,6 +697,13 @@ impl GitIndexTransactionStore for SharedDaemonGitIndexTransactionStore {
         preview_id: &GitIndexPreviewId,
     ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
         self.inner.read_preview(preview_id)
+    }
+
+    fn read_record(
+        &self,
+        idempotency_key: &GitIndexIdempotencyKey,
+    ) -> GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>> {
+        self.inner.read_record(idempotency_key)
     }
 
     fn begin_or_replay(
@@ -476,5 +758,233 @@ impl GitIndexTransactionStore for SharedDaemonGitIndexTransactionStore {
     ) -> GitIndexTransactionStoreResult<()> {
         self.inner
             .clear_repository_quarantine(repository_id, transaction_id, recovery_receipt)
+    }
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn initialized_database(path: &Path) -> TestConnection {
+        let database = TestConnection::open(path);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("schema runtime");
+        runtime.block_on(async {
+            let transaction = database
+                .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
+                .await
+                .expect("schema transaction");
+            crate::global_db::ensure_git_index_transaction_schema(&transaction)
+                .await
+                .expect("install Git transaction schema");
+            transaction.commit().await.expect("commit Git schema");
+        });
+        database
+    }
+
+    fn preview_input(
+        suffix: &str,
+        created_at: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> GitIndexPreviewInputV1 {
+        let template =
+            super::super::test_support::preview_input(&super::super::test_support::preview());
+        GitIndexPreviewInputV1::new_commit(
+            GitIndexPreviewId::new(format!("preview.gc.{suffix}")).expect("preview id"),
+            template.repository_snapshot,
+            template.commit_intent.expect("commit intent"),
+            created_at,
+            expires_at,
+        )
+        .expect("preview input")
+    }
+
+    fn wait_for_attempts(observer: &PreviewGcTestObserver, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while observer.purge_attempts.load(Ordering::SeqCst) < expected && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            observer.purge_attempts.load(Ordering::SeqCst),
+            expected,
+            "expected bounded preview GC attempt"
+        );
+    }
+
+    #[test]
+    fn empty_store_has_zero_gc_writes_over_time() {
+        let directory = TempDir::new().expect("directory");
+        let observer = Arc::new(PreviewGcTestObserver::default());
+        let _store = DaemonGitIndexTransactionStore::open_engine_test_with_gc_observer(
+            initialized_database(&directory.path().join("store.db")),
+            Arc::clone(&observer),
+        )
+        .expect("store actor");
+
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn one_expiry_causes_one_bounded_purge_and_then_sleeps() {
+        let directory = TempDir::new().expect("directory");
+        let observer = Arc::new(PreviewGcTestObserver::default());
+        let store = DaemonGitIndexTransactionStore::open_engine_test_with_gc_observer(
+            initialized_database(&directory.path().join("store.db")),
+            Arc::clone(&observer),
+        )
+        .expect("store actor");
+        let created_at = current_utc_micros().expect("clock");
+        let input = preview_input(
+            "one",
+            created_at,
+            UtcMicros(created_at.0.saturating_add(100_000)),
+        );
+        let preview_id = input.preview_id.clone();
+        store.save_preview_input(input).expect("save preview input");
+
+        wait_for_attempts(&observer, 1);
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            store
+                .read_preview_input(&preview_id, current_utc_micros().expect("clock"))
+                .expect("read tombstone"),
+            GitIndexPreviewInputReadV1::Expired {
+                purged_at: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn save_command_wake_lowers_the_known_expiry_deadline() {
+        let directory = TempDir::new().expect("directory");
+        let observer = Arc::new(PreviewGcTestObserver::default());
+        let store = DaemonGitIndexTransactionStore::open_engine_test_with_gc_observer(
+            initialized_database(&directory.path().join("store.db")),
+            Arc::clone(&observer),
+        )
+        .expect("store actor");
+        let created_at = current_utc_micros().expect("clock");
+        store
+            .save_preview_input(preview_input(
+                "later",
+                created_at,
+                UtcMicros(created_at.0.saturating_add(2_000_000)),
+            ))
+            .expect("save later input");
+        store
+            .save_preview_input(preview_input(
+                "sooner",
+                created_at,
+                UtcMicros(created_at.0.saturating_add(100_000)),
+            ))
+            .expect("save sooner input");
+
+        wait_for_attempts(&observer, 1);
+
+        assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn restart_reconstructs_expired_cleanup_deadline() {
+        let directory = TempDir::new().expect("directory");
+        let path = directory.path().join("store.db");
+        let now = current_utc_micros().expect("clock");
+        // The input is created durable and already expired, and the daemon
+        // actor that wrote it is gone: only the restarted actor can
+        // reconstruct the cleanup deadline. Seeding through the engine store
+        // keeps the pre-restart daemon GC from racing the fixture under load.
+        let created_at = UtcMicros(now.0.saturating_sub(1_000_000));
+        let input = preview_input(
+            "restart",
+            created_at,
+            UtcMicros(created_at.0.saturating_add(100_000)),
+        );
+        let preview_id = input.preview_id.clone();
+        {
+            let database = initialized_database(&path);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("seed runtime");
+            runtime
+                .block_on(
+                    GlobalDbGitIndexTransactionStore::for_engine_test(&database)
+                        .save_preview_input(input),
+                )
+                .expect("save preview input");
+        }
+
+        let observer = Arc::new(PreviewGcTestObserver::default());
+        let store = DaemonGitIndexTransactionStore::open_engine_test_with_gc_observer(
+            TestConnection::open(&path),
+            Arc::clone(&observer),
+        )
+        .expect("restarted store actor");
+        wait_for_attempts(&observer, 1);
+
+        assert!(matches!(
+            store
+                .read_preview_input(&preview_id, current_utc_micros().expect("clock"))
+                .expect("read restart tombstone"),
+            GitIndexPreviewInputReadV1::Expired {
+                purged_at: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn failed_due_gc_waits_for_command_and_never_fabricates_success() {
+        let directory = TempDir::new().expect("directory");
+        let observer = Arc::new(PreviewGcTestObserver::default());
+        observer.fail_purge.store(true, Ordering::SeqCst);
+        let store = DaemonGitIndexTransactionStore::open_engine_test_with_gc_observer(
+            initialized_database(&directory.path().join("store.db")),
+            Arc::clone(&observer),
+        )
+        .expect("store actor");
+        let created_at = current_utc_micros().expect("clock");
+        let input = preview_input(
+            "failure",
+            created_at,
+            UtcMicros(created_at.0.saturating_add(100_000)),
+        );
+        let preview_id = input.preview_id.clone();
+        store.save_preview_input(input).expect("save preview input");
+        wait_for_attempts(&observer, 1);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            store.read_preview_input(&preview_id, current_utc_micros().expect("clock")),
+            Err(GitIndexTransactionStoreError::Unavailable)
+        );
+        assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 2);
+
+        observer.fail_purge.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            store
+                .read_preview_input(&preview_id, current_utc_micros().expect("clock"))
+                .expect("retry purge before command"),
+            GitIndexPreviewInputReadV1::Expired {
+                purged_at: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 3);
     }
 }
