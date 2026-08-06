@@ -127,12 +127,13 @@ pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> H
         (HookHostV1::Hermes, SessionBoundary | ToolLifecycle) => Native,
         (HookHostV1::Hermes, SavedEdit | TestLifecycle) => ReceiptDerived,
         (HookHostV1::Hermes, PromptBoundary) => Unavailable,
-        (
-            HookHostV1::Kiro,
-            SessionBoundary | PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
-        ) => Unavailable,
+        (HookHostV1::Kiro, PromptBoundary) => Native,
+        (HookHostV1::Kiro, SessionBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
+            Unavailable
+        }
         (HookHostV1::KimiCode, ToolLifecycle | SavedEdit) => Native,
-        (HookHostV1::KimiCode, SessionBoundary | PromptBoundary | TestLifecycle) => Unavailable,
+        (HookHostV1::KimiCode, SessionBoundary) => Native,
+        (HookHostV1::KimiCode, PromptBoundary | TestLifecycle) => Unavailable,
         (HookHostV1::OpenCode, SessionBoundary | ToolLifecycle | SavedEdit) => Native,
         (HookHostV1::OpenCode, PromptBoundary | TestLifecycle) => Unavailable,
         (
@@ -474,13 +475,13 @@ mod tests {
         );
         assert_eq!(
             stock_event_support(HookHostV1::Kiro, HookEventFamily::PromptBoundary),
-            HookEventSupportV1::Unavailable,
-            "the documented Kiro callback has no replay-safe provider event identity"
+            HookEventSupportV1::Native,
+            "the checked-in Kiro userPromptSubmit capture proves this native family"
         );
         assert_eq!(
             stock_event_support(HookHostV1::KimiCode, HookEventFamily::SessionBoundary),
-            HookEventSupportV1::Unavailable,
-            "the captured Kimi Stop callback has no provider event identity"
+            HookEventSupportV1::Native,
+            "the checked-in Kimi Stop capture proves this native family"
         );
         assert_eq!(
             stock_event_support(HookHostV1::CursorCloud, HookEventFamily::SessionBoundary),

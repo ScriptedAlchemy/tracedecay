@@ -351,14 +351,6 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
         None => return commands::handle_no_command().await,
     };
 
-    let _hook_lease = match hook_cmd::admit_hook_command(&command) {
-        hook_cmd::HookAdmission::NotHook => None,
-        hook_cmd::HookAdmission::Acquired(lease) => Some(lease),
-        hook_cmd::HookAdmission::Busy => {
-            hook_cmd::drain_busy_hook_stdin(&command);
-            return Ok(());
-        }
-    };
     run_startup_preamble(&command).await;
     dispatch_command(command, host_bundle).await
 }
@@ -1354,7 +1346,7 @@ enum CommandStartupPolicy {
 
 impl CommandStartupPolicy {
     fn for_command(command: &Commands) -> Self {
-        if hook_cmd::hook_input(command).is_some() {
+        if hook_capture_cmd::is_native_hook_command(command) {
             return Self::SkipAll;
         }
 
