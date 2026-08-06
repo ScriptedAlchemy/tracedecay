@@ -55,7 +55,7 @@ pub(super) fn def_grep() -> ToolDefinition {
     def_always_load(
         "tracedecay_grep",
         "Grep Content",
-        "grep, ripgrep, rg, text search, find string. Literal/regex content search over the project working tree (respects .gitignore, skips binary files), graph-enriched: each hit resolves the enclosing symbol so the natural next call is tracedecay_body. Routing: use this for literal/regex content search (string literals, config keys, error messages); for symbol names use tracedecay_search; for concepts use tracedecay_context. Defaults to the active project; pass project_id/project_path only when intentionally searching another registered project.",
+        "grep, ripgrep, rg, text search, find string. Literal/regex content search over UTF-8 text sources in the project working tree (respects .gitignore; binary and non-UTF-8 files are outside the search scope), graph-enriched: each hit resolves the enclosing symbol so the natural next call is tracedecay_body. Bounded file or line omissions and unavailable source candidates are reported as partial coverage. Routing: use this for literal/regex content search (string literals, config keys, error messages); for symbol names use tracedecay_search; for concepts use tracedecay_context. Defaults to the active project; pass project_id/project_path only when intentionally searching another registered project.",
         json!({
             "type": "object",
             "properties": with_project_selector_properties(json!({

@@ -1,10 +1,10 @@
 //! Content-search tool handler: `tracedecay_grep`.
 //!
-//! Literal/regex search over the project working tree (respecting
-//! `.gitignore`), graph-enriched: each hit resolves the enclosing symbol from
-//! the code graph so the natural follow-up is `tracedecay_body`. This closes
-//! the gap that made agents fall back to raw `rg` — `tracedecay_search` only
-//! matches symbol *names*, not file *content*.
+//! Literal/regex search over UTF-8 text sources in the project working tree
+//! (respecting `.gitignore`), graph-enriched: each hit resolves the enclosing
+//! symbol from the code graph so the natural follow-up is `tracedecay_body`.
+//! This closes the gap that made agents fall back to raw `rg` —
+//! `tracedecay_search` only matches symbol *names*, not file *content*.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,10 @@ use ignore::overrides::{Override, OverrideBuilder};
 use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
+use tracedecay_application::{
+    CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain, Omission,
+    OmissionReason,
+};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
@@ -145,10 +149,16 @@ pub(super) async fn handle_grep(
     }
 
     let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_str()));
-    let output_value = build_output_value(&hits, truncated, scan.files_scanned);
+    let output_value = build_output_value(
+        &hits,
+        truncated,
+        scan.files_scanned,
+        scan.lines_examined,
+        scan.omissions,
+    );
 
     let text = render::finalize(Some(cg.project_root()), &args, &output_value, || {
-        render_grep_md(&hits, truncated, scan.files_scanned)
+        render_grep_md(&hits, truncated, scan.files_scanned, scan.omissions)
     });
     Ok(ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
@@ -237,7 +247,26 @@ async fn scan_tree_off_thread(
 pub(crate) struct ScanResult {
     pub(crate) hits: Vec<GrepHit>,
     pub(crate) files_scanned: usize,
+    pub(crate) lines_examined: usize,
+    pub(crate) omissions: ScanOmissionCounts,
     pub(crate) truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScanOmissionCounts {
+    pub(crate) oversized_files: usize,
+    pub(crate) oversized_lines: usize,
+    pub(crate) unavailable_sources: usize,
+}
+
+impl ScanOmissionCounts {
+    fn budget(self) -> usize {
+        self.oversized_files + self.oversized_lines
+    }
+
+    fn any(self) -> bool {
+        self.budget() > 0 || self.unavailable_sources > 0
+    }
 }
 
 struct GeneratedDirScope {
@@ -352,14 +381,23 @@ where
 
     let mut hits: Vec<GrepHit> = Vec::new();
     let mut files_scanned = 0usize;
+    let mut lines_examined = 0usize;
+    let mut omissions = ScanOmissionCounts::default();
     let mut truncated = false;
 
     for entry in walker {
         if is_cancelled() {
             break;
         }
-        let Ok(entry) = entry else { continue };
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                omissions.unavailable_sources += 1;
+                continue;
+            }
+        };
         let Some(ft) = entry.file_type() else {
+            omissions.unavailable_sources += 1;
             continue;
         };
         if !ft.is_file() {
@@ -367,6 +405,7 @@ where
         }
         let path = entry.path();
         let Ok(rel) = path.strip_prefix(project_root) else {
+            omissions.unavailable_sources += 1;
             continue;
         };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
@@ -374,17 +413,26 @@ where
         if is_cancelled() {
             break;
         }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                omissions.unavailable_sources += 1;
+                continue;
+            }
         };
         if metadata.len() > MAX_FILE_BYTES {
+            omissions.oversized_files += 1;
             continue;
         }
         if is_cancelled() {
             break;
         }
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                omissions.unavailable_sources += 1;
+                continue;
+            }
         };
         if looks_binary(&bytes) {
             continue;
@@ -401,12 +449,16 @@ where
                 return ScanResult {
                     hits,
                     files_scanned,
+                    lines_examined,
+                    omissions,
                     truncated,
                 };
             }
             if line.len() > MAX_LINE_BYTES {
+                omissions.oversized_lines += 1;
                 continue;
             }
+            lines_examined += 1;
             if !matcher.is_match(line) {
                 continue;
             }
@@ -436,6 +488,8 @@ where
                 return ScanResult {
                     hits,
                     files_scanned,
+                    lines_examined,
+                    omissions,
                     truncated,
                 };
             }
@@ -445,6 +499,8 @@ where
     ScanResult {
         hits,
         files_scanned,
+        lines_examined,
+        omissions,
         truncated,
     }
 }
@@ -463,7 +519,59 @@ fn looks_binary(bytes: &[u8]) -> bool {
     head.contains(&0)
 }
 
-fn build_output_value(hits: &[GrepHit], truncated: bool, files_scanned: usize) -> Value {
+fn grep_metadata(
+    lines_examined: usize,
+    returned: usize,
+    truncated: bool,
+    omission_counts: ScanOmissionCounts,
+) -> (EvidenceCoverage, Vec<Omission>) {
+    let completeness = if truncated || omission_counts.any() {
+        CoverageCompleteness::Partial
+    } else {
+        CoverageCompleteness::Complete
+    };
+    let visited = lines_examined as u64;
+    let returned = returned as u64;
+    let coverage = EvidenceCoverage {
+        requested_domains: vec![EvidenceDomain::Source],
+        // Coverage counts use matching lines as the eligible/returned grain.
+        // `visited` is every bounded text line actually tested by the matcher;
+        // any omission makes the total eligible matches unknown.
+        visited: Some(visited),
+        eligible: (completeness == CoverageCompleteness::Complete).then_some(returned),
+        returned,
+        completeness,
+        domains: vec![CoverageDomainState {
+            domain: EvidenceDomain::Source,
+            completeness,
+        }],
+    };
+    let mut omissions = Vec::with_capacity(2);
+    let budget_omissions = omission_counts.budget();
+    if budget_omissions > 0 {
+        omissions.push(Omission {
+            domain: EvidenceDomain::Source,
+            count: budget_omissions as u64,
+            reason: OmissionReason::Budget,
+        });
+    }
+    if omission_counts.unavailable_sources > 0 {
+        omissions.push(Omission {
+            domain: EvidenceDomain::Source,
+            count: omission_counts.unavailable_sources as u64,
+            reason: OmissionReason::Unavailable,
+        });
+    }
+    (coverage, omissions)
+}
+
+fn build_output_value(
+    hits: &[GrepHit],
+    truncated: bool,
+    files_scanned: usize,
+    lines_examined: usize,
+    omission_counts: ScanOmissionCounts,
+) -> Value {
     let items: Vec<Value> = hits
         .iter()
         .map(|hit| {
@@ -490,21 +598,31 @@ fn build_output_value(hits: &[GrepHit], truncated: bool, files_scanned: usize) -
             item
         })
         .collect();
+    let (coverage, omissions) =
+        grep_metadata(lines_examined, hits.len(), truncated, omission_counts);
 
     json!({
         "results": items,
         "match_count": hits.len(),
         "files_scanned": files_scanned,
         "truncated": truncated,
+        "coverage": coverage,
+        "omissions": omissions,
     })
 }
 
-fn render_grep_md(hits: &[GrepHit], truncated: bool, files_scanned: usize) -> String {
+fn render_grep_md(
+    hits: &[GrepHit],
+    truncated: bool,
+    files_scanned: usize,
+    omission_counts: ScanOmissionCounts,
+) -> String {
     let mut md = Md::new();
     md.heading(2, "Grep Results");
     if hits.is_empty() {
         md.empty_note("No matching lines.");
         md.line(&format!("_Scanned {files_scanned} files._"));
+        append_partial_coverage_md(&mut md, omission_counts);
         return md.render();
     }
 
@@ -539,7 +657,47 @@ fn render_grep_md(hits: &[GrepHit], truncated: bool, files_scanned: usize) -> St
         );
     }
     md.line(&summary);
+    append_partial_coverage_md(&mut md, omission_counts);
     md.render()
+}
+
+fn append_partial_coverage_md(md: &mut Md, omissions: ScanOmissionCounts) {
+    if omissions.oversized_files > 0 {
+        let noun = if omissions.oversized_files == 1 {
+            "file"
+        } else {
+            "files"
+        };
+        md.line(&format!(
+            "_Coverage is partial: skipped {} {noun} larger than the \
+             {MAX_FILE_BYTES}-byte scan limit; matching lines may be omitted._",
+            omissions.oversized_files
+        ));
+    }
+    if omissions.oversized_lines > 0 {
+        let noun = if omissions.oversized_lines == 1 {
+            "line"
+        } else {
+            "lines"
+        };
+        md.line(&format!(
+            "_Coverage is partial: skipped {} {noun} longer than the \
+             {MAX_LINE_BYTES}-byte scan limit; matching lines may be omitted._",
+            omissions.oversized_lines
+        ));
+    }
+    if omissions.unavailable_sources > 0 {
+        let noun = if omissions.unavailable_sources == 1 {
+            "source candidate was"
+        } else {
+            "source candidates were"
+        };
+        md.line(&format!(
+            "_Coverage is partial: {} {noun} unavailable during the scan; matching lines may be \
+             omitted._",
+            omissions.unavailable_sources
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -678,24 +836,157 @@ mod tests {
         assert!(checks.load(Ordering::Relaxed) > 10);
     }
 
+    fn write_oversized_match(path: &Path, pattern: &str) {
+        let mut source = format!("{pattern}\n").into_bytes();
+        source.resize((MAX_FILE_BYTES as usize) + 1, b'x');
+        std::fs::write(path, source).expect("oversized fixture");
+    }
+
+    fn assert_partial_output(output: &Value, visited: u64, returned: u64, omissions: Value) {
+        assert_eq!(output["truncated"], json!(false));
+        assert_eq!(output["coverage"]["completeness"], json!("partial"));
+        assert_eq!(output["coverage"]["visited"], json!(visited));
+        assert_eq!(output["coverage"]["eligible"], Value::Null);
+        assert_eq!(output["coverage"]["returned"], json!(returned));
+        assert_eq!(output["omissions"], omissions);
+    }
+
+    fn scan_output(project: &Path, pattern: &str) -> (ScanResult, Value) {
+        let matcher = Regex::new(pattern).expect("matcher");
+        let scan = scan_tree(project, &matcher, None, None, 0, 10, || false);
+        let output = build_output_value(
+            &scan.hits,
+            scan.truncated,
+            scan.files_scanned,
+            scan.lines_examined,
+            scan.omissions,
+        );
+        (scan, output)
+    }
+
+    fn rendered_scan(scan: &ScanResult) -> String {
+        render_grep_md(
+            &scan.hits,
+            scan.truncated,
+            scan.files_scanned,
+            scan.omissions,
+        )
+    }
+
+    fn one_budget_omission() -> Value {
+        json!([{"domain": "source", "count": 1, "reason": "budget"}])
+    }
+
     #[test]
-    fn scan_tree_skips_files_larger_than_two_megabytes() {
+    fn matching_oversized_file_reports_partial_coverage_without_result_truncation() {
         let project = tempfile::tempdir().expect("temp project");
-        let mut oversized = b"OVERSIZED_FILE_TOKEN\n".to_vec();
-        oversized.resize((MAX_FILE_BYTES as usize) + 1, b'x');
-        std::fs::write(project.path().join("oversized.txt"), oversized).expect("oversized fixture");
-        std::fs::write(project.path().join("tracked.txt"), "OVERSIZED_FILE_TOKEN\n")
-            .expect("source fixture");
+        write_oversized_match(
+            &project.path().join("oversized.txt"),
+            "OVERSIZED_ONLY_TOKEN",
+        );
 
-        let matcher = Regex::new("OVERSIZED_FILE_TOKEN").expect("matcher");
-        let scan = scan_tree(project.path(), &matcher, None, None, 0, 10, || false);
-        let files = scan
-            .hits
-            .iter()
-            .map(|hit| hit.file.as_str())
-            .collect::<Vec<_>>();
+        let (scan, output) = scan_output(project.path(), "OVERSIZED_ONLY_TOKEN");
 
-        assert!(files.contains(&"tracked.txt"), "{files:?}");
-        assert!(!files.contains(&"oversized.txt"), "{files:?}");
+        assert!(scan.hits.is_empty());
+        assert_eq!(scan.omissions.oversized_files, 1);
+        assert!(!scan.truncated);
+        assert_partial_output(&output, 0, 0, one_budget_omission());
+
+        let markdown = rendered_scan(&scan);
+        assert!(markdown.contains("No matching lines."), "{markdown}");
+        assert!(
+            markdown.contains("skipped 1 file larger than the 2000000-byte scan limit"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn mixed_ordinary_and_oversized_files_return_hits_with_partial_coverage() {
+        let project = tempfile::tempdir().expect("temp project");
+        write_oversized_match(
+            &project.path().join("oversized.txt"),
+            "MIXED_OVERSIZED_TOKEN",
+        );
+        std::fs::write(
+            project.path().join("tracked.txt"),
+            "ordinary prefix\nMIXED_OVERSIZED_TOKEN\nordinary suffix\n",
+        )
+        .expect("source fixture");
+
+        let (scan, output) = scan_output(project.path(), "MIXED_OVERSIZED_TOKEN");
+
+        assert_eq!(scan.hits.len(), 1);
+        assert_eq!(scan.hits[0].file, "tracked.txt");
+        assert_eq!(scan.files_scanned, 1);
+        assert_eq!(scan.lines_examined, 3);
+        assert_eq!(scan.omissions.oversized_files, 1);
+        assert!(!scan.truncated);
+        assert_eq!(output["results"][0]["file"], json!("tracked.txt"));
+        assert_partial_output(&output, 3, 1, one_budget_omission());
+
+        let markdown = rendered_scan(&scan);
+        assert!(markdown.contains("tracked.txt:2"), "{markdown}");
+        assert!(markdown.contains("Coverage is partial"), "{markdown}");
+    }
+
+    #[test]
+    fn overlong_matching_line_is_a_budget_omission() {
+        let project = tempfile::tempdir().expect("temp project");
+        let long_line = format!("OVERLONG_LINE_TOKEN{}", "x".repeat(MAX_LINE_BYTES));
+        std::fs::write(
+            project.path().join("overlong.txt"),
+            format!("ordinary line\n{long_line}\n"),
+        )
+        .expect("overlong fixture");
+
+        let (scan, output) = scan_output(project.path(), "OVERLONG_LINE_TOKEN");
+
+        assert_eq!(scan.lines_examined, 1);
+        assert_eq!(scan.omissions.oversized_lines, 1);
+        assert_partial_output(&output, 1, 0, one_budget_omission());
+
+        let markdown = rendered_scan(&scan);
+        assert!(
+            markdown.contains("skipped 1 line longer than the 4096-byte scan limit"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn unavailable_source_candidates_are_typed_and_ordered_after_budget_omissions() {
+        let omission_counts = ScanOmissionCounts {
+            oversized_lines: 1,
+            unavailable_sources: 2,
+            ..ScanOmissionCounts::default()
+        };
+        let output = build_output_value(&[], false, 0, 0, omission_counts);
+
+        assert_partial_output(
+            &output,
+            0,
+            0,
+            json!([
+                {
+                    "domain": "source",
+                    "count": 1,
+                    "reason": "budget",
+                },
+                {
+                    "domain": "source",
+                    "count": 2,
+                    "reason": "unavailable",
+                }
+            ]),
+        );
+
+        let markdown = render_grep_md(&[], false, 0, omission_counts);
+        assert!(
+            markdown.contains("skipped 1 line longer than the 4096-byte scan limit"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("2 source candidates were unavailable"),
+            "{markdown}"
+        );
     }
 }
