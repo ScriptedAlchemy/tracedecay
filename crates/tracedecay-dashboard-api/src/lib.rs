@@ -1149,6 +1149,10 @@ fn project_api_router() -> Router<DashboardState> {
             get(memory_api::curation_activity),
         )
         .route(
+            "/api/plugins/holographic/curation/plan",
+            get(memory_api::curation_plan),
+        )
+        .route(
             "/api/plugins/holographic/curation/runs",
             get(memory_api::curation_runs),
         )
@@ -1260,6 +1264,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/automation/outcomes",
             get(automation_outcomes_api::outcomes),
         )
+        .route("/api/automation/runs", get(automation_run_api::run_list))
         .route(
             "/api/automation/runs/{run_id}/artifacts",
             get(automation_run_api::artifact_list),
@@ -1306,6 +1311,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/plugins/analytics/observatory/export",
             get(analytics_api::observatory_export),
         )
+        .route("/api/plugins/analytics/agents", get(analytics_api::agents))
         .route("/api/plugins/analytics/hints", get(analytics_api::hints))
         .route("/api/plugins/analytics/usage", get(analytics_api::usage))
         .route(
@@ -2375,6 +2381,7 @@ mod authority_tests {
         let app = router_with_active_application(fixture.state, None, Router::new());
 
         for uri in [
+            "/api/plugins/analytics/agents",
             "/api/plugins/analytics/hints",
             "/api/plugins/analytics/usage",
             "/api/plugins/analytics/underused",

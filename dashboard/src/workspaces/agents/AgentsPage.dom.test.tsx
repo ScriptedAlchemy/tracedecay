@@ -112,6 +112,48 @@ describe('AgentsPage read coverage', () => {
     expect(await screen.findByText(/recent suffix · 10,000 rows scanned/i)).toBeTruthy();
     expect(screen.queryByText(/all time, hook log/i)).toBeNull();
   });
+
+  it('renders subagent delegation counts from the session store', async () => {
+    stubAnalytics({
+      usage: usageSummary({ message_count: 2 }),
+      diagnostics: { available: false, hook_call_count: 0, by_mcp_tool: [] },
+      underused: { available: true, families: [] },
+      agents: {
+        available: true,
+        source: 'sessions',
+        by_agent: [
+          { agent: 'Codex', sessions: 42 },
+          { agent: 'Claude', sessions: 3 },
+        ],
+      },
+    });
+    renderAgents();
+
+    expect(await screen.findByText('Codex')).toBeTruthy();
+    expect(screen.getByText('42')).toBeTruthy();
+    expect(screen.getByText('Claude')).toBeTruthy();
+    expect(screen.getByText(/sessions per managed subagent · source: sessions/i)).toBeTruthy();
+  });
+
+  it('keeps an unavailable subagent read distinct from zero delegations', async () => {
+    stubAnalytics({
+      usage: usageSummary({ message_count: 2 }),
+      diagnostics: { available: false, hook_call_count: 0, by_mcp_tool: [] },
+      underused: { available: true, families: [] },
+      agents: unavailableAnalyticsEnvelope(
+        { available: false, source: 'session_store_unavailable', by_agent: [] },
+        'analytics_agents_source_unavailable',
+      ),
+    });
+    renderAgents();
+
+    expect(
+      await screen.findByText(
+        /Subagent sessions unavailable: analytics_agents_source_unavailable/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/no subagent sessions are recorded/i)).toBeNull();
+  });
 });
 
 /**

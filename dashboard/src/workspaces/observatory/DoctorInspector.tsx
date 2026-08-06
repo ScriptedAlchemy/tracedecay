@@ -20,7 +20,7 @@ import {
 } from '../../contracts/generated.ts';
 import { doctorFindingsQueryKey, fetchDoctorFindings } from '../../data/query/doctor.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
-import { useScope } from '../../data/scope/store.ts';
+import { scopeWritable, scopeWriteSentence, useScope } from '../../data/scope/store.ts';
 import { EnvelopeTruth } from '../../ui/EnvelopeTruth.tsx';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { ReadModelState, envelopeReadState } from '../../ui/ReadSection.tsx';
@@ -47,6 +47,7 @@ export function DoctorInspector() {
           canonical evidence and typed diagnostics
         </span>
       </div>
+      <ScopeWritabilityNote />
       <DoctorFindings
         result={findings.data}
         pending={findings.isPending}
@@ -54,6 +55,35 @@ export function DoctorInspector() {
         onRefresh={() => void findings.refetch()}
       />
     </section>
+  );
+}
+
+/**
+ * What this scope means for acting on the diagnosis.
+ *
+ * The Doctor route is read-only by design — corrective actions stay with the
+ * owning daemon — so there is no control here to disable. But a reader on a
+ * non-active project scope still needs to know that everything on this page is
+ * an observation of a project the gateway will not let them change, and how to
+ * reach the scope that would. A writable scope renders nothing: a sentence
+ * explaining writes on a page that performs none would be inventing a
+ * capability.
+ */
+function ScopeWritabilityNote() {
+  const scope = useScope((state) => state.scope);
+  const writability = scopeWritable(scope);
+  if (writability.state === 'writable') return null;
+  return (
+    <p
+      data-scope-writability={writability.state}
+      className="min-w-0 px-4 pt-1.5 text-2xs leading-relaxed text-text-secondary"
+    >
+      {scopeWriteSentence(writability, {
+        writable: (target) => `Writes apply to ${target}.`,
+        refused: (reason) =>
+          `This diagnosis is read-only here — corrective actions stay with the owning daemon. ${reason}`,
+      })}
+    </p>
   );
 }
 

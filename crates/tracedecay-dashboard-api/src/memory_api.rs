@@ -609,6 +609,31 @@ pub async fn curation_activity(
     Json(memory_service::curation_activity_payload(&state, limit).await)
 }
 
+/// `GET /api/plugins/holographic/curation/plan` — the deterministic curation
+/// plan the similarity curator would review: dedup delete proposals plus
+/// hygiene candidates (secret-like, transient, and possible-supersession
+/// pairs). Every entry is a candidate for review; nothing here mutates the
+/// store, and a failed computation is reported as its error rather than as an
+/// empty clean plan.
+pub async fn curation_plan(State(state): State<DashboardState>) -> Json<Value> {
+    match memory_service::build_delete_plan(&state).await {
+        Ok((actions, hygiene, counts, total)) => Json(json!({
+            "actions": actions,
+            "hygiene": hygiene,
+            "counts": counts,
+            "total_facts": total,
+            "error": "",
+        })),
+        Err(err) => Json(json!({
+            "actions": [],
+            "hygiene": Value::Null,
+            "counts": {},
+            "total_facts": 0,
+            "error": err,
+        })),
+    }
+}
+
 /// `GET /api/plugins/holographic/curation/runs` — recent standalone
 /// automation backend runs, loaded from the append-only project sidecar ledger.
 pub async fn curation_runs(

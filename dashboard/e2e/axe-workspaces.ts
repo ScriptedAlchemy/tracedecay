@@ -44,6 +44,7 @@
  * moves.
  */
 import type { Page } from '@playwright/test';
+import { fixtureEnvelope } from '../src/test/fixtureEnvelope.ts';
 import { resolveFixture } from '../stories/fixtures/data.ts';
 import {
   expectContains,
@@ -907,9 +908,13 @@ export const WORKSPACE_SCENARIOS: readonly Scenario[] = [
       'THE SPLIT READ — analytics diagnostics that could not be read print no figure, and do not suppress the usage read that answered',
     overrides: {
       // `available: false` is what `analytics_api.rs` answers when the hook
-      // analytics store cannot be folded. Every plate behind it has to say so;
-      // the usage read on the sibling route is untouched.
-      [ANALYTICS_DIAGNOSTICS]: { status: 200, body: { available: false } },
+      // analytics store cannot be folded — inside the canonical envelope,
+      // which the route serves since the read migration. Every plate behind
+      // it has to say so; the usage read on the sibling route is untouched.
+      [ANALYTICS_DIAGNOSTICS]: {
+        status: 200,
+        body: fixtureEnvelope({ available: false, hook_call_count: 0, by_mcp_tool: [] }),
+      },
     },
     assert: async (page) => {
       const plates = await readouts(page);
