@@ -239,20 +239,20 @@ if (typeof sdk.createClient !== "function" ||
   throw new Error("installed package exports are incomplete");
 }
 
-const attemptFinishDescriptor = sdk.OPERATIONS.find(
-  (operation) => operation.operation === "work_attempt_finish",
+const registerDefinitionDescriptor = sdk.OPERATIONS.find(
+  (operation) => operation.operation === "workflow_register_definition",
 );
-if (!attemptFinishDescriptor ||
-    attemptFinishDescriptor.operationId !== "operation.work.attempt_finish" ||
-    attemptFinishDescriptor.route !== "/application/work/attempt/finish" ||
-    attemptFinishDescriptor.effect !== "administrative" ||
-    attemptFinishDescriptor.idempotency !== "required" ||
-    attemptFinishDescriptor.bindingId !== "binding.http.work.attempt_finish" ||
-    attemptFinishDescriptor.requestSchema.schemaId !== "schema.work.attempt_finish.request" ||
-    attemptFinishDescriptor.requestSchema.revision !== 1 ||
-    attemptFinishDescriptor.resultSchema.schemaId !== "schema.work.attempt_finish.result" ||
-    attemptFinishDescriptor.resultSchema.revision !== 1) {
-  throw new Error("installed package work_attempt_finish descriptor identity drifted");
+if (!registerDefinitionDescriptor ||
+    registerDefinitionDescriptor.operationId !== "operation.workflow.register_definition" ||
+    registerDefinitionDescriptor.route !== "/application/workflow/register-definition" ||
+    registerDefinitionDescriptor.effect !== "administrative" ||
+    registerDefinitionDescriptor.idempotency !== "required" ||
+    registerDefinitionDescriptor.bindingId !== "binding.http.workflow.register_definition" ||
+    registerDefinitionDescriptor.requestSchema.schemaId !== "schema.workflow.register_definition.request" ||
+    registerDefinitionDescriptor.requestSchema.revision !== 1 ||
+    registerDefinitionDescriptor.resultSchema.schemaId !== "schema.workflow.register_definition.result" ||
+    registerDefinitionDescriptor.resultSchema.revision !== 1) {
+  throw new Error("installed package workflow_register_definition descriptor identity drifted");
 }
 
 console.log(JSON.stringify({
@@ -266,13 +266,14 @@ const availabilityClient = sdk.createClient({
   projectId: process.env.TRACEDECAY_SDK_PROJECT_ID,
   token: process.env.TRACEDECAY_SDK_TOKEN,
 });
-if (!("work_snapshot" in availabilityClient.operations) ||
-    !("work_attempt_finish" in availabilityClient.operations) ||
+if (!("workflow_list_definitions" in availabilityClient.operations) ||
+    !("workflow_get_definition" in availabilityClient.operations) ||
     !("workflow_register_definition" in availabilityClient.operations) ||
+    "work_snapshot" in availabilityClient.operations ||
     "test_results" in availabilityClient.operations ||
     "invoke" in availabilityClient ||
     "requestOperation" in availabilityClient) {
-  throw new Error("only schema-authorized Work and Workflow operations may be callable");
+  throw new Error("only schema-authorized Workflow operations may be callable");
 }
 
 const baseUrl = process.env.TRACEDECAY_SDK_BASE_URL;
@@ -285,8 +286,8 @@ for (const mode of ["local", "remote"]) {
   });
   let operationId;
   try {
-    const result = await client.operations.work_snapshot(
-      { page_size: 1 },
+    const result = await client.operations.workflow_list_definitions(
+      {},
       { page: { size: 1 } },
     );
     operationId = result.request_id;

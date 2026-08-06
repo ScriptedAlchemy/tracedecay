@@ -8,7 +8,9 @@ use tracedecay_sdk::client::{
     StreamOptions, StreamResume,
 };
 use tracedecay_sdk::operation::DeadlineBehavior;
-use tracedecay_sdk::operations::{TypedOperation, WorkCreate, WorkSnapshot};
+use tracedecay_sdk::operations::{
+    TypedOperation, WorkflowListDefinitions, WorkflowRegisterDefinition,
+};
 
 fn request(stream: &mut TcpStream) -> String {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -66,24 +68,24 @@ fn event_response(body: &str) -> String {
     )
 }
 
-fn work_snapshot_success() -> serde_json::Value {
+fn list_definitions_success() -> serde_json::Value {
     json!({
         "kind": "success",
         "value": {
-            "binding_id": "binding.http.work.snapshot",
-            "contract": {"schema_id": "schema.work.snapshot.result", "schema_revision": 1},
+            "binding_id": "binding.http.workflow.list_definitions",
+            "contract": {"schema_id": "schema.workflow.list_definitions.result", "schema_revision": 1},
             "request_id": "request.sdk",
             "scope": {},
             "outcome": {"outcome": "evidence", "value": {
                 "temporal": {}, "authority": {}, "evidence_authorities": [],
                 "coverage": {}, "omissions": [], "scores": [], "contributions": [],
-                "page": {"sort_contract_id": "sort.work", "sort_revision": 1,
+                "page": {"sort_contract_id": "sort.workflow", "sort_revision": 1,
                     "total": 1, "returned": 1, "cursor": null, "expires_at": null},
                 "execution": {"started_at": 1, "ended_at": 2,
                     "effective_deadline": {"expires_at": 3}, "cancellation": null,
                     "budget": {"units_consumed": 1, "bytes_consumed": 1,
                         "elapsed_micros": 1}, "termination": "completed"},
-                "payload": {"not": "a work snapshot"}
+                "payload": {"not": "a workflow definition list"}
             }}
         }
     })
@@ -96,37 +98,28 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
         json!({
             "kind": "success",
             "value": {
-                "binding_id": "binding.http.work.create",
-                "contract": {"schema_id": "schema.work.create.result", "schema_revision": 1},
+                "binding_id": "binding.http.workflow.list_definitions",
+                "contract": {"schema_id": "schema.workflow.list_definitions.result", "schema_revision": 1},
                 "request_id": "request.sdk",
                 "scope": {},
                 "outcome": {"outcome": "evidence", "value": {
                     "temporal": {}, "authority": {}, "evidence_authorities": [],
                     "coverage": {}, "omissions": [], "scores": [], "contributions": [],
-                    "page": {"sort_contract_id": "sort.health", "sort_revision": 1,
+                    "page": {"sort_contract_id": "sort.workflow", "sort_revision": 1,
                         "total": 1, "returned": 1, "cursor": null, "expires_at": null},
                     "execution": {"started_at": 1, "ended_at": 2,
                         "effective_deadline": {"expires_at": 3}, "cancellation": null,
                         "budget": {"units_consumed": 1, "bytes_consumed": 1,
                             "elapsed_micros": 1}, "termination": "completed"},
-                    "payload": {
-                        "accepted_proposal": null,
-                        "authority": {
-                            "actor_id": "actor.sdk",
-                            "policy_digest": "sha256:policy",
-                            "project_id": "project.sdk",
-                            "repository_id": "repository.sdk",
-                            "worktree_id": "worktree.sdk"
-                        },
-                        "dependencies": [],
-                        "execution_admitted": false,
-                        "history_len": 1,
-                        "runtime_evidence": [],
-                        "task_accepted": false,
-                        "task_id": "task.sdk",
-                        "title": "SDK task",
-                        "version": 1
-                    }
+                    "payload": [{
+                        "definition_id": "workflow.sdk",
+                        "definition_version": 1,
+                        "pinned_catalog_digest": "sha256:catalog",
+                        "pinned_configuration_digest": "sha256:configuration",
+                        "pinned_policy_digest": "sha256:policy",
+                        "project_id": "project.sdk",
+                        "steps": []
+                    }]
                 }}
             }
         }),
@@ -144,15 +137,9 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
     .build()
     .unwrap();
 
-    let request = serde_json::from_value(json!({
-        "command_id": "command.sdk",
-        "occurred_at": 1,
-        "task_id": "task.sdk",
-        "title": "SDK task"
-    }))
-    .unwrap();
+    let request = serde_json::from_value(json!({})).unwrap();
     let local_result = local
-        .execute_with_options::<WorkCreate>(
+        .execute_with_options::<WorkflowListDefinitions>(
             &request,
             OperationRequestOptions {
                 deadline_micros: Some(1_800_000_000_000_001),
@@ -160,7 +147,7 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
         )
         .unwrap();
     let remote_result = remote
-        .execute_with_options::<WorkCreate>(
+        .execute_with_options::<WorkflowListDefinitions>(
             &request,
             OperationRequestOptions {
                 deadline_micros: Some(1_800_000_000_000_002),
@@ -169,19 +156,19 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
         .unwrap();
 
     assert_eq!(
-        serde_json::to_value(local_result.result).unwrap()["task_id"],
-        "task.sdk"
+        serde_json::to_value(local_result.result).unwrap()[0]["definition_id"],
+        "workflow.sdk"
     );
     assert_eq!(
-        serde_json::to_value(remote_result.result).unwrap()["task_id"],
-        "task.sdk"
+        serde_json::to_value(remote_result.result).unwrap()[0]["definition_id"],
+        "workflow.sdk"
     );
     let requests = server.join().unwrap();
     assert!(requests[0].contains("authorization: Bearer sdk-token"));
     assert!(requests[0].contains(&format!("origin: {base_url}")));
     assert!(requests[0].contains("x-tracedecay-deadline-micros: 1800000000000001"));
-    assert!(requests[0].contains("/application/work/create"));
-    assert!(!requests[0].contains("/application/work/create?"));
+    assert!(requests[0].contains("/application/workflow/list-definitions"));
+    assert!(!requests[0].contains("/application/workflow/list-definitions?"));
     assert!(requests[1].contains("origin: https://client.example"));
     assert!(requests[1].contains("x-tracedecay-deadline-micros: 1800000000000002"));
 }
@@ -240,16 +227,25 @@ fn cancellation_and_stream_resume_use_lifecycle_routes() {
 }
 
 #[test]
-fn typed_work_descriptors_retain_canonical_contract_identity() {
+fn typed_workflow_descriptors_retain_canonical_contract_identity() {
     fn assert_typed_contract<Operation: TypedOperation>() {}
 
-    assert_typed_contract::<WorkCreate>();
-    assert_eq!(WorkCreate::OPERATION_ID, "operation.work.create");
-    assert_eq!(WorkCreate::ROUTE, "/application/work/create");
-    assert_eq!(WorkCreate::BINDING_ID, "binding.http.work.create");
-    assert_eq!(WorkCreate::MAXIMUM_DEADLINE_MILLIS, 30_000);
+    assert_typed_contract::<WorkflowRegisterDefinition>();
     assert_eq!(
-        WorkCreate::DEADLINE_BEHAVIOR,
+        WorkflowRegisterDefinition::OPERATION_ID,
+        "operation.workflow.register_definition"
+    );
+    assert_eq!(
+        WorkflowRegisterDefinition::ROUTE,
+        "/application/workflow/register-definition"
+    );
+    assert_eq!(
+        WorkflowRegisterDefinition::BINDING_ID,
+        "binding.http.workflow.register_definition"
+    );
+    assert_eq!(WorkflowRegisterDefinition::MAXIMUM_DEADLINE_MILLIS, 30_000);
+    assert_eq!(
+        WorkflowRegisterDefinition::DEADLINE_BEHAVIOR,
         DeadlineBehavior::ReturnEffectReceipt
     );
 }
@@ -263,16 +259,10 @@ fn invalid_typed_deadline_is_rejected_before_transport() {
     ))
     .build()
     .unwrap();
-    let request = serde_json::from_value(json!({
-        "command_id": "command.sdk",
-        "occurred_at": 1,
-        "task_id": "task.sdk",
-        "title": "SDK task"
-    }))
-    .unwrap();
+    let request = serde_json::from_value(json!({})).unwrap();
 
     let error = client
-        .execute_with_options::<WorkCreate>(
+        .execute_with_options::<WorkflowListDefinitions>(
             &request,
             OperationRequestOptions {
                 deadline_micros: Some(0),
@@ -284,48 +274,51 @@ fn invalid_typed_deadline_is_rejected_before_transport() {
 }
 
 #[test]
-fn typed_work_result_rejects_malformed_payloads() {
-    let response = json_response("200 OK", work_snapshot_success());
+fn typed_result_rejects_malformed_payloads() {
+    let response = json_response("200 OK", list_definitions_success());
     let (base_url, server) = serve(vec![response]);
     let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
         .build()
         .unwrap();
 
-    let request = serde_json::from_value::<<WorkSnapshot as TypedOperation>::Request>(
-        json!({"page_size": 1}),
-    )
-    .unwrap();
-    let error = client.execute::<WorkSnapshot>(&request).unwrap_err();
+    let request =
+        serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!({}))
+            .unwrap();
+    let error = client
+        .execute::<WorkflowListDefinitions>(&request)
+        .unwrap_err();
 
     assert!(matches!(error, ClientError::Protocol { .. }));
     let requests = server.join().unwrap();
-    assert!(requests[0].contains("POST /projects/project.sdk/application/work/snapshot HTTP/1.1"));
-    assert!(!requests[0].contains("/application/work/snapshot?"));
-    assert!(requests[0].contains(r#""page_size":1"#));
+    assert!(
+        requests[0]
+            .contains("POST /projects/project.sdk/application/workflow/list-definitions HTTP/1.1")
+    );
+    assert!(!requests[0].contains("/application/workflow/list-definitions?"));
 }
 
 #[test]
 fn malformed_success_and_problem_fields_are_protocol_errors() {
-    let mut missing_scope = work_snapshot_success();
+    let mut missing_scope = list_definitions_success();
     missing_scope["value"]
         .as_object_mut()
         .unwrap()
         .remove("scope");
-    let mut bad_outcome = work_snapshot_success();
+    let mut bad_outcome = list_definitions_success();
     bad_outcome["value"]["outcome"]["outcome"] = json!("future");
-    let mut missing_receipt = work_snapshot_success();
+    let mut missing_receipt = list_definitions_success();
     missing_receipt["value"]["outcome"]["value"]["execution"]
         .as_object_mut()
         .unwrap()
         .remove("budget");
-    let mut bad_contract = work_snapshot_success();
+    let mut bad_contract = list_definitions_success();
     bad_contract["value"]["contract"]["schema_revision"] = json!("1");
-    let mut missing_identity = work_snapshot_success();
+    let mut missing_identity = list_definitions_success();
     missing_identity["value"]["request_id"] = Value::Null;
     let mut problem = json!({
         "kind": "problem",
         "value": {
-            "binding_id": "binding.http.work.snapshot",
+            "binding_id": "binding.http.workflow.list_definitions",
             "contract": {"schema_id": "schema.application.problem", "schema_revision": 1},
             "request_id": "request.sdk",
             "problem": {
@@ -359,13 +352,12 @@ fn malformed_success_and_problem_fields_are_protocol_errors() {
     let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
         .build()
         .unwrap();
-    let request = serde_json::from_value::<<WorkSnapshot as TypedOperation>::Request>(
-        json!({"page_size": 1}),
-    )
-    .unwrap();
+    let request =
+        serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!({}))
+            .unwrap();
     for _ in 0..6 {
         assert!(matches!(
-            client.execute::<WorkSnapshot>(&request),
+            client.execute::<WorkflowListDefinitions>(&request),
             Err(ClientError::Protocol { .. })
         ));
     }
