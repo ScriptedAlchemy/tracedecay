@@ -5736,6 +5736,147 @@ async fn witness_verified_mount_activates_without_rebuild() {
     registry.shutdown().await;
 }
 
+/// A retained seal is only a candidate for activation. If source-authority
+/// verification fails after the seal decodes, the worker must not copy that
+/// unverified generation into the serving slot. The failed arrival remains
+/// pending for a later hint, while queries fail fast with the typed unverified
+/// state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_retained_activation_never_installs_unverified_serving_state() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let scope = {
+        let mut scheduler = scheduler(&fixture, scoped_store, bytes);
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree id"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope")
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background activation");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount retained generation");
+
+    // Hold the scheduler after the worker dequeues the mount arrival. This
+    // makes the attempted activation observable through the existing pending
+    // arrival: zero while the attempt owns it, restored after the failure.
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal scheduler held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("scheduler lock acquired");
+
+    let git_dir = fixture.path().join(".git");
+    let unavailable_git_dir = fixture.path().join(".git.activation-unavailable");
+    std::fs::rename(&git_dir, &unavailable_git_dir).expect("make Git authority unavailable");
+    drop(admission);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry.pending_wake_micros_for_scope(&scope).await == Some(0) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "worker did not dequeue the retained activation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    release_tx.send(()).expect("release scheduler");
+    lock_thread.join().expect("join scheduler holder");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|pending| pending != 0)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "failed activation did not restore its pending retry arrival"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        None,
+        "a retained generation cannot serve after its activation fails"
+    );
+    match tokio::time::timeout(
+        Duration::from_millis(250),
+        registry.execute_query_search(&scope, core_search_request("alpha")),
+    )
+    .await
+    .expect("an unavailable generation must not block its query")
+    {
+        Err(super::query_runtime::QuerySearchExecutionErrorV1::GenerationUnverified) => {}
+        Err(other) => panic!("expected the typed unverified state, got {other:?}"),
+        Ok(_) => panic!("failed activation must not degrade into a stale answer"),
+    }
+
+    // A later real hint retries the retained owner. Restoring Git truth lets
+    // the retry prove and activate the exact retained generation.
+    std::fs::rename(&unavailable_git_dir, &git_dir).expect("restore Git authority");
+    assert!(
+        registry.notify_hook_overflow(fixture.path()).await,
+        "restored worktree accepts a retry hint"
+    );
+    let receipt = wait_for_event_to_ready(&registry).await;
+    assert!(
+        receipt.is_noop(),
+        "retry verifies the unchanged retained seal"
+    );
+    assert!(
+        registry
+            .latest_generation_id(fixture.path())
+            .await
+            .is_some(),
+        "successful retry installs the verified retained generation"
+    );
+    registry.shutdown().await;
+}
+
 /// Busy admission preserves the prior generation and schedules a follow-up wake
 /// so serve-during-refresh cannot leave the index stale indefinitely.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

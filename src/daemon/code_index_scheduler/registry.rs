@@ -697,7 +697,13 @@ impl CodeIndexSchedulerRegistryV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let result = scheduler.activate_or_reconcile();
-                    let latest = scheduler.latest_complete();
+                    // A retained seal can decode even when source-authority
+                    // verification fails. Only a terminal activation/reconcile
+                    // outcome may mint serving state from it.
+                    let latest = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|_| scheduler.latest_complete());
                     // Reconcile completion is an activation point: build this
                     // generation's serving derivations here, on the blocking
                     // pool, so the first query against it stays O(result).
@@ -707,7 +713,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     (result, latest)
                 })
                 .await;
-                if let Ok((_, Some(latest))) = &result {
+                if let Ok((Ok(_), Some(latest))) = &result {
                     *worker_serving_generation
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
