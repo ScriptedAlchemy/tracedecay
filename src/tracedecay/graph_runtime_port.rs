@@ -201,6 +201,26 @@ impl GraphRuntimePort for TraceDecay {
         })
     }
 
+    fn lazy_index_ignored_dependency_files<'a>(
+        &'a self,
+        file_paths: &'a [String],
+        control: GraphRequestControl<'a>,
+    ) -> GraphFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            ensure_dependency_hint_request_active(control)?;
+            if TraceDecay::is_read_only(self) {
+                return Ok(Vec::new());
+            }
+            super::indexing::controlled_sync::lazy_index_ignored_dependency_files(
+                self,
+                file_paths,
+                || ensure_dependency_hint_request_active(control),
+                || begin_dependency_hint_commit(control),
+            )
+            .await
+        })
+    }
+
     fn get_complexity_ranked<'a>(
         &'a self,
         node_kind: Option<&'a NodeKind>,
@@ -413,4 +433,15 @@ fn ensure_dependency_hint_request_active(control: GraphRequestControl<'_>) -> Re
         ));
     }
     Ok(())
+}
+
+fn begin_dependency_hint_commit(control: GraphRequestControl<'_>) -> Result<()> {
+    ensure_dependency_hint_request_active(control)?;
+    let Some(cancellation) = control.cancellation else {
+        return Ok(());
+    };
+    if cancellation.try_begin_commit() {
+        return Ok(());
+    }
+    ensure_dependency_hint_request_active(control)
 }

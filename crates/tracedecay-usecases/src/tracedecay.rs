@@ -162,6 +162,11 @@ pub trait GraphRuntimePort: Send + Sync {
         path_prefix: Option<&'a str>,
         control: GraphRequestControl<'a>,
     ) -> GraphFuture<'a, Vec<DependencyImportUse>>;
+    fn lazy_index_ignored_dependency_files<'a>(
+        &'a self,
+        file_paths: &'a [String],
+        control: GraphRequestControl<'a>,
+    ) -> GraphFuture<'a, Vec<String>>;
     fn get_complexity_ranked<'a>(
         &'a self,
         node_kind: Option<&'a NodeKind>,

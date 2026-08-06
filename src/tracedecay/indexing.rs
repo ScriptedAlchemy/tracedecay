@@ -18,6 +18,8 @@ use crate::types::*;
 
 use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
 
+pub(super) mod controlled_sync;
+
 const GRAPH_REBUILD_STATE_KEY: &str = "graph_rebuild_state_v1";
 const GRAPH_REBUILD_CHECKPOINT_DIR: &str = "graph-rebuild-checkpoint-v1";
 const GRAPH_REBUILD_CHECKPOINT_BATCH_SIZE: usize = 1_024;
@@ -1324,7 +1326,7 @@ impl TraceDecay {
         if refs.is_empty() {
             return Ok(());
         }
-        let all_nodes = self.db.get_all_nodes().await.unwrap_or_default();
+        let all_nodes = self.db.get_all_nodes().await?;
         let resolver = ReferenceResolver::from_nodes(&self.db, &all_nodes);
         let resolution = resolver.resolve_all(&refs);
         let edges = resolver.create_edges(&resolution.resolved);
