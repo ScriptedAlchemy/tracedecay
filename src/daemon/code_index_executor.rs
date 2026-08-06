@@ -562,6 +562,10 @@ pub(super) fn code_index_search_executor(
                             code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
                             code_search::lane_reason::GENERATION_REBUILDING,
                         ),
+                        QuerySearchExecutionErrorV1::GenerationUnverified => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
+                            code_search::lane_reason::GENERATION_REBUILDING,
+                        ),
                         QuerySearchExecutionErrorV1::InvalidScope(_)
                         | QuerySearchExecutionErrorV1::InvalidPolicy(_) => (
                             code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
