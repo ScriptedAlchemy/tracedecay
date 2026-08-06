@@ -176,60 +176,47 @@ Keep in SQLite:
 
 **Interfaces:**
 - Consumes: validated opaque TraceDecay namespace, projection, entity, relation, generation, watermark, and vector identities.
-- Produces:
+- Produces a daemon-owned registry, immutable generation publications, and
+  verified snapshot leases. Raw database handles, mutable snapshots, and
+  unverified mutation methods remain crate-private implementation details:
 
 ```rust
-pub struct GraphDb;
-pub struct GraphSnapshot;
-pub struct GraphWriteBatch;
-pub struct GraphPublication;
+pub struct GraphDbRegistry;
+pub struct GraphGenerationManifest;
+pub struct PreparedGraphPublication;
+pub struct VerifiedGraphSnapshot;
 pub struct VerifiedGraphCommit;
 
-pub struct GraphDbOpenOptions {
-    pub location: GraphDbLocation,
-    pub expected_format: GraphFormatVersion,
-    pub durability: GraphDurability,
-    pub cancellation: CancellationToken,
-}
-
-pub struct GraphPublication {
-    pub namespace: GraphNamespace,
-    pub idempotency_key: GraphIdempotencyKey,
-    pub source_generation: SourceGeneration,
-    pub expected_watermark: Option<GraphWatermark>,
-    pub next_watermark: GraphWatermark,
-    pub batch: GraphWriteBatch,
-}
-
-impl GraphDb {
-    pub fn open(options: GraphDbOpenOptions) -> Result<Self, GraphDbError>;
-    pub fn snapshot(&self) -> Result<GraphSnapshot, GraphDbError>;
-    pub fn apply_unverified(
+impl GraphDbRegistry {
+    pub fn publish_verified(
         &self,
-        batch: GraphWriteBatch,
-    ) -> Result<GraphCommit, GraphDbError>;
-    pub fn replace_projection_unverified(
-        &self,
-        replacement: ProjectionReplacement,
-    ) -> Result<GraphCommit, GraphDbError>;
-    pub fn publish_unverified(
-        &self,
-        publication: GraphPublication,
-    ) -> Result<GraphCommit, GraphDbError>;
-    pub fn verify_recovered_projection(
-        &self,
-        manifest: &GraphReplayManifest,
+        registration: GraphDbRegistration,
+        publication_authority: &mut dyn GraphPublicationStore,
+        context: &GraphPublicationOperationContext,
+        key: &GraphPublicationKey,
     ) -> Result<VerifiedGraphCommit, GraphDbError>;
-    pub fn traverse(
+    pub fn recover_verified_snapshot(
         &self,
-        request: TraversalRequest,
-    ) -> Result<TraversalResult, GraphDbError>;
-    pub fn vector_search(
+        registration: GraphDbRegistration,
+        publication_authority: &mut dyn GraphPublicationStore,
+        context: &GraphPublicationOperationContext,
+        projection: &GraphProjectionIdentity,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError>;
+    pub fn verified_generation_snapshot(
         &self,
-        request: VectorSearchRequest,
-    ) -> Result<VectorSearchResult, GraphDbError>;
+        registration: GraphDbRegistration,
+        projection: &GraphProjectionIdentity,
+        generation: &GraphGenerationId,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError>;
 }
 ```
+
+`VerifiedGraphSnapshot` is the only production read capability. It binds one
+exact verified generation plus its verified dependency closure and exposes
+bounded traversal/vector operations without exposing Grafeo or `GraphDb`.
+Relational replay plus verified-head CAS is the publication linearization
+authority. Historical generation snapshots remain addressable while retained;
+they never move the current verified head backward.
 
 - [ ] **Step 1: Write failing runtime-boundary tests**
 
@@ -332,19 +319,27 @@ git commit -m "feat(graph-db): add embedded Grafeo runtime boundary"
 
 **Interfaces:**
 - Consumes: one immutable code generation, its chunks, symbols, files, typed relation edges, and admitted vector generation.
-- Produces: `CodeGraphProjectionPublisher`, `CodeGraphEvidenceReadPort`, and frozen graph snapshots keyed by `CodeGenerationId`.
+- Produces an immutable `CodeGraphEvidenceReadPort` over frozen verified graph
+  snapshots keyed by `CodeGenerationId`. The daemon-owned publication service
+  is the sole caller allowed to append relational replay, publish an
+  unverified generation, close/reopen, verify recovered bytes, and advance the
+  verified head.
 
 ```rust
-pub trait CodeGraphProjectionPublisher {
-    fn publish_code_graph(
-        &self,
-        generation: &CodeGenerationId,
-        edges: &[CanonicalRelationEdge],
-        chunks: &[CodeSearchChunk],
-        cancellation: &CancellationToken,
-    ) -> Result<VerifiedGraphCommit, RetrievalPortError>;
+pub struct CodeGraphProjectionStore {
+    snapshot: VerifiedGraphSnapshot,
+}
+
+impl CodeGraphProjectionStore {
+    pub fn from_verified_snapshot(
+        snapshot: VerifiedGraphSnapshot,
+    ) -> Result<Self, RetrievalPortError>;
 }
 ```
+
+Hermetic tests and evaluation fixtures may use an explicitly test-only
+in-memory builder. Production code-index/query readers never receive a raw
+`GraphDb`, mutable publisher, or unverified snapshot.
 
 - [ ] **Step 1: Add failing reopen, generation-isolation, and traversal-equivalence tests**
 
@@ -748,11 +743,13 @@ git commit -am "refactor(workflow): move DAG topology to graph-db"
 
 ```rust
 pub trait GraphRuntimeRegistry {
-    fn resolve(
+    fn verified_snapshot(
         &self,
         route: &ExactProjectRoute,
+        projection: &GraphProjectionIdentity,
+        generation: Option<&GraphGenerationId>,
         cancellation: &CancellationToken,
-    ) -> Result<Arc<GraphDb>, GraphRouteError>;
+    ) -> Result<VerifiedGraphSnapshot, GraphRouteError>;
 
     fn close(
         &self,
@@ -771,9 +768,10 @@ Cover linked worktrees sharing project graph identity, multi-root routing, cross
 The daemon registry owns open/close, writer serialization, unverified
 convergence, close/reopen recovered-state verification, verified snapshot
 leases, retention, and health. MCP, CLI, HTTP/dashboard, LSP, hooks, workers,
-and tests never open graph-db directly. A reader lease binds a
-`VerifiedGraphCommit`; an unverified apply never replaces the currently served
-snapshot.
+and production tests never open graph-db directly. A reader lease binds an
+exact verified generation and its dependency closure; an unverified apply
+never replaces the currently served snapshot. Publication is a separate
+daemon-internal authority and no host/tool/read adapter can invoke it directly.
 
 - [ ] **Step 3: Wire retained tools and views**
 
