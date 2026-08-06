@@ -30,9 +30,9 @@ use crate::store::vector_generations::{
     GraphVectorGenerationStoreV1, PublishedVectorGenerationV1, VectorGenerationBuildIdV1,
     VectorGenerationPlanV1, VectorProjectionCheckpointV1,
 };
-use tracedecay_graph_db::{GraphCancellation, GraphDbOwner, NeverCancelled};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_code_index::projection::expected_request_digest;
+use tracedecay_graph_db::{GraphCancellation, GraphDbOwner, NeverCancelled};
 use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::graph::production_code_index_freshness;
@@ -70,6 +70,7 @@ use tracedecay_semantic::{
     SemanticRuntimeStatusProjectionV1, prepare_semantic_evaluation_projection,
 };
 
+use super::graph_provider::{RetainedSemanticVectorGraphV1, SemanticVectorGraphProviderV1};
 #[cfg(test)]
 use super::ports::SemanticActivationRequestV1;
 use super::ports::{
@@ -79,7 +80,6 @@ use super::ports::{
     SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1, SemanticRuntimeStateV1,
     SemanticRuntimeStatusV1,
 };
-use super::graph_provider::{RetainedSemanticVectorGraphV1, SemanticVectorGraphProviderV1};
 use super::{
     DaemonGlobalSemanticProjectionSchedulerV1, SemanticProjectionBatchV1,
     SemanticProjectionLeaseV1, SemanticProjectionScheduleErrorV1,
@@ -527,7 +527,12 @@ impl ProductionSemanticRuntimeV1 {
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         let clean_checkpoint = store
-            .commit_batch(&clean_build, None, clean_prepared.clone(), Arc::clone(cancellation))
+            .commit_batch(
+                &clean_build,
+                None,
+                clean_prepared.clone(),
+                Arc::clone(cancellation),
+            )
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         let clean_publication = store
@@ -716,7 +721,12 @@ impl ProductionSemanticRuntimeV1 {
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         store
-            .commit_batch(&incompatible_build, None, incompatible.clone(), Arc::clone(cancellation))
+            .commit_batch(
+                &incompatible_build,
+                None,
+                incompatible.clone(),
+                Arc::clone(cancellation),
+            )
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         if store
@@ -1087,7 +1097,8 @@ impl ProductionSemanticRuntimeV1 {
                         .await
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                     let cancellation = Arc::clone(retained.cancellation());
-                    let store = GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
+                    let store =
+                        GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
                     let next = store
                         .commit_batch(&build, state.checkpoint.as_ref(), prepared, cancellation)
                         .await
@@ -1116,7 +1127,8 @@ impl ProductionSemanticRuntimeV1 {
                         .await
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                     let cancellation = Arc::clone(retained.cancellation());
-                    let store = GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
+                    let store =
+                        GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
                     let publication = store
                         .publish_generation(&build, expected_active.as_ref(), cancellation)
                         .await
@@ -2113,7 +2125,7 @@ pub fn semantic_lane_readiness_for_request<'a>(
 }
 
 /// Obtain a query factory only for the atomically current generation.
-#[cfg(any(test, feature = "semantic-fastembed"))]
+#[cfg(feature = "semantic-fastembed")]
 pub fn current_query_factory(
     handle: &DaemonSemanticRuntimeHandleV1,
 ) -> Option<(
@@ -2670,8 +2682,12 @@ fn fair_schedule_failure(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[cfg(feature = "semantic-fastembed")]
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
+    #[cfg(feature = "semantic-fastembed")]
+    use tracedecay_domain::CalibrationProfileId;
 
     use tracedecay_domain::UtcMicros;
 
@@ -2679,10 +2695,10 @@ mod tests {
     use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
     use tracedecay_domain::{
         AdmittedEmbeddingProjectionKeyV1, AuthorizationRevision, BoundedSanitizedText,
-        CalibrationProfileId, ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId,
-        CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
-        ContentDigest, EphemeralSanitizedQueryViewV1, FallbackSubpayloadDigest, FileOccurrenceId,
-        FusionProfileId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId, PrincipalId,
+        ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
+        CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ContentDigest,
+        EphemeralSanitizedQueryViewV1, FallbackSubpayloadDigest, FileOccurrenceId, FusionProfileId,
+        LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId, PrincipalId,
         ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, PublicRetrieverStatus,
         QueryDigest, QueryMac, QueryNormalizationRevision, RepositoryId, RetrievalRequest,
         RetrievalScope, RetrievalSnapshot, RetrieverKind, SanitizerRevision, SensitivityDecision,
@@ -2830,6 +2846,7 @@ mod tests {
         Arc::new(fallback)
     }
 
+    #[cfg(feature = "semantic-fastembed")]
     fn composition_calibration(
         request: &SemanticRetrievalRequestV1<'_>,
     ) -> SemanticCalibrationProfileV1 {
@@ -3077,6 +3094,9 @@ mod tests {
         );
     }
 
+    // Binding a query runtime requires the concrete FastEmbed runtime; the
+    // compiled-out stub fails compatibility verification by design.
+    #[cfg(feature = "semantic-fastembed")]
     #[tokio::test]
     async fn atomically_current_generation_enables_semantic_lane() {
         let handle = DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("handle");
@@ -3139,6 +3159,9 @@ mod tests {
         ));
     }
 
+    // Binding a query runtime requires the concrete FastEmbed runtime; the
+    // compiled-out stub fails compatibility verification by design.
+    #[cfg(feature = "semantic-fastembed")]
     #[tokio::test]
     async fn live_request_cancellation_reaches_query_runtime_before_vector_scan() {
         struct PanicVectors;
