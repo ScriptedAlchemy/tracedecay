@@ -341,17 +341,35 @@ impl DaemonEngine {
         requirement: ProjectServerRequirement,
     ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
         let (project_path, route) = Self::project_route(handshake)?;
-        let cached = {
+        let exact = {
             let mut servers = self.store_administration.project_servers().lock().await;
             servers
                 .get_route_and_touch_for(&route, requirement)
                 .map(|(_, server)| Arc::clone(server))
         };
-        let Some(server) = cached else {
-            return Ok(None);
-        };
         self.ensure_registered_project_route(&project_path, handshake.allow_init)
             .await?;
+        if let Some(server) = exact {
+            return Ok(Some(
+                self.activate_project_server(project_path, server).await,
+            ));
+        }
+        let Some(key) =
+            resolved_project_server_key(&self.store_administration, &project_path, handshake)
+                .await?
+        else {
+            return Ok(None);
+        };
+        let Some((_, server)) = cached_or_bind_ready_project_server(
+            &self.store_administration,
+            &route,
+            Some(&key),
+            requirement,
+        )
+        .await
+        else {
+            return Ok(None);
+        };
         Ok(Some(
             self.activate_project_server(project_path, server).await,
         ))

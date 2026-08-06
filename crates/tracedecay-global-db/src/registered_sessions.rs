@@ -16,6 +16,12 @@ use super::{
 };
 
 const SESSION_INGEST_HEALTH_PAGE_SIZE: i64 = 512;
+const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, tool_names, metadata_json \
+                 FROM session_messages \
+                 WHERE provider = ?1 AND session_id = ?2 \
+                   AND timestamp IS NOT NULL AND timestamp >= ?3 \
+                 ORDER BY timestamp, ordinal, message_id \
+                 LIMIT ?4";
 
 impl RegisteredGlobalDb {
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
@@ -305,12 +311,7 @@ impl RegisteredGlobalDb {
         let mut rows = self
             .read_connection()
             .query(
-                "SELECT timestamp, ordinal, kind, tool_names, metadata_json
-                 FROM session_messages
-                 WHERE provider = ?1 AND session_id = ?2
-                   AND timestamp IS NOT NULL AND timestamp >= ?3
-                 ORDER BY timestamp, ordinal
-                 LIMIT ?4",
+                SESSION_MESSAGES_AFTER_SQL,
                 tracedecay_runtime_core::db::engine::params![
                     provider,
                     session_id,
@@ -893,9 +894,11 @@ fn row_to_workflow_message(
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
+    use tracedecay_runtime_core::db::engine::Value;
 
     use super::*;
     use crate::ParseOffset;
+
     use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
     fn session(provider: &str, session_id: &str, transcript_path: &str) -> SessionRecord {
@@ -914,6 +917,69 @@ mod tests {
             agent_id: None,
             parent_tool_use_id: None,
         }
+    }
+
+    async fn query_plan(
+        database: &RegisteredGlobalDb,
+        sql: &str,
+        params: Vec<Value>,
+    ) -> Vec<String> {
+        let snapshot = database.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(&format!("EXPLAIN QUERY PLAN {sql}"), params)
+            .await
+            .unwrap();
+        let mut details = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            details.push(row.get::<String>(3).unwrap());
+        }
+        details
+    }
+
+    fn assert_scoped_index_plan(details: &[String], index: &str) {
+        assert!(
+            details.iter().any(|detail| detail.contains(index)),
+            "query plan did not use {index}: {details:?}"
+        );
+        assert!(
+            !details
+                .iter()
+                .any(|detail| detail.contains("INTEGER PRIMARY KEY")),
+            "query plan regressed to a global rowid scan: {details:?}"
+        );
+        assert!(
+            !details.iter().any(|detail| detail.contains("TEMP B-TREE")),
+            "query plan regressed to a sort: {details:?}"
+        );
+    }
+
+    async fn insert_interleaved_session_messages(database: &RegisteredGlobalDb, rows: i64) {
+        let final_value = rows - 1;
+        let transaction = database.begin_write_transaction().await.unwrap();
+        transaction
+            .execute_batch(&format!(
+                "WITH RECURSIVE rows(value) AS (
+                    SELECT 0
+                    UNION ALL
+                    SELECT value + 1 FROM rows WHERE value < {final_value}
+                 )
+                 INSERT INTO session_messages(
+                    provider, message_id, session_id, role, timestamp, ordinal, text,
+                    kind, model, tool_names, source_path, source_offset, metadata_json
+                 )
+                 SELECT
+                    'claude',
+                    printf('message-%04d', value),
+                    CASE WHEN value % 2 = 0 THEN 'target' ELSE 'noise' END,
+                    'assistant',
+                    1700000000 + ({final_value} - value / 8),
+                    CASE WHEN value % 2 = 0 THEN value / 4 ELSE value / 2 END,
+                    'payload', NULL, NULL, printf('tool-%04d', {final_value} - value), NULL, NULL, NULL
+                 FROM rows;"
+            ))
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
     }
 
     #[tokio::test]
@@ -1038,6 +1104,66 @@ mod tests {
                     deferred_units: 3,
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn interleaved_session_activity_reads_use_covering_index() {
+        let profile = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .unwrap();
+        assert!(
+            database
+                .upsert_session(&session("claude", "target", "/tmp/target.jsonl"))
+                .await
+        );
+        assert!(
+            database
+                .upsert_session(&session("claude", "noise", "/tmp/noise.jsonl"))
+                .await
+        );
+
+        insert_interleaved_session_messages(database, 2_048).await;
+
+        let activities = database
+            .session_messages_after("claude", "target", 1_700_000_000, 512)
+            .await
+            .unwrap();
+        assert_eq!(activities.len(), 512);
+        assert!(activities.windows(2).all(|window| {
+            (window[0].timestamp, window[0].ordinal) <= (window[1].timestamp, window[1].ordinal)
+        }));
+        for window in activities.windows(2) {
+            if (window[0].timestamp, window[0].ordinal) == (window[1].timestamp, window[1].ordinal)
+            {
+                assert!(
+                    window[0].tool_names > window[1].tool_names,
+                    "message_id tie-break did not produce a stable order: {window:?}"
+                );
+            }
+        }
+
+        let activity_plan = query_plan(
+            database,
+            SESSION_MESSAGES_AFTER_SQL,
+            vec![
+                Value::Text("claude".to_owned()),
+                Value::Text("target".to_owned()),
+                Value::Integer(1_700_000_000),
+                Value::Integer(512),
+            ],
+        )
+        .await;
+        assert_scoped_index_plan(&activity_plan, "idx_session_messages_session_activity");
+        assert!(
+            activity_plan
+                .iter()
+                .any(|detail| detail.contains("COVERING INDEX")),
+            "activity query plan is not covering: {activity_plan:?}"
         );
     }
 }

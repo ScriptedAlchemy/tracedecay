@@ -101,6 +101,20 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         Some((self.aliases.get(route)?, &entry.server))
     }
 
+    pub(super) fn bind_ready_route(
+        &mut self,
+        route: ProjectRouteKey,
+        key: ProjectServerKey,
+        requirement: ProjectServerRequirement,
+    ) -> Option<&Server> {
+        if !self.servers.get(&key)?.publication.satisfies(requirement) {
+            return None;
+        }
+        self.aliases.insert(route.clone(), key);
+        self.get_route_and_touch_for(&route, requirement)
+            .map(|(_, server)| server)
+    }
+
     pub(super) fn mark_ready(&mut self, key: &ProjectServerKey) -> bool {
         let Some(entry) = self.servers.get_mut(key) else {
             return false;
