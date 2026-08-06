@@ -53,16 +53,14 @@ pub struct RuntimeRegistryAggregateSnapshot {
     pub queued_operations: u64,
     pub queued_bytes: u64,
     pub total_leases: u64,
-    pub wal_bytes: u64,
-    pub memory_estimate_bytes: u64,
+    pub wal_bytes: Option<u64>,
+    pub memory_estimate_bytes: Option<u64>,
     pub global_queued_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeRegistryShardSnapshot {
-    pub shard: String,
-    pub incarnation: u64,
-    pub authority_epoch: u64,
+    pub binding: tracedecay_store::StoreRuntimeBindingV1,
     pub state: String,
     pub health: String,
     pub writer_present: bool,
@@ -74,8 +72,8 @@ pub struct RuntimeRegistryShardSnapshot {
     pub queued_operations: u32,
     pub queued_bytes: u64,
     pub total_leases: u64,
-    pub wal_bytes: u64,
-    pub memory_estimate_bytes: u64,
+    pub wal_bytes: Option<u64>,
+    pub memory_estimate_bytes: Option<u64>,
     pub pinned_profile: bool,
     pub idle_for_ms: u64,
     pub eviction_eligible: bool,
@@ -169,9 +167,7 @@ impl RuntimeRegistryShardSnapshot {
         telemetry: &crate::daemon::store_runtime::telemetry::ShardRuntimeTelemetry,
     ) -> Self {
         Self {
-            shard: format!("{:?}", telemetry.binding.shard_id.scope),
-            incarnation: telemetry.binding.incarnation.get(),
-            authority_epoch: telemetry.binding.authority_epoch.get(),
+            binding: telemetry.binding.clone(),
             state: runtime_state_label(telemetry.state).to_owned(),
             health: runtime_health_label(telemetry.health).to_owned(),
             writer_present: telemetry.writer_present,
@@ -237,5 +233,60 @@ fn runtime_health_label(
         crate::daemon::store_runtime::shard::ShardRuntimeHealth::Healthy => "healthy",
         crate::daemon::store_runtime::shard::ShardRuntimeHealth::Degraded => "degraded",
         crate::daemon::store_runtime::shard::ShardRuntimeHealth::Faulted => "faulted",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_store::{
+        BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
+        StoreShardIdV1, UserProfileId,
+    };
+
+    #[test]
+    fn shard_wire_uses_canonical_binding_and_preserves_unknown_usage() {
+        let binding = StoreRuntimeBindingV1::new(
+            StoreShardIdV1::project(
+                BrainId::try_from("brain.runtime-wire").unwrap(),
+                UserProfileId::try_from("profile.runtime-wire").unwrap(),
+                ProjectId::try_from("project.runtime-wire").unwrap(),
+            ),
+            StoreIncarnationV1::new(3).unwrap(),
+            StoreAuthorityEpochV1::new(5).unwrap(),
+        );
+        let shard = RuntimeRegistryShardSnapshot {
+            binding,
+            state: "ready".to_owned(),
+            health: "healthy".to_owned(),
+            writer_present: false,
+            physical_reader_handles: 0,
+            general_reader_waiters: 0,
+            health_reader_waiters: 0,
+            writer_busy_events: 0,
+            writer: None,
+            queued_operations: 0,
+            queued_bytes: 0,
+            total_leases: 0,
+            wal_bytes: None,
+            memory_estimate_bytes: None,
+            pinned_profile: false,
+            idle_for_ms: 0,
+            eviction_eligible: true,
+            eviction_blocker_count: 0,
+        };
+
+        let value = serde_json::to_value(shard).unwrap();
+
+        assert_eq!(value["binding"]["shard_id"]["scope"]["kind"], "project");
+        assert_eq!(
+            value["binding"]["shard_id"]["scope"]["project_id"],
+            "project.runtime-wire"
+        );
+        assert_eq!(value["binding"]["incarnation"], 3);
+        assert_eq!(value["binding"]["authority_epoch"], 5);
+        assert!(value.get("shard").is_none());
+        assert!(value["wal_bytes"].is_null());
+        assert!(value["memory_estimate_bytes"].is_null());
     }
 }
