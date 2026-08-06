@@ -3,20 +3,20 @@
 ## Status / role
 
 Cross-cutting instrumentation is implemented only with each owning product
-slice; this sentence is not a blanket completion certificate. PR14 completes
+slice; this sentence is not a blanket completion certificate. The dashboard delivery completes
 the Observatory and Costs experience over the resulting canonical read models.
 As of 2026-07-27 the focused dashboard backend and frontend suites exercise
 those experiences successfully, so the former suite-blocked "implemented but
-unverified" qualification is withdrawn. PR14 acceptance is still open:
+unverified" qualification is withdrawn. Dashboard acceptance is still open:
 Observatory lacks hook-hint/event-flow/latency presentation, Costs lacks its
 latency breakdown, and the Plan 11 performance/SSE/usability journeys have not
-executed. Plan 11/PR14 owns those UI gaps; this plan retains the canonical
+executed. Plan 11 owns those UI gaps; this plan retains the canonical
 measurement and coverage semantics. This plan is a product observability
 contract, not a plan compiler or delivery tracker.
 Its versioned measurements and coverage semantics are the canonical product
-telemetry input to [PR20 performance optimization](33-end-to-end-performance-optimization.md).
+telemetry input to [measured performance optimization](33-end-to-end-performance-optimization.md).
 Versioned benchmark, profiler, and operating-system measurements remain valid
-PR20 evidence under that plan's measurement contract.
+performance evidence under that plan's measurement contract.
 Plan 33 owns no execution ledger. It consumes accepted production
 observability and comparison artifacts, freezes workloads, compares effects,
 and records only the accepted/provisional/rejected comparison disposition
@@ -74,7 +74,7 @@ rejected-argument, LSP, feedback-cycle, and provider measurement specified
 below remains attached to its owning production action and visible through the
   appropriate product view.
 
-**PR17 work item → admitted execution → observed outcome → reviewed
+**Work item → admitted execution → observed outcome → reviewed
 replanning:** Plan 24 work identity and evidence flow into a real Plan 32 run;
 the selected provider adapter emits requested/actual route, negotiation,
 queue/admission, lease, progress, heartbeat, stream/artifact, cancellation,
@@ -165,11 +165,11 @@ behavior, or unavailable state is reduced or deferred by this framing.
   paths, commit messages, author identity, and conflict content never enter
   canonical events, aggregates, exports, or drill-down anchors.
 - [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
-  telemetry is staged by owning PR: PR11 emits feedback-cycle trigger identity,
+  telemetry is staged by owning delivery: the feedback foundation emits feedback-cycle trigger identity,
   evaluation stage, per-trigger terminal reason, budget-exceeded state,
-  duplicate-trigger dedupe, suppression, and stage/total latency; PR12 emits
+  duplicate-trigger dedupe, suppression, and stage/total latency; the baseline readers emit
   CLI/MCP/HTTP/LSP delivery, truncation, and expansion state without payloads;
-  PR13 emits GitHub item/thread lifecycle
+  advisory feedback emits GitHub item/thread lifecycle
   (`current`, `outdated`, `resolved`, `edited`, `deleted`) separately from
   GitHub ingress provider outcome (`complete`, `partial`, `unavailable`,
   `denied`, `rate_limited`, `stale`, `failed`),
@@ -177,7 +177,7 @@ behavior, or unavailable state is reduced or deferred by this framing.
   concurrent-agent proximity warning emission/suppression/expiry/risk class,
   pinned Plan 20 `feedback.proximity.risk_threshold` revision/digest,
   host-adapter delivery state, and truncation/expansion handle/anchor usage
-  and failures without payloads; PR14 owns Observatory/Doctor read models and
+  and failures without payloads; the dashboard delivery owns Observatory/Doctor read models and
   dashboard projections over those events. The GitHub lifecycle and ingress
   outcome sets are exhaustive and orthogonal: lifecycle describes observed
   item/thread state, while ingress outcomes describe refresh, coverage,
@@ -199,7 +199,7 @@ behavior, or unavailable state is reduced or deferred by this framing.
 - Use stable idempotency keys so retries and replay cannot double count.
 - Record terminal outcomes separately from attempts and preserve cancellation, rejection, timeout, partial success, and unknown outcomes.
 - Keep instrumentation bounded and non-blocking while making dropped or delayed telemetry measurable.
-- PR17 emits bounded Plan 24/32 observations for task-shape and
+- The workflow delivery emits bounded Plan 24/32 observations for task-shape and
   decomposition grade and estimate ranges; proposal/decision identity;
   requested/actual model route and exact model/version/effort/tool/host
   capability; first-pass scope completion and accepted correctness;
@@ -211,7 +211,7 @@ behavior, or unavailable state is reduced or deferred by this framing.
   policy/config/catalog, evidence horizon, and valid/observation-time
   revisions. Self-reported completion is a separate evidence class and never
   substitutes for independent acceptance, tests, review, or outcome.
-- PR17 auxiliary-provider observations include requested and actual
+- Auxiliary-provider observations include requested and actual
   provider/backend/executable/protocol/model/reasoning identity; capability
   negotiation and explicit fallback decision; exact task/attempt/Session and
   scope identity; queue/admission/start/progress/heartbeat/event/artifact/
@@ -221,7 +221,7 @@ behavior, or unavailable state is reduced or deferred by this framing.
   `Completed`, `Unsupported`, `Absent`, `Stale`, `Cancelled`, `TimedOut`,
   `Failed`, or `Partial` outcome. Events never contain argv/stdin values, raw
   output, environment values, secrets, prompts, paths, or private context.
-- PR17 topology/routing observations include selected and actual topology,
+- Topology/routing observations include selected and actual topology,
   partition count, edge cut, coupling, critical path, serial fraction, hubs,
   barriers, runnable/actual concurrency, saturation, scheduler overhead,
   context transfer, coordination/integration/review/rework; plus eligible
@@ -446,7 +446,7 @@ formulas. Direct tests cover binding, rebuild, payload safety, cross-surface
 parity, and rendering. Historical file and test names do not constrain that
 ownership.
 
-This contract ships through the PR17 executable Work loop: the domain event
+This contract ships through the executable Work loop: the domain event
 types, canonical serialization, exhaustive enum handling, prohibited-field
 checks, and idempotency are implemented with the first real owner emission;
 deterministic joins, interval union, censoring, fixed buckets,
@@ -724,12 +724,12 @@ baseline ceremony is required.
 
 Checked-in performance fixtures use sanitized realistic data and contain no
 credentials, prompts, private source, provider payloads, local paths, or
-project/user identifiers. PR20 owns the concrete comparison artifact layout
+project/user identifiers. Measured performance optimization owns the concrete comparison artifact layout
 needed by its production journey.
 
 ### Canonical review and outcome labels
 
-PR17 uses one Plan 26-owned label schema. Every label records schema revision,
+The workflow delivery uses one Plan 26-owned label schema. Every label records schema revision,
 work/acceptance/decomposition identity, attempt and evidence horizon,
 valid/observation time, source class, retrieval anchors, coverage/confidence,
 actor/reviewer identity where permitted, and conflict/override provenance.
@@ -846,7 +846,7 @@ queryable.
 ### Rejected-argument analytics
 
 Consume only the canonical dispatcher event defined by
-[PR12](21-cli-mcp-tool-surface-and-output-unification.md); projections never
+[the CLI/MCP surface plan](21-cli-mcp-tool-surface-and-output-unification.md); projections never
 reparse CLI text, MCP errors, HTTP bodies, or logs. Provide frequency and rate
 read models grouped by tool/command, normalized rejected argument name, error
 class, schema/version, transport, and, when present, provider, model family,
@@ -884,10 +884,10 @@ decision with collision, ambiguity, and maintenance review.
 
 ### Observatory and Costs
 
-- PR14 exposes shared typed read models through application queries and the
-  then-shipped CLI, MCP, HTTP, and dashboard adapters. PR18 adds SDK adapters
-  and parity when the official SDKs ship.
-- PR17 extends those same adapters with `ExecutionTopologyMetricsV1` and
+- The dashboard delivery exposes shared typed read models through application queries and the
+  then-shipped CLI, MCP, HTTP, and dashboard adapters. SDK adapters
+  and parity are added when the official SDKs ship.
+- The workflow delivery extends those same adapters with `ExecutionTopologyMetricsV1` and
   Observatory/Costs execution-topology views; it does not add a telemetry
   store, formula, or transport-local projection.
 - Backend and UI adapters render application read models; dashboard formulas
@@ -905,7 +905,7 @@ decision with collision, ambiguity, and maintenance review.
 - Aggregates reconcile to canonical events for pinned watermarks and remain reproducible after projector rebuilds.
 - Lag, SLO, adoption, hint, automation, usage, cost, and savings fixtures verify units, populations, horizons, and exclusions.
 - Observatory, CLI, MCP, HTTP, and exports pass value and coverage parity tests
-  in PR14; PR18 SDK conformance adds the same parity fixtures for each shipped
+  in the dashboard delivery; SDK conformance adds the same parity fixtures for each shipped
   SDK.
 - Product-path tests prove events and drill-down anchors contain no prohibited
   raw content.
@@ -1041,14 +1041,14 @@ decision with collision, ambiguity, and maintenance review.
   absence as zero; removed-name and misspelling fixtures support reproducible
   alias/schema analysis without changing dispatch behavior.
 - [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
-  fixtures reconcile staged emission: PR11 cycle trigger/stage/terminal/budget/
-  dedupe/latency events; PR12 CLI/MCP/HTTP/LSP delivery/truncation/expansion
-  events; PR13 GitHub item/thread lifecycle (`current`, `outdated`, `resolved`,
+  fixtures reconcile staged emission: feedback-foundation cycle trigger/stage/terminal/budget/
+  dedupe/latency events; baseline-reader CLI/MCP/HTTP/LSP delivery/truncation/expansion
+  events; advisory GitHub item/thread lifecycle (`current`, `outdated`, `resolved`,
   `edited`, `deleted`) and ingress provider outcome (`complete`, `partial`,
   `unavailable`, `denied`, `rate_limited`, `stale`, `failed`), CI localization
   provenance without log payloads, proximity emitted/suppressed/expired/risk-
   class dimensions plus pinned Plan 20 threshold revision/digest, and host-adapter
-  state; PR14 Observatory/Doctor read-model parity across transports. Table-driven
+  state; and dashboard Observatory/Doctor read-model parity across transports. Table-driven
   fixtures cover the separate exhaustive GitHub lifecycle and ingress outcome
   sets, plus the Plan 35 provider states (unsupported, absent, indexing, stale,
   cancelled, timed-out, failed, partial versus supported plus completed plus
