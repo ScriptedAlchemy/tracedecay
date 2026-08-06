@@ -2350,7 +2350,9 @@ mod authority_tests {
             let value: Value = serde_json::from_slice(&body).expect("LCM aggregate json");
 
             assert_eq!(value["domain_state"], "ready", "{uri}");
-            assert_eq!(value["coverage"]["complete"], true, "{uri}");
+            assert_eq!(value["coverage"]["completeness"], "complete", "{uri}");
+            assert_eq!(value["coverage"]["eligible"], 1, "{uri}");
+            assert_eq!(value["coverage"]["examined"], 1, "{uri}");
             assert_eq!(value["payload"]["exists"], true, "{uri}");
         }
     }
