@@ -910,7 +910,7 @@ pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
-    #[error("the shared feedback readers must be registered before advisory registration")]
+    #[error("the shared feedback readers must be registered before the advisory runtime")]
     MissingFeedbackRuntime,
     #[error("the hook orchestration registry is unavailable")]
     HookOrchestrationUnavailable,

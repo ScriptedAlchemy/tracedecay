@@ -1,6 +1,6 @@
 //! Authority-backed automation fact proposals.
 //!
-//! `fact_proposals.json` was the legacy pre-authority store.  It is now read once as a
+//! `fact_proposals.json` was the legacy authority.  It is now read once as a
 //! bounded legacy import and then archived.  The separate projection file is
 //! strictly post-commit display metadata; proposal state, CAS, and applied
 //! facts always come from [`MemoryApplication`].
