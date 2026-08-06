@@ -10,6 +10,8 @@ use std::io::Write;
 use std::net::TcpListener;
 #[cfg(not(unix))]
 use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -236,6 +238,20 @@ impl TraceDecayStorageEnvGuard {
     pub fn set(home: impl AsRef<Path>) -> Self {
         let home = canonicalize_test_dir(home.as_ref());
         let profile_root = canonicalize_test_dir(&home.join(".tracedecay"));
+        // The profile identity authority fail-closes on any profile root that
+        // is not 0700, and this guard pre-creates the directory under the
+        // process umask (production creates it 0700 itself).
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&profile_root, fs::Permissions::from_mode(0o700)).unwrap_or_else(
+                |err| {
+                    panic!(
+                        "failed to restrict test profile root '{}': {err}",
+                        profile_root.display()
+                    )
+                },
+            );
+        }
         let global_db_path = canonicalize_test_db_path(&profile_root.join("global.db"));
 
         Self {
@@ -389,8 +405,6 @@ fn write_executable_atomically(path: &Path, contents: &[u8]) -> std::io::Result<
 
 #[cfg(unix)]
 fn make_executable_file(file: &File) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
     let mut permissions = file.metadata()?.permissions();
     permissions.set_mode(0o755);
     file.set_permissions(permissions)

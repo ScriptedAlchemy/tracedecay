@@ -267,6 +267,11 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
     )
     .expect("administrative profile");
 
+    let administrative_profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+    )
+    .expect("administrative profile");
+
     for operation in APPLICATION_SURFACE_OPERATIONS {
         let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(operation.as_str())
             .expect("operation name");
