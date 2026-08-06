@@ -120,9 +120,6 @@ const SESSION_TOOLS: &[&str] = &[
     "lcm_describe",
     "lcm_expand",
     "lcm_expand_query",
-    "lcm_preflight",
-    "lcm_compress",
-    "lcm_session_boundary",
 ];
 const MEMORY_TOOLS: &[&str] = &["memory_status", "fact_store", "fact_feedback"];
 const EDIT_TOOLS: &[&str] = &[

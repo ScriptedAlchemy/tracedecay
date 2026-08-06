@@ -20,31 +20,6 @@ use crate::semantic_runtime::{
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
-const SCHEMA: &str = r"
-CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_state_v1 (
-    scope_digest TEXT NOT NULL,
-    epoch INTEGER NOT NULL CHECK (epoch >= 0),
-    configuration_revision TEXT NOT NULL,
-    transition_digest TEXT,
-    activation_receipt_digest TEXT,
-    state_json TEXT NOT NULL,
-    activation_receipt_json TEXT,
-    PRIMARY KEY (scope_digest, epoch)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS configuration_semantic_retrieval_transition_v1
-    ON configuration_semantic_retrieval_state_v1(scope_digest, transition_digest)
-    WHERE transition_digest IS NOT NULL;
-CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_pending_v1 (
-    scope_digest TEXT NOT NULL,
-    transition_digest TEXT NOT NULL,
-    base_epoch INTEGER NOT NULL CHECK (base_epoch >= 0),
-    base_configuration_revision TEXT NOT NULL,
-    transition_json TEXT NOT NULL,
-    resulting_state_json TEXT NOT NULL,
-    staged_at INTEGER NOT NULL,
-    PRIMARY KEY (scope_digest, transition_digest)
-);";
-
 #[derive(Clone)]
 pub struct ProductionSemanticRetrievalConfigurationStoreV1 {
     database: Arc<RegisteredGlobalDb>,
@@ -65,7 +40,6 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             scope,
             prepared_central_commits: Arc::new(Mutex::new(BTreeMap::new())),
         };
-        store.ensure_schema().await?;
         Ok(store)
     }
 
@@ -81,7 +55,6 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         {
             return Err(SemanticConfigurationBackendErrorV1::Rejected);
         }
-        self.ensure_schema().await?;
         let state_json = encode_state(state)?;
         let transaction = self
             .database
@@ -119,7 +92,6 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
     pub async fn current_committed_state(
         &self,
     ) -> Result<Option<CommittedRetrievalProfileStateV1>, SemanticConfigurationBackendErrorV1> {
-        self.ensure_schema().await?;
         let snapshot = self
             .database
             .read_snapshot()
@@ -150,7 +122,6 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
     pub async fn current_state_if_present(
         &self,
     ) -> Result<Option<RetrievalProfileStateV1>, SemanticConfigurationBackendErrorV1> {
-        self.ensure_schema().await?;
         let snapshot = self
             .database
             .read_snapshot()
@@ -331,17 +302,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         Ok(transition)
     }
 
-    async fn ensure_schema(&self) -> Result<(), SemanticConfigurationBackendErrorV1> {
-        self.database
-            .writer_connection()
-            .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?
-            .execute_batch(SCHEMA)
-            .await
-            .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)
-    }
-
     async fn current_record(&self) -> Result<StoredState, SemanticConfigurationBackendErrorV1> {
-        self.ensure_schema().await?;
         let snapshot = self
             .database
             .read_snapshot()
@@ -678,7 +639,6 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
     async fn load_latest_pending(
         &self,
     ) -> Result<PendingTransition, SemanticConfigurationBackendErrorV1> {
-        self.ensure_schema().await?;
         let snapshot = self
             .database
             .read_snapshot()

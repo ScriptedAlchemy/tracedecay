@@ -13,6 +13,58 @@ use crate::display::format_token_count;
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) mod registry_drift;
 
+/// Opens an isolated daemon-registered profile database so Doctor tests can
+/// exercise the read-only session-temporal health adapter against the real
+/// registered reader pool instead of an ad-hoc connection.
+#[cfg(test)]
+pub(crate) struct DoctorTestRuntime {
+    database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+    _registry: crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    _scope: crate::db::DaemonDatabaseScope,
+}
+
+#[cfg(test)]
+impl DoctorTestRuntime {
+    pub(crate) async fn open(profile_root: &Path, label: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NONCE: AtomicU64 = AtomicU64::new(1);
+
+        std::fs::create_dir_all(profile_root).expect("create Doctor test profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700))
+                .expect("secure Doctor test profile root");
+        }
+        let identity = crate::daemon::profile_identity::load_or_create(profile_root)
+            .expect("load Doctor test profile identity");
+        let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
+        let scope = crate::db::enter_daemon_database_scope(profile_root, nonce, label)
+            .expect("enter Doctor test database scope");
+        let registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .expect("open Doctor test runtime registry");
+        let database = registry
+            .profile_database()
+            .await
+            .expect("mount Doctor test profile database");
+        Self {
+            database,
+            _registry: registry,
+            _scope: scope,
+        }
+    }
+
+    pub(crate) fn database(&self) -> &crate::global_db::RegisteredGlobalDb {
+        self.database.as_ref()
+    }
+}
+
 /// Runs a comprehensive health check of the tracedecay installation.
 pub async fn run_doctor() -> crate::errors::Result<()> {
     let _lifecycle_lease = match crate::lifecycle_lease::acquire_shared_or_inherited("doctor") {

@@ -11,11 +11,15 @@ use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
+use tracedecay_usecases::session::lcm::{
+    LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityUnavailableReason,
+    LcmCompactionCommand, LcmCompressionEvidence, LcmHostProtocol, LcmTranscriptIngestCommand,
+};
 
 use super::super::SessionAuthorities;
 
 use super::errors::{map_claude_observation_ingest_error, map_transcript_ingest_error};
-use super::{required_project_db, required_str};
+use super::required_str;
 
 mod kernels;
 
@@ -137,33 +141,14 @@ async fn drain_host_observation_projections(
 }
 
 pub(super) async fn codex_compact(
-    cg: &TraceDecay,
+    _cg: &TraceDecay,
     args: &Value,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
-    let db = required_project_db(session_authorities)?;
-    if let Some(source) = crate::sessions::codex::CodexSource::new() {
-        let project_id = project_observation_id(cg)?;
-        let scope = ObservationScopeV1::Project {
-            project_id: project_id.clone(),
-        };
-        let admission =
-            host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
-        for path in source.transcript_paths(cg.project_root()) {
-            crate::sessions::codex::try_admit_codex_jsonl_observations_for_project_with_admission(
-                &path,
-                cg.project_root(),
-                project_id.clone(),
-                &admission,
-                None,
-            )
-            .await
-            .map_err(|error| map_transcript_ingest_error(&error))?;
-        }
-        let cancellation = ObservationCancellation::default();
-        drain_host_observation_projections(&admission, &scope, &cancellation).await?;
-    }
+    let Some(authority) = session_authorities.project_lcm else {
+        return Ok(compaction_authority_unavailable("codex_compact"));
+    };
     let session_id = serde_json::from_str::<Value>(event_json)
         .ok()
         .as_ref()
@@ -173,61 +158,72 @@ pub(super) async fn codex_compact(
                 .find_map(|key| value.get(*key).and_then(Value::as_str))
                 .map(str::to_string)
         });
-    let mut pending = db
-        .pending_codex_compaction_summary_requests(session_id.as_deref(), 1)
-        .await
-        .map_err(|error| config_error(format!("load Codex compaction request failed: {error}")))?;
-    let Some(pending) = pending.pop() else {
+    let Some(session_id) = session_id else {
         return Ok(json!({
             "action": "codex_compact",
-            "status": "skipped",
-            "reason": "no pending compaction summary",
+            "status": "unavailable",
+            "reason": "host_session_identity_unavailable",
+            "messages_upserted": 0,
         }));
     };
-    let config = crate::sessions::codex_app_server::CodexAppServerSummaryConfig::from_env();
-    let summary = crate::sessions::codex_app_server::summarize_with_codex_app_server(
-        &pending.request,
-        &config,
-    )
-    .map_err(|error| config_error(format!("Codex summary failed: {error}")))?;
-    let published = db
-        .publish_codex_compaction_summary_successor(
-            &pending.node_id,
-            &summary.text,
-            "codex_app_server",
-            summary.model.as_deref().or(config.model.as_deref()),
-        )
+    let Some(response) = authority
+        .execute(pressure_only_command(
+            "codex",
+            &session_id,
+            None,
+            None,
+            None,
+            None,
+            LcmHostProtocol::CodexContextCompacted {
+                protocol_revision: "codex.context-compacted.v1".to_owned(),
+                event_digest: tracedecay_domain::canonical_sha256(&event_json)
+                    .map_err(|error| config_error(format!("digest Codex event failed: {error}")))?,
+            },
+        ))
         .await
-        .map_err(|error| config_error(format!("store Codex compaction summary failed: {error}")))?;
+    else {
+        return Ok(compaction_authority_unavailable("codex_compact"));
+    };
+    let reason = compaction_unavailable_reason(&response.outcome);
     Ok(json!({
         "action": "codex_compact",
-        "status": "completed",
-        "node_id": published.node_id,
-        "predecessor_node_id": pending.node_id,
+        "status": "unavailable",
+        "reason": reason,
+        "authority_outcome": response.outcome,
+        "committed_state": response.receipt.committed_state,
+        "messages_upserted": 0,
+    }))
+}
+
+pub(super) async fn claude_compact(
+    args: &Value,
+    _session_authorities: SessionAuthorities<'_>,
+) -> Result<Value> {
+    required_str(args, "event_json")?;
+    Ok(json!({
+        "action": "claude_compact",
+        "status": "unavailable",
+        "reason": "claude_postcompact_provenance_unavailable",
+        "summary_nodes_created": 0,
+        "summary_node_ids": [],
     }))
 }
 
 pub(super) async fn cursor_compact(
-    cg: &TraceDecay,
+    _cg: &TraceDecay,
     args: &Value,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
-    let db = required_project_db(session_authorities)?;
-    let project_id = project_observation_id(cg)?;
-    let admission =
-        host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
+    let Some(authority) = session_authorities.project_lcm else {
+        return Ok(compaction_authority_unavailable("cursor_compact"));
+    };
     let parsed: Value = serde_json::from_str(event_json)?;
     let session_id = ["session_id", "conversation_id", "chat_id"]
         .iter()
         .find_map(|key| parsed.get(*key).and_then(Value::as_str))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error("Cursor preCompact event omitted session id"))?;
-    let ingest = crate::sessions::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
-        event_json, project_id, &admission, None,
-    )
-    .await
-    .map_err(|error| map_transcript_ingest_error(&error))?;
     let messages_to_compact = event_usize(&parsed, &["messages_to_compact", "compact_count"]);
     if messages_to_compact == Some(0) {
         return Ok(cursor_compact_skipped("no messages to compact"));
@@ -238,47 +234,59 @@ pub(super) async fn cursor_compact(
         .map(|(count, compact)| count.saturating_sub(compact));
     let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
     let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
-    let first = db
-        .lcm_compress(cursor_lcm_request(
+    let Some(response) = authority
+        .execute(pressure_only_command(
+            "cursor",
             session_id,
             current_tokens,
             context_length,
             messages_to_compact,
             fresh_tail_count,
-            crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary,
-            None,
-        ))
-        .await
-        .map_err(|error| config_error(format!("prepare Cursor compaction failed: {error}")))?;
-    let Some(summary_request) = first.summary_request else {
-        return Ok(cursor_compact_skipped(first.reason));
-    };
-    let config = crate::sessions::cursor_agent::CursorAgentSummaryConfig::from_env();
-    let summary =
-        crate::sessions::cursor_agent::summarize_with_cursor_agent(&summary_request, &config)
-            .map_err(|error| config_error(format!("cursor-agent summary failed: {error}")))?;
-    let second = db
-        .lcm_compress(cursor_lcm_request(
-            session_id,
-            current_tokens,
-            context_length,
-            messages_to_compact,
-            fresh_tail_count,
-            crate::sessions::lcm::LcmSummarizerMode::Provided {
-                summary_text: summary,
-                route: Some("cursor_agent".to_string()),
+            LcmHostProtocol::CursorPreCompact {
+                protocol_revision: "cursor.precompact.v1".to_owned(),
+                event_digest: tracedecay_domain::canonical_sha256(&event_json).map_err(
+                    |error| config_error(format!("digest Cursor event failed: {error}")),
+                )?,
             },
-            first.frontier.current_frontier_store_id.or(Some(0)),
         ))
         .await
-        .map_err(|error| config_error(format!("store Cursor compaction failed: {error}")))?;
+    else {
+        return Ok(compaction_authority_unavailable("cursor_compact"));
+    };
+    let reason = compaction_unavailable_reason(&response.outcome);
     Ok(json!({
-        "status": second.status,
-        "reason": second.reason,
-        "summary_nodes_created": second.summary_nodes_created,
-        "summary_node_ids": second.summary_nodes.into_iter().map(|node| node.node_id).collect::<Vec<_>>(),
-        "messages_upserted": ingest.messages_upserted,
+        "action": "cursor_compact",
+        "status": "unavailable",
+        "reason": reason,
+        "authority_outcome": response.outcome,
+        "committed_state": response.receipt.committed_state,
+        "summary_nodes_created": 0,
+        "summary_node_ids": [],
+        "messages_upserted": 0,
     }))
+}
+
+fn compaction_authority_unavailable(action: &str) -> Value {
+    json!({
+        "action": action,
+        "status": "unavailable",
+        "reason": "lcm_daemon_authority_unavailable",
+        "summary_nodes_created": 0,
+        "summary_node_ids": [],
+    })
+}
+
+fn compaction_unavailable_reason(outcome: &LcmAuthorityOutcome) -> &'static str {
+    if matches!(
+        outcome,
+        LcmAuthorityOutcome::Unavailable {
+            reason: LcmAuthorityUnavailableReason::HostPayloadUnavailable
+        }
+    ) {
+        "host_payload_unavailable"
+    } else {
+        "lcm_daemon_authority_rejected"
+    }
 }
 
 fn cursor_compact_skipped(reason: impl Into<String>) -> Value {
@@ -304,38 +312,38 @@ fn event_usize(value: &Value, keys: &[&str]) -> Option<usize> {
     event_i64(value, keys).and_then(|value| usize::try_from(value).ok())
 }
 
-fn cursor_lcm_request(
+fn pressure_only_command(
+    provider: &str,
     session_id: &str,
     current_tokens: Option<i64>,
     context_length: Option<i64>,
     max_source_messages: Option<usize>,
     fresh_tail_count: Option<usize>,
-    summarizer: crate::sessions::lcm::LcmSummarizerMode,
-    expected_current_frontier_store_id: Option<i64>,
-) -> crate::sessions::lcm::LcmCompressionRequest {
-    crate::sessions::lcm::LcmCompressionRequest {
-        provider: "cursor".to_string(),
-        session_id: session_id.to_string(),
-        messages: Vec::new(),
-        current_tokens,
-        focus_topic: Some("Cursor context compaction".to_string()),
-        ignore_session_patterns: Vec::new(),
-        stateless_session_patterns: Vec::new(),
-        ignore_message_patterns: Vec::new(),
-        expected_current_frontier_store_id,
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length,
-        reserve_tokens_floor: None,
-        summarizer,
-    }
+    protocol: LcmHostProtocol,
+) -> LcmAuthorityRequest {
+    LcmAuthorityRequest::Compact(LcmCompactionCommand {
+        preflight: crate::sessions::lcm::LcmPreflightRequest {
+            provider: provider.to_owned(),
+            session_id: session_id.to_string(),
+            messages: Vec::new(),
+            current_tokens,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages,
+            summary_fan_in: None,
+            incremental_max_depth: None,
+            fresh_tail_count,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
+            context_length,
+            reserve_tokens_floor: None,
+        },
+        evidence: LcmCompressionEvidence::PressureOnly { protocol },
+    })
 }
 
 pub(super) async fn accounting_receipt(
@@ -374,6 +382,9 @@ pub(super) async fn ingest_transcript(
         .get("user_scope")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    if provider == "hermes" && args.get("messages").is_some() {
+        return ingest_hermes_callback_turn(args, user_scope, session_authorities).await;
+    }
     let max_new_bytes = args.get("max_new_bytes").and_then(Value::as_u64);
     let admission_scope = if user_scope {
         HostAdmissionScope::Profile
@@ -485,6 +496,84 @@ pub(super) async fn ingest_transcript(
         output["source_bytes_scanned"] = json!(stats.source_bytes_scanned);
     }
     Ok(output)
+}
+
+async fn ingest_hermes_callback_turn(
+    args: &Value,
+    user_scope: bool,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<Value> {
+    let session_id = required_str(args, "session_id")?;
+    let messages = args
+        .get("messages")
+        .and_then(Value::as_array)
+        .filter(|messages| !messages.is_empty())
+        .ok_or_else(|| config_error("Hermes turn callback requires non-empty messages"))?
+        .clone();
+    let authority = if user_scope {
+        session_authorities.profile_lcm
+    } else {
+        session_authorities.project_lcm
+    };
+    let Some(authority) = authority else {
+        return Ok(json!({
+            "action": "ingest_transcript",
+            "provider": "hermes",
+            "user_scope": user_scope,
+            "status": "unavailable",
+            "reason": "lcm_daemon_authority_unavailable",
+        }));
+    };
+    let event_digest = tracedecay_domain::canonical_sha256(&(&"hermes", &session_id, &messages))
+        .map_err(|error| config_error(format!("digest Hermes turn failed: {error}")))?;
+    let request = LcmAuthorityRequest::Ingest(LcmTranscriptIngestCommand {
+        preflight: crate::sessions::lcm::LcmPreflightRequest {
+            provider: "hermes".to_owned(),
+            session_id: session_id.to_owned(),
+            messages,
+            current_tokens: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            incremental_max_depth: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
+        },
+        protocol_revision: "hermes.turn-completed.v1".to_owned(),
+        event_digest,
+    });
+    let Some(response) = authority.execute(request).await else {
+        return Ok(json!({
+            "action": "ingest_transcript",
+            "provider": "hermes",
+            "user_scope": user_scope,
+            "status": "unavailable",
+            "reason": "lcm_daemon_authority_unavailable",
+        }));
+    };
+    let status = if response.outcome == LcmAuthorityOutcome::Ready
+        && matches!(response.payload, Some(LcmAuthorityPayload::Ingest(_)))
+    {
+        "committed"
+    } else {
+        "unavailable"
+    };
+    Ok(json!({
+        "action": "ingest_transcript",
+        "provider": "hermes",
+        "user_scope": user_scope,
+        "status": status,
+        "authority_outcome": response.outcome,
+        "committed_state": response.receipt.committed_state,
+    }))
 }
 
 pub(super) fn complete_ingest_admission(

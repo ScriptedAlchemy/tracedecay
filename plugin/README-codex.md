@@ -47,3 +47,7 @@ this workflow.
 `PostCompact` is an admission-only request. The daemon schedules compaction
 against its canonical session data and owns model execution, retries, and
 results; the hook does not start a Codex child process or configure a model.
+Codex does not expose an authenticated compacted payload through this hook,
+so pressure-only compaction stays read-only: the daemon reports
+native-summary publication as unavailable and does not mutate transcript
+state.

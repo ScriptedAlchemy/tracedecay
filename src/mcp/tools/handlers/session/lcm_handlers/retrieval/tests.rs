@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use tempfile::TempDir;
 use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalModeV1, UtcMicros};
 
@@ -14,7 +12,7 @@ use crate::mcp::tools::handlers::session::message_search::{
 #[tokio::test]
 async fn load_maps_exact_forensic_occurrence_and_preserves_legacy_keys() {
     let service = RecordingService::new(complete("a😀界bc", "assistant", Some("opaque-next")));
-    let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
+    let context = LcmHandlerContext::user(Some(&service));
     let response = handle_lcm_load_session(
         context,
         json!({
@@ -80,7 +78,7 @@ async fn load_preserves_the_kernel_page_order_bound_to_its_cursor() {
     });
     let response = payload(
         handle_lcm_load_session(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({
                 "session_id": "session-exact",
                 "cursor": "opaque-current",
@@ -100,7 +98,7 @@ async fn load_preserves_the_kernel_page_order_bound_to_its_cursor() {
 async fn grep_preserves_exact_phrase_cjk_emoji_and_maps_exact_session_filters() {
     let query = "\"exact phrase\" 精确 😀";
     let service = RecordingService::new(complete(query, "user", Some("grep-next")));
-    let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
+    let context = LcmHandlerContext::user(Some(&service));
     let response = handle_lcm_grep(
         context,
         json!({
@@ -156,7 +154,7 @@ async fn grep_binds_summary_source_as_of_and_renders_stable_summary_hits() {
     });
     let response = payload(
         handle_lcm_grep(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({
                 "query": "canonical summary",
                 "provider": "claude",
@@ -204,7 +202,7 @@ async fn grep_missing_profile_store_is_unavailable_without_db_fallback() {
     let missing_path = temp.path().join("sessions.db");
     let response = payload(
         handle_lcm_grep(
-            LcmHandlerContext::user(&missing_path, None, None),
+            LcmHandlerContext::user(None),
             json!({"query": "anything", "format": "json"}),
         )
         .await
@@ -226,7 +224,7 @@ async fn project_read_alias_without_service_never_probes_the_store_path() {
     let missing_path = temp.path().join("sessions.db");
     let response = payload(
         handle_lcm_load_session(
-            LcmHandlerContext::project_for_test(temp.path(), &missing_path, None),
+            LcmHandlerContext::project_for_test(temp.path(), None),
             json!({"session_id": "session-exact", "format": "json"}),
         )
         .await

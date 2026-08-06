@@ -4,7 +4,7 @@ use std::io::Write;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 #[cfg(unix)]
-use tracedecay::daemon::{DaemonHandshake, call_default_tool, tool_json_payload};
+use tracedecay::hooks::cursor_pre_compact_via_daemon;
 use tracedecay::sessions::cursor::{
     CursorSweepSource, CursorTranscriptIngestStats, cursor_project_slug,
     ingest_cursor_transcript_event as ingest_cursor_transcript_event_for_project,
@@ -13,8 +13,6 @@ use tracedecay::sessions::cursor::{
     ingest_cursor_user_transcript_event_capped_with_registered_roots,
     try_ingest_cursor_project_sweep_capped as try_ingest_cursor_project_sweep_capped_for_project,
 };
-#[cfg(unix)]
-use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
 use tracedecay::sessions::source::TranscriptIngestResult;
 
 #[cfg(unix)]
@@ -279,7 +277,7 @@ async fn user_cursor_event_without_workspace_fails_closed_on_slug_collision() {
 // Intentional: this test pins process-wide HOME/TRACEDECAY_GLOBAL_DB while the
 // hook resolves its storage paths.
 #[allow(clippy::await_holding_lock)]
-async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
+async fn cursor_pre_compact_without_native_payload_is_read_only_and_unavailable() {
     let tmp = TempDir::new().unwrap();
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
@@ -302,40 +300,46 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     let transcript = tmp.path().join("cursor-session.jsonl");
     std::fs::write(
         &transcript,
-        r#"{"role":"user","message":{"content":[{"type":"text","text":"First durable decision: keep Cursor compaction summaries in LCM."}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"Implementation plan: use cursor-agent as an auxiliary summarizer when Cursor exposes no summary."}]}}
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"First durable decision: publish only authenticated native compaction payloads."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Cursor exposes pressure without native summary content, so publication stays unavailable."}]}}
 {"role":"user","message":{"content":[{"type":"text","text":"Fresh tail should remain replayable."}]}}
 {"role":"assistant","message":{"content":[{"type":"text","text":"Acknowledged fresh tail."}]}}
 "#,
     )
     .unwrap();
 
-    let fake_bin = tmp.path().join(if cfg!(windows) {
-        "cursor-agent-fake.cmd"
-    } else {
-        "cursor-agent-fake"
-    });
-    let fake_body = if cfg!(windows) {
-        "@echo off\r\necho Cursor auxiliary summary: keep compaction summaries in LCM.\r\n"
-    } else {
-        "#!/bin/sh\nprintf '%s\\n' 'Cursor auxiliary summary: keep compaction summaries in LCM.'\n"
-    };
-    std::fs::write(&fake_bin, fake_body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let _summary_env_guards = [
-        EnvVarGuard::set("TRACEDECAY_CURSOR_AGENT_BIN", &fake_bin),
-        EnvVarGuard::set("TRACEDECAY_CURSOR_SUMMARY_MODEL", "fake-cursor-model"),
-        EnvVarGuard::set("TRACEDECAY_CURSOR_SUMMARY_TIMEOUT_SECS", "5"),
-        EnvVarGuard::set(
-            "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
-            tmp.path().join("summary-workspace"),
-        ),
-    ];
     let _daemon = spawn_tracedecay_daemon(&home);
+
+    // In production a preCompact event only fires mid-session, after earlier
+    // hook traffic has already admitted the project session store. A freshly
+    // spawned debug daemon still owes that first-touch admission, which costs
+    // more than the strict hook acknowledgement budget, so replay that history
+    // first: drive best-effort pressure events on a separate warmup session
+    // until the daemon acknowledges within budget.
+    let warmup_event = serde_json::json!({
+        "hook_event_name": "preCompact",
+        "session_id": "warmup-session",
+        "conversation_id": "warmup-conversation",
+        "transcript_path": transcript,
+        "workspace_roots": [project.clone()],
+        "message_count": 4,
+        "messages_to_compact": 2,
+        "context_tokens": 124000,
+        "context_window_size": 128000
+    })
+    .to_string();
+    let warmup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let warmup = cursor_pre_compact_via_daemon(&warmup_event).await;
+        if warmup.status != "error" {
+            break;
+        }
+        assert_eq!(warmup.reason, "timed out", "warmup hit a non-budget error");
+        assert!(
+            std::time::Instant::now() < warmup_deadline,
+            "daemon never acknowledged pressure within the warmup deadline"
+        );
+    }
 
     let event = serde_json::json!({
         "hook_event_name": "preCompact",
@@ -348,23 +352,13 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
         "context_tokens": 124000,
         "context_window_size": 128000
     });
-    let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, true)
-        .expect("daemon handshake");
-    let result = call_default_tool(
-        &handshake,
-        "tracedecay_hook_runtime",
-        serde_json::json!({
-            "action": "cursor_compact",
-            "event_json": event.to_string(),
-            "format": "json",
-        }),
-    )
-    .await
-    .expect("daemon-owned Cursor compaction");
-    let outcome = tool_json_payload(&result, "tracedecay_hook_runtime")
-        .expect("Cursor compaction response payload");
-    assert_eq!(outcome["status"], "ok", "{}", outcome["reason"]);
-    assert_eq!(outcome["summary_nodes_created"], 1);
+    let outcome = cursor_pre_compact_via_daemon(&event.to_string()).await;
+    assert_eq!(
+        (outcome.status.as_str(), outcome.reason.as_str()),
+        ("unavailable", "host_payload_unavailable"),
+    );
+    assert_eq!(outcome.summary_nodes_created, 0);
+    assert!(outcome.summary_node_ids.is_empty());
 
     // The daemon is the sole writer authority for its session store. Stop it
     // before mounting the persisted database for post-run assertions.
@@ -372,41 +366,13 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     let runtime = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id)
         .await
         .unwrap();
-    let node_id = outcome["summary_node_ids"]
-        .as_array()
-        .and_then(|node_ids| node_ids.first())
-        .and_then(serde_json::Value::as_str)
-        .expect("summary node id should be returned");
-    let expanded = runtime
-        .lcm_expand_summary_node_for_test("cursor", "cursor-session", node_id)
-        .await
-        .expect("summary node should expand");
     assert!(
-        expanded
-            .summary
-            .summary_text
-            .contains("Cursor auxiliary summary: keep compaction summaries in LCM.")
-    );
-    let described = runtime
-        .lcm_describe_for_test(LcmDescribeRequest {
-            provider: "cursor".to_string(),
-            session_id: "cursor-session".to_string(),
-            target: LcmDescribeTarget::SummaryNode {
-                node_id: node_id.to_owned(),
-            },
-        })
-        .await
-        .expect("summary node should describe");
-    let summary = described
-        .summary_node
-        .expect("summary node details should exist");
-    assert_eq!(summary.source_count, 2);
-    assert!(
-        summary
-            .metadata_json
-            .as_deref()
-            .unwrap_or_default()
-            .contains("cursor_agent")
+        runtime
+            .session_for_test(HostAdmissionScope::Project, "cursor", "cursor-session")
+            .await
+            .unwrap()
+            .is_none(),
+        "pressure-only compaction must not ingest the transcript"
     );
 }
 

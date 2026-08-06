@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use tracedecay_domain::{HydrationStateV1, RetrievalGrainV1, SessionId};
 use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 
@@ -35,7 +33,7 @@ async fn malformed_expand_query_selectors_never_call_the_service() {
         ),
     ] {
         let service = RecordingService::new(complete("unused", "user", None));
-        let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
+        let context = LcmHandlerContext::user(Some(&service));
         let error = handle_lcm_expand_query(context, args).await.unwrap_err();
         assert!(error.to_string().contains(field), "{error}");
         assert_eq!(service.calls(), 0);
@@ -52,7 +50,7 @@ async fn expand_query_translates_search_through_the_retrieval_service() {
     ));
     let response = payload(
         handle_lcm_expand_query(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({
                 "provider": "claude",
                 "session_id": "session-exact",
@@ -121,7 +119,7 @@ async fn expand_query_translates_node_ids_through_summary_expansion() {
     });
     let response = payload(
         handle_lcm_expand_query(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({
                 "provider": "claude",
                 "session_id": "session-exact",
@@ -203,7 +201,7 @@ async fn expand_query_omits_typed_unavailable_summary_sources() {
 
     let direct = payload(
         handle_lcm_expand(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({
                 "provider": "claude",
                 "session_id": "session-exact",
@@ -231,7 +229,7 @@ async fn expand_query_omits_typed_unavailable_summary_sources() {
 
     let response = payload(
         handle_lcm_expand_query(
-            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            LcmHandlerContext::user(Some(&service)),
             json!({
                 "provider": "claude",
                 "session_id": "session-exact",
@@ -305,7 +303,7 @@ async fn expand_query_forwards_single_node_cursor_to_canonical_expansion() {
     });
 
     handle_lcm_expand_query(
-        LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+        LcmHandlerContext::user(Some(&service)),
         json!({
             "provider": "claude",
             "session_id": "session-exact",

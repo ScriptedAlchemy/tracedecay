@@ -4732,7 +4732,10 @@
         },
         "source_token_count": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "summary_node_count": {
           "format": "int64",
@@ -4740,17 +4743,15 @@
         },
         "summary_token_count": {
           "format": "int64",
-          "type": "integer"
-        },
-        "token_estimate_total": {
-          "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
         "message_count",
         "summary_node_count",
-        "token_estimate_total",
         "summary_token_count",
         "source_token_count"
       ],

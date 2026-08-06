@@ -7,10 +7,18 @@
 //! re-exports these under `sessions::lcm`, and the registered temporal adapters
 //! depend on them directly, so neither side has to reach through the other.
 
+pub mod authority;
 pub mod contracts;
 pub mod render;
 pub use tracedecay_sessions::lcm::compression_policy;
 
+pub use authority::{
+    LcmAuthorityFuture, LcmAuthorityInvocation, LcmAuthorityOperation, LcmAuthorityOutcome,
+    LcmAuthorityPayload, LcmAuthorityPort, LcmAuthorityReceipt, LcmAuthorityRequest,
+    LcmAuthorityResponse, LcmAuthorityTarget, LcmAuthorityUnavailableReason, LcmCompactionCommand,
+    LcmCompressionEvidence, LcmDoctorQuery, LcmHostProtocol, LcmStatusQuery,
+    LcmTranscriptIngestCommand, lcm_authority_operation_identity,
+};
 pub use contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,

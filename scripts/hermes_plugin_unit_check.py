@@ -454,9 +454,9 @@ def _check_registration_split(
 
     fwd = ForwardingCtx()
     plugin.register(fwd)
-    assert "tracedecay_lcm_compress" in fwd.tools, sorted(fwd.tools)
+    assert "tracedecay_lcm_compress" not in fwd.tools, sorted(fwd.tools)
     assert "lcm_grep" in fwd.tools, sorted(fwd.tools)
-    ok("LCM live-ingest verbs register when the host forwards messages")
+    ok("read-only LCM mirrors register when the host forwards messages")
     return ctx
 
 
@@ -647,47 +647,15 @@ def _check_engine_state_and_compress(
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
-    replay = [{"role": "user", "content": "[summary] hello/hi"}]
-
-    real_json = plugin.call_tracedecay_json
-    try:
-        plugin.call_tracedecay_json = lambda name, args, **kw: {
-            "status": "ok",
-            "reason": "compressed",
-            "replay_messages": list(replay),
-        }
-        out = engine.compress(list(messages), current_tokens=10)
-        assert out == replay, out
-        assert all(isinstance(m, dict) and m.get("role") for m in out)
-        assert engine._last_compress_aborted is False
-        assert engine.last_compress_result.get("status") == "ok"
-        ok("compress() returns replay message list on success")
-
-        plugin.call_tracedecay_json = lambda name, args, **kw: {
-            "status": "ok",
-            "reason": "below_threshold",
-            "replay_messages": list(messages),
-        }
-        out = engine.compress(list(messages), current_tokens=10)
-        assert out == messages, out
-        ok("compress() no-op returns the input list (host skips rotation)")
-
-        plugin.call_tracedecay_json = lambda name, args, **kw: {"error": "boom"}
-        out = engine.compress(list(messages), current_tokens=10)
-        assert out == messages, out
-        assert engine._last_compress_aborted is True
-        assert "boom" in str(engine._last_summary_error)
-        ok("compress() error returns the input list and flags the abort")
-
-        def _raise(name, args, **kw):
-            raise RuntimeError("subprocess exploded")
-
-        plugin.call_tracedecay_json = _raise
-        out = engine.compress(list(messages), current_tokens=10)
-        assert out == messages and engine._last_compress_aborted is True
-        ok("compress() exception degrades to the input list")
-    finally:
-        plugin.call_tracedecay_json = real_json
+    out = engine.compress(list(messages), current_tokens=10)
+    assert out == messages, out
+    assert engine._last_compress_aborted is True
+    assert engine.last_compress_result == {
+        "status": "unavailable",
+        "reason": "host_raw_compression_unavailable",
+        "semantic_error": True,
+    }
+    ok("compress() returns the unchanged transcript with typed unavailability")
 
     # Host-contract token attrs (minimum-context guard reads these).
     engine.update_model("check-model", 128000)
@@ -724,8 +692,8 @@ def _check_engine_thread_isolation(engine):
 
 
 def _check_should_compress_gating(plugin, engine):
-    # should_compress gates locally below the tracked threshold: no
-    # subprocess spawn for the up-to-~90 per-turn host probes.
+    # Hermes exposes no authenticated raw-compaction payload, so no pressure
+    # probe can claim that compression is available.
     probes = []
     real_probe = plugin.TraceDecayContextEngine._preflight_probe
     try:
@@ -736,11 +704,11 @@ def _check_should_compress_gating(plugin, engine):
         plugin.TraceDecayContextEngine._preflight_probe = _spy_probe
         assert engine.should_compress(prompt_tokens=10) is False
         assert probes == [], probes
-        assert engine.should_compress(prompt_tokens=engine.threshold_tokens) is True
-        assert len(probes) == 1, probes
+        assert engine.should_compress(prompt_tokens=engine.threshold_tokens) is False
+        assert probes == [], probes
     finally:
         plugin.TraceDecayContextEngine._preflight_probe = real_probe
-    ok("should_compress short-circuits below threshold, probes at it")
+    ok("should_compress stays false without an authentic host payload")
 
     # ABC contract: should_compress_preflight returns a BOOL; an error dict
     # from the probe must read as False, never truthy.
@@ -753,10 +721,10 @@ def _check_should_compress_gating(plugin, engine):
         plugin.TraceDecayContextEngine._preflight_probe = (
             lambda self, *a, **k: {"status": "ok", "should_compress": True}
         )
-        assert engine.should_compress_preflight([]) is True
+        assert engine.should_compress_preflight([]) is False
     finally:
         plugin.TraceDecayContextEngine._preflight_probe = real_probe
-    ok("should_compress_preflight honors the bool ABC contract")
+    ok("should_compress_preflight reports typed capability absence")
 
 
 def _check_expand_query_degradation(plugin):
@@ -804,10 +772,16 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
     ok("memory schemas collapsed to 3")
 
     calls = []
+    transcript_calls = []
     real_tool = plugin.tools.call_tracedecay_tool
+    real_json = plugin.call_tracedecay_json
     try:
         plugin.tools.call_tracedecay_tool = lambda name, args, **kw: (
             calls.append((name, args, kw)) or "{}"
+        )
+        plugin.call_tracedecay_json = lambda name, args, **kw: (
+            transcript_calls.append((name, args, kw))
+            or {"status": "committed"}
         )
 
         provider.handle_tool_call("fact_store", {"action": "search", "query": "rust"})
@@ -818,16 +792,18 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
         assert kwargs["project_root"] == expected_project_root, kwargs
         ok("memory tool calls stay bound to the provider's session project")
 
-        before = len(calls)
+        before = len(transcript_calls)
         provider.sync_turn("u", "a", session_id="other-session", messages=messages)
-        turn_calls = calls[before:]
+        turn_calls = transcript_calls[before:]
         assert len(turn_calls) == 2, turn_calls
         user_name, user_args, user_kwargs = turn_calls[0]
-        assert user_name == "tracedecay_lcm_preflight"
+        assert user_name == "tracedecay_hook_runtime"
+        assert user_args["action"] == "ingest_transcript"
         assert user_args["storage_scope"] == "user", user_args
         assert "project_root" not in user_kwargs, user_kwargs
         name, args, kwargs = turn_calls[1]
-        assert name == "tracedecay_lcm_preflight", calls
+        assert name == "tracedecay_hook_runtime", transcript_calls
+        assert args["action"] == "ingest_transcript"
         assert args["session_id"] == "other-session"
         assert [message["content"] for message in args["messages"]] == ["u", "a"]
         assert all(message.get("id") for message in args["messages"])
@@ -838,20 +814,19 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
             message["associated_project_roots"] == [expected_project_root]
             for message in args["messages"]
         )
-        assert args["transcript_projection"] is True
         assert "project_root" not in args, args
         assert kwargs["project_root"] == expected_project_root, kwargs
 
         ok("sync_turn stores a canonical user turn plus its project projection")
 
-        before = len(calls)
+        before = len(transcript_calls)
         provider.sync_turn("only user", "and assistant", session_id="s2", messages=None)
-        turn_calls = calls[before:]
+        turn_calls = transcript_calls[before:]
         assert len(turn_calls) == 2, turn_calls
         assert turn_calls[0][1]["storage_scope"] == "user", turn_calls
         assert "project_root" not in turn_calls[0][2], turn_calls
         name, args, kwargs = turn_calls[1]
-        assert name == "tracedecay_lcm_preflight", calls
+        assert name == "tracedecay_hook_runtime", transcript_calls
         assert args["messages"][0]["content"] == "only user"
         assert args["messages"][1]["content"] == "and assistant"
         assert "project_root" not in args, args
@@ -872,13 +847,12 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
         ok("on_memory_write mirrors adds and skips removals")
 
         provider.project_root = None
-        before = len(calls)
+        before = len(transcript_calls)
         provider.sync_turn("u", "a", session_id="untethered", messages=messages)
-        assert len(calls) == before + 1
-        name, args, kwargs = calls[-1]
-        assert name == "tracedecay_lcm_preflight"
+        assert len(transcript_calls) == before + 1
+        name, args, kwargs = transcript_calls[-1]
+        assert name == "tracedecay_hook_runtime"
         assert args["storage_scope"] == "user", args
-        assert args["transcript_projection"] is True
         assert "project_root" not in kwargs, kwargs
         provider.handle_tool_call("fact_store", {"action": "add", "content": "pref"})
         name, args, kwargs = calls[-1]
@@ -888,7 +862,7 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
 
         real_resolver = plugin._resolved_project_scope
         plugin._resolved_project_scope = lambda path, *_args: expected_project_root
-        before = len(calls)
+        before = len(transcript_calls)
         provider.sync_turn(
             "project task",
             "done",
@@ -906,30 +880,30 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
                 },
             ],
         )
-        turn_calls = calls[before:]
+        turn_calls = transcript_calls[before:]
         assert len(turn_calls) == 2, turn_calls
         assert turn_calls[0][1]["storage_scope"] == "user", turn_calls
         assert "project_root" not in turn_calls[0][2], turn_calls
         name, args, kwargs = turn_calls[1]
-        assert name == "tracedecay_lcm_preflight"
+        assert name == "tracedecay_hook_runtime"
         assert kwargs["project_root"] == expected_project_root
         assert [message["id"] for message in turn_calls[0][1]["messages"]] == [
             message["id"] for message in args["messages"]
         ]
-        assert args["transcript_projection"] is True
         plugin._resolved_project_scope = real_resolver
         ok("structured tool activity correlates an untethered turn to its project")
         provider.project_root = expected_project_root
 
         # Non-primary execution contexts must not write turn state.
-        before = len(calls)
+        before = len(transcript_calls)
         provider.agent_context = "cron"
         provider.sync_turn("u", "a", session_id="cron-session", messages=messages)
-        assert len(calls) == before, calls[before:]
+        assert len(transcript_calls) == before, transcript_calls[before:]
         provider.agent_context = ""
         ok("sync_turn skips cron/flush execution contexts")
     finally:
         plugin.tools.call_tracedecay_tool = real_tool
+        plugin.call_tracedecay_json = real_json
 
 
 def _check_prefetch_cache(plugin, ctx):
@@ -988,8 +962,13 @@ def _check_args_file_spill(plugin, work: Path):
 
         big = "x" * (200 * 1024)
         raw = plugin.tools.call_tracedecay_tool(
-            "tracedecay_lcm_preflight",
-            {"session_id": "s", "messages": [{"role": "user", "content": big}]},
+            "tracedecay_hook_runtime",
+            {
+                "action": "ingest_transcript",
+                "provider": "hermes",
+                "session_id": "s",
+                "messages": [{"role": "user", "content": big}],
+            },
         )
         outer = json.loads(raw)
         inner = json.loads(outer["content"][0]["text"])

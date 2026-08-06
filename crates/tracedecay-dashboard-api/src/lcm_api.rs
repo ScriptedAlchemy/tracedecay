@@ -156,49 +156,49 @@ struct LcmSessionCountsV1 {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum LcmTokenCountProvenanceV1 {
+pub(super) enum LcmTokenCountProvenanceV1 {
     O200kApproximate,
     Unavailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub(super) struct LcmMessageV1 {
-    store_id: Option<i64>,
-    session_id: String,
-    role: Option<String>,
-    source: Option<String>,
-    timestamp: Option<i64>,
-    token_count: Option<i64>,
-    token_count_provenance: Option<LcmTokenCountProvenanceV1>,
-    content: Option<String>,
-    message_id: String,
-    ordinal: Option<i64>,
-    storage_kind: Option<String>,
-    metadata_json: Option<String>,
-    tool_name: Option<String>,
-    pinned: Option<i64>,
-    summary_node_ids: Vec<String>,
+    pub(super) store_id: Option<i64>,
+    pub(super) session_id: String,
+    pub(super) role: Option<String>,
+    pub(super) source: Option<String>,
+    pub(super) timestamp: Option<i64>,
+    pub(super) token_count: Option<i64>,
+    pub(super) token_count_provenance: Option<LcmTokenCountProvenanceV1>,
+    pub(super) content: Option<String>,
+    pub(super) message_id: String,
+    pub(super) ordinal: Option<i64>,
+    pub(super) storage_kind: Option<String>,
+    pub(super) metadata_json: Option<String>,
+    pub(super) tool_name: Option<String>,
+    pub(super) pinned: Option<i64>,
+    pub(super) summary_node_ids: Vec<String>,
     #[serde(default)]
-    snippet: Option<String>,
+    pub(super) snippet: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub(super) struct LcmSummaryNodeV1 {
-    node_id: String,
-    session_id: String,
-    depth: i64,
-    category: String,
-    source_type: String,
-    token_count: Option<i64>,
-    source_token_count: Option<i64>,
-    latest_at: Option<i64>,
-    created_at: i64,
-    expand_hint: String,
-    summary: String,
+    pub(super) node_id: String,
+    pub(super) session_id: String,
+    pub(super) depth: i64,
+    pub(super) category: String,
+    pub(super) source_type: String,
+    pub(super) token_count: Option<i64>,
+    pub(super) source_token_count: Option<i64>,
+    pub(super) latest_at: Option<i64>,
+    pub(super) created_at: i64,
+    pub(super) expand_hint: String,
+    pub(super) summary: String,
     #[serde(default)]
-    recency: Option<i64>,
+    pub(super) recency: Option<i64>,
     #[serde(default)]
-    snippet: Option<String>,
+    pub(super) snippet: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

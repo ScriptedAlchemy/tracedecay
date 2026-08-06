@@ -1,25 +1,6 @@
-use std::path::Path;
-
 use super::super::super::*;
 use super::super::shared::lcm_status_payload;
 use super::super::test_support::*;
-use super::*;
-
-#[tokio::test]
-async fn doctor_requires_a_specific_provider_before_storage_open() {
-    for (args, field) in [
-        (json!({"format": "json"}), "provider"),
-        (json!({"provider": "all", "format": "json"}), "provider"),
-    ] {
-        let error = handle_lcm_doctor(
-            LcmHandlerContext::user(Path::new("/missing"), None, None),
-            args,
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains(field), "{error}");
-    }
-}
 
 #[test]
 fn status_envelope_preserves_exact_json_and_markdown_rendering() {

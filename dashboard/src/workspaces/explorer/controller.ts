@@ -62,14 +62,18 @@ function cancelPlannerQuery(runId: string): Promise<EnvelopeResult<ExplorerQuery
   );
 }
 
-function readSessionSize(sessionId: string): Promise<EnvelopeResult<ExplorerSessionSizeV1>> {
+function readSessionSize(
+  sessionId: string,
+): Promise<EnvelopeResult<ExplorerSessionSizeV1>> {
   return fetchEnvelope(
     `/api/explorer/sessions/${encodeURIComponent(sessionId)}/size`,
     ExplorerSessionSizeV1Schema,
   );
 }
 
-function readSessionContext(sessionId: string): Promise<EnvelopeResult<ExplorerReadContextV1>> {
+function readSessionContext(
+  sessionId: string,
+): Promise<EnvelopeResult<ExplorerReadContextV1>> {
   return fetchEnvelope(
     `/api/explorer/sessions/${encodeURIComponent(sessionId)}/read-context?limit=25&offset=0&order=asc`,
     ExplorerReadContextV1Schema,

@@ -363,11 +363,6 @@ pub const UNAVAILABLE_OPERATIONS: &[UnavailableOperationCapability] = &[
         disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
     },
     UnavailableOperationCapability {
-        operation: "application_lcm_compress",
-        operation_id: "operation.application.lcm_compress",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
         operation: "application_lcm_describe",
         operation_id: "operation.application.lcm_describe",
         disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
@@ -395,16 +390,6 @@ pub const UNAVAILABLE_OPERATIONS: &[UnavailableOperationCapability] = &[
     UnavailableOperationCapability {
         operation: "application_lcm_load_session",
         operation_id: "operation.application.lcm_load_session",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_lcm_preflight",
-        operation_id: "operation.application.lcm_preflight",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_lcm_session_boundary",
-        operation_id: "operation.application.lcm_session_boundary",
         disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
     },
     UnavailableOperationCapability {

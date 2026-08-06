@@ -13,7 +13,7 @@ async fn unsupported_filters_are_typed_and_never_call_the_service() {
         json!({"query": "x", "sort": "recency", "include_summaries": false, "format": "json"}),
     ] {
         let service = RecordingService::new(complete("unused", "user", None));
-        let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
+        let context = LcmHandlerContext::user(Some(&service));
         let response = payload(handle_lcm_grep(context, args).await.unwrap());
         assert_eq!(response["status"], "unsupported_filter");
         assert!(
@@ -56,7 +56,7 @@ async fn malformed_unsupported_filters_are_rejected_without_broadening() {
         ),
     ] {
         let service = RecordingService::new(complete("unused", "user", None));
-        let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
+        let context = LcmHandlerContext::user(Some(&service));
         let error = handle_lcm_grep(context, args).await.unwrap_err();
         assert!(error.to_string().contains(field), "{error}");
         assert_eq!(service.calls(), 0);
@@ -66,7 +66,7 @@ async fn malformed_unsupported_filters_are_rejected_without_broadening() {
 #[tokio::test]
 async fn cursor_failures_and_legacy_numeric_cursor_are_typed_without_db_fallback() {
     let denied = RecordingService::new(SessionRetrievalServiceOutcome::Denied);
-    let denied_context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&denied));
+    let denied_context = LcmHandlerContext::user(Some(&denied));
     let denied_response = payload(
         handle_lcm_grep(
             denied_context,
@@ -83,7 +83,7 @@ async fn cursor_failures_and_legacy_numeric_cursor_are_typed_without_db_fallback
     assert_eq!(denied_response["status"], "denied");
 
     let drifted = RecordingService::new(SessionRetrievalServiceOutcome::WrongScope);
-    let drifted_context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&drifted));
+    let drifted_context = LcmHandlerContext::user(Some(&drifted));
     let drifted_response = payload(
         handle_lcm_grep(
             drifted_context,
@@ -100,7 +100,7 @@ async fn cursor_failures_and_legacy_numeric_cursor_are_typed_without_db_fallback
     assert_eq!(drifted_response["status"], "wrong_scope");
 
     let service = RecordingService::new(complete("compat", "assistant", Some("opaque-next")));
-    let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
+    let context = LcmHandlerContext::user(Some(&service));
     let error = handle_lcm_load_session(
         context,
         json!({
@@ -119,7 +119,7 @@ async fn cursor_failures_and_legacy_numeric_cursor_are_typed_without_db_fallback
     assert_eq!(service.calls(), 0);
 
     let missing_path = Path::new("/definitely/missing/tracedecay-sessions.db");
-    let missing_context = LcmHandlerContext::user(missing_path, None, None);
+    let missing_context = LcmHandlerContext::user(None);
     let missing = payload(
         handle_lcm_load_session(
             missing_context,

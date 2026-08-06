@@ -20,6 +20,8 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
+use super::SessionRetrievalServicePort;
+use super::dashboard_lcm::DashboardLcmReadAdapter;
 use super::support::generic_tool_result;
 
 use crate::dashboard::{
@@ -299,7 +301,7 @@ pub(super) async fn handle_dashboard(
     args: Value,
     retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
-    lcm_retrieval: Option<Arc<dyn super::SessionRetrievalServicePort>>,
+    lcm_retrieval: Option<Arc<dyn SessionRetrievalServicePort>>,
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
@@ -397,9 +399,8 @@ pub(super) async fn handle_dashboard(
             let lcm_read_authority = lcm_retrieval
                 .zip(retained_cg.store_layout().identity.project_id.clone())
                 .map(|(retrieval, project_id)| {
-                    Arc::new(super::dashboard_lcm::DashboardLcmReadAdapter::new(
-                        retrieval, project_id,
-                    )) as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
+                    Arc::new(DashboardLcmReadAdapter::new(retrieval, project_id))
+                        as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
                 });
             crate::hooks::install_dashboard_hook_readiness_projection()?;
             let state = build_state_with_automation_reconciler(
