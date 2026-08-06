@@ -6,14 +6,16 @@
 //! the durable semantic-vector projection
 //! (docs/plans/tracedecay-v2/39-embedded-grafeo-graph-database.md Task 4).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
-use tracedecay_domain::ProjectId;
+use tracedecay_domain::{CodeGenerationId, ProjectId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_store::RetainedGraphStoreLeaseV1;
+
+use crate::store::vector_generations::GraphVectorGenerationStoreV1;
 
 use crate::application::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticRuntimeFuture, SemanticVectorGraphErrorV1,
@@ -67,6 +69,23 @@ pub(crate) fn project_semantic_vector_graph_provider(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&provider_key(project_root))
         .cloned()
+}
+
+/// Source generations still read from by published vector generations in the
+/// mounted project's current code graph, or `None` when the graph inventory
+/// cannot be proven (unmounted project, unavailable graph). Callers must fail
+/// closed on `None`: an unprovable protection set is never an empty one.
+pub(crate) async fn project_vector_readable_sources(
+    project_root: &Path,
+) -> Option<BTreeSet<CodeGenerationId>> {
+    let provider = project_semantic_vector_graph_provider(project_root)?;
+    let retained = provider.graph_for_current().await.ok()?;
+    let store = GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
+    let inventory = store
+        .retention_inventory(Arc::clone(retained.cancellation()))
+        .await
+        .ok()?;
+    Some(inventory.retained_readable_sources())
 }
 
 /// Resolve semantic-vector graph runtimes for one mounted project.

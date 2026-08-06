@@ -144,7 +144,7 @@ pub(crate) async fn redundancy_scan(
     // result into both so the two views can never diverge and the O(pairs²)
     // grouping runs a single time per call.
     let groups = connected_node_groups(&pairs);
-    let semantic = project_semantic_redundancy_generation(cg.project_root(), cg.db()).await;
+    let semantic = project_semantic_redundancy_generation(cg.project_root()).await;
     let output = augment_redundancy_output(
         options,
         total_candidates,

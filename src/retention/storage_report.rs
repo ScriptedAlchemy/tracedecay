@@ -23,12 +23,15 @@
 //! or a WAL database with no `-shm` to map read-only — its fields are `None`
 //! rather than guessed at, and the store still reports its size.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+use tracedecay_domain::CodeGenerationId;
 use tracedecay_runtime_core::sqlite_read_snapshot::{
     BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe, pragma_u64,
 };
+
+use crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources;
 
 use super::code_index_generations::{
     CodeGenerationRetentionGenerationV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
@@ -308,10 +311,13 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
                 .get::<String>(1)
                 .map_err(|error| report_error("decode canonical root", error))?;
             registered_ids.insert(project_id.clone());
+            let vector_readable_sources =
+                project_vector_readable_sources(Path::new(&canonical_root)).await;
             append_project_report(
                 profile_root,
                 &project_id,
                 &canonical_root,
+                vector_readable_sources,
                 &mut stores,
                 &mut code_generation_retention,
                 &mut code_generation_retention_availability,
@@ -369,6 +375,14 @@ pub(crate) async fn build_storage_report_page_from_registered_global_db(
             DIRECTORY_CURSOR_PREFIX.to_owned()
         };
         let profile_root = profile_root.to_path_buf();
+        // Graph inventories resolve through async retained runtimes, so pair
+        // each project with its protection set before the blocking census.
+        let mut projects_with_sources = Vec::with_capacity(projects.len());
+        for project in projects {
+            let vector_readable_sources =
+                project_vector_readable_sources(Path::new(&project.canonical_root)).await;
+            projects_with_sources.push((project, vector_readable_sources));
+        }
         return tokio::task::spawn_blocking(move || {
             let mut report = StorageReport {
                 profile_root: profile_root.display().to_string(),
@@ -376,11 +390,12 @@ pub(crate) async fn build_storage_report_page_from_registered_global_db(
                 coverage: StorageReportCoverage::partial(next_cursor),
                 ..StorageReport::default()
             };
-            for project in projects {
+            for (project, vector_readable_sources) in projects_with_sources {
                 append_project_report(
                     &profile_root,
                     &project.project_id,
                     &project.canonical_root,
+                    vector_readable_sources,
                     &mut report.stores,
                     &mut report.code_generation_retention,
                     &mut report.code_generation_retention_availability,
@@ -468,9 +483,15 @@ pub async fn build_project_storage_report_from_daemon(
 ) -> crate::errors::Result<StorageReport> {
     let profile_root = profile_root.to_path_buf();
     let project_id = project_id.to_owned();
+    let vector_readable_sources = project_vector_readable_sources(canonical_root).await;
     let canonical_root = canonical_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        build_project_storage_report(&profile_root, &project_id, &canonical_root)
+        build_project_storage_report(
+            &profile_root,
+            &project_id,
+            &canonical_root,
+            vector_readable_sources,
+        )
     })
     .await
     .map_err(|error| report_error("join daemon-backed project storage report", error))?
@@ -479,10 +500,15 @@ pub async fn build_project_storage_report_from_daemon(
 /// Build the same read-only report for one explicitly identified shard without
 /// opening `global.db`. This is the daemon-independent path for maintenance
 /// when the global registry's exclusive-maintenance authority is unavailable.
+/// Vector liveness lives in the mounted code graph, so daemon callers resolve
+/// `vector_readable_sources` first; offline callers pass `None` and the
+/// retention dry run reports itself unavailable rather than planning against
+/// an unproven protection set.
 pub fn build_project_storage_report(
     profile_root: &Path,
     project_id: &str,
     canonical_root: &Path,
+    vector_readable_sources: Option<BTreeSet<CodeGenerationId>>,
 ) -> crate::errors::Result<StorageReport> {
     crate::storage::validate_project_id(project_id).map_err(|message| {
         crate::errors::TraceDecayError::Config {
@@ -496,6 +522,7 @@ pub fn build_project_storage_report(
         profile_root,
         project_id,
         &canonical_root.to_string_lossy(),
+        vector_readable_sources,
         &mut stores,
         &mut code_generation_retention,
         &mut code_generation_retention_availability,
@@ -518,6 +545,7 @@ fn append_project_report(
     profile_root: &Path,
     project_id: &str,
     canonical_root: &str,
+    vector_readable_sources: Option<BTreeSet<CodeGenerationId>>,
     stores: &mut Vec<StoreSizeReportEntry>,
     code_generation_retention: &mut Vec<CodeGenerationRetentionDryRunEntry>,
     code_generation_retention_availability: &mut Vec<CodeGenerationRetentionAvailabilityEntry>,
@@ -566,19 +594,18 @@ fn append_project_report(
     } else {
         GenerationDigestVerificationV1::Full
     };
-    let readable_sources = match crate::store::vector_generations::retained_readable_sources_from_read_only_project_store(
-            &data_root,
-        ) {
-        Ok(readable_sources) => readable_sources,
-        Err(_) => {
-            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
-                project_id: project_id.to_owned(),
-                store_root: code_index_store_root.display().to_string(),
-                state: StorageReportAvailabilityState::Unavailable,
-                reason: Some("generation_retention_liveness_unavailable".to_owned()),
-            });
-            return Ok(());
-        }
+    // Published vectors live in the mounted code graph, so liveness is only
+    // provable when the caller resolved the graph inventory (daemon paths).
+    // Without it the dry run is reported unavailable rather than planned
+    // against an empty protection set.
+    let Some(readable_sources) = vector_readable_sources else {
+        code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
+            project_id: project_id.to_owned(),
+            store_root: code_index_store_root.display().to_string(),
+            state: StorageReportAvailabilityState::Unavailable,
+            reason: Some("generation_retention_graph_inventory_unavailable".to_owned()),
+        });
+        return Ok(());
     };
     let plan = match plan_code_generation_retention_with_verification(
         &code_index_store_root,
@@ -1259,7 +1286,8 @@ mod tests {
         seed_graph_db(&profile_root, "proj_a");
 
         let report =
-            build_project_storage_report(&profile_root, "proj_a", Path::new("/repos/a")).unwrap();
+            build_project_storage_report(&profile_root, "proj_a", Path::new("/repos/a"), None)
+                .unwrap();
 
         assert_eq!(report.stores.len(), 1);
         assert_eq!(report.stores[0].project_id, "proj_a");
@@ -1281,7 +1309,8 @@ mod tests {
         std::fs::create_dir_all(store_root.join(CODE_GENERATIONS_DIRECTORY)).unwrap();
         std::fs::write(store_root.join("active-code-generation-v1.json"), b"{}").unwrap();
 
-        let report = build_project_storage_report(&profile_root, "proj_a", canonical_root).unwrap();
+        let report =
+            build_project_storage_report(&profile_root, "proj_a", canonical_root, None).unwrap();
 
         assert!(report.code_generation_retention.is_empty());
         let availability = report
@@ -1328,7 +1357,13 @@ mod tests {
             .set_len(64 * 1024 * 1024)
             .expect("sparse oversized generation");
 
-        let report = build_project_storage_report(&profile_root, "proj_a", canonical_root).unwrap();
+        let report = build_project_storage_report(
+            &profile_root,
+            "proj_a",
+            canonical_root,
+            Some(BTreeSet::new()),
+        )
+        .unwrap();
         let payload = serde_json::to_value(report).unwrap();
 
         assert_ne!(

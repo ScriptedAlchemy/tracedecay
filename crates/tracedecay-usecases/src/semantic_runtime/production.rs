@@ -892,6 +892,14 @@ impl ProductionSemanticRuntimeV1 {
         }
     }
 
+    /// Read the durably active vector generation from the current graph,
+    /// or `None` when the graph is unavailable or nothing is active.
+    pub async fn active_vector_generation(&self) -> Option<PublishedVectorGenerationV1> {
+        let retained = self.graph.graph_for_current().await.ok()?;
+        let (store, cancellation) = graph_vector_store(&retained);
+        store.active_generation(cancellation).await.ok().flatten()
+    }
+
     fn schedule_saved_generation_fair(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
