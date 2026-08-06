@@ -10,7 +10,7 @@ use schemars::schema::RootSchema;
 use serde_json::Value;
 use tracedecay_application::sdk_executable_binding_registry;
 use tracedecay_tool_catalog::{
-    EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract,
+    DeadlineBehavior, EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract,
     SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1, SdkExecutableBindingV1,
     SdkTransportBindingV1,
 };
@@ -43,6 +43,9 @@ struct Operation {
     request_schema: Schema,
     result_schema: Schema,
     cancellation: Value,
+    deadline: Value,
+    maximum_deadline_millis: u64,
+    deadline_behavior: DeadlineBehavior,
 }
 
 struct Schema {
@@ -54,7 +57,7 @@ struct Schema {
 struct UnavailableOperation {
     operation_id: String,
     name: String,
-    disposition: &'static str,
+    disposition: ExecutableUnavailableDispositionV1,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -81,7 +84,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // rustfmt the emitted Rust so `cargo fmt --check` and the codegen
         // drift check agree on one canonical byte form (the pinned toolchain
         // makes the formatting deterministic across machines and CI).
-        &rustfmt(&render_rust_operations(&operations)?)?,
+        &rustfmt(&render_rust_operations(&operations, &unavailable)?)?,
     )?;
     Ok(())
 }
@@ -116,7 +119,7 @@ fn canonical_unavailable_operations(
             } => Some(UnavailableOperation {
                 operation_id: operation_id.as_str().to_owned(),
                 name: operation_name(operation_id.as_str()),
-                disposition: unavailable_disposition(*disposition),
+                disposition: *disposition,
             }),
         })
         .collect()
@@ -170,6 +173,9 @@ fn operation_from_binding(binding: &SdkExecutableBindingV1) -> Result<Operation,
             body: binding.result_schema().body().clone(),
         },
         cancellation: serde_json::to_value(binding.cancellation())?,
+        deadline: serde_json::to_value(binding.deadline())?,
+        maximum_deadline_millis: binding.deadline().maximum_millis(),
+        deadline_behavior: binding.deadline().behavior(),
     })
 }
 
@@ -404,6 +410,7 @@ fn render_operations(
          \x20 readonly requestSchema: { schemaId: string; revision: number };\n\
          \x20 readonly resultSchema: { schemaId: string; revision: number };\n\
          \x20 readonly cancellation: CanonicalCancellation;\n\
+         \x20 readonly deadline: { maximum_millis: number; behavior: \"reject_before_admission\" | \"return_operation_receipt\" | \"return_effect_receipt\" };\n\
          \x20 readonly decodeRequest: Decoder<Request>; readonly decodeResult: Decoder<Result>;\n\
          \x20 readonly decodeSuccess: Decoder<HttpSuccessEnvelope<Result>>;\n}\n\n",
     );
@@ -438,9 +445,9 @@ fn render_operations(
             out,
             "  {{ operation: {0}, operationId: {1}, route: {2}, method: \"POST\", effect: {3}, idempotency: {4}, bindingId: {5},\n\
              \x20   requestSchema: {{ schemaId: {6}, revision: {7} }}, resultSchema: {{ schemaId: {8}, revision: {9} }},\n\
-             \x20   cancellation: {10},\n\
-             \x20   decodeRequest: decode{11}Request, decodeResult: decode{11}Result,\n\
-             \x20   decodeSuccess: (value: unknown) => decodeHttpSuccessEnvelope(value, {5}, {8}, {9}, decode{11}Result) }},",
+             \x20   cancellation: {10}, deadline: {11},\n\
+             \x20   decodeRequest: decode{12}Request, decodeResult: decode{12}Result,\n\
+             \x20   decodeSuccess: (value: unknown) => decodeHttpSuccessEnvelope(value, {5}, {8}, {9}, decode{12}Result) }},",
             quote(&operation.name),
             quote(&operation.operation_id),
             quote(&operation.route),
@@ -452,6 +459,7 @@ fn render_operations(
             quote(&operation.result_schema.id),
             operation.result_schema.revision,
             serde_json::to_string(&operation.cancellation)?,
+            serde_json::to_string(&operation.deadline)?,
             operation.type_name
         );
     }
@@ -479,7 +487,7 @@ fn render_operations(
             "  {{ operation: {}, operationId: {}, availability: \"unavailable\", disposition: {} }},",
             quote(&operation.name),
             quote(&operation.operation_id),
-            quote(operation.disposition)
+            quote(unavailable_disposition(operation.disposition))
         );
     }
     out.push_str(
@@ -490,12 +498,21 @@ fn render_operations(
     Ok(out)
 }
 
-fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Error>> {
+fn render_rust_operations(
+    operations: &[Operation],
+    unavailable: &[UnavailableOperation],
+) -> Result<String, Box<dyn Error>> {
     let mut out = String::from(
         "//! Generated typed public operation descriptors. DO NOT EDIT.\n\n\
          use serde::Serialize;\n\
          use serde::de::DeserializeOwned;\n\
-         use tracedecay_tool_catalog::{EffectClass, IdempotencyContract};\n\n\
+         use tracedecay_tool_catalog::{DeadlineBehavior, EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract};\n\n\
+         #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
+         pub struct UnavailableOperationCapability {\n\
+         \x20   pub operation: &'static str,\n\
+         \x20   pub operation_id: &'static str,\n\
+         \x20   pub disposition: ExecutableUnavailableDispositionV1,\n\
+         }\n\n\
          pub trait TypedOperation {\n\
          \x20   type Request: Serialize;\n\
          \x20   type Result: DeserializeOwned;\n\n\
@@ -504,11 +521,13 @@ fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Er
          \x20   const BINDING_ID: &'static str;\n\
          \x20   const EFFECT: EffectClass;\n\
          \x20   const IDEMPOTENCY: IdempotencyContract;\n\
+         \x20   const MAXIMUM_DEADLINE_MILLIS: u64;\n\
+         \x20   const DEADLINE_BEHAVIOR: DeadlineBehavior;\n\
          \x20   const RESULT_SCHEMA_ID: &'static str;\n\
          \x20   const RESULT_SCHEMA_REVISION: u32;\n\
          }\n\n\
          macro_rules! typed_operation {\n\
-         \x20   ($name:ident, $module:ident, $operation:literal, $route:literal, $binding:literal, $effect:expr, $idempotency:expr, $schema:literal, $revision:literal) => {\n\
+         \x20   ($name:ident, $module:ident, $operation:literal, $route:literal, $binding:literal, $effect:expr, $idempotency:expr, $maximum_deadline:literal, $deadline_behavior:expr, $schema:literal, $revision:literal) => {\n\
          \x20       #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\n\
          \x20       pub struct $name;\n\
          \x20       impl TypedOperation for $name {\n\
@@ -519,12 +538,25 @@ fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Er
          \x20           const BINDING_ID: &'static str = $binding;\n\
          \x20           const EFFECT: EffectClass = $effect;\n\
          \x20           const IDEMPOTENCY: IdempotencyContract = $idempotency;\n\
+         \x20           const MAXIMUM_DEADLINE_MILLIS: u64 = $maximum_deadline;\n\
+         \x20           const DEADLINE_BEHAVIOR: DeadlineBehavior = $deadline_behavior;\n\
          \x20           const RESULT_SCHEMA_ID: &'static str = $schema;\n\
          \x20           const RESULT_SCHEMA_REVISION: u32 = $revision;\n\
          \x20       }\n\
          \x20   };\n\
          }\n\n",
     );
+    out.push_str("pub const UNAVAILABLE_OPERATIONS: &[UnavailableOperationCapability] = &[\n");
+    for operation in unavailable {
+        emit!(
+            out,
+            "    UnavailableOperationCapability {{ operation: {name:?}, operation_id: {operation_id:?}, disposition: ExecutableUnavailableDispositionV1::{disposition:?} }},",
+            name = operation.name,
+            operation_id = operation.operation_id,
+            disposition = operation.disposition,
+        );
+    }
+    out.push_str("];\n\n");
     for operation in operations {
         let module = operation.name.clone();
         let (request_source, request_type) = typify_schema(&operation.request_schema.body)?;
@@ -539,7 +571,7 @@ fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Er
              \x20   pub type Result = result::{result_type};\n\
              }}\n\
              typed_operation!(\n\
-             \x20   {marker}, {module}, {operation_id:?}, {route:?}, {binding:?}, EffectClass::{effect:?}, IdempotencyContract::{idempotency:?}, {schema:?}, {revision}\n\
+             \x20   {marker}, {module}, {operation_id:?}, {route:?}, {binding:?}, EffectClass::{effect:?}, IdempotencyContract::{idempotency:?}, {maximum_deadline}, DeadlineBehavior::{deadline_behavior:?}, {schema:?}, {revision}\n\
              );\n",
             marker = type_name(&operation.name),
             operation_id = operation.operation_id,
@@ -547,6 +579,8 @@ fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Er
             binding = operation.binding,
             effect = operation.effect,
             idempotency = operation.idempotency,
+            maximum_deadline = operation.maximum_deadline_millis,
+            deadline_behavior = operation.deadline_behavior,
             schema = operation.result_schema.id,
             revision = operation.result_schema.revision,
         );
@@ -779,6 +813,10 @@ mod tests {
             operation.route.starts_with("/application/workflow/")
                 && operation.binding.starts_with("binding.http.workflow.")
         }));
-        assert!(operations.iter().all(|operation| !operation.route.is_empty()));
+        assert!(
+            operations
+                .iter()
+                .all(|operation| !operation.route.is_empty())
+        );
     }
 }

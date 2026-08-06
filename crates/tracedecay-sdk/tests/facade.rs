@@ -1,4 +1,6 @@
-use tracedecay_sdk::operations::{TypedOperation, WorkAttemptFinish, WorkflowRegisterDefinition};
+use tracedecay_sdk::operations::{
+    TypedOperation, UNAVAILABLE_OPERATIONS, WorkAttemptFinish, WorkflowRegisterDefinition,
+};
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
     application, domain, operation, remote, work, workflow,
@@ -101,6 +103,14 @@ fn work_attempt_finish_descriptor_matches_the_canonical_binding() {
     );
     assert_eq!(WorkAttemptFinish::EFFECT, binding.effect());
     assert_eq!(WorkAttemptFinish::IDEMPOTENCY, binding.idempotency());
+    assert_eq!(
+        WorkAttemptFinish::MAXIMUM_DEADLINE_MILLIS,
+        binding.deadline().maximum_millis()
+    );
+    assert_eq!(
+        WorkAttemptFinish::DEADLINE_BEHAVIOR,
+        binding.deadline().behavior()
+    );
 
     match binding.exposure() {
         operation::RouteExposureV1::Public {
@@ -149,6 +159,42 @@ fn workflow_register_definition_descriptor_matches_the_mounted_binding() {
         WorkflowRegisterDefinition::IDEMPOTENCY,
         binding.idempotency()
     );
+}
+
+#[test]
+fn generated_unavailable_operations_match_the_canonical_sdk_registry() {
+    let registry = application::sdk_executable_binding_registry().expect("canonical SDK registry");
+    let expected = registry
+        .iter()
+        .filter_map(|availability| match availability {
+            operation::SdkExecutableBindingAvailabilityV1::Available { .. } => None,
+            operation::SdkExecutableBindingAvailabilityV1::Unavailable {
+                operation_id,
+                disposition,
+            } => Some((
+                operation_id.as_str(),
+                (
+                    operation_id
+                        .as_str()
+                        .strip_prefix("operation.")
+                        .unwrap_or(operation_id.as_str())
+                        .replace('.', "_"),
+                    *disposition,
+                ),
+            )),
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let generated = UNAVAILABLE_OPERATIONS
+        .iter()
+        .map(|operation| {
+            (
+                operation.operation_id,
+                (operation.operation.to_owned(), operation.disposition),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    assert_eq!(generated, expected);
 }
 
 #[test]

@@ -54,6 +54,67 @@ impl SchemaBodyAuthorityV1 {
     }
 }
 
+/// Reviewed request/result schema bodies supplied by a capability's owning
+/// application module.
+///
+/// Most catalog entries need only stable schema references. Public SDK
+/// generation additionally needs the Rust-owned bodies, so capabilities opt in
+/// beside their manifest instead of being copied into an SDK-only inventory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ExecutableSchemaAuthority {
+    capability_id: CapabilityId,
+    request_schema: SchemaBodyAuthorityV1,
+    result_schema: SchemaBodyAuthorityV1,
+}
+
+impl ExecutableSchemaAuthority {
+    pub fn for_types<Request, Output>(
+        manifest: &CapabilityManifestV1,
+    ) -> Result<Self, CatalogValidationError>
+    where
+        Request: JsonSchema,
+        Output: JsonSchema,
+    {
+        Self::new(
+            manifest,
+            SchemaBodyAuthorityV1::for_type::<Request>(manifest.request_schema().clone())?,
+            SchemaBodyAuthorityV1::for_type::<Output>(manifest.result_schema().clone())?,
+        )
+    }
+
+    pub fn new(
+        manifest: &CapabilityManifestV1,
+        request_schema: SchemaBodyAuthorityV1,
+        result_schema: SchemaBodyAuthorityV1,
+    ) -> Result<Self, CatalogValidationError> {
+        if request_schema.schema_ref() != manifest.request_schema()
+            || result_schema.schema_ref() != manifest.result_schema()
+        {
+            return Err(CatalogValidationError::InvalidCapability {
+                capability_id: manifest.capability_id().clone(),
+                reason: "executable schema authority does not match the manifest",
+            });
+        }
+        Ok(Self {
+            capability_id: manifest.capability_id().clone(),
+            request_schema,
+            result_schema,
+        })
+    }
+
+    pub fn capability_id(&self) -> &CapabilityId {
+        &self.capability_id
+    }
+
+    pub fn request_schema(&self) -> &SchemaBodyAuthorityV1 {
+        &self.request_schema
+    }
+
+    pub fn result_schema(&self) -> &SchemaBodyAuthorityV1 {
+        &self.result_schema
+    }
+}
+
 fn canonicalize_json(value: Value) -> Value {
     match value {
         Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
