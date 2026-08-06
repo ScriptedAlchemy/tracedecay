@@ -922,6 +922,7 @@ dependencies = [
 name = "tracedecay-policy"
 version = "0.1.0"
 dependencies = [
+ "schemars 1.2.2",
  "serde",
  "tracedecay-domain",
 ]
