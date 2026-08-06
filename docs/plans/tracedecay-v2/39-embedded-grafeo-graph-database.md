@@ -19,11 +19,13 @@ cargo-nextest.
 
 - Use Grafeo embedded in-process. No server, sidecar process, network
   transport, or separately managed database process.
-- Open Grafeo through its public path/configuration API using the standard
-  persistent multi-file directory layout and WAL. The daemon registry assigns
-  that directory from the canonical project/profile identity. Do not use the
-  single-file `.grafeo` format, inject an already-open file, replace Grafeo's
-  storage engine, or add a private-file adapter.
+- Open Grafeo through its public path/configuration API using
+  `StorageFormat::SingleFile`. The daemon registry assigns one ordinary
+  `.grafeo` database-file path from canonical project/profile identity; Grafeo
+  may manage its documented `.grafeo.wal` sidecar while the file is open and
+  checkpoints it into the database file on close. Do not inject an already-open
+  file, replace Grafeo's storage engine, or add a private/secure filesystem
+  adapter.
 - Depend on the exact published `=0.5.42` release. Do not pin an unpublished Git
   revision, maintain a TraceDecay fork, vendor Grafeo, or reimplement its
   storage, WAL, checkpoint, or recovery machinery.
@@ -43,7 +45,7 @@ cargo-nextest.
 - Event-sourced domains use one crash-safe publication protocol: commit the
   canonical event and idempotent graph outbox/replay record first, apply the
   graph batch as unverified projection work, close and reopen the Grafeo
-  directory, recompute the recovered namespace/projection digest from actual
+  database file, recompute the recovered namespace/projection digest from actual
   entities and relations, and only then advance the relational verified graph
   watermark. No caller reads past that verified watermark, and replay never
   invents a second event.
@@ -70,7 +72,7 @@ Official implementation references:
 - [Embedded Rust API](https://grafeo.dev/user-guide/rust/)
 - [Vector and hybrid search](https://grafeo.dev/user-guide/vector-search/)
 - [Published Rust API for `0.5.42`](https://docs.rs/grafeo/0.5.42/grafeo/)
-- [Persistent directory storage and WAL](https://grafeo.dev/user-guide/persistence/persistent/)
+- [Persistent storage and WAL](https://grafeo.dev/user-guide/persistence/persistent/)
 
 ---
 
@@ -231,8 +233,8 @@ impl GraphDb {
 
 - [ ] **Step 1: Write failing runtime-boundary tests**
 
-Cover in-memory and standard persistent-directory open, canonical
-project/profile directory resolution, exact logical store identity, atomic
+Cover in-memory and standard persistent-file open, canonical project/profile
+database-file resolution, exact logical store identity, atomic
 batch rollback, snapshot isolation, deterministic traversal, cancellation,
 vector dimension/metric rejection, WAL recovery, unverified writes remaining
 unservable, close/reopen full-digest verification, missing/corrupt WAL records,
@@ -273,12 +275,14 @@ pub struct GraphRelation {
 }
 ```
 
-Open persistent databases by directory with Grafeo's public configuration API
-and WAL enabled; Grafeo owns the files below that directory. All validation
-occurs before mutation. Validation and transaction failures leave the prior
-verified generation readable. A successful `WalSync` is only an unverified
-apply outcome because Grafeo `0.5.42` can suppress an earlier WAL append error.
-The daemon-owned publisher closes and reopens the directory, lets Grafeo
+Open persistent databases as ordinary `.grafeo` files with Grafeo's public
+configuration API, `StorageFormat::SingleFile`, and WAL enabled. Grafeo owns
+the database file and its documented transient `.grafeo.wal` sidecar; TraceDecay
+does not implement a file adapter. All validation occurs before mutation.
+Validation and transaction failures leave the prior verified generation
+readable. A successful `WalSync` is only an unverified apply outcome because
+Grafeo `0.5.42` can suppress an earlier WAL append error. The daemon-owned
+publisher closes and reopens the database file, lets Grafeo
 perform recovery, recomputes the complete recovered namespace/projection
 digest, compares it with the canonical replay manifest, and only then exposes
 `VerifiedGraphCommit` and advances the relational verified watermark.
