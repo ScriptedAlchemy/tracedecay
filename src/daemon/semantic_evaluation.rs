@@ -260,7 +260,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                         .artifact_digest
                         .as_ref()
                         .map(|digest| digest.as_str().to_owned()),
-                    measurement_method: "linux-procfs-v1:cpu=/proc/self/stat(utime+stime,getconf-CLK_TCK);rss=/proc/self/status(VmHWM-process-lifetime-peak);query/clean-build/incremental/stages/projection-cases=std::time::Instant;projection-cases=prepare_semantic_evaluation_projection+DatabaseVectorEvaluationStoreV1(SQLite-CAS,receipts,model-calls,active-pointer,isolated-row-removed-after-run);hydration=canonical-late-hydration+authorized-fixture-filesystem-reads+receipt-count;model=catalog-verified-model-member-length;vector=sum-f32-bytes;index=exact-flat-zero;cache=session-pool-resident-bytes"
+                    measurement_method: "linux-procfs-v1:cpu=/proc/self/stat(utime+stime,getconf-CLK_TCK);rss=/proc/self/status(VmHWM-process-lifetime-peak);query/clean-build/incremental/stages/projection-cases=std::time::Instant;projection-cases=prepare_semantic_evaluation_projection+GraphVectorGenerationStoreV1(isolated-in-memory-graph,watermark-CAS,receipts,model-calls,active-pointer,graph-dropped-after-run);hydration=canonical-late-hydration+authorized-fixture-filesystem-reads+receipt-count;model=catalog-verified-model-member-length;vector=sum-f32-bytes;index=exact-flat-zero;cache=session-pool-resident-bytes"
                         .to_owned(),
                 },
                 eligible_chunks: context.eligible_chunks,

@@ -1,16 +1,14 @@
 //! Immutable semantic vector-generation storage.
 //!
 //! The deterministic state machine is the single in-memory authority over
-//! generation lifecycle. Production persistence lives in the embedded graph
-//! database through [`graph_adapter`], whose watermark compare-and-swap makes
-//! generation publication and the active pointer visible together. The only
-//! SQLite surface left here is the isolated, non-authoritative evaluation
-//! lane used by the native semantic evaluator.
+//! generation lifecycle. All persistence lives in the embedded graph database
+//! through [`graph_adapter`], whose watermark compare-and-swap makes
+//! generation publication and the active pointer visible together; the native
+//! semantic evaluator drives the same adapter over a private in-memory graph.
 #![forbid(unsafe_code)]
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    mem::size_of,
     sync::{Arc, Mutex, Weak},
 };
 
@@ -25,7 +23,6 @@ use tracedecay_domain::{
 pub use tracedecay_domain::VectorGenerationIdV1;
 
 use tracedecay_code_index::projection::{expected_publication_digest, verify_batch_receipt};
-use tracedecay_runtime_core::db::{Database, engine::params};
 use tracedecay_semantic::projector::{
     PreparedVectorGenerationV1, ProjectedChunkVectorV1, SemanticProjectionErrorV1,
 };
@@ -37,63 +34,11 @@ const VECTOR_GENERATION_BUILD_DIGEST_DOMAIN: &str = "tracedecay.vector-generatio
 const VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-manifest.v1";
 const VECTOR_COMMITTED_BATCH_DIGEST_DOMAIN: &str = "tracedecay.vector-committed-batch.v1";
 const PHYSICAL_VECTOR_REUSE_DIGEST_DOMAIN: &str = "tracedecay.physical-vector-reuse.v1";
-const VECTOR_GENERATION_STATE_OPERATION: &str = "persist semantic vector generations";
-/// Row-per-vector float storage for the evaluation lane.
-///
-/// The payload is content-addressed by `output_digest`, which the projector
-/// derives from `(projection_key, chunk_id, chunk_digest, values)`. Two rows
-/// with the same address therefore hold the same floats, and
-/// [`ProjectedChunkVectorV1::validate`] re-derives that address on every load,
-/// so a mis-bound payload fails closed instead of being served.
-const VECTOR_EVALUATION_PAYLOAD_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_payload_v1 (
-    output_digest TEXT PRIMARY KEY,
-    dimensions INTEGER NOT NULL CHECK (dimensions > 0),
-    payload BLOB NOT NULL
-) STRICT;
-";
-/// Rows bound per statement when writing or reading payloads. Keeps every
-/// statement inside the runtime's bound-parameter and materialization limits
-/// so a whole-corpus generation moves as a sequence of bounded pages.
-const VECTOR_PAYLOAD_STATEMENT_ROWS: usize = 256;
-const VECTOR_EVALUATION_PAYLOAD_TABLE_V1: &str = "semantic_vector_evaluation_payload_v1";
-/// Slice storage for the state document's corpus-sized metadata.
-///
-/// Every collection that scales with the corpus — per-vector row metadata,
-/// per-chunk projection receipts, the plan's expected chunk set, the staged
-/// committed-effect set, the prepared batches, and the physical-byte bindings
-/// — is encoded once, addressed by the SHA-256 of those bytes, and written as
-/// bounded slices. The state document keeps only the address, so it stays
-/// generation-level regardless of corpus size. Content addressing also means
-/// a staged collection and the published collection it becomes share one
-/// stored copy, so publication writes no new slices.
-const VECTOR_EVALUATION_STATE_SLICE_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_state_slice_v1 (
-    collection_digest TEXT NOT NULL,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-    payload BLOB NOT NULL
-) STRICT;
-CREATE UNIQUE INDEX IF NOT EXISTS semantic_vector_evaluation_state_slice_v1_address
-    ON semantic_vector_evaluation_state_slice_v1 (collection_digest, ordinal);
-";
-const VECTOR_EVALUATION_STATE_SLICE_TABLE_V1: &str = "semantic_vector_evaluation_state_slice_v1";
-/// Bytes per stored slice. One statement carries
-/// `VECTOR_STATE_SLICE_STATEMENT_ROWS` of these, so the widest statement this
-/// store issues stays near a megabyte no matter how large the collection is.
+#[cfg(test)]
+/// Bytes per sealed slice of a corpus-sized externalized collection, keeping
+/// each sealed unit bounded no matter how large the collection is.
 const VECTOR_STATE_SLICE_BYTES: usize = 32 * 1024;
-/// Slices bound per statement.
-const VECTOR_STATE_SLICE_STATEMENT_ROWS: usize = 32;
-/// Slices read per statement. A single query may materialize neither more rows
-/// nor more bytes than the runtime allows, and a whole-corpus collection
-/// exceeds both, so reads page through the ordinals in bounded groups.
-const VECTOR_STATE_SLICE_READ_ROWS: usize = 128;
-const VECTOR_EVALUATION_STATE_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_state_v1 (
-    evaluation_id TEXT PRIMARY KEY,
-    revision INTEGER NOT NULL CHECK (revision >= 0),
-    state_json TEXT NOT NULL
-) STRICT;
-";
+/// Bounded optimistic-retry budget for watermark compare-and-swap loops.
 const MAX_STATE_CAS_RETRIES: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -323,6 +268,7 @@ impl<T> ExternalV1<T> {
         self.value
     }
 
+    #[cfg(test)]
     /// Mutable access that keeps the address intact.
     ///
     /// Only for edits the externalized encoding cannot observe: filling the
@@ -388,6 +334,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for ExternalV1<T> {
     }
 }
 
+#[cfg(test)]
 /// One externalized collection, seen by the load/seal walk without knowing
 /// which collection it is.
 ///
@@ -395,6 +342,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for ExternalV1<T> {
 /// were cut into.
 type SealedCollectionV1 = (ContentDigest, Vec<Vec<u8>>);
 
+#[cfg(test)]
 trait ExternalSlotV1 {
     /// The address this slot's bytes are stored under, if it is sealed.
     fn address(&self) -> Option<&ContentDigest>;
@@ -414,6 +362,7 @@ trait ExternalSlotV1 {
     fn fill(&mut self, slices: &[Vec<u8>]) -> Result<(), VectorGenerationStoreErrorV1>;
 }
 
+#[cfg(test)]
 impl<T> ExternalSlotV1 for ExternalV1<T>
 where
     T: Serialize + serde::de::DeserializeOwned,
@@ -1580,267 +1529,6 @@ impl VectorGenerationStateMachineV1 {
     }
 }
 
-/// SQLite-backed, non-authoritative state used by the native semantic evaluator.
-///
-/// It executes the same generation state machine and writer path as
-/// production, but uses an isolated row that is removed after the measured
-/// run. It can therefore exercise publication/activation without changing the
-/// project's active semantic generation.
-pub(crate) struct DatabaseVectorEvaluationStoreV1<'database> {
-    database: &'database Database,
-    evaluation_id: String,
-}
-
-impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
-    pub(crate) async fn open(
-        database: &'database Database,
-        evaluation_id: impl Into<String>,
-    ) -> Result<Self, VectorGenerationStoreErrorV1> {
-        let evaluation_id = evaluation_id.into();
-        if evaluation_id.is_empty()
-            || evaluation_id.len() > 256
-            || evaluation_id.trim() != evaluation_id
-            || evaluation_id.chars().any(char::is_control)
-        {
-            return Err(VectorGenerationStoreErrorV1::Storage(
-                "semantic evaluation identity is invalid".to_owned(),
-            ));
-        }
-        database
-            .execute_write_batch(
-                VECTOR_GENERATION_STATE_OPERATION,
-                VECTOR_EVALUATION_STATE_SCHEMA_V1,
-            )
-            .await
-            .map_err(storage_error)?;
-        database
-            .execute_write_batch(
-                VECTOR_GENERATION_STATE_OPERATION,
-                VECTOR_EVALUATION_PAYLOAD_SCHEMA_V1,
-            )
-            .await
-            .map_err(storage_error)?;
-        database
-            .execute_write_batch(
-                VECTOR_GENERATION_STATE_OPERATION,
-                VECTOR_EVALUATION_STATE_SLICE_SCHEMA_V1,
-            )
-            .await
-            .map_err(storage_error)?;
-        let initial_state = serde_json::to_string(&VectorGenerationStateMachineV1::default())
-            .map_err(storage_error)?;
-        let inserted = database
-            .execute_write_engine(
-                VECTOR_GENERATION_STATE_OPERATION,
-                "INSERT INTO semantic_vector_evaluation_state_v1 (
-                    evaluation_id, revision, state_json
-                 ) VALUES (?1, 0, ?2)",
-                params![evaluation_id.clone(), initial_state],
-            )
-            .await
-            .map_err(storage_error)?;
-        if inserted != 1 {
-            return Err(VectorGenerationStoreErrorV1::Storage(
-                "semantic evaluation state could not be initialized".to_owned(),
-            ));
-        }
-        Ok(Self {
-            database,
-            evaluation_id,
-        })
-    }
-
-    pub(crate) async fn rebuild_generation(
-        &self,
-        plan: VectorGenerationPlanV1,
-    ) -> Result<VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1> {
-        self.mutate_state(|state| state.rebuild_generation(plan.clone()))
-            .await
-    }
-
-    pub(crate) async fn commit_batch(
-        &self,
-        build_id: &VectorGenerationBuildIdV1,
-        expected_checkpoint: Option<&VectorProjectionCheckpointV1>,
-        prepared: PreparedVectorGenerationV1,
-    ) -> Result<VectorProjectionCheckpointV1, VectorGenerationStoreErrorV1> {
-        self.mutate_state(|state| {
-            state.commit_batch(build_id, expected_checkpoint, prepared.clone())
-        })
-        .await
-    }
-
-    pub(crate) async fn publish_generation(
-        &self,
-        build_id: &VectorGenerationBuildIdV1,
-        expected_active_generation: Option<&VectorGenerationIdV1>,
-    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
-        self.mutate_state(|state| state.publish_generation(build_id, expected_active_generation))
-            .await
-    }
-
-    pub(crate) async fn cancel_generation(
-        &self,
-        build_id: &VectorGenerationBuildIdV1,
-    ) -> Result<bool, VectorGenerationStoreErrorV1> {
-        self.mutate_state(|state| Ok(state.cancel_generation(build_id)))
-            .await
-    }
-
-    pub(crate) async fn active_generation_id(
-        &self,
-    ) -> Result<Option<VectorGenerationIdV1>, VectorGenerationStoreErrorV1> {
-        let (_, state, _) = self.load_state().await?;
-        Ok(state.active_generation_id().cloned())
-    }
-
-    pub(crate) async fn active_generation_for(
-        &self,
-        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
-        source_generation: &CodeGenerationId,
-        source_manifest_digest: &ManifestDigest,
-    ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
-        let (_, state, _) = self.load_state().await?;
-        Ok(state
-            .active_generation_for(embedding_key, source_generation, source_manifest_digest)
-            .cloned())
-    }
-
-    pub(crate) async fn close(self) -> Result<(), VectorGenerationStoreErrorV1> {
-        let transaction = self
-            .database
-            .begin_write_transaction(VECTOR_GENERATION_STATE_OPERATION)
-            .await
-            .map_err(storage_error)?;
-        let deleted = transaction
-            .execute_engine(
-                "DELETE FROM semantic_vector_evaluation_state_v1
-                 WHERE evaluation_id = ?1",
-                params![self.evaluation_id],
-            )
-            .await
-            .map_err(storage_error)?;
-        if deleted != 1 {
-            transaction.rollback().await.map_err(storage_error)?;
-            return Err(VectorGenerationStoreErrorV1::ConcurrentMutation);
-        }
-        // The measured run owned every evaluation payload only while some
-        // evaluation state referenced it. Once the last one is gone the whole
-        // lane is unreachable, so it is released with the row that named it.
-        transaction
-            .execute_engine(
-                "DELETE FROM semantic_vector_evaluation_payload_v1
-                 WHERE NOT EXISTS (SELECT 1 FROM semantic_vector_evaluation_state_v1)",
-                (),
-            )
-            .await
-            .map_err(storage_error)?;
-        transaction
-            .execute_engine(
-                "DELETE FROM semantic_vector_evaluation_state_slice_v1
-                 WHERE NOT EXISTS (SELECT 1 FROM semantic_vector_evaluation_state_v1)",
-                (),
-            )
-            .await
-            .map_err(storage_error)?;
-        transaction.commit().await.map_err(storage_error)?;
-        Ok(())
-    }
-
-    async fn mutate_state<ResultValue>(
-        &self,
-        mut mutation: impl FnMut(
-            &mut VectorGenerationStateMachineV1,
-        ) -> Result<ResultValue, VectorGenerationStoreErrorV1>,
-    ) -> Result<ResultValue, VectorGenerationStoreErrorV1> {
-        for _ in 0..MAX_STATE_CAS_RETRIES {
-            let (revision, mut state, load) = self.load_state().await?;
-            let result = mutation(&mut state)?;
-            let pending_slices = seal_external_state(&mut state, &load.durable_slices)?;
-            let state_json = serde_json::to_string(&state).map_err(storage_error)?;
-            let transaction = self
-                .database
-                .begin_write_transaction(VECTOR_GENERATION_STATE_OPERATION)
-                .await
-                .map_err(storage_error)?;
-            write_vector_payloads(
-                &transaction,
-                VECTOR_EVALUATION_PAYLOAD_TABLE_V1,
-                &state,
-                &load.durable,
-            )
-            .await?;
-            write_state_slices(
-                &transaction,
-                VECTOR_EVALUATION_STATE_SLICE_TABLE_V1,
-                &pending_slices,
-            )
-            .await?;
-            let changed = transaction
-                .execute_engine(
-                    "UPDATE semantic_vector_evaluation_state_v1
-                     SET revision = revision + 1, state_json = ?1
-                     WHERE evaluation_id = ?2 AND revision = ?3",
-                    params![state_json, self.evaluation_id.clone(), revision],
-                )
-                .await
-                .map_err(storage_error)?;
-            if changed == 1 {
-                transaction.commit().await.map_err(storage_error)?;
-                return Ok(result);
-            }
-            transaction.rollback().await.map_err(storage_error)?;
-        }
-        Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
-    }
-
-    async fn load_state(
-        &self,
-    ) -> Result<
-        (i64, VectorGenerationStateMachineV1, VectorPayloadLoadV1),
-        VectorGenerationStoreErrorV1,
-    > {
-        let mut rows = self
-            .database
-            .engine_conn()
-            .query(
-                "SELECT revision, state_json
-                 FROM semantic_vector_evaluation_state_v1
-                 WHERE evaluation_id = ?1",
-                params![self.evaluation_id.clone()],
-            )
-            .await
-            .map_err(storage_error)?;
-        let row = rows.next().await.map_err(storage_error)?.ok_or_else(|| {
-            VectorGenerationStoreErrorV1::Storage(
-                "semantic evaluation state row is missing".to_owned(),
-            )
-        })?;
-        let revision = row.get::<i64>(0).map_err(storage_error)?;
-        let state_json = row.get::<String>(1).map_err(storage_error)?;
-        drop(rows);
-        let mut state: VectorGenerationStateMachineV1 =
-            serde_json::from_str(&state_json).map_err(storage_error)?;
-        drop(state_json);
-        let (durable_slices, _) = hydrate_external_state(
-            self.database,
-            VECTOR_EVALUATION_STATE_SLICE_TABLE_V1,
-            &mut state,
-        )
-        .await?;
-        let mut load = hydrate_vector_payloads(
-            self.database,
-            VECTOR_EVALUATION_PAYLOAD_TABLE_V1,
-            &mut state,
-        )
-        .await?;
-        load.durable_slices = durable_slices;
-        state.ensure_physical_reuse_index()?;
-        validate_loaded_state(&state)?;
-        Ok((revision, state, load))
-    }
-}
-
 impl VectorGenerationStateMachineV1 {
     /// Rebuild the derived physical-byte index for every published generation.
     ///
@@ -1948,6 +1636,7 @@ fn intern_generation_vectors(
     }
 }
 
+#[cfg(test)]
 fn validate_loaded_state(
     state: &VectorGenerationStateMachineV1,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
@@ -2151,47 +1840,8 @@ fn validate_published_receipts(
     Ok(())
 }
 
-/// Which payload rows a load resolved, and whether it had to fall back to the
-/// pre-migration inline encoding.
-#[derive(Debug, Default)]
-struct VectorPayloadLoadV1 {
-    /// Addresses already durable in the payload table. A later write skips
-    /// them, so a commit persists only the rows its own batch introduced.
-    durable: BTreeSet<ContentDigest>,
-    /// Collection addresses already durable in the slice table, for the same
-    /// reason.
-    durable_slices: BTreeSet<ContentDigest>,
-}
-
-fn encode_vector_payload(values: &[f32]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(std::mem::size_of_val(values));
-    for value in values {
-        payload.extend_from_slice(&value.to_le_bytes());
-    }
-    payload
-}
-
-fn decode_vector_payload(
-    output_digest: &ContentDigest,
-    dimensions: i64,
-    payload: &[u8],
-) -> Result<Vec<f32>, VectorGenerationStoreErrorV1> {
-    let width = size_of::<f32>();
-    if dimensions <= 0
-        || !payload.len().is_multiple_of(width)
-        || usize::try_from(dimensions).ok() != Some(payload.len() / width)
-    {
-        return Err(VectorGenerationStoreErrorV1::Storage(format!(
-            "vector payload {output_digest} has an inconsistent width"
-        )));
-    }
-    Ok(payload
-        .chunks_exact(width)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect())
-}
-
 impl VectorGenerationStateMachineV1 {
+    #[cfg(test)]
     fn visit_vectors<'state>(&'state self, visit: &mut impl FnMut(&'state ProjectedChunkVectorV1)) {
         for generation in self.published.generations.values() {
             for vector in generation.vectors.values() {
@@ -2205,6 +1855,7 @@ impl VectorGenerationStateMachineV1 {
         }
     }
 
+    #[cfg(test)]
     /// Refill the elided float payload of every vector row.
     ///
     /// Every write here goes through [`ExternalV1::elided_mut`]: the
@@ -2222,48 +1873,6 @@ impl VectorGenerationStateMachineV1 {
             }
         }
     }
-}
-
-/// Fill every externalized vector in `state` from `payload_table`.
-///
-/// Reads are paged: addresses are resolved in bounded `IN (...)` groups rather
-/// than materializing the table. A missing address fails closed — a generation
-/// whose floats cannot be resolved must not serve.
-async fn hydrate_vector_payloads(
-    database: &Database,
-    payload_table: &str,
-    state: &mut VectorGenerationStateMachineV1,
-) -> Result<VectorPayloadLoadV1, VectorGenerationStoreErrorV1> {
-    let mut load = VectorPayloadLoadV1::default();
-    let mut wanted = BTreeSet::new();
-    state.visit_vectors(&mut |vector| {
-        if vector.values.is_empty() {
-            wanted.insert(vector.output_digest.clone());
-        }
-    });
-    if wanted.is_empty() {
-        return Ok(load);
-    }
-    let payloads = read_vector_payloads(database, payload_table, &wanted).await?;
-    let mut missing = None;
-    state.visit_vectors_mut(&mut |vector| {
-        if !vector.values.is_empty() {
-            return;
-        }
-        match payloads.get(&vector.output_digest) {
-            Some(values) => vector.values.clone_from(values),
-            None => {
-                missing.get_or_insert_with(|| vector.output_digest.clone());
-            }
-        }
-    });
-    if let Some(missing) = missing {
-        return Err(VectorGenerationStoreErrorV1::Storage(format!(
-            "vector payload {missing} is missing from the store"
-        )));
-    }
-    load.durable = wanted;
-    Ok(load)
 }
 
 /// Seal a hand-built fixture so its document can be serialized.
@@ -2307,113 +1916,11 @@ fn fill_from_sealed(
         .expect("fill externalized collections");
 }
 
-async fn read_vector_payloads(
-    database: &Database,
-    payload_table: &str,
-    wanted: &BTreeSet<ContentDigest>,
-) -> Result<BTreeMap<ContentDigest, Vec<f32>>, VectorGenerationStoreErrorV1> {
-    let connection = database.engine_conn();
-    let addresses = wanted.iter().cloned().collect::<Vec<_>>();
-    let mut payloads = BTreeMap::new();
-    for group in addresses.chunks(VECTOR_PAYLOAD_STATEMENT_ROWS) {
-        let placeholders = (1..=group.len())
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT output_digest, dimensions, payload
-             FROM {payload_table}
-             WHERE output_digest IN ({placeholders})"
-        );
-        let values = group
-            .iter()
-            .map(|digest| {
-                tracedecay_runtime_core::db::engine::Value::Text(digest.as_str().to_owned())
-            })
-            .collect::<Vec<_>>();
-        let mut rows = connection
-            .query(
-                &sql,
-                tracedecay_runtime_core::db::engine::params_from_iter(values),
-            )
-            .await
-            .map_err(storage_error)?;
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let output_digest =
-                ContentDigest::try_from(row.get::<String>(0).map_err(storage_error)?)
-                    .map_err(storage_error)?;
-            let dimensions = row.get::<i64>(1).map_err(storage_error)?;
-            let payload = row.get::<Vec<u8>>(2).map_err(storage_error)?;
-            let decoded = decode_vector_payload(&output_digest, dimensions, &payload)?;
-            payloads.insert(output_digest, decoded);
-        }
-        drop(rows);
-    }
-    Ok(payloads)
-}
-
-/// Persist every payload `state` references that is not already durable.
-///
-/// Writes happen inside the caller's transaction, so payload rows and the
-/// state pointer that names them become visible together. Rows are
-/// content-addressed and inserted with `OR IGNORE`, so a retried commit is a
-/// no-op rather than a conflict.
-async fn write_vector_payloads(
-    transaction: &tracedecay_runtime_core::db::DatabaseWriteTransaction<'_>,
-    payload_table: &str,
-    state: &VectorGenerationStateMachineV1,
-    durable: &BTreeSet<ContentDigest>,
-) -> Result<(), VectorGenerationStoreErrorV1> {
-    let mut pending: BTreeMap<ContentDigest, &[f32]> = BTreeMap::new();
-    state.visit_vectors(&mut |vector| {
-        if !durable.contains(&vector.output_digest) {
-            pending
-                .entry(vector.output_digest.clone())
-                .or_insert(&vector.values);
-        }
-    });
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let rows = pending.into_iter().collect::<Vec<_>>();
-    for group in rows.chunks(VECTOR_PAYLOAD_STATEMENT_ROWS) {
-        let tuples = (0..group.len())
-            .map(|index| {
-                let base = index * 3;
-                format!("(?{}, ?{}, ?{})", base + 1, base + 2, base + 3)
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "INSERT OR IGNORE INTO {payload_table} (output_digest, dimensions, payload)
-             VALUES {tuples}"
-        );
-        let mut values = Vec::with_capacity(group.len() * 3);
-        for (output_digest, payload) in group {
-            values.push(tracedecay_runtime_core::db::engine::Value::Text(
-                output_digest.as_str().to_owned(),
-            ));
-            values.push(tracedecay_runtime_core::db::engine::Value::Integer(
-                i64::try_from(payload.len()).map_err(storage_error)?,
-            ));
-            values.push(tracedecay_runtime_core::db::engine::Value::Blob(
-                encode_vector_payload(payload),
-            ));
-        }
-        transaction
-            .execute_engine(
-                &sql,
-                tracedecay_runtime_core::db::engine::params_from_iter(values),
-            )
-            .await
-            .map_err(storage_error)?;
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 type ExternalSlotVisitV1<'visit> =
     dyn FnMut(&mut dyn ExternalSlotV1) -> Result<(), VectorGenerationStoreErrorV1> + 'visit;
 
+#[cfg(test)]
 impl PublishedVectorGenerationV1 {
     fn visit_external_slots(
         &mut self,
@@ -2426,6 +1933,7 @@ impl PublishedVectorGenerationV1 {
     }
 }
 
+#[cfg(test)]
 impl VectorGenerationStateMachineV1 {
     /// Every externalized collection in the state document, in a stable order.
     fn visit_external_slots(
@@ -2449,6 +1957,7 @@ impl VectorGenerationStateMachineV1 {
     }
 }
 
+#[cfg(test)]
 /// Seal every externalized collection and collect the slices to write.
 ///
 /// A slot whose address is already durable is left alone, so a mutation
@@ -2470,149 +1979,6 @@ fn seal_external_state(
         Ok(())
     })?;
     Ok(pending)
-}
-
-/// Fill every externalized collection in `state` from `slice_table`.
-///
-/// Collections are resolved one address at a time so a whole-corpus load never
-/// holds every encoded collection at once, and each is verified against its
-/// content address before it is parsed. A missing address fails closed.
-async fn hydrate_external_state(
-    database: &Database,
-    slice_table: &str,
-    state: &mut VectorGenerationStateMachineV1,
-) -> Result<(BTreeSet<ContentDigest>, bool), VectorGenerationStoreErrorV1> {
-    let mut wanted = BTreeSet::new();
-    let mut inline = false;
-    state.visit_external_slots(&mut |slot| {
-        match slot.address() {
-            Some(address) => {
-                wanted.insert(address.clone());
-            }
-            None => inline = true,
-        }
-        Ok(())
-    })?;
-    for address in &wanted {
-        let slices = read_state_slices(database, slice_table, address).await?;
-        state.visit_external_slots(&mut |slot| {
-            if slot.address() == Some(address) {
-                slot.fill(&slices)?;
-            }
-            Ok(())
-        })?;
-    }
-    Ok((wanted, inline))
-}
-
-/// Read one collection's slices in ordinal order.
-///
-/// Paged by ordinal rather than read as one statement: a whole-corpus
-/// collection has more slices than a single query may materialize, and the
-/// runtime refuses such a statement outright rather than truncating it. Paging
-/// keeps every statement bounded no matter how large the collection grows.
-async fn read_state_slices(
-    database: &Database,
-    slice_table: &str,
-    address: &ContentDigest,
-) -> Result<Vec<Vec<u8>>, VectorGenerationStoreErrorV1> {
-    let connection = database.engine_conn();
-    let sql = format!(
-        "SELECT ordinal, payload
-         FROM {slice_table}
-         WHERE collection_digest = ?1 AND ordinal >= ?2 AND ordinal < ?3
-         ORDER BY ordinal"
-    );
-    let mut slices = Vec::new();
-    loop {
-        let start = i64::try_from(slices.len()).map_err(storage_error)?;
-        let end = start
-            .checked_add(i64::try_from(VECTOR_STATE_SLICE_READ_ROWS).map_err(storage_error)?)
-            .ok_or_else(|| {
-                VectorGenerationStoreErrorV1::Storage(
-                    "externalized state collection is implausibly large".to_owned(),
-                )
-            })?;
-        let mut rows = connection
-            .query(&sql, params![address.as_str(), start, end])
-            .await
-            .map_err(storage_error)?;
-        let mut read = 0_usize;
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let ordinal = row.get::<i64>(0).map_err(storage_error)?;
-            if usize::try_from(ordinal).ok() != Some(slices.len()) {
-                return Err(VectorGenerationStoreErrorV1::Storage(format!(
-                    "externalized state collection {address} has a gap in its slices"
-                )));
-            }
-            slices.push(row.get::<Vec<u8>>(1).map_err(storage_error)?);
-            read += 1;
-        }
-        drop(rows);
-        if read < VECTOR_STATE_SLICE_READ_ROWS {
-            break;
-        }
-    }
-    if slices.is_empty() {
-        return Err(VectorGenerationStoreErrorV1::Storage(format!(
-            "externalized state collection {address} is missing from the store"
-        )));
-    }
-    Ok(slices)
-}
-
-/// Persist sealed collection slices inside the caller's transaction.
-///
-/// Rows are content-addressed and inserted with `OR IGNORE`, so a retried
-/// commit is a no-op rather than a conflict, and every statement carries a
-/// bounded number of bounded slices.
-async fn write_state_slices(
-    transaction: &tracedecay_runtime_core::db::DatabaseWriteTransaction<'_>,
-    slice_table: &str,
-    pending: &BTreeMap<ContentDigest, Vec<Vec<u8>>>,
-) -> Result<(), VectorGenerationStoreErrorV1> {
-    let rows = pending
-        .iter()
-        .flat_map(|(address, slices)| {
-            slices
-                .iter()
-                .enumerate()
-                .map(move |(ordinal, payload)| (address, ordinal, payload))
-        })
-        .collect::<Vec<_>>();
-    for group in rows.chunks(VECTOR_STATE_SLICE_STATEMENT_ROWS) {
-        let tuples = (0..group.len())
-            .map(|index| {
-                let base = index * 3;
-                format!("(?{}, ?{}, ?{})", base + 1, base + 2, base + 3)
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "INSERT OR IGNORE INTO {slice_table} (collection_digest, ordinal, payload)
-             VALUES {tuples}"
-        );
-        let mut values = Vec::with_capacity(group.len() * 3);
-        for (address, ordinal, payload) in group {
-            values.push(tracedecay_runtime_core::db::engine::Value::Text(
-                address.as_str().to_owned(),
-            ));
-            values.push(tracedecay_runtime_core::db::engine::Value::Integer(
-                i64::try_from(*ordinal).map_err(storage_error)?,
-            ));
-            values.push(tracedecay_runtime_core::db::engine::Value::Blob(
-                (*payload).clone(),
-            ));
-        }
-        transaction
-            .execute_engine(
-                &sql,
-                tracedecay_runtime_core::db::engine::params_from_iter(values),
-            )
-            .await
-            .map_err(storage_error)?;
-    }
-    Ok(())
 }
 
 fn storage_error(error: impl std::fmt::Display) -> VectorGenerationStoreErrorV1 {
@@ -2799,8 +2165,6 @@ mod tests {
         EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId,
         ProjectionBatchRequestV1, ProjectionReplayReasonV1,
     };
-    use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
-
     fn id<T>(value: &str) -> T
     where
         T: TryFrom<String>,
@@ -3002,77 +2366,6 @@ mod tests {
         }
     }
 
-    /// One projection batch that adds a single chunk vector.
-    fn added_prepared(
-        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
-        to_generation: &CodeGenerationId,
-        chunk_id: &CodeSearchChunkId,
-        chunk_digest: &ContentDigest,
-        values: Vec<f32>,
-    ) -> PreparedVectorGenerationV1 {
-        let projection_key = embedding_key.projection_key().clone();
-        let output_digest = tracedecay_semantic::projector::vector_output_digest(
-            &projection_key,
-            chunk_id,
-            chunk_digest,
-            &values,
-        )
-        .expect("canonical vector output digest");
-        let mut changes = ChangedCodeChunkSetV1 {
-            from_generation: None,
-            to_generation: to_generation.clone(),
-            manifest_digest: manifest_digest('0'),
-            added_or_changed: vec![ChangedCodeChunkV1 {
-                chunk_id: chunk_id.clone(),
-                prior_digest: None,
-                current_digest: Some(chunk_digest.clone()),
-            }],
-            deleted: vec![],
-            reused: vec![],
-        };
-        changes.manifest_digest = changes.compute_digest().expect("changed-set digest");
-        let source_manifest_digest = changes.manifest_digest.clone();
-        let mut request = ProjectionBatchRequestV1 {
-            request_digest: manifest_digest('0'),
-            changes,
-            previous_projection_key: None,
-            target_projection_key: projection_key.clone(),
-            replay_reason: ProjectionReplayReasonV1::SourceEdit,
-        };
-        request.request_digest =
-            tracedecay_code_index::projection::expected_request_digest(&request)
-                .expect("projection request digest");
-        let receipt = tracedecay_code_index::projection::build_batch_receipt(
-            &request,
-            &[
-                tracedecay_code_index::projection::ChunkProjectionDecisionV1 {
-                    chunk_id: chunk_id.clone(),
-                    prior_chunk_digest: None,
-                    current_chunk_digest: Some(chunk_digest.clone()),
-                    operation: ProjectionOperationV1::Added,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: Some(output_digest.clone()),
-                },
-            ],
-        )
-        .expect("added projection receipt");
-        PreparedVectorGenerationV1 {
-            embedding_key: embedding_key.clone(),
-            request,
-            receipt,
-            vectors: vec![ProjectedChunkVectorV1 {
-                projection_key,
-                source_generation: to_generation.clone(),
-                source_manifest_digest,
-                chunk_id: chunk_id.clone(),
-                chunk_digest: chunk_digest.clone(),
-                values,
-                output_digest,
-            }],
-            tombstones: vec![],
-        }
-    }
-
     fn insert_generation(
         store: &mut FakeVectorGenerationStoreV1,
         generation: PublishedVectorGenerationV1,
@@ -3237,66 +2530,6 @@ mod tests {
             .expect("current generation")
             .validate_persisted()
             .expect("current generation is complete");
-    }
-
-    #[tokio::test]
-    async fn native_evaluation_state_is_sqlite_backed_and_never_becomes_authoritative() {
-        let temporary = tempfile::tempdir().expect("temporary project database");
-        let path = temporary.path().join("project.db");
-        crate::register_test_schema_installer();
-        let authority = DatabaseAuthority::acquire_test(&path, "native semantic evaluation")
-            .expect("authority");
-        let (database, _) =
-            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
-                .await
-                .expect("database");
-
-        let evaluation =
-            DatabaseVectorEvaluationStoreV1::open(&database, "semantic-native-evaluation:test")
-                .await
-                .expect("SQLite-backed evaluation store");
-        assert_eq!(
-            evaluation
-                .active_generation_id()
-                .await
-                .expect("evaluation active generation"),
-            None
-        );
-        assert_eq!(
-            database
-                .query_scalar_i64(
-                    "inspect native evaluation row",
-                    "SELECT COUNT(*) FROM semantic_vector_evaluation_state_v1",
-                )
-                .await
-                .expect("evaluation row count"),
-            1
-        );
-        assert_eq!(
-            database
-                .query_scalar_i64(
-                    "prove native evaluation did not create authoritative state",
-                    "SELECT COUNT(*)
-                     FROM sqlite_schema
-                     WHERE type = 'table'
-                       AND name = 'semantic_vector_generation_state_v1'",
-                )
-                .await
-                .expect("authoritative schema count"),
-            0
-        );
-
-        evaluation.close().await.expect("remove evaluation row");
-        assert_eq!(
-            database
-                .query_scalar_i64(
-                    "verify native evaluation cleanup",
-                    "SELECT COUNT(*) FROM semantic_vector_evaluation_state_v1",
-                )
-                .await
-                .expect("evaluation row count after cleanup"),
-            0
-        );
     }
 
     #[test]

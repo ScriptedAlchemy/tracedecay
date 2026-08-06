@@ -155,4 +155,11 @@ fn native_activation_rejects_sqlite_vector_measurement_provenance() {
         )
         .is_ok()
     );
+    assert!(
+        crate::report::validate_native_measurement_method(
+            "linux-procfs-v1;projection-cases=prepare_semantic_evaluation_projection\
+             +GraphVectorGenerationStoreV1(isolated-in-memory-graph,watermark-CAS)"
+        )
+        .is_ok()
+    );
 }
