@@ -24,9 +24,11 @@ use constant_time_eq::constant_time_eq;
 use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
+use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 use tracedecay_domain::ProjectId;
 
 use crate::errors::{Result, TraceDecayError};
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 const MAX_HTTP_APPLICATION_PROJECT_ROUTERS: usize = 8;
 const MAX_HTTP_APPLICATION_COLD_RESOLUTIONS: usize = 8;
@@ -35,6 +37,12 @@ type ProjectRouterResolverFuture =
     Pin<Box<dyn Future<Output = Result<Option<Router>>> + Send + 'static>>;
 type ProjectRouterResolver =
     Arc<dyn Fn(ProjectId) -> ProjectRouterResolverFuture + Send + Sync + 'static>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectRouterResolutionError {
+    Saturated,
+    Unavailable,
+}
 
 #[derive(Default)]
 struct ProjectRouterCache {
@@ -116,24 +124,40 @@ impl DaemonHttpApplicationRegistry {
         Ok(())
     }
 
-    async fn resolve(&self, project_id: &str) -> Option<Router> {
-        let project_id = ProjectId::new(project_id.to_owned()).ok()?;
+    async fn resolve(
+        &self,
+        project_id: &str,
+    ) -> std::result::Result<Option<Router>, ProjectRouterResolutionError> {
+        let Ok(project_id) = ProjectId::new(project_id.to_owned()) else {
+            return Ok(None);
+        };
         if let Some(router) = self.routers.lock().await.get(project_id.as_str()) {
-            return Some(router);
+            return Ok(Some(router));
         }
         let resolver = {
-            let slot = self.resolver.read().ok()?;
+            let slot = self
+                .resolver
+                .read()
+                .map_err(|_| ProjectRouterResolutionError::Unavailable)?;
             slot.as_ref().cloned()
-        }?;
+        };
+        let Some(resolver) = resolver else {
+            return Ok(None);
+        };
         let _permit = Arc::clone(&self.resolver_admission)
             .try_acquire_owned()
-            .ok()?;
-        let router = resolver(project_id.clone()).await.ok().flatten()?;
+            .map_err(|_| ProjectRouterResolutionError::Saturated)?;
+        let Some(router) = resolver(project_id.clone())
+            .await
+            .map_err(|_| ProjectRouterResolutionError::Unavailable)?
+        else {
+            return Ok(None);
+        };
         self.routers
             .lock()
             .await
             .insert(project_id.as_str().to_owned(), router.clone());
-        Some(router)
+        Ok(Some(router))
     }
 
     fn router(self) -> Router {
@@ -155,8 +179,35 @@ async fn dispatch_project_application(
     Path((project_id, tail)): Path<(String, String)>,
     mut request: Request<Body>,
 ) -> Response {
-    let Some(router) = registry.resolve(&project_id).await else {
-        return StatusCode::NOT_FOUND.into_response();
+    let router = match registry.resolve(&project_id).await {
+        Ok(Some(router)) => router,
+        Ok(None) => {
+            return transport_problem_response(ApplicationProblem::not_found_or_not_authorized(
+                RetryDirective::Never,
+            ));
+        }
+        Err(ProjectRouterResolutionError::Saturated) => {
+            let Ok(diagnostic) = SafeDiagnostic::new(
+                "http.project_router_saturated",
+                "Project route resolution is saturated",
+            ) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            return transport_problem_response(ApplicationProblem::Saturated {
+                diagnostic,
+                retry: RetryDirective::AfterDelay,
+                legal_actions: vec![LegalAction::Retry],
+            });
+        }
+        Err(ProjectRouterResolutionError::Unavailable) => {
+            let Ok(diagnostic) = SafeDiagnostic::new(
+                "http.project_router_unavailable",
+                "Project route resolution is unavailable",
+            ) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            return transport_problem_response(ApplicationProblem::unavailable(diagnostic));
+        }
     };
     let query = request
         .uri()
@@ -171,6 +222,13 @@ async fn dispatch_project_application(
         Ok(response) => response,
         Err(never) => match never {},
     }
+}
+
+fn transport_problem_response(problem: ApplicationProblem) -> Response {
+    let Ok(request_id) = mint_global_request_id(GlobalRequestSurface::Http) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    tracedecay_api::adapter_problem_response(request_id, problem)
 }
 
 #[derive(Clone)]
