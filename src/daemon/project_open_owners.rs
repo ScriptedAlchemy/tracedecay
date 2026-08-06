@@ -1782,7 +1782,7 @@ async fn register_production_advisory_owner(
     let hook_notices = Pr13AdvisoryHookNoticeQueueV1::new(feedback_scope.clone());
     let hook_v2 = hook_notices.sink();
     let legacy_hook = unavailable_advisory_hook_sink();
-    let (hook_project_id, hook_worktree_id) = crate::hooks::hook_v2_scope_locators(&resolved_scope);
+    let (hook_project_id, hook_worktree_id) = crate::hooks::hook_scope_locators(&resolved_scope);
     let lifecycle_registration =
         crate::daemon::context_scout_lifecycle::register_context_scout_lifecycle_authority(
             hook_project_id,

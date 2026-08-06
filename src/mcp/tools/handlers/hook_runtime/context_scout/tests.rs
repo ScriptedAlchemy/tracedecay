@@ -108,8 +108,7 @@ fn hook_v2_scout_prepare_accepts_no_caller_candidates() {
 fn hook_v2_native_session_requires_exact_protected_locator() {
     let session_id = "native-session-1";
     let mut envelope = hook_v2_envelope_for_test();
-    envelope.protected_session_id =
-        crate::hooks::hook_v2_protected_session_id_for_native(session_id);
+    envelope.protected_session_id = crate::hooks::protected_native_session_id(session_id);
     assert_eq!(
         hook_v2_native_session_id(&json!({ "native_session_id": session_id }), &envelope)
             .as_ref()

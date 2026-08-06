@@ -107,10 +107,10 @@ fn disposition_classifier_distinguishes_outcomes() {
 }
 
 #[test]
-fn hook_v2_transport_dispositions_remain_distinct_in_telemetry() {
-    let accepted = disposition_from_hook_v2(HookTransportDispositionV1::Accepted);
-    let spooled = disposition_from_hook_v2(HookTransportDispositionV1::AcceptedForReplay);
-    let catchup = disposition_from_hook_v2(HookTransportDispositionV1::CatchupRequired);
+fn native_dispatch_dispositions_remain_distinct_in_telemetry() {
+    let accepted = disposition_from_native_dispatch(HookTransportDispositionV1::Accepted);
+    let spooled = disposition_from_native_dispatch(HookTransportDispositionV1::AcceptedForReplay);
+    let catchup = disposition_from_native_dispatch(HookTransportDispositionV1::CatchupRequired);
 
     assert_eq!(accepted.status, HostAdmissionStatus::Supported);
     assert_eq!(accepted.reason_code.as_deref(), Some("hook_v2_accepted"));

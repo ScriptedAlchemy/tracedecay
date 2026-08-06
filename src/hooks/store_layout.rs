@@ -2,7 +2,7 @@
 //!
 //! One hook invocation resolves the same checkout's store layout three to six
 //! times: once per analytics row written (`hook_invoked`, every hint row, and
-//! `hook_completed` from the timing span's `Drop`), once in Hook V2's
+//! `hook_completed` from the timing span's `Drop`), once in the native Hook
 //! `prepare_bound_hook`, once per surviving hint in the dedupe path, and twice
 //! more in the memory-injection seen-facts path. Every one of those repeats the
 //! same filesystem work — reading the enrollment and repository identity

@@ -198,12 +198,22 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
                 &project_root,
             ) {
                 Ok(Some(layout)) => match current_time() {
-                    Some(now) => tracedecay_hooks::capture_native_event_for_replay(
-                        &layout.data_root,
-                        source,
-                        &payload,
-                        now,
-                    ),
+                    Some(now) => {
+                        match tracedecay::hooks::native_capture_material(source, &payload, now) {
+                            Ok(material) => tracedecay_hooks::capture_native_event_for_replay(
+                                &layout.data_root,
+                                source,
+                                &payload,
+                                material,
+                                now,
+                            ),
+                            Err(
+                                tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeEvent
+                                | tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeFamily,
+                            ) => NativeHookCaptureOutcomeV1::Unsupported,
+                            Err(_) => NativeHookCaptureOutcomeV1::Rejected,
+                        }
+                    }
                     None => NativeHookCaptureOutcomeV1::Unavailable,
                 },
                 Ok(None) => NativeHookCaptureOutcomeV1::Unbound,

@@ -552,7 +552,7 @@ fn dedupe_round_trips_through_disk() {
 }
 
 #[test]
-fn save_writes_versioned_v2_schema() {
+fn save_writes_versioned_schema() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tool_hints_seen.json");
     let mut dedupe = ToolHintDedupe::default();
@@ -570,7 +570,7 @@ fn save_writes_versioned_v2_schema() {
 }
 
 #[test]
-fn v1_store_migrates_to_v2_round_trip() {
+fn legacy_store_migrates_to_versioned_schema() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tool_hints_seen.json");
     // Legacy v1 file: a bare array of {session_id, category}.

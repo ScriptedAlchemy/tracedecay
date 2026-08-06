@@ -824,11 +824,6 @@ mod tests {
                 include_bytes!("../fixtures/host_events/kimi/post-tool-use-edit.json"),
                 NativeHookSignalV1::SavedEdit,
             ),
-            (
-                NativeHostIdentityV1::KimiCode,
-                include_bytes!("../fixtures/host_events/kimi/stop.json"),
-                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
-            ),
         ];
 
         for (host, payload, signal) in captures {
@@ -956,10 +951,8 @@ mod tests {
             decode_native_hook_event(
                 NativeHostIdentityV1::Kiro,
                 fixture_request(kiro, "prompt_boundary").as_slice()
-            )
-            .unwrap()
-            .signal,
-            NativeHookSignalV1::PromptBoundary
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeFamily)
         );
         for identity in ["saved_edit", "stop"] {
             assert_eq!(

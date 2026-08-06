@@ -193,7 +193,7 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
     let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Cursor, hook_name, &event);
     if hook_name == "stop"
         && let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
+        && let Some(guidance) = super::dispatch::dispatch(
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
             root,
@@ -303,7 +303,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
         &parsed,
     );
     if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
+        && let Some(guidance) = super::dispatch::dispatch(
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
             root,
@@ -335,7 +335,7 @@ async fn cursor_session_start_response(event: &str) -> String {
     let root = cursor_project_root_from_event_with_identity(event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", event);
-    let guidance = super::v2::dispatch_for_scope(
+    let guidance = super::dispatch::dispatch_for_scope(
         tracedecay_hooks::HookHostV1::CursorDesktop,
         event,
         root.as_deref(),

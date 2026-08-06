@@ -159,6 +159,12 @@ pub struct HookAdmissionLedgerV1 {
     next_order: u64,
 }
 
+impl Drop for HookAdmissionLedgerV1 {
+    fn drop(&mut self) {
+        let _ = self._writer_lock.unlock();
+    }
+}
+
 impl HookAdmissionLedgerV1 {
     /// Open (and bounded-recover) the ledger for one host.
     pub fn open(

@@ -290,8 +290,7 @@ pub(super) async fn hook_v2_delivery_receipt(cg: &TraceDecay, args: &Value) -> R
         >(claim)
         .map_err(|error| config_error(format!("invalid Context Scout claim: {error}")))?,
         None => {
-            let Some(project_id) =
-                crate::hooks::hook_v2_project_id_for_layout(cg.hook_store_layout())
+            let Some(project_id) = crate::hooks::hook_project_id_for_layout(cg.hook_store_layout())
             else {
                 return Ok(json!({ "status": "unavailable" }));
             };

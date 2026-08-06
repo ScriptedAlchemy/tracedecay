@@ -35,8 +35,7 @@ pub(super) fn hook_v2_native_session_id(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
 ) -> Option<SessionId> {
     let session = SessionId::new(args.get("native_session_id")?.as_str()?.to_owned()).ok()?;
-    (crate::hooks::hook_v2_protected_session_id_for_native(session.as_str())
-        == envelope.protected_session_id)
+    (crate::hooks::protected_native_session_id(session.as_str()) == envelope.protected_session_id)
         .then_some(session)
 }
 

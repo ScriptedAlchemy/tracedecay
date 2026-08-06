@@ -195,10 +195,10 @@ impl HookTimingSpan {
         );
     }
 
-    pub(crate) fn note_hook_v2_disposition(&self, disposition: HookTransportDispositionV1) {
+    pub(crate) fn note_native_dispatch_disposition(&self, disposition: HookTransportDispositionV1) {
         merge_disposition(
             &mut self.state().disposition,
-            disposition_from_hook_v2(disposition),
+            disposition_from_native_dispatch(disposition),
         );
     }
 
@@ -287,7 +287,9 @@ fn note_result(state: &mut HookTimingState, result: &Result<Value, TraceDecayErr
     }
 }
 
-fn disposition_from_hook_v2(disposition: HookTransportDispositionV1) -> HookDispositionTelemetry {
+fn disposition_from_native_dispatch(
+    disposition: HookTransportDispositionV1,
+) -> HookDispositionTelemetry {
     match disposition {
         HookTransportDispositionV1::Accepted => HookDispositionTelemetry::from_parts(
             HostAdmissionStatus::Supported,

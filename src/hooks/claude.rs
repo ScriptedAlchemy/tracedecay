@@ -150,7 +150,7 @@ async fn claude_session_start_response(event: &str) -> String {
         event,
         &parsed,
     );
-    super::v2::dispatch_for_scope(
+    super::dispatch::dispatch_for_scope(
         tracedecay_hooks::HookHostV1::ClaudeCode,
         event,
         root.as_deref(),
@@ -239,7 +239,7 @@ async fn claude_post_tool_use_response(event: &str) -> Option<String> {
         event,
         &parsed,
     );
-    super::v2::dispatch_for_scope(
+    super::dispatch::dispatch_for_scope(
         tracedecay_hooks::HookHostV1::ClaudeCode,
         event,
         root.as_deref(),
@@ -297,7 +297,7 @@ pub async fn hook_prompt_submit() {
     println!("{}", serde_json::json!({}));
 }
 
-/// `Stop` hook handler: submits the native turn boundary to daemon-owned V2.
+/// `Stop` hook handler: submits the native turn boundary to the daemon.
 pub async fn hook_stop() {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
@@ -318,7 +318,7 @@ async fn claude_stop_response_for_event(event: &str) -> String {
     let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry =
         record_hook_invoked_parsed(root.as_deref(), HintAgent::Claude, "Stop", event, &parsed);
-    super::v2::dispatch_for_scope(
+    super::dispatch::dispatch_for_scope(
         tracedecay_hooks::HookHostV1::ClaudeCode,
         event,
         root.as_deref(),
