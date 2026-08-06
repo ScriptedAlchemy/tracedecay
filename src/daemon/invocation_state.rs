@@ -194,7 +194,6 @@ impl DaemonInvocationState {
         project_root: &Path,
         store_root: PathBuf,
         semantic_runtime: Option<&crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
-        semantic_database: Option<Arc<crate::db::Database>>,
         semantic_lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
         semantic_resources: Option<crate::config::SemanticResourceCeilings>,
         graph_runtime: Arc<
@@ -242,12 +241,11 @@ impl DaemonInvocationState {
             Arc::clone(&vector_graph),
         );
         let semantic_schedule = semantic_runtime
-            .zip(semantic_database)
             .zip(semantic_lifecycle)
             .zip(semantic_resources)
             .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
             .map(
-                |((((handle, database), lifecycle), resources), worktree_id)| {
+                |(((handle, lifecycle), resources), worktree_id)| {
                     let graph = Arc::clone(&vector_graph);
                     crate::application::semantic_runtime::production_saved_generation_schedule_hook(
                         crate::application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
@@ -255,7 +253,6 @@ impl DaemonInvocationState {
                             code_index_store_root: scoped_code_index_store_root.clone(),
                             worktree_id,
                             handle: handle.clone(),
-                            database,
                             graph,
                             lifecycle,
                             resources,

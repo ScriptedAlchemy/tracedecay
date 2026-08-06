@@ -263,7 +263,6 @@ pub(super) async fn production_project_server(
     let semantic_auto_download_enabled =
         semantic_config.auto_download && runtime.semantic_auto_download();
     let semantic_startup_selection = semantic_config.selected_model.clone();
-    let semantic_database = cg.dashboard_database_guard();
     let project_database_is_read_only = cg.db().filesystem_is_read_only();
     let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
     let existing = {
@@ -352,7 +351,6 @@ pub(super) async fn production_project_server(
         let project_root = canonical_project_path.to_path_buf();
         let store_root = code_index_store_root.clone();
         let semantic_runtime = semantic_runtime.clone();
-        let semantic_database = Arc::clone(&semantic_database);
         let semantic_lifecycle = semantic_lifecycle.clone();
         let semantic_resources = *semantic_resources;
         let scope = code_search_scope.clone();
@@ -365,7 +363,6 @@ pub(super) async fn production_project_server(
             let project_root = project_root.clone();
             let store_root = store_root.clone();
             let semantic_runtime = semantic_runtime.clone();
-            let semantic_database = Arc::clone(&semantic_database);
             let semantic_lifecycle = semantic_lifecycle.clone();
             let semantic_resources = semantic_resources;
             let scope = scope.clone();
@@ -384,7 +381,6 @@ pub(super) async fn production_project_server(
                     &project_root,
                     store_root,
                     Some(&semantic_runtime),
-                    Some(semantic_database),
                     semantic_lifecycle,
                     Some(semantic_resources),
                     graph_runtime,
