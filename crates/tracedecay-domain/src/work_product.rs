@@ -1,8 +1,8 @@
 //! Canonical Plan 24 product graph contracts.
 //!
 //! These values contain no persistence or provider behavior. The owning daemon
-//! stores them through its injected shared graph handle and Plan 32 executes
-//! only the exact provider admissions represented here.
+//! stores them through its injected shared graph handle. Runtime execution
+//! remains external; this graph retains only exact accepted-attempt evidence.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -49,8 +49,6 @@ pub enum WorkProductContractError {
     ProposalMismatch,
     #[error("Work provider route was not explicitly selected")]
     RouteNotSelected,
-    #[error("Work provider admission or outcome is invalid")]
-    InvalidProviderTransition,
     #[error("Work acceptance criteria are not satisfied")]
     AcceptanceUnsatisfied,
     #[error("Task evidence is not rooted in the selected task")]
@@ -385,26 +383,45 @@ impl WorkTaskEvidenceV1 {
         mut links: Vec<TaskEvidenceLinkV1>,
         coverage: WorkTaskEvidenceCoverageV1,
     ) -> Result<Self, WorkProductContractError> {
-        if links.len() > MAX_WORK_PRODUCT_EVIDENCE {
-            return Err(WorkProductContractError::GraphTooLarge);
-        }
-        if links.iter().any(|link| link.task_id() != &task_id) {
-            return Err(WorkProductContractError::EvidenceTaskMismatch);
-        }
         links.sort_by(|left, right| left.link_id.cmp(&right.link_id));
-        if links
-            .windows(2)
-            .any(|pair| pair[0].link_id == pair[1].link_id)
-        {
-            return Err(WorkProductContractError::DuplicateIdentity);
-        }
-        coverage.validate(links.len())?;
-        Ok(Self {
+        let evidence = Self {
             task_id,
             graph_version,
             links,
             coverage,
-        })
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    pub fn validate(&self) -> Result<(), WorkProductContractError> {
+        let links = &self.links;
+        if links.len() > MAX_WORK_PRODUCT_EVIDENCE {
+            return Err(WorkProductContractError::GraphTooLarge);
+        }
+        if links.iter().any(|link| link.revision() == 0) {
+            return Err(WorkProductContractError::InvalidVersion);
+        }
+        if links.iter().any(|link| link.task_id() != &self.task_id) {
+            return Err(WorkProductContractError::EvidenceTaskMismatch);
+        }
+        if links
+            .iter()
+            .map(TaskEvidenceLinkV1::link_id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != links.len()
+        {
+            return Err(WorkProductContractError::DuplicateIdentity);
+        }
+        if links
+            .windows(2)
+            .any(|pair| pair[0].link_id() > pair[1].link_id())
+        {
+            return Err(WorkProductContractError::IllegalTransition);
+        }
+        self.coverage.validate(links.len())?;
+        Ok(())
     }
 
     pub fn task_id(&self) -> &TaskId {
@@ -694,84 +711,6 @@ impl WorkProposalDecisionV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkProviderTerminalV1 {
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkProviderOutcomeV1 {
-    identity: WorkAttemptIdentityV1,
-    terminal: WorkProviderTerminalV1,
-    evidence_digest: ManifestDigest,
-    observed_at: UtcMicros,
-}
-
-impl WorkProviderOutcomeV1 {
-    pub fn new(
-        identity: WorkAttemptIdentityV1,
-        terminal: WorkProviderTerminalV1,
-        evidence_digest: ManifestDigest,
-        observed_at: UtcMicros,
-    ) -> Self {
-        Self {
-            identity,
-            terminal,
-            evidence_digest,
-            observed_at,
-        }
-    }
-
-    pub fn identity(&self) -> &WorkAttemptIdentityV1 {
-        &self.identity
-    }
-
-    pub const fn terminal(&self) -> &WorkProviderTerminalV1 {
-        &self.terminal
-    }
-
-    pub fn evidence_digest(&self) -> &ManifestDigest {
-        &self.evidence_digest
-    }
-
-    pub const fn observed_at(&self) -> UtcMicros {
-        self.observed_at
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum WorkProviderAdmissionV1 {
-    Admitted {
-        identity: WorkAttemptIdentityV1,
-        proposal_id: ProposalId,
-        route: WorkProviderRouteV1,
-        admitted_at: UtcMicros,
-    },
-    Cancelled {
-        identity: WorkAttemptIdentityV1,
-        cancelled_at: UtcMicros,
-    },
-    RolledBack {
-        identity: WorkAttemptIdentityV1,
-        rolled_back_at: UtcMicros,
-    },
-}
-
-impl WorkProviderAdmissionV1 {
-    pub fn identity(&self) -> &WorkAttemptIdentityV1 {
-        match self {
-            Self::Admitted { identity, .. }
-            | Self::Cancelled { identity, .. }
-            | Self::RolledBack { identity, .. } => identity,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkHandoffV1 {
     handoff_id: WorkHandoffId,
@@ -857,8 +796,7 @@ pub struct WorkItemV1 {
     accepted_route: Option<WorkRouteDecisionV1>,
     evidence_links: BTreeSet<TaskEvidenceLinkId>,
     accepted_criteria: BTreeMap<AcceptanceCriterionId, TaskEvidenceLinkId>,
-    provider_admission: Option<WorkProviderAdmissionV1>,
-    provider_outcomes: Vec<WorkProviderOutcomeV1>,
+    accepted_attempts: BTreeMap<WorkAttemptIdentityV1, TaskEvidenceLinkId>,
     handoffs: Vec<WorkHandoffV1>,
     accepted_at: Option<UtcMicros>,
     archived_at: Option<UtcMicros>,
@@ -892,8 +830,7 @@ impl WorkItemV1 {
             accepted_route: None,
             evidence_links: BTreeSet::new(),
             accepted_criteria: BTreeMap::new(),
-            provider_admission: None,
-            provider_outcomes: Vec::new(),
+            accepted_attempts: BTreeMap::new(),
             handoffs: Vec::new(),
             accepted_at: None,
             archived_at: None,
@@ -956,20 +893,8 @@ impl WorkItemV1 {
         self.accepted_route.as_ref()
     }
 
-    pub fn provider_admission(&self) -> Option<&WorkProviderAdmissionV1> {
-        self.provider_admission.as_ref()
-    }
-
-    pub fn provider_outcomes(&self) -> &[WorkProviderOutcomeV1] {
-        &self.provider_outcomes
-    }
-
-    pub fn current_provider_outcome(&self) -> Option<&WorkProviderOutcomeV1> {
-        let identity = self.provider_admission.as_ref()?.identity();
-        self.provider_outcomes
-            .iter()
-            .rev()
-            .find(|outcome| outcome.identity() == identity)
+    pub fn accepted_attempts(&self) -> &BTreeMap<WorkAttemptIdentityV1, TaskEvidenceLinkId> {
+        &self.accepted_attempts
     }
 
     pub fn evidence_links(&self) -> &BTreeSet<TaskEvidenceLinkId> {
