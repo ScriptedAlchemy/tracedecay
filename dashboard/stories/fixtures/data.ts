@@ -1527,6 +1527,15 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
       'effective configuration diverges from the desired revision on two protected keys',
       ['configuration:revision:r-317', 'configuration:revision:r-318'],
     ),
+    // A second storage finding: the same family can report more than one
+    // observation, and `stale` needs a badge on screen like the other seven.
+    entry(
+      'storage',
+      'stale',
+      'complete',
+      'the session-store size observation was taken at watermark wm-38, three syncs behind the current wm-41',
+      ['store:sessions:size-observation:wm-38'],
+    ),
     entry(
       'semantic_index',
       'unknown',
