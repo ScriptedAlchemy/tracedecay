@@ -254,6 +254,15 @@ fn line_end_including_newline(text: &str, pos: usize) -> usize {
         .map_or(text.len(), |index| pos + index + 1)
 }
 
+fn line_end_for_range(text: &str, start: usize, end: usize) -> usize {
+    line_end_including_newline(
+        text,
+        end.checked_sub(1)
+            .filter(|end| *end >= start)
+            .unwrap_or(start),
+    )
+}
+
 fn leading_indent(text: &str, pos: usize) -> String {
     let start = line_start(text, pos);
     text[start..].chars().take_while(|ch| *ch == ' ').collect()
@@ -546,7 +555,7 @@ fn remove_one_seq_item(
         Ok(format!("{}{}", &text[..start], &text[end..]))
     } else {
         let line_start = line_start(text, start);
-        let line_end = line_end_including_newline(text, end);
+        let line_end = line_end_for_range(text, start, end);
         Ok(format!("{}{}", &text[..line_start], &text[line_end..]))
     }
 }
@@ -575,7 +584,10 @@ fn remove_map_entry(
         Ok(format!("{}{}", &text[..start], &text[end..]))
     } else {
         let line_start = line_start(text, key_start);
-        let line_end = line_end_including_newline(text, value_end.unwrap_or(key_start));
+        let line_end = value_end.map_or_else(
+            || line_end_including_newline(text, key_start),
+            |value_end| line_end_for_range(text, key_start, value_end),
+        );
         Ok(format!("{}{}", &text[..line_start], &text[line_end..]))
     }
 }
@@ -671,7 +683,7 @@ fn collapse_if_empty(
         // `value_end` is inside the entry's final line (or at its key when
         // removing a now-null `key:`). Expand to the line boundary exactly
         // once so the following line and authored blank lines remain intact.
-        let end = line_end_including_newline(text, value_end);
+        let end = line_end_for_range(text, key_start, value_end);
         if text[..start].ends_with("\n\n") {
             start -= 1;
         }
@@ -734,6 +746,73 @@ mod tests {
     use super::*;
 
     use tempfile::TempDir;
+
+    /// A block-collection value's byte range ends one byte past its trailing
+    /// newline, i.e. exactly at the start of the following line. Resolving the
+    /// line end from that exclusive offset used to swallow the following
+    /// authored line; the collapse must remove exactly the entry's own lines.
+    #[test]
+    fn remove_map_entry_at_line_boundary_keeps_following_line() {
+        let text = concat!(
+            "plugins:\n",
+            "  tracedecay:\n",
+            "    project_root: /legacy\n",
+            "  enabled:\n",
+            "    - other\n",
+        );
+        let document = parse_profile(text).unwrap();
+        let root = document.as_mapping().unwrap();
+        let plugins = root.get("plugins").unwrap().as_mapping().cloned().unwrap();
+        assert_eq!(
+            remove_map_entry(text, &plugins, "tracedecay").unwrap(),
+            concat!("plugins:\n", "  enabled:\n", "    - other\n"),
+        );
+    }
+
+    #[test]
+    fn remove_one_seq_item_keeps_following_authored_lines() {
+        let text = concat!(
+            "plugins:\n",
+            "  enabled:\n",
+            "    - tracedecay\n",
+            "    - other\n",
+            "\n",
+            "# authored trailing comment\n",
+        );
+        assert_eq!(
+            remove_seq_item(text, &["plugins", "enabled"], "tracedecay").unwrap(),
+            concat!(
+                "plugins:\n",
+                "  enabled:\n",
+                "    - other\n",
+                "\n",
+                "# authored trailing comment\n",
+            ),
+        );
+    }
+
+    #[test]
+    fn collapse_after_removal_keeps_following_authored_lines() {
+        let text = concat!(
+            "plugins:\n",
+            "  enabled:\n",
+            "    - tracedecay\n",
+            "  tracedecay:\n",
+            "    project_root: /legacy\n",
+            "\n",
+            "memory: keep\n",
+        );
+        assert_eq!(
+            remove_legacy_project_pin(text).unwrap(),
+            concat!(
+                "plugins:\n",
+                "  enabled:\n",
+                "    - tracedecay\n",
+                "\n",
+                "memory: keep\n",
+            ),
+        );
+    }
 
     #[derive(Debug, Clone, Copy)]
     enum Mutation {
