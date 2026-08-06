@@ -30,7 +30,10 @@ use fs_guards::{
     write_path_preserving_final_symlink,
 };
 use hints::{DependencyAnalysis, cfg_context_hints, cycle_risk_hints};
-use rendering::{build_dest_content, combined_diff, dedup_preserve, remove_span_with_cleanup};
+use rendering::{
+    build_dest_content, combined_diff, dedup_preserve, remove_span_with_cleanup,
+    strip_orphaned_imports,
+};
 use rust_paths::{
     crate_root_file, is_importable_item, module_stem, parent_module_candidates, rust_module_path,
     source_declares_external_module, visibility_word,
@@ -190,9 +193,15 @@ impl TraceDecay {
                 &moved_text,
             )
             .await?;
+        let source_modified =
+            strip_orphaned_imports(&source_modified, &analysis.orphaned_source_imports);
 
         // Assemble the destination content.
-        let applied_imports = dedup_preserve(&analysis.auto_imports, &dest_original);
+        let applied_imports = dedup_preserve(
+            &analysis.auto_imports,
+            &dest_original,
+            dest_module.as_deref(),
+        );
         let dest_modified = build_dest_content(&dest_original, &applied_imports, &moved_text);
 
         // Impact report.
@@ -436,7 +445,21 @@ impl TraceDecay {
         // Hoisted out of the `use`-statement loop below: `source_code_only`
         // never changes across iterations, so recomputing its identifier set
         // on every matching `use` statement was pure waste.
-        let source_identifiers = body_identifiers(&source_code_only);
+        //
+        // `use` statements are excluded from the residual-identifier scan:
+        // an import's own line must not count as a "use" of its binding, or
+        // an import referenced only by the moved symbol could never be
+        // recognized as orphaned.
+        let residual_use_lines: HashSet<String> = parse_use_statements(source_modified)
+            .into_iter()
+            .map(|stmt| stmt.text.trim().to_string())
+            .collect();
+        let source_without_uses: String = source_code_only
+            .lines()
+            .filter(|line| !residual_use_lines.contains(line.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source_identifiers = body_identifiers(&source_without_uses);
 
         // 1. Same-file item dependencies (structs, enums, helpers, consts, …).
         let src_nodes = self.get_nodes_by_file(source_rel).await.unwrap_or_default();
@@ -514,18 +537,20 @@ impl TraceDecay {
                         )),
                     });
                 }
-                // Orphaned-import: source no longer needs it after the move.
+                // Orphaned-import: source no longer needs it after the move,
+                // so the move removes it instead of leaving a dead import.
                 let leaf = &stmt.leaves[0].binding;
                 if !source_identifiers.contains(leaf) {
+                    out.orphaned_source_imports.push(stmt.text.trim().to_string());
                     out.hints.push(MoveHint {
-                        kind: "orphaned_import".to_string(),
+                        kind: "orphaned_import_removed".to_string(),
                         file: source_rel.to_string(),
                         line: Some(stmt.line),
                         detail: format!(
-                            "`{}` is only used by the moved symbol and is now unused in {source_rel}",
+                            "`{}` was only used by the moved symbol and was removed from {source_rel}",
                             stmt.text.trim()
                         ),
-                        suggestion: Some(format!("remove `{}` from {source_rel}", stmt.text.trim())),
+                        suggestion: None,
                     });
                 }
             } else {
