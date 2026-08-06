@@ -478,6 +478,11 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, str]]:
         "content": "catalog sweep isolated fact",
         "session_id": session_id,
         "root": str(root),
+        "glob": "Cargo.toml",
+        "key": "package.name",
+        "from_ref": "HEAD",
+        "to_ref": "HEAD",
+        "branch": "main",
     }
 
 
@@ -637,6 +642,9 @@ def _materialize(schema: dict[str, Any], fixture: dict[str, str], field: str | N
         return None
     if kind in {"string", None}:
         if field in OPAQUE_FIELDS:
+            produced = fixture.get(field or "")
+            if produced:
+                return produced
             raise SweepError(f"missing authentic producer for opaque {field}")
         if field == "generation":
             return "code-generation:unpinned-latest.v1"
