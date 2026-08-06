@@ -631,12 +631,14 @@ mod tests {
 
     #[test]
     fn caller_profile_material_must_match_what_direct_evaluator_runs() {
-        let material = load_direct_evaluated_profile_material(
-            Path::new(env!("CARGO_MANIFEST_DIR")),
-            None,
-            "query-fallback",
-        )
-        .expect("checked-in evaluated profile");
+        // The evaluator fixtures are workspace-relative, not crate-relative.
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root above crates/tracedecay-usecases");
+        let material =
+            load_direct_evaluated_profile_material(workspace_root, None, "query-fallback")
+                .expect("checked-in evaluated profile");
         let mut candidate = SemanticEvaluationProfileCandidateV1 {
             evaluated_profile_id: "query-fallback".to_owned(),
             profile: SemanticEvaluationFusionCandidateV1 {
