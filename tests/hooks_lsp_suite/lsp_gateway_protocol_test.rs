@@ -119,7 +119,7 @@ fn lsp_protocol_keeps_unsaved_edits_session_local_and_rejects_deferred_methods()
     );
     let overlay = session.overlays().snapshot("file:///root/a.rs").unwrap();
     assert!(overlay.ephemeral);
-    assert_eq!(overlay.text, "");
+    assert_eq!(&*overlay.text, "");
 
     session.handle_payload(
         br#"{"jsonrpc":"2.0","id":2,"method":"textDocument/rename","params":{}}"#,
