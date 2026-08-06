@@ -30,10 +30,10 @@ use crate::application::context::{
 };
 use crate::application::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionDataFreshness, SessionRequestBinding, SessionRetrievalConfiguration,
-    SessionRetrievalOutcome, SessionRetrievalScope, SessionRetrievalService,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionError,
-    SessionTemporalQuery,
+    SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,
+    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
+    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionTemporalExecutionError, SessionTemporalQuery,
 };
 use crate::daemon::session_temporal_refresh_scheduler::{
     SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
@@ -567,7 +567,9 @@ impl DaemonSessionRetrievalService {
         &self,
         command: SessionRetrievalCommand,
     ) -> SessionRetrievalServiceOutcome {
-        if let Some(unavailable) = self.refresh_unavailable() {
+        if command.query().freshness_policy() == SessionFreshnessPolicy::RequireFresh
+            && let Some(unavailable) = self.refresh_unavailable()
+        {
             return SessionRetrievalServiceOutcome::Unavailable(unavailable);
         }
         // Count commands the service answers past the fast-path gate,

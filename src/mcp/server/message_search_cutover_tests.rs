@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -317,34 +316,87 @@ async fn retained_project_and_profile_handles_construct_retrieval_services() {
 }
 
 #[tokio::test]
-async fn unavailable_project_worker_rejects_before_expensive_reads() {
-    let (server, dir, _pin) =
+async fn unavailable_project_worker_serves_active_data_but_rejects_require_fresh() {
+    let (server, _dir, _pin) =
         server_with_project_refresh_wake(Some(SessionTemporalRefreshWake::unavailable())).await;
+    let runtime = server
+        .host_admission_test_runtime_for_test()
+        .expect("retained host-admission test runtime");
+    let scope = ObservationScopeV1::Project {
+        project_id: ProjectId::new(MESSAGE_SEARCH_PROJECT_ID).expect("project id"),
+    };
+    Box::pin(seed_temporal_message(
+        runtime,
+        HostAdmissionScope::Project,
+        MESSAGE_SEARCH_PROJECT_ID,
+        scope.clone(),
+        1,
+        MESSAGE_SEARCH_ROOT_SESSION_ID,
+        "cursor",
+        "message.stored-worker",
+        "stored worker evidence",
+    ))
+    .await;
+    assert!(
+        runtime
+            .session_temporal_fixture_count_for_test(
+                HostAdmissionScope::Project,
+                SessionTemporalFixtureCountV1::TemporalGenerations,
+            )
+            .await
+            .expect("count active temporal generations")
+            >= 1,
+        "fixture must publish a canonical active generation"
+    );
 
-    let payload = tokio::time::timeout(
-        Duration::from_millis(100),
-        message_search(
-            &server,
-            json!({
-                "query": "database backup",
-                "project_path": dir.path(),
-                "format": "json",
-            }),
-        ),
+    let stored = message_search(
+        &server,
+        json!({
+            "query": "stored worker evidence",
+            "provider": "cursor",
+            "catch_up": false,
+            "format": "json",
+        }),
     )
-    .await
-    .expect("unavailable retrieval should reject within the fast-path budget");
+    .await;
 
-    assert_eq!(payload["status"], "unavailable");
-    assert_eq!(payload["error"]["reason"], "refresh_worker_missing");
-    assert_eq!(payload["service_status"]["backlog"], 0);
-    assert_eq!(payload["service_status"]["blocker"], "worker_missing");
+    assert_eq!(stored["outcome"], "partial", "{stored}");
+    assert_eq!(stored["count"], 1, "{stored}");
+    assert_eq!(stored["temporal"]["freshness"]["state"], "fresh");
+    assert!(
+        stored["results"][0]["message"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("stored worker evidence"))
+    );
     assert_eq!(
         server
             .project_session_retrieval_calls
             .load(Ordering::Relaxed),
-        0,
-        "unavailable status must reject before temporal retrieval starts"
+        1,
+        "AllowStored must reach canonical temporal retrieval"
+    );
+
+    let fresh = message_search(
+        &server,
+        json!({
+            "query": "stored worker evidence",
+            "provider": "cursor",
+            "catch_up": true,
+            "format": "json",
+        }),
+    )
+    .await;
+
+    assert_eq!(fresh["status"], "unavailable", "{fresh}");
+    assert_eq!(fresh["error"]["reason"], "refresh_worker_missing");
+    assert_eq!(fresh["service_status"]["backlog"], 0);
+    assert_eq!(fresh["service_status"]["blocker"], "worker_missing");
+    assert_eq!(
+        server
+            .project_session_retrieval_calls
+            .load(Ordering::Relaxed),
+        1,
+        "RequireFresh must fail before canonical temporal retrieval"
     );
     server.shutdown().await;
 }
