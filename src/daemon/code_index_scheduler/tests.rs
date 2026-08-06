@@ -23,8 +23,9 @@ use tracedecay_domain::{
     ManifestDigest, OptionalStagePublicStatus, PrincipalId, PrivacyDomainId, ProjectId,
     QueryNormalizationRevision, RankedCandidate, RefId, RelationEdgeKindV1, RepositoryId,
     RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, RetrieverKind, SanitizerRevision, ScoreDomainId,
-    SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
+    RetrievalScope, RetrievalSnapshot, RetrieverKind, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1,
+    UtcMicros, VectorWatermark, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -784,7 +785,41 @@ fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
                 )
             })
             .collect(),
-        score_domain_calibrations: BTreeMap::new(),
+        // Plan 15 pipeline step 7: approximate candidates calibrate only within
+        // a declared score domain, so the profile must cover every raw-score
+        // domain the daemon lanes emit.
+        score_domain_calibrations: [
+            (
+                RetrieverKind::ExactLiteral,
+                tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
+            ),
+            (
+                RetrieverKind::Lexical,
+                tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+            ),
+            (
+                RetrieverKind::Graph,
+                tracedecay_query::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
+            ),
+        ]
+        .into_iter()
+        .map(|(lane, domain)| {
+            let score_domain = ScoreDomainId::new(domain).expect("score domain id");
+            (
+                score_domain.clone(),
+                ScoreDomainCalibrationV1 {
+                    calibration_profile_id: CalibrationProfileId::new(format!(
+                        "calibration.{}.code-index.fixture",
+                        lane.as_str()
+                    ))
+                    .expect("calibration id"),
+                    score_domain,
+                    raw_min_micros: 0,
+                    raw_max_micros: 1_000_000,
+                },
+            )
+        })
+        .collect(),
         weights_micros: [
             (RetrieverKind::ExactLiteral, 1_000_000),
             (RetrieverKind::Lexical, 500_000),
