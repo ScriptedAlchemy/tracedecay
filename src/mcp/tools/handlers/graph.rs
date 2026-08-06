@@ -1408,7 +1408,7 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
 
     let output = json!({
         "read_only": true,
-        "note": "Preview only — no files are edited. 'references' are graph reference \
+        "note": "Preview only — nothing is edited. 'references' are graph reference \
                  sites (the declaration is reported separately in 'node'); \
                  'text_only_matches' are literal name occurrences NOT backed by a graph \
                  edge (comments, strings, dynamic dispatch, unresolved refs) and must be \
