@@ -28,9 +28,8 @@ pub(crate) async fn handle_signature_search(
 
     if returns.is_none() && params.is_empty() && want_async.is_none() {
         return Err(TraceDecayError::Config {
-            message:
-                "tracedecay_signature_search requires at least one of returns / params / async"
-                    .to_string(),
+            message: "missing required parameter: one of 'returns', 'params', or 'async'"
+                .to_string(),
         });
     }
 

@@ -49,7 +49,7 @@ pub(crate) async fn handle_test_map(
         cg.get_node(node_id).await?.into_iter().collect()
     } else {
         return Err(TraceDecayError::Config {
-            message: "provide either 'file' or 'node_id'".to_string(),
+            message: "missing required parameter: 'file' or 'node_id'".to_string(),
         });
     };
 
