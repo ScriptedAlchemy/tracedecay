@@ -404,8 +404,17 @@ pub(crate) fn advisory_cycle_invocation_result(
                     })
                 })
                 .collect::<Vec<_>>();
+            // The publication handle exists only after the shared durable
+            // store atomically recorded this exact completed cycle, so its
+            // presence is the wire truth for "published". It rides on the
+            // cycle object because publication is per-cycle state, not a
+            // property of the surrounding evidence page.
+            let mut cycle_wire = serde_json::to_value(&cycle.execution.cycle)
+                .map_err(|_| advisory_cycle_contract_problem())?;
+            cycle_wire["published"] =
+                serde_json::Value::Bool(cycle.execution.publication.is_some());
             let payload = serde_json::json!({
-                "cycle": cycle.execution.cycle,
+                "cycle": cycle_wire,
                 "finding_handles": finding_handles,
             });
             let page = PageState::first_page(
