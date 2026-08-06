@@ -1,4 +1,4 @@
-//! Canonical Context Scout operations for PR13 CLI/MCP/HTTP surfaces.
+//! Canonical Context Scout operations for CLI/MCP/HTTP surfaces.
 //!
 //! The application crate owns operation identity and catalog metadata only.
 //! Exact-address authorization and durable mutation remain daemon authorities.

@@ -11,13 +11,13 @@ use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard};
 use tokio::sync::watch;
 use tracedecay_lsp::FeedbackCycleRuntimePort;
 
-use crate::application::feedback::Pr12FeedbackCycleRuntime;
-use crate::application::feedback::concrete::Pr12FeedbackRuntime;
-use crate::application::primitives::Pr12PrimitiveProjectRuntime;
+use crate::application::feedback::FeedbackCycleRuntime;
+use crate::application::feedback::concrete::FeedbackRuntime;
+use crate::application::primitives::PrimitiveProjectRuntime;
 
 use super::invocation::{
     DaemonAdvisoryCycleInvocationOwner, DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner,
-    Pr13HookOrchestrationPortV1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
+    HookOrchestrationPortV1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
     RegisteredFeedbackRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
     UnavailableFeedbackCycleRuntimeV1,
 };
@@ -109,14 +109,14 @@ pub(crate) struct ProjectRuntime {
     callable_code: Option<RegisteredCallableCodeRuntime>,
     feedback: Option<RegisteredFeedbackRuntime>,
     advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
-    feedback_cycle: Option<Arc<Pr12FeedbackCycleRuntime>>,
+    feedback_cycle: Option<Arc<FeedbackCycleRuntime>>,
     feedback_cycle_input: Option<Arc<SwitchableFeedbackCycleRuntimeV1>>,
-    primitive: Option<Pr12PrimitiveProjectRuntime>,
+    primitive: Option<PrimitiveProjectRuntime>,
     configuration: Option<RegisteredConfigurationRuntime>,
     work: Option<RegisteredWorkRuntime>,
     lsp_owner: Option<DaemonLspInvocationOwner>,
     advisory: Option<Arc<dyn Any + Send + Sync>>,
-    advisory_hook_orchestrator: Option<Arc<dyn Pr13HookOrchestrationPortV1>>,
+    advisory_hook_orchestrator: Option<Arc<dyn HookOrchestrationPortV1>>,
     external_acquisition:
         Option<Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>>,
     semantic: Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
@@ -195,14 +195,14 @@ project_runtime_components!(
     RegisteredCallableCodeRuntime => callable_code,
     RegisteredFeedbackRuntime => feedback,
     DaemonAdvisoryCycleInvocationOwner => advisory_cycle,
-    Arc<Pr12FeedbackCycleRuntime> => feedback_cycle,
+    Arc<FeedbackCycleRuntime> => feedback_cycle,
     Arc<SwitchableFeedbackCycleRuntimeV1> => feedback_cycle_input,
-    Pr12PrimitiveProjectRuntime => primitive,
+    PrimitiveProjectRuntime => primitive,
     RegisteredConfigurationRuntime => configuration,
     RegisteredWorkRuntime => work,
     DaemonLspInvocationOwner => lsp_owner,
     Arc<dyn Any + Send + Sync> => advisory,
-    Arc<dyn Pr13HookOrchestrationPortV1> => advisory_hook_orchestrator,
+    Arc<dyn HookOrchestrationPortV1> => advisory_hook_orchestrator,
     Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1> => external_acquisition,
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
 );
@@ -390,7 +390,7 @@ impl ProjectRuntimePublication {
 /// views taken at five different moments.
 #[derive(Default)]
 pub(super) struct ProjectRequestRuntimesV1 {
-    pub(super) feedback: Option<Arc<Pr12FeedbackRuntime>>,
+    pub(super) feedback: Option<Arc<FeedbackRuntime>>,
     pub(super) feedback_owner: Option<DaemonFeedbackInvocationOwner>,
     pub(super) advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
     pub(super) configuration: Option<RegisteredConfigurationRuntime>,
@@ -715,7 +715,7 @@ impl ProjectRuntimeRegistryV1 {
     pub(crate) async fn publish_feedback_cycle_atomically(
         &self,
         project_root: PathBuf,
-        runtime: Arc<Pr12FeedbackCycleRuntime>,
+        runtime: Arc<FeedbackCycleRuntime>,
         production_input: Arc<dyn FeedbackCycleRuntimePort>,
     ) -> Result<(), FeedbackCyclePublicationError> {
         loop {
@@ -727,7 +727,7 @@ impl ProjectRuntimeRegistryV1 {
                 }
                 let incumbent = runtimes.entry(project_root.clone()).or_default();
                 let reserved = incumbent.reservations.iter().any(|type_id| {
-                    *type_id == TypeId::of::<Arc<Pr12FeedbackCycleRuntime>>()
+                    *type_id == TypeId::of::<Arc<FeedbackCycleRuntime>>()
                         || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
                 });
                 if !reserved {

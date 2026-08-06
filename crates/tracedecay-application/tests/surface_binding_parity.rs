@@ -1,4 +1,4 @@
-//! Surface semantic parity for Git, feedback, configuration, and PR14 reads.
+//! Surface semantic parity for Git, feedback, configuration, and dashboard reads.
 
 use tracedecay_application::{
     ApplicationHandlerDescriptor, configuration_surface_catalog_contribution,

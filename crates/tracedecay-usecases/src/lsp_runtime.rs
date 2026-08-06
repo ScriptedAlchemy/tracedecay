@@ -1,6 +1,6 @@
 //! Production LSP composition over the canonical feedback runtime.
 //!
-//! The adapter mints authorized reads through [`Pr12FeedbackRuntime`] and
+//! The adapter mints authorized reads through [`FeedbackRuntime`] and
 //! invokes its daemon owner. The cloned [`ProjectFeedbackStore`] is the same
 //! durable publication/dedupe authority used by the feedback cycle; this
 //! module creates no feedback store, cache, cursor codec, or diagnostic
@@ -58,7 +58,7 @@ use url::Url;
 
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::feedback::concrete::{
-    ConcretePr12FeedbackOwner, Pr12FeedbackRuntime, ProjectFeedbackStore,
+    ConcreteFeedbackOwner, FeedbackRuntime, ProjectFeedbackStore,
 };
 use crate::feedback::owner::{
     FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
@@ -303,7 +303,7 @@ pub trait LspFeedbackProjectionScopePort: Send + Sync {
 /// bound to the admitted feedback scope and code-index generation.
 #[derive(Clone)]
 pub struct RegisteredProjectLspAuthority {
-    feedback: Arc<Pr12FeedbackRuntime>,
+    feedback: Arc<FeedbackRuntime>,
     publications: ProjectFeedbackStore,
     project_root: PathBuf,
     project_dir: Arc<Dir>,
@@ -314,7 +314,7 @@ pub struct RegisteredProjectLspAuthority {
 
 impl RegisteredProjectLspAuthority {
     pub fn new(
-        feedback: Arc<Pr12FeedbackRuntime>,
+        feedback: Arc<FeedbackRuntime>,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
         workspace_index: Arc<dyn crate::lsp_support::LspWorkspaceDocumentIndexPort>,
     ) -> Result<Self, LspRuntimeFailure> {
@@ -1422,9 +1422,9 @@ impl OperationEventTestRunProjection {
 /// Shared feedback source mounted as both `FeedbackCyclePort` and the managed
 /// diagnostics/context authority in the daemon LSP runtime adapters.
 #[derive(Clone)]
-pub struct ConcretePr12FeedbackLspSource {
-    runtime: Arc<Pr12FeedbackRuntime>,
-    owner: Arc<ConcretePr12FeedbackOwner>,
+pub struct ConcreteFeedbackLspSource {
+    runtime: Arc<FeedbackRuntime>,
+    owner: Arc<ConcreteFeedbackOwner>,
     publications: ProjectFeedbackStore,
     cycle: Arc<dyn FeedbackCycleRuntimePort>,
     scope: Arc<dyn LspFeedbackProjectionScopePort>,
@@ -1433,9 +1433,9 @@ pub struct ConcretePr12FeedbackLspSource {
     changes: ProjectionChangeQueue,
 }
 
-impl ConcretePr12FeedbackLspSource {
+impl ConcreteFeedbackLspSource {
     pub fn new<F>(
-        runtime: Arc<Pr12FeedbackRuntime>,
+        runtime: Arc<FeedbackRuntime>,
         cycle: F,
         scope: Arc<dyn LspFeedbackProjectionScopePort>,
         diagnostic_projection: Arc<dyn LspFeedbackDiagnosticProjectionPort>,
@@ -1822,7 +1822,7 @@ impl ConcretePr12FeedbackLspSource {
     }
 }
 
-impl FeedbackCycleRuntimePort for ConcretePr12FeedbackLspSource {
+impl FeedbackCycleRuntimePort for ConcreteFeedbackLspSource {
     fn execute(
         &self,
         request: FeedbackCycleRequest,
@@ -1836,7 +1836,7 @@ impl FeedbackCycleRuntimePort for ConcretePr12FeedbackLspSource {
     }
 }
 
-impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
+impl ManagedDiagnosticSnapshotPort for ConcreteFeedbackLspSource {
     fn snapshot(
         &self,
         request: CanonicalDiagnosticRefreshRequest,
@@ -1895,7 +1895,7 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
     }
 }
 
-impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
+impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
     fn registrations(&self) -> Vec<ContextProjectionRegistration> {
         [
             ContextProjectionKind::diagnostics(),
@@ -2254,7 +2254,7 @@ fn canonical_application_value<T: Serialize>(
 #[allow(clippy::too_many_arguments)]
 pub fn lsp_session_factory<F>(
     runtime: tokio::runtime::Handle,
-    feedback_runtime: Arc<Pr12FeedbackRuntime>,
+    feedback_runtime: Arc<FeedbackRuntime>,
     database: Database,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     workspace_index: Arc<dyn crate::lsp_support::LspWorkspaceDocumentIndexPort>,
@@ -2279,7 +2279,7 @@ where
         database,
         project.clone(),
     ));
-    let feedback = Arc::new(ConcretePr12FeedbackLspSource::new(
+    let feedback = Arc::new(ConcreteFeedbackLspSource::new(
         feedback_runtime,
         feedback_cycle,
         project.clone(),

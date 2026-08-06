@@ -7,7 +7,7 @@ use crate::research::{DomainError, ManifestDigest, canonical_sha256};
 
 use super::*;
 
-/// The only native Git mutations represented by PR11. Generic Git execution,
+/// The only native Git mutations represented by the index-transaction runtime. Generic Git execution,
 /// ref rewrites, merge/rebase/cherry-pick, push, and worktree writes are
 /// deliberately absent.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

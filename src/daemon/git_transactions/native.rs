@@ -48,7 +48,7 @@ pub(crate) struct MaterializedGitIndexPreview {
 }
 
 /// Repository-specific preview and snapshot authority. Implementations may use
-/// only the fixed PR11 native adapter to build patch material and capture
+/// only the fixed native Git adapter to build patch material and capture
 /// state; no transport data or arbitrary Git input reaches this boundary.
 pub(crate) trait GitIndexPreviewAssembler {
     fn materialize(
@@ -81,7 +81,7 @@ pub(crate) trait GitIndexPreviewAssembler {
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError>;
 }
 
-/// Concrete PR11 assembler backed by the fixed query read-only authority and
+/// Concrete native-Git assembler backed by the fixed query read-only authority and
 /// the isolated-index preview mechanics in [`FixedGitIndexRunner`].
 pub(crate) struct NativeGitIndexPreviewAssembler {
     repository_root: PathBuf,
@@ -313,8 +313,8 @@ impl NativeGitIndexPreviewAssembler {
     }
 }
 
-/// Project-owned assembler used by the daemon singleton before PR12 adds a
-/// transport binding. Repository and worktree identities come from the typed
+/// Project-owned assembler used by the daemon singleton until a dedicated
+/// transport binding exists. Repository and worktree identities come from the typed
 /// request scope or durable transaction record; the daemon contributes only
 /// the authoritative project identity and currently opened worktree root.
 pub(crate) struct DaemonProjectGitIndexPreviewAssembler {

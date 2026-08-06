@@ -1,15 +1,15 @@
 use super::*;
 
-pub struct Pr13AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
+pub struct AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
     feedback_scope: FeedbackScopeV1,
-    feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,
+    feedback_cycle: Arc<FeedbackCycleRuntime>,
     github: Option<Arc<GitHubReviewRuntimeOwnerV1<GR, GA>>>,
     ci: ConcreteCiFailureLocalizationOwnerV1<CS, CE>,
-    proximity: ConcretePr13ProximityRuntimeOwnerV1<PE, PC>,
+    proximity: ConcreteProximityRuntimeOwnerV1<PE, PC>,
     observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
-impl<GR, GA, CS, CE, PE, PC> Pr13AdvisoryRuntime<GR, GA, CS, CE, PE, PC>
+impl<GR, GA, CS, CE, PE, PC> AdvisoryRuntime<GR, GA, CS, CE, PE, PC>
 where
     GR: GitHubCurrentBranchRemapper + Sync,
     GA: GitHubCanonicalReviewAnchorAuthorityV1 + Clone + Sync,
@@ -19,10 +19,10 @@ where
     PC: ConfigurationControlStore + Clone + Send + 'static,
 {
     pub fn open(
-        input: Pr13AdvisoryRuntimeOpenV1,
-        providers: Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
-    ) -> Result<Self, Pr13AdvisoryRuntimeOpenErrorV1> {
-        let Pr13AdvisoryRuntimeOpenV1 {
+        input: AdvisoryRuntimeOpenV1,
+        providers: AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
+    ) -> Result<Self, AdvisoryRuntimeOpenErrorV1> {
+        let AdvisoryRuntimeOpenV1 {
             database,
             project_root,
             resolved_scope,
@@ -37,7 +37,7 @@ where
             || feedback.project_root() != project_root
             || feedback.scope() != &resolved_scope
         {
-            return Err(Pr13AdvisoryRuntimeOpenErrorV1::ScopeMismatch);
+            return Err(AdvisoryRuntimeOpenErrorV1::ScopeMismatch);
         }
         let github = match github {
             Some(mut github) => {
@@ -45,7 +45,7 @@ where
                     .github_source_access
                     .as_ref()
                     .map(Arc::clone)
-                    .ok_or(Pr13AdvisoryRuntimeOpenErrorV1::GitHubRuntimeUnavailable)?;
+                    .ok_or(AdvisoryRuntimeOpenErrorV1::GitHubRuntimeUnavailable)?;
                 github.database = database;
                 github.resolved_scope = resolved_scope;
                 github.feedback_scope = feedback_scope.clone();
@@ -56,7 +56,7 @@ where
                         providers.github_anchors,
                         github_source_access,
                     )
-                    .map_err(|_| Pr13AdvisoryRuntimeOpenErrorV1::GitHubRuntimeUnavailable)?,
+                    .map_err(|_| AdvisoryRuntimeOpenErrorV1::GitHubRuntimeUnavailable)?,
                 ))
             }
             None => None,
@@ -65,12 +65,12 @@ where
             providers.ci_source,
             providers.ci_exact_evidence,
         );
-        let proximity = open_pr13_proximity_runtime(
+        let proximity = open_proximity_runtime(
             feedback_scope.clone(),
             providers.proximity_evidence,
             providers.configuration,
         )
-        .ok_or(Pr13AdvisoryRuntimeOpenErrorV1::ProximityRuntimeUnavailable)?;
+        .ok_or(AdvisoryRuntimeOpenErrorV1::ProximityRuntimeUnavailable)?;
         let observations = feedback_cycle.source_observation_port();
         Ok(Self {
             feedback_scope,
@@ -82,7 +82,7 @@ where
         })
     }
 
-    pub fn feedback_owner(&self) -> Arc<ConcretePr12FeedbackOwner> {
+    pub fn feedback_owner(&self) -> Arc<ConcreteFeedbackOwner> {
         self.feedback_cycle.feedback_runtime().owner()
     }
 
@@ -116,7 +116,7 @@ where
             );
             return Err(error);
         }
-        let mut contributions = Pr13AdvisoryContributionsV1::absent();
+        let mut contributions = AdvisoryContributionsV1::absent();
         mark_unrequested_remote_providers(
             &mut contributions,
             request.github.is_some(),
@@ -171,7 +171,7 @@ where
                         let ingress = &state.state.latest_attempt.ingress;
                         self.observe_github(&request.feedback.input, ingress);
                         contributions.capture(
-                            Pr13AdvisoryProviderV1::GitHub,
+                            AdvisoryProviderV1::GitHub,
                             ingress.advisory_findings(request.validity),
                         );
                     }
@@ -188,7 +188,7 @@ where
                             Plan26FeedbackOutcomeV1::Denied,
                         );
                         contributions.set_state(
-                            Pr13AdvisoryProviderV1::GitHub,
+                            AdvisoryProviderV1::GitHub,
                             ProviderEvaluationStateV1::Unavailable,
                         );
                     }
@@ -198,7 +198,7 @@ where
                             Plan26FeedbackOutcomeV1::Unavailable,
                         );
                         contributions.set_state(
-                            Pr13AdvisoryProviderV1::GitHub,
+                            AdvisoryProviderV1::GitHub,
                             ProviderEvaluationStateV1::Unavailable,
                         );
                     }
@@ -208,7 +208,7 @@ where
                             Plan26FeedbackSourceEventV1::GitHubStale { item_count: 0 },
                         );
                         contributions.set_state(
-                            Pr13AdvisoryProviderV1::GitHub,
+                            AdvisoryProviderV1::GitHub,
                             ProviderEvaluationStateV1::Stale,
                         );
                     }
@@ -219,7 +219,7 @@ where
                     Plan26FeedbackOutcomeV1::Unavailable,
                 );
                 contributions.set_state(
-                    Pr13AdvisoryProviderV1::GitHub,
+                    AdvisoryProviderV1::GitHub,
                     ProviderEvaluationStateV1::Unavailable,
                 );
             }
@@ -243,7 +243,7 @@ where
                     CiFailureLocalizationPortOutcomeV1::Localized(localization) => {
                         self.observe_ci(&request.feedback.input, &localization);
                         contributions.capture(
-                            Pr13AdvisoryProviderV1::Ci,
+                            AdvisoryProviderV1::Ci,
                             localization.advisory_findings(request.validity),
                         );
                     }
@@ -255,7 +255,7 @@ where
                             None,
                         );
                         contributions.set_state(
-                            Pr13AdvisoryProviderV1::Ci,
+                            AdvisoryProviderV1::Ci,
                             ProviderEvaluationStateV1::Unavailable,
                         );
                     }
@@ -269,7 +269,7 @@ where
                             )),
                         );
                         contributions.set_state(
-                            Pr13AdvisoryProviderV1::Ci,
+                            AdvisoryProviderV1::Ci,
                             ProviderEvaluationStateV1::Partial,
                         );
                     }
@@ -285,7 +285,7 @@ where
                             ),
                         );
                         contributions.set_state(
-                            Pr13AdvisoryProviderV1::Ci,
+                            AdvisoryProviderV1::Ci,
                             ProviderEvaluationStateV1::Failed,
                         );
                     }
@@ -297,7 +297,7 @@ where
                             None,
                         );
                         contributions.set_state(
-                            Pr13AdvisoryProviderV1::Ci,
+                            AdvisoryProviderV1::Ci,
                             ProviderEvaluationStateV1::Unavailable,
                         );
                     }
@@ -324,7 +324,7 @@ where
                         coverage,
                         degradation,
                     );
-                    contributions.set_state(Pr13AdvisoryProviderV1::Ci, state);
+                    contributions.set_state(AdvisoryProviderV1::Ci, state);
                 } else {
                     // Found is handled above; fail closed if the terminal map regresses.
                     self.observe_ci_terminal(
@@ -334,7 +334,7 @@ where
                         None,
                     );
                     contributions.set_state(
-                        Pr13AdvisoryProviderV1::Ci,
+                        AdvisoryProviderV1::Ci,
                         ProviderEvaluationStateV1::Unavailable,
                     );
                 }
@@ -362,26 +362,26 @@ where
                 }
             };
             match outcome {
-                Pr13ProximityRuntimeOutcomeV1::Completed(contributor) => {
+                ProximityRuntimeOutcomeV1::Completed(contributor) => {
                     self.observe_proximity(&request.feedback.input, &contributor);
                     contributions.capture(
-                        Pr13AdvisoryProviderV1::Proximity,
+                        AdvisoryProviderV1::Proximity,
                         contributor.advisory_findings(request.validity),
                     );
                 }
-                Pr13ProximityRuntimeOutcomeV1::Denied
-                | Pr13ProximityRuntimeOutcomeV1::Unavailable => contributions.set_state(
-                    Pr13AdvisoryProviderV1::Proximity,
+                ProximityRuntimeOutcomeV1::Denied
+                | ProximityRuntimeOutcomeV1::Unavailable => contributions.set_state(
+                    AdvisoryProviderV1::Proximity,
                     ProviderEvaluationStateV1::Unavailable,
                 ),
-                Pr13ProximityRuntimeOutcomeV1::Cancelled => {
+                ProximityRuntimeOutcomeV1::Cancelled => {
                     return Ok(self.finish_interruption(
                         &request.feedback.input,
                         AdvisoryCycleInterruption::Cancelled,
                         contributions,
                     ));
                 }
-                Pr13ProximityRuntimeOutcomeV1::TimedOut => {
+                ProximityRuntimeOutcomeV1::TimedOut => {
                     return Ok(self.finish_interruption(
                         &request.feedback.input,
                         AdvisoryCycleInterruption::TimedOut,
@@ -405,7 +405,7 @@ where
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
         interruption: AdvisoryCycleInterruption,
-        contributions: Pr13AdvisoryContributionsV1,
+        contributions: AdvisoryContributionsV1,
     ) -> AdvisoryCycleOutcome {
         self.observations.observe_source_event(
             input,
@@ -431,7 +431,7 @@ where
     fn observe_provider_states(
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        contributions: &Pr13AdvisoryContributionsV1,
+        contributions: &AdvisoryContributionsV1,
     ) {
         for provider in &contributions.providers {
             self.observations
@@ -592,7 +592,7 @@ where
     fn observe_proximity(
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        contributor: &super::super::Pr13ProximityFindingContributorV1,
+        contributor: &super::super::ProximityFindingContributorV1,
     ) {
         let contributions = contributor.contributions();
         let emitted_count = contributions
@@ -672,7 +672,7 @@ where
         &self,
         context: &RequestContext,
         request: FeedbackCycleExecutionRequest,
-        contributions: Pr13AdvisoryContributionsV1,
+        contributions: AdvisoryContributionsV1,
     ) -> Result<AdvisoryCycleOutcome, ApplicationContractError> {
         let observation_input = request.input.clone();
         let advisory = contributions.as_plan09()?;
@@ -696,7 +696,7 @@ pub(super) enum AdvisoryCycleInterruption {
 }
 
 impl AdvisoryCycleInterruption {
-    fn finish(self, mut contributions: Pr13AdvisoryContributionsV1) -> AdvisoryCycleOutcome {
+    fn finish(self, mut contributions: AdvisoryContributionsV1) -> AdvisoryCycleOutcome {
         match self {
             Self::Cancelled => {
                 contributions.terminalize_pending(ProviderEvaluationStateV1::Cancelled);
@@ -762,12 +762,12 @@ pub(super) fn saturating_u32(value: u64) -> u32 {
 }
 
 pub(super) fn provider_state_event(
-    provider: &Pr13AdvisoryProviderStateV1,
+    provider: &AdvisoryProviderStateV1,
 ) -> Plan26FeedbackSourceEventV1 {
     let provider_kind = match provider.provider {
-        Pr13AdvisoryProviderV1::GitHub => Plan26AdvisoryProviderV1::GitHubReview,
-        Pr13AdvisoryProviderV1::Ci => Plan26AdvisoryProviderV1::CiLocalization,
-        Pr13AdvisoryProviderV1::Proximity => Plan26AdvisoryProviderV1::Proximity,
+        AdvisoryProviderV1::GitHub => Plan26AdvisoryProviderV1::GitHubReview,
+        AdvisoryProviderV1::Ci => Plan26AdvisoryProviderV1::CiLocalization,
+        AdvisoryProviderV1::Proximity => Plan26AdvisoryProviderV1::Proximity,
     };
     Plan26FeedbackSourceEventV1::ProviderState {
         provider: provider_kind,
@@ -776,19 +776,19 @@ pub(super) fn provider_state_event(
 }
 
 pub(super) fn mark_unrequested_remote_providers(
-    contributions: &mut Pr13AdvisoryContributionsV1,
+    contributions: &mut AdvisoryContributionsV1,
     github_requested: bool,
     ci_requested: bool,
 ) {
     if !github_requested {
         contributions.set_state(
-            Pr13AdvisoryProviderV1::GitHub,
+            AdvisoryProviderV1::GitHub,
             ProviderEvaluationStateV1::Unavailable,
         );
     }
     if !ci_requested {
         contributions.set_state(
-            Pr13AdvisoryProviderV1::Ci,
+            AdvisoryProviderV1::Ci,
             ProviderEvaluationStateV1::Unavailable,
         );
     }

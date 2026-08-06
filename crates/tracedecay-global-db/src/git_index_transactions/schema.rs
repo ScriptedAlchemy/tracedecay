@@ -1,7 +1,7 @@
 use crate::global_db_operation_error;
 use tracedecay_runtime_core::db::engine::Executor;
 
-/// Adds the durable, project-local authority for PR11 index transactions.
+/// Adds the durable, project-local authority for Git index transactions.
 ///
 /// Preview and input rows are immutable commitments; journal rows retain the
 /// one mutable phase/epoch state; terminal receipts are append-only.  A

@@ -174,7 +174,7 @@ impl std::fmt::Display for GitFileModeV1 {
 }
 
 /// Native HEAD state. Missing, unborn, and detached states are explicit,
-/// never guessed (Plan 36, PR7 provenance rule carried into query reads).
+/// never guessed (Plan 36, provenance rule carried into query reads).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum GitHeadStateV1 {

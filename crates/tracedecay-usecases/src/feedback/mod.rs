@@ -1,4 +1,4 @@
-//! Root-owned concrete adapters for the transport-neutral PR11 feedback core.
+//! Root-owned concrete adapters for the transport-neutral feedback core.
 //!
 //! This module composes existing store, query, and observation boundaries. It
 //! deliberately does not register a daemon trigger, transport handler, CI or
@@ -19,8 +19,8 @@ pub use cycle_production::{
     ProductionFeedbackCycleProximityPortV1, resolve_production_feedback_cycle_parts,
 };
 pub use cycle_runtime::{
-    Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput,
-    Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError, Pr12FeedbackFindingHandlesV1,
-    open_pr12_feedback_cycle_runtime,
+    CanonicalFeedbackResultV1, FeedbackCycleInvocation, FeedbackCycleLspInput,
+    FeedbackCycleRuntime, FeedbackCycleRuntimeError, FeedbackFindingHandlesV1,
+    open_feedback_cycle_runtime,
 };
 pub use production::ProductionFeedbackRuntimeStateV1;

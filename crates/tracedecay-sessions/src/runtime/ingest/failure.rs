@@ -151,7 +151,7 @@ impl IngestPassCoverage {
     }
 }
 
-/// Narrow additive pass result required by PR6 bounded multi-source scheduling.
+/// Narrow additive pass result required by bounded multi-source scheduling.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IngestPassOutcome {
     pub stats: TranscriptIngestStats,

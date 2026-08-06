@@ -457,7 +457,7 @@ impl DaemonInvocationService {
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
         self.project_runtimes.shut_down_all().await;
-        if let Ok(mut registry) = pr13_hook_orchestration_registry().lock() {
+        if let Ok(mut registry) = hook_orchestration_registry().lock() {
             registry.retain(|_, runtime| runtime.strong_count() > 0);
         }
         self.operation_events.expire_all().await;

@@ -81,7 +81,7 @@ pub fn full_hunk_selection_bitmap(line_count: u32) -> Vec<u64> {
 /// reference — never by display ordinal or line number alone.
 ///
 /// query mints these as read-only identity evidence only. Applying them is a
-/// PR11 daemon mutation path and is not representable here.
+/// daemon Git mutation path and is not representable here.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HunkRefV1 {
@@ -189,7 +189,7 @@ impl HunkRefV1 {
 }
 
 /// Domain separator for the immutable repository-state digest retained by a
-/// PR11 index preview. This digest is distinct from the content-addressed
+/// Git index preview. This digest is distinct from the content-addressed
 /// [`RepositoryStateSnapshotId`] so it can bind the full typed snapshot into
 /// every `HunkRefV1` compare-and-swap precondition.
 pub const GIT_INDEX_SNAPSHOT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.snapshot.v1";
@@ -197,10 +197,10 @@ pub const GIT_INDEX_SNAPSHOT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.snap
 /// Domain separator for a canonical commitment to the complete commit intent.
 pub const GIT_INDEX_COMMIT_INTENT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.commit-intent.v1";
 
-/// Domain separator for immutable PR11 index previews.
+/// Domain separator for immutable Git index previews.
 pub const GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.preview.v1";
 
-/// Domain separator for terminal PR11 index transaction receipts.
+/// Domain separator for terminal Git index transaction receipts.
 pub const GIT_INDEX_RECEIPT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.receipt.v1";
 
 crate::canonical_text::validated_string_newtype!(

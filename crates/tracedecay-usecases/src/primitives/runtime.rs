@@ -44,7 +44,7 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
-use super::concrete::Pr12SourceReadAdapter;
+use super::concrete::SourceReadAdapter;
 use super::grep_analysis::{
     TraceDecayAstGrepAuthorityV1, TraceDecayComplexityAuthorityV1,
     TraceDecayDependencyDepthAuthorityV1,
@@ -61,27 +61,27 @@ use tracedecay_runtime_core::db::Database;
 const MAX_OPERATION_PARAMETERS_BYTES: usize = 1_048_576;
 const MAX_OPERATION_OUTPUT_BYTES: usize = 1_048_576;
 const MAX_ADMITTED_ROOT_URI_BYTES: usize = 4_096;
-const MAX_CONCURRENT_PR12_PRIMITIVES: usize = 32;
+const MAX_CONCURRENT_PRIMITIVES: usize = 32;
 
 /// Validated once per process rather than on every paged primitive result.
-static PR12_PRIMITIVE_SORT_CONTRACT: LazyLock<SortContractId> = LazyLock::new(|| {
+static PRIMITIVE_SORT_CONTRACT: LazyLock<SortContractId> = LazyLock::new(|| {
     SortContractId::new("sort.application.retrieval.stable")
         .unwrap_or_else(|_| panic!("static primitive sort contract is valid"))
 });
 
-pub type Pr12PrimitiveDispatchFuture<'a> =
+pub type PrimitiveDispatchFuture<'a> =
     Pin<Box<dyn Future<Output = ApplicationResult<Value>> + Send + 'a>>;
 
-pub type Pr12PrimitiveTransportDispatchFuture<'a> = Pin<
+pub type PrimitiveTransportDispatchFuture<'a> = Pin<
     Box<
         dyn Future<Output = Result<ApplicationResult<Value>, ApplicationContractError>> + Send + 'a,
     >,
 >;
 
-pub type Pr12OperationalPrimitiveFuture<'a> =
+pub type OperationalPrimitiveFuture<'a> =
     Pin<Box<dyn Future<Output = ApplicationResult<Value>> + Send + 'a>>;
 
-pub type Pr12ExtendedPrimitiveFuture<'a, T> =
+pub type ExtendedPrimitiveFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<T>> + Send + 'a>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,7 +106,7 @@ pub trait ManagedTestRunCurrentScopePort: Send + Sync {
 /// configuration, diagnostics, project, or status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Pr12OperationalPrimitive {
+pub enum OperationalPrimitive {
     Project,
     Status,
     Files,
@@ -117,13 +117,13 @@ pub enum Pr12OperationalPrimitive {
 /// Canonical bounded parameters for one operational read.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Pr12OperationalPrimitiveRequest {
-    pub operation: Pr12OperationalPrimitive,
+pub struct OperationalPrimitiveRequest {
+    pub operation: OperationalPrimitive,
     pub parameters: Value,
     pub maximum_output_bytes: u32,
 }
 
-impl Pr12OperationalPrimitiveRequest {
+impl OperationalPrimitiveRequest {
     fn validate(&self) -> Result<(), ApplicationContractError> {
         if !self.parameters.is_object() {
             return Err(ApplicationContractError::Inconsistent {
@@ -136,14 +136,14 @@ impl Pr12OperationalPrimitiveRequest {
 }
 
 /// Object-safe owner for the existing operational read families.
-pub trait Pr12OperationalPrimitivePort: Send + Sync {
+pub trait OperationalPrimitivePort: Send + Sync {
     fn read<'a>(
         &'a self,
         context: &'a RequestContext,
         operation: &'a ApplicationOperation,
-        request: &'a Pr12OperationalPrimitiveRequest,
+        request: &'a OperationalPrimitiveRequest,
         observed_at: UtcMicros,
-    ) -> Pr12OperationalPrimitiveFuture<'a>;
+    ) -> OperationalPrimitiveFuture<'a>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -333,72 +333,72 @@ pub struct DiagnosticsPrimitiveResult {
 /// Typed extension over existing query/source/system services. Every method is
 /// independently callable; no operation string or untyped parameter bag is
 /// accepted.
-pub trait Pr12ExtendedPrimitivePort: Send + Sync {
+pub trait ExtendedPrimitivePort: Send + Sync {
     fn qualified_name<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a QualifiedNamePrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, QualifiedNamePrimitiveResult>;
+    ) -> ExtendedPrimitiveFuture<'a, QualifiedNamePrimitiveResult>;
 
     fn call_chain<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a CallChainPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, CallChainPrimitiveResult>;
+    ) -> ExtendedPrimitiveFuture<'a, CallChainPrimitiveResult>;
 
     fn file_dependents<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a FileDependentsPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, FileDependentsPrimitiveResult>;
+    ) -> ExtendedPrimitiveFuture<'a, FileDependentsPrimitiveResult>;
 
     fn source_body<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a SourceBodyPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, SourceBodyPrimitiveResult>;
+    ) -> ExtendedPrimitiveFuture<'a, SourceBodyPrimitiveResult>;
 
     fn source_outline<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a SourceOutlinePrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, SourceOutlinePrimitiveResult>;
+    ) -> ExtendedPrimitiveFuture<'a, SourceOutlinePrimitiveResult>;
 
     fn module_api<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a ModuleApiPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult>;
+    ) -> ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult>;
 
     fn file_metadata<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a FileMetadataPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult>;
+    ) -> ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult>;
 
     fn health_delta<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a HealthDeltaRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, HealthDeltaResult>;
+    ) -> ExtendedPrimitiveFuture<'a, HealthDeltaResult>;
 
     fn storage_status<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a StorageStatusPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult>;
+    ) -> ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult>;
 
     fn diagnostics<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a DiagnosticsPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, DiagnosticsPrimitiveResult>;
+    ) -> ExtendedPrimitiveFuture<'a, DiagnosticsPrimitiveResult>;
 }
 
 /// Closed typed request enum accepted by direct daemon invocation.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "primitive", content = "request", rename_all = "snake_case")]
-pub enum Pr12PrimitiveRequest {
+pub enum PrimitiveRequest {
     #[serde(skip)]
     SymbolSearch(SymbolSearchPrimitiveRequest),
     ExactSymbol(ExactSymbolRequest),
@@ -429,35 +429,35 @@ pub enum Pr12PrimitiveRequest {
     HealthDelta(HealthDeltaRequest),
     StorageStatus(StorageStatusPrimitiveRequest),
     DiagnosticsRead(DiagnosticsPrimitiveRequest),
-    Operational(Pr12OperationalPrimitiveRequest),
+    Operational(OperationalPrimitiveRequest),
     RecentTestResults(PageRequest),
 }
 
 /// One catalog operation plus its closed typed primitive request.
 #[derive(Debug)]
-pub struct Pr12PrimitiveInvocation {
+pub struct PrimitiveInvocation {
     pub operation: ApplicationOperation,
-    pub request: Pr12PrimitiveRequest,
+    pub request: PrimitiveRequest,
 }
 
 /// Object-safe asynchronous facade retained and called directly by the daemon.
-pub trait Pr12PrimitiveDispatch: Send + Sync {
+pub trait PrimitiveDispatch: Send + Sync {
     fn dispatch(
         &self,
-        invocation: Pr12PrimitiveInvocation,
+        invocation: PrimitiveInvocation,
         context: RequestContext,
         observed_at: UtcMicros,
-    ) -> Pr12PrimitiveDispatchFuture<'_>;
+    ) -> PrimitiveDispatchFuture<'_>;
 
     fn dispatch_transport(
         &self,
         request_id: RequestId,
         operation: ApplicationOperation,
-        request: Pr12PrimitiveRequest,
+        request: PrimitiveRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
-    ) -> Pr12PrimitiveTransportDispatchFuture<'_>;
+    ) -> PrimitiveTransportDispatchFuture<'_>;
 }
 
 /// Owned production authorities supplied by the daemon project-open path.
@@ -467,7 +467,7 @@ pub trait Pr12PrimitiveDispatch: Send + Sync {
 /// every dependency is explicit and no authority can be discovered at call
 /// time.
 #[derive(Clone)]
-struct Pr12PrimitiveProjectServices {
+struct PrimitiveProjectServices {
     pub symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync>,
     pub source: Arc<dyn SourceReadPrimitivePort + Send + Sync>,
     pub tests: Arc<dyn TestPrimitivePort + Send + Sync>,
@@ -479,11 +479,11 @@ struct Pr12PrimitiveProjectServices {
     pub temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     pub source_lines: Arc<dyn SourceRetrievalPort + Send + Sync>,
     pub health: Arc<dyn OperationalRetrievalPort + Send + Sync>,
-    pub extended: Arc<dyn Pr12ExtendedPrimitivePort>,
-    pub operational: Arc<dyn Pr12OperationalPrimitivePort>,
+    pub extended: Arc<dyn ExtendedPrimitivePort>,
+    pub operational: Arc<dyn OperationalPrimitivePort>,
 }
 
-impl Pr12PrimitiveProjectServices {
+impl PrimitiveProjectServices {
     #[allow(clippy::too_many_arguments)]
     fn new(
         symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync>,
@@ -497,8 +497,8 @@ impl Pr12PrimitiveProjectServices {
         temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
         source_lines: Arc<dyn SourceRetrievalPort + Send + Sync>,
         health: Arc<dyn OperationalRetrievalPort + Send + Sync>,
-        extended: Arc<dyn Pr12ExtendedPrimitivePort>,
-        operational: Arc<dyn Pr12OperationalPrimitivePort>,
+        extended: Arc<dyn ExtendedPrimitivePort>,
+        operational: Arc<dyn OperationalPrimitivePort>,
     ) -> Self {
         Self {
             symbol_graph,
@@ -520,22 +520,22 @@ impl Pr12PrimitiveProjectServices {
 
 /// Cloneable owned runtime retained by the daemon for one admitted root.
 #[derive(Clone)]
-pub struct OwnedPr12PrimitiveRuntime {
-    project_runtime: Pr12PrimitiveProjectServices,
+pub struct OwnedPrimitiveRuntime {
+    project_runtime: PrimitiveProjectServices,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
     test_runs: CanonicalManagedTestRunReader,
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
-    capacity: Pr12PrimitiveCapacity,
+    capacity: PrimitiveCapacity,
 }
 
 #[derive(Clone)]
-struct Pr12PrimitiveCapacity {
+struct PrimitiveCapacity {
     permits: Arc<Semaphore>,
 }
 
-impl Pr12PrimitiveCapacity {
+impl PrimitiveCapacity {
     fn new(maximum_concurrent: usize) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(maximum_concurrent)),
@@ -552,10 +552,10 @@ impl Pr12PrimitiveCapacity {
 /// Dropping this value releases the dispatch facade and every Arc-backed
 /// project primitive authority together. The database and graph fields keep
 /// the exact project-open owners alive for the same lifetime as dispatch.
-pub struct Pr12PrimitiveProjectRuntime {
+pub struct PrimitiveProjectRuntime {
     database: Database,
     graph: Arc<TraceDecay>,
-    dispatch: Arc<dyn Pr12PrimitiveDispatch>,
+    dispatch: Arc<dyn PrimitiveDispatch>,
 }
 
 /// Replace the mount-time authority carried by an owned primitive result with
@@ -577,8 +577,8 @@ pub fn reauthorize_primitive_evidence(
     true
 }
 
-impl Pr12PrimitiveProjectRuntime {
-    pub fn dispatch(&self) -> Arc<dyn Pr12PrimitiveDispatch> {
+impl PrimitiveProjectRuntime {
+    pub fn dispatch(&self) -> Arc<dyn PrimitiveDispatch> {
         Arc::clone(&self.dispatch)
     }
 
@@ -597,13 +597,13 @@ impl Pr12PrimitiveProjectRuntime {
     }
 }
 
-impl Pr12PrimitiveDispatch for OwnedPr12PrimitiveRuntime {
+impl PrimitiveDispatch for OwnedPrimitiveRuntime {
     fn dispatch(
         &self,
-        invocation: Pr12PrimitiveInvocation,
+        invocation: PrimitiveInvocation,
         context: RequestContext,
         observed_at: UtcMicros,
-    ) -> Pr12PrimitiveDispatchFuture<'_> {
+    ) -> PrimitiveDispatchFuture<'_> {
         self.dispatch_invocation(invocation, context, observed_at)
     }
 
@@ -611,11 +611,11 @@ impl Pr12PrimitiveDispatch for OwnedPr12PrimitiveRuntime {
         &self,
         request_id: RequestId,
         operation: ApplicationOperation,
-        request: Pr12PrimitiveRequest,
+        request: PrimitiveRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
-    ) -> Pr12PrimitiveTransportDispatchFuture<'_> {
+    ) -> PrimitiveTransportDispatchFuture<'_> {
         Box::pin(async move {
             if let Some(problem) = pre_admission_problem(
                 &request_id,
@@ -644,7 +644,7 @@ impl Pr12PrimitiveDispatch for OwnedPr12PrimitiveRuntime {
             )?;
             Ok(self
                 .dispatch_invocation(
-                    Pr12PrimitiveInvocation { operation, request },
+                    PrimitiveInvocation { operation, request },
                     context,
                     observed_at,
                 )
@@ -653,13 +653,13 @@ impl Pr12PrimitiveDispatch for OwnedPr12PrimitiveRuntime {
     }
 }
 
-impl OwnedPr12PrimitiveRuntime {
+impl OwnedPrimitiveRuntime {
     fn dispatch_invocation(
         &self,
-        invocation: Pr12PrimitiveInvocation,
+        invocation: PrimitiveInvocation,
         context: RequestContext,
         observed_at: UtcMicros,
-    ) -> Pr12PrimitiveDispatchFuture<'_> {
+    ) -> PrimitiveDispatchFuture<'_> {
         Box::pin(async move {
             if let Some(problem) = admission_problem(
                 &self.scope,
@@ -742,14 +742,14 @@ fn transport_context(
 ///
 /// Exact constructor signature:
 ///
-/// `open_pr12_primitive_project_runtime(database, graph, symbol_graph_cursors,
+/// `open_primitive_project_runtime(database, graph, symbol_graph_cursors,
 /// tests, lexical_grep, redundancy, temporal, source_lines, health, extended,
 /// operational, scope, access,
 /// admitted_root_uri, operation_events, test_run_scope) ->
-/// Result<Pr12PrimitiveProjectRuntime,
+/// Result<PrimitiveProjectRuntime,
 /// ApplicationContractError>`
 #[allow(clippy::too_many_arguments)]
-pub fn open_pr12_primitive_project_runtime(
+pub fn open_primitive_project_runtime(
     database: Database,
     graph: Arc<TraceDecay>,
     symbol_graph_cursors: Arc<dyn SymbolGraphCursorPort>,
@@ -759,14 +759,14 @@ pub fn open_pr12_primitive_project_runtime(
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     source_lines: Arc<dyn SourceRetrievalPort + Send + Sync>,
     health: Arc<dyn OperationalRetrievalPort + Send + Sync>,
-    extended: Arc<dyn Pr12ExtendedPrimitivePort>,
-    operational: Arc<dyn Pr12OperationalPrimitivePort>,
+    extended: Arc<dyn ExtendedPrimitivePort>,
+    operational: Arc<dyn OperationalPrimitivePort>,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
     operation_events: OperationEventAuthority,
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
-) -> Result<Pr12PrimitiveProjectRuntime, ApplicationContractError> {
+) -> Result<PrimitiveProjectRuntime, ApplicationContractError> {
     scope.validate()?;
     validate_admitted_root_uri(&admitted_root_uri)?;
     if access.scope != scope {
@@ -778,9 +778,9 @@ pub fn open_pr12_primitive_project_runtime(
         CanonicalSymbolGraphAdapter::new(Arc::clone(&graph), symbol_graph_cursors),
     );
     let source: Arc<dyn SourceReadPrimitivePort + Send + Sync> = Arc::new(
-        Pr12SourceReadAdapter::new(Arc::clone(&graph), scope.clone())?,
+        SourceReadAdapter::new(Arc::clone(&graph), scope.clone())?,
     );
-    let services = Pr12PrimitiveProjectServices::new(
+    let services = PrimitiveProjectServices::new(
         symbol_graph,
         source,
         tests,
@@ -797,16 +797,16 @@ pub fn open_pr12_primitive_project_runtime(
         extended,
         operational,
     );
-    let dispatch: Arc<dyn Pr12PrimitiveDispatch> = Arc::new(OwnedPr12PrimitiveRuntime {
+    let dispatch: Arc<dyn PrimitiveDispatch> = Arc::new(OwnedPrimitiveRuntime {
         project_runtime: services,
         scope,
         access,
         admitted_root_uri,
         test_runs: CanonicalManagedTestRunReader::new(operation_events),
         test_run_scope,
-        capacity: Pr12PrimitiveCapacity::new(MAX_CONCURRENT_PR12_PRIMITIVES),
+        capacity: PrimitiveCapacity::new(MAX_CONCURRENT_PRIMITIVES),
     });
-    Ok(Pr12PrimitiveProjectRuntime {
+    Ok(PrimitiveProjectRuntime {
         database,
         graph,
         dispatch,
@@ -881,8 +881,8 @@ fn admission_problem(
 }
 
 async fn dispatch_admitted(
-    runtime: &OwnedPr12PrimitiveRuntime,
-    invocation: Pr12PrimitiveInvocation,
+    runtime: &OwnedPrimitiveRuntime,
+    invocation: PrimitiveInvocation,
     context: RequestContext,
     observed_at: UtcMicros,
 ) -> ApplicationResult<Value> {
@@ -891,7 +891,7 @@ async fn dispatch_admitted(
         return invalid_request(&context, &operation);
     }
     match invocation.request {
-        Pr12PrimitiveRequest::SymbolSearch(request) => {
+        PrimitiveRequest::SymbolSearch(request) => {
             let outcome = runtime
                 .project_runtime
                 .symbol_graph
@@ -905,7 +905,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::ExactSymbol(request) => {
+        PrimitiveRequest::ExactSymbol(request) => {
             let outcome = runtime
                 .project_runtime
                 .symbol_graph
@@ -919,7 +919,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::SignatureSearch(request) => {
+        PrimitiveRequest::SignatureSearch(request) => {
             let outcome = runtime
                 .project_runtime
                 .symbol_graph
@@ -933,7 +933,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::Implementations(request) => {
+        PrimitiveRequest::Implementations(request) => {
             let outcome = runtime
                 .project_runtime
                 .symbol_graph
@@ -947,7 +947,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::TypeHierarchy(request) => {
+        PrimitiveRequest::TypeHierarchy(request) => {
             let outcome = runtime
                 .project_runtime
                 .symbol_graph
@@ -961,7 +961,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::Callers(request) => {
+        PrimitiveRequest::Callers(request) => {
             let outcome = runtime
                 .project_runtime
                 .symbol_graph
@@ -975,7 +975,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::Callees(request) => {
+        PrimitiveRequest::Callees(request) => {
             let outcome = runtime
                 .project_runtime
                 .symbol_graph
@@ -989,7 +989,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::Impact(request) => {
+        PrimitiveRequest::Impact(request) => {
             let outcome = runtime
                 .project_runtime
                 .symbol_graph
@@ -1003,7 +1003,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::SourceRead(request) => {
+        PrimitiveRequest::SourceRead(request) => {
             let outcome = runtime
                 .project_runtime
                 .source
@@ -1018,7 +1018,7 @@ async fn dispatch_admitted(
                 .await;
             source_outcome(&runtime.access, &context, &operation, outcome)
         }
-        Pr12PrimitiveRequest::TestMap(request) => {
+        PrimitiveRequest::TestMap(request) => {
             let outcome = runtime
                 .project_runtime
                 .tests
@@ -1026,7 +1026,7 @@ async fn dispatch_admitted(
                 .await;
             test_map_outcome(&runtime.access, &context, &operation, outcome)
         }
-        Pr12PrimitiveRequest::AffectedFileTests(request) => {
+        PrimitiveRequest::AffectedFileTests(request) => {
             let outcome = runtime
                 .project_runtime
                 .tests
@@ -1034,7 +1034,7 @@ async fn dispatch_admitted(
                 .await;
             affected_file_tests_outcome(&runtime.access, &context, &operation, outcome)
         }
-        Pr12PrimitiveRequest::LexicalGrep(request) => {
+        PrimitiveRequest::LexicalGrep(request) => {
             let port_context = grep_context(&context, &operation, observed_at);
             let outcome = runtime
                 .project_runtime
@@ -1049,7 +1049,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::AstGrep(request) => {
+        PrimitiveRequest::AstGrep(request) => {
             let port_context = grep_context(&context, &operation, observed_at);
             let outcome = runtime
                 .project_runtime
@@ -1064,7 +1064,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::Complexity(request) => {
+        PrimitiveRequest::Complexity(request) => {
             let port_context = grep_context(&context, &operation, observed_at);
             let outcome = runtime
                 .project_runtime
@@ -1079,7 +1079,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::Redundancy(request) => {
+        PrimitiveRequest::Redundancy(request) => {
             let port_context = grep_context(&context, &operation, observed_at);
             let outcome = runtime
                 .project_runtime
@@ -1094,7 +1094,7 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::DependencyDepth(request) => {
+        PrimitiveRequest::DependencyDepth(request) => {
             let port_context = grep_context(&context, &operation, observed_at);
             let outcome = runtime
                 .project_runtime
@@ -1109,14 +1109,14 @@ async fn dispatch_admitted(
                 outcome,
             )
         }
-        Pr12PrimitiveRequest::SessionLookup(request) => {
+        PrimitiveRequest::SessionLookup(request) => {
             let outcome = runtime
                 .project_runtime
                 .temporal
                 .session_lookup(&retrieval_context(&context, &operation), &request);
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::QualifiedName(request) => {
+        PrimitiveRequest::QualifiedName(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
@@ -1124,7 +1124,7 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::CallChain(request) => {
+        PrimitiveRequest::CallChain(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
@@ -1132,7 +1132,7 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::FileDependents(request) => {
+        PrimitiveRequest::FileDependents(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
@@ -1140,14 +1140,14 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::SourceLines(request) => {
+        PrimitiveRequest::SourceLines(request) => {
             let outcome = runtime
                 .project_runtime
                 .source_lines
                 .source_lines(&retrieval_context(&context, &operation), &request);
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::SourceBody(request) => {
+        PrimitiveRequest::SourceBody(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
@@ -1155,7 +1155,7 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::SourceOutline(request) => {
+        PrimitiveRequest::SourceOutline(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
@@ -1163,7 +1163,7 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::ModuleApi(request) => {
+        PrimitiveRequest::ModuleApi(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
@@ -1171,7 +1171,7 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::FileMetadata(request) => {
+        PrimitiveRequest::FileMetadata(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
@@ -1179,14 +1179,14 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::HealthRead(request) => {
+        PrimitiveRequest::HealthRead(request) => {
             let outcome = runtime
                 .project_runtime
                 .health
                 .health_read(&retrieval_context(&context, &operation), &request);
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::HealthDelta(request) => {
+        PrimitiveRequest::HealthDelta(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
@@ -1194,7 +1194,7 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::StorageStatus(request) => {
+        PrimitiveRequest::StorageStatus(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
@@ -1202,7 +1202,7 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::DiagnosticsRead(request) => {
+        PrimitiveRequest::DiagnosticsRead(request) => {
             let outcome = runtime
                 .project_runtime
                 .extended
@@ -1210,7 +1210,7 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        Pr12PrimitiveRequest::Operational(request) => {
+        PrimitiveRequest::Operational(request) => {
             if request.validate().is_err() {
                 return invalid_request(&context, &operation);
             }
@@ -1222,23 +1222,23 @@ async fn dispatch_admitted(
                 .await;
             validate_operational_result(&context, &operation, maximum_output_bytes, result)
         }
-        Pr12PrimitiveRequest::RecentTestResults(page) => {
+        PrimitiveRequest::RecentTestResults(page) => {
             recent_test_results(runtime, &context, &operation, &page, observed_at).await
         }
     }
 }
 
-fn valid_owned_symbol_graph_request(request: &Pr12PrimitiveRequest) -> bool {
+fn valid_owned_symbol_graph_request(request: &PrimitiveRequest) -> bool {
     match request {
-        Pr12PrimitiveRequest::SymbolSearch(request) => request.validate().is_ok(),
-        Pr12PrimitiveRequest::ExactSymbol(request) => request.validate().is_ok(),
-        Pr12PrimitiveRequest::SignatureSearch(request) => request.validate().is_ok(),
-        Pr12PrimitiveRequest::Implementations(request) => request.validate().is_ok(),
-        Pr12PrimitiveRequest::TypeHierarchy(request) => request.validate().is_ok(),
-        Pr12PrimitiveRequest::Callers(request) | Pr12PrimitiveRequest::Callees(request) => {
+        PrimitiveRequest::SymbolSearch(request) => request.validate().is_ok(),
+        PrimitiveRequest::ExactSymbol(request) => request.validate().is_ok(),
+        PrimitiveRequest::SignatureSearch(request) => request.validate().is_ok(),
+        PrimitiveRequest::Implementations(request) => request.validate().is_ok(),
+        PrimitiveRequest::TypeHierarchy(request) => request.validate().is_ok(),
+        PrimitiveRequest::Callers(request) | PrimitiveRequest::Callees(request) => {
             request.validate().is_ok()
         }
-        Pr12PrimitiveRequest::Impact(request) => request.validate().is_ok(),
+        PrimitiveRequest::Impact(request) => request.validate().is_ok(),
         _ => true,
     }
 }
@@ -1727,7 +1727,7 @@ fn evidence_result(
         .validate()
         .map_err(|_| contract_problem(context, operation))?;
     let mut page = PageState::first_page(
-        PR12_PRIMITIVE_SORT_CONTRACT.clone(),
+        PRIMITIVE_SORT_CONTRACT.clone(),
         1,
         eligible,
         coverage.returned,
@@ -1772,7 +1772,7 @@ fn evidence_result(
 }
 
 async fn recent_test_results(
-    runtime: &OwnedPr12PrimitiveRuntime,
+    runtime: &OwnedPrimitiveRuntime,
     context: &RequestContext,
     operation: &ApplicationOperation,
     page: &PageRequest,
@@ -2090,8 +2090,8 @@ fn validate_bounds(
 #[cfg(test)]
 mod tests {
     use super::{
-        Pr12ExtendedPrimitivePort, Pr12OperationalPrimitiveRequest, Pr12PrimitiveCapacity,
-        Pr12PrimitiveDispatch, Pr12PrimitiveRequest, StorageStatusPrimitiveRequest,
+        ExtendedPrimitivePort, OperationalPrimitiveRequest, PrimitiveCapacity,
+        PrimitiveDispatch, PrimitiveRequest, StorageStatusPrimitiveRequest,
         pre_admission_problem, valid_owned_symbol_graph_request, validate_admitted_root_uri,
     };
     use tracedecay_application::retrieval::{
@@ -2106,8 +2106,8 @@ mod tests {
         EphemeralSanitizedQueryViewV1, QueryNormalizationRevision, SanitizerRevision, UtcMicros,
     };
 
-    fn assert_object_safe(_: &dyn Pr12PrimitiveDispatch) {}
-    fn assert_extended_object_safe(_: &dyn Pr12ExtendedPrimitivePort) {}
+    fn assert_object_safe(_: &dyn PrimitiveDispatch) {}
+    fn assert_extended_object_safe(_: &dyn ExtendedPrimitivePort) {}
 
     #[test]
     fn primitive_dispatch_is_object_safe() {
@@ -2149,7 +2149,7 @@ mod tests {
 
     #[test]
     fn primitive_dispatch_capacity_fails_closed_and_recovers() {
-        let capacity = Pr12PrimitiveCapacity::new(1);
+        let capacity = PrimitiveCapacity::new(1);
         let permit = capacity.try_acquire().expect("first permit");
         assert!(capacity.try_acquire().is_none());
         drop(permit);
@@ -2171,8 +2171,8 @@ mod tests {
 
     #[test]
     fn operational_parameters_reject_cross_project_selectors() {
-        let request = Pr12OperationalPrimitiveRequest {
-            operation: super::Pr12OperationalPrimitive::Project,
+        let request = OperationalPrimitiveRequest {
+            operation: super::OperationalPrimitive::Project,
             parameters: serde_json::json!({"project_path": "/other"}),
             maximum_output_bytes: 1024,
         };
@@ -2181,27 +2181,27 @@ mod tests {
 
     #[test]
     fn closed_request_round_trips_for_direct_daemon_invocation() {
-        let request = Pr12PrimitiveRequest::Operational(Pr12OperationalPrimitiveRequest {
-            operation: super::Pr12OperationalPrimitive::Status,
+        let request = PrimitiveRequest::Operational(OperationalPrimitiveRequest {
+            operation: super::OperationalPrimitive::Status,
             parameters: serde_json::json!({"include_runtime": true}),
             maximum_output_bytes: 4096,
         });
         let encoded = serde_json::to_value(request).expect("encode closed request");
         assert!(matches!(
             serde_json::from_value(encoded).expect("decode closed request"),
-            Pr12PrimitiveRequest::Operational(_)
+            PrimitiveRequest::Operational(_)
         ));
     }
 
     #[test]
     fn typed_system_request_round_trips_without_value_parameters() {
-        let request = Pr12PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
+        let request = PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
             include_details: true,
         });
         let encoded = serde_json::to_value(request).expect("encode typed request");
         assert!(matches!(
             serde_json::from_value(encoded).expect("decode typed request"),
-            Pr12PrimitiveRequest::StorageStatus(_)
+            PrimitiveRequest::StorageStatus(_)
         ));
     }
 
@@ -2221,7 +2221,7 @@ mod tests {
         )
         .expect("query");
         let requests = [
-            Pr12PrimitiveRequest::SymbolSearch(SymbolSearchPrimitiveRequest {
+            PrimitiveRequest::SymbolSearch(SymbolSearchPrimitiveRequest {
                 query,
                 scope: SymbolGraphScope {
                     path_prefix: Some("../other".to_owned()),
@@ -2229,27 +2229,27 @@ mod tests {
                 lazy_index_ignored_dependencies: false,
                 meta: meta(),
             }),
-            Pr12PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
+            PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
                 returns: None,
                 params: Vec::new(),
                 is_async: None,
                 scope: SymbolGraphScope::default(),
                 meta: meta(),
             }),
-            Pr12PrimitiveRequest::Implementations(ImplementationsRequest {
+            PrimitiveRequest::Implementations(ImplementationsRequest {
                 selector: ImplementationSelector::Method {
                     name: String::new(),
                 },
                 scope: SymbolGraphScope::default(),
                 meta: meta(),
             }),
-            Pr12PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
+            PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
                 node_id: "node".to_owned(),
                 maximum_depth: 0,
                 scope: SymbolGraphScope::default(),
                 meta: meta(),
             }),
-            Pr12PrimitiveRequest::Callers(GraphRelationRequest {
+            PrimitiveRequest::Callers(GraphRelationRequest {
                 node_id: "node".to_owned(),
                 maximum_depth: 0,
                 resolve_trait_dispatch: false,

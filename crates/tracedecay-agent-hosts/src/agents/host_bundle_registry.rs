@@ -1,6 +1,6 @@
 //! Versioned catalog of first-party host components compiled into `TraceDecay`.
 //!
-//! No external or third-party bundle loading is supported by PR13. SHA-256 digests provide only
+//! No external or third-party bundle loading is supported. SHA-256 digests provide only
 //! corruption detection and idempotent content identity.
 
 use std::collections::BTreeSet;

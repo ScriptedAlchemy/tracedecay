@@ -22,14 +22,14 @@ use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecu
 ///
 /// It reuses the existing path resolver, source decoder, read modes, symbol
 /// projection, and cross-session cache. The typed scope is retained as the
-/// extension seam for PR15; this adapter intentionally admits exactly one
+/// extension seam for independently authorized roots; this adapter intentionally admits exactly one
 /// project/repository/worktree scope.
-pub struct Pr12SourceReadAdapter {
+pub struct SourceReadAdapter {
     graph: Arc<TraceDecay>,
     scope: ResolvedScope,
 }
 
-impl Pr12SourceReadAdapter {
+impl SourceReadAdapter {
     pub fn new(
         graph: Arc<TraceDecay>,
         scope: ResolvedScope,
@@ -39,7 +39,7 @@ impl Pr12SourceReadAdapter {
     }
 }
 
-impl SourceReadPrimitivePort for Pr12SourceReadAdapter {
+impl SourceReadPrimitivePort for SourceReadAdapter {
     fn source_read<'a>(
         &'a self,
         context: SourceReadPortContext<'a>,
@@ -61,7 +61,7 @@ impl SourceReadPrimitivePort for Pr12SourceReadAdapter {
     }
 }
 
-impl Pr12SourceReadAdapter {
+impl SourceReadAdapter {
     async fn read(
         &self,
         request: &SourceReadPrimitiveRequest,

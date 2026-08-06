@@ -1,6 +1,6 @@
 //! `GET /api/events` — the dashboard's typed Server-Sent Events stream.
 //!
-//! The PR14 frontend replaces polling with one revision-monotone SSE path (plan
+//! The dashboard frontend replaces polling with one revision-monotone SSE path (plan
 //! 11 §"Finalized implementation architecture" → SSE module). Every event
 //! carries stream/run identity, a monotone event revision, an entity revision,
 //! exact scope, observation time, an optional source watermark, and coverage.

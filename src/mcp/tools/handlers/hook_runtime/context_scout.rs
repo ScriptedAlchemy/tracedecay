@@ -246,7 +246,7 @@ pub(super) async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Resu
     let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
     Ok(orchestration_response(
         "hook_v2_scout_prepare",
-        crate::daemon::admit_registered_pr13_hook_orchestration(
+        crate::daemon::admit_registered_hook_orchestration(
             envelope.clone(),
             snapshot.binding,
             lifecycle,
@@ -259,9 +259,9 @@ pub(super) async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Resu
 
 fn orchestration_response(
     action: &str,
-    outcome: crate::daemon::Pr13HookOrchestrationAdmissionV1,
+    outcome: crate::daemon::HookOrchestrationAdmissionV1,
 ) -> Value {
-    use crate::daemon::Pr13HookOrchestrationAdmissionV1 as Admission;
+    use crate::daemon::HookOrchestrationAdmissionV1 as Admission;
     match outcome {
         Admission::Enqueued => json!({ "action": action, "status": "accepted" }),
         Admission::Backpressured => json!({ "action": action, "status": "deferred" }),
@@ -326,10 +326,10 @@ pub(super) async fn hook_v2_feedback_notice_delivery(
         }
     }
     let notice = serde_json::from_value::<
-        crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+        crate::application::advisory::AdvisoryHookLookupNoticeV1,
     >(required_value(args, "feedback_notice")?)
     .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
-    let status = if crate::application::advisory::acknowledge_pr13_advisory_hook_notice(
+    let status = if crate::application::advisory::acknowledge_advisory_hook_notice(
         envelope.project_id,
         envelope.worktree_id,
         &notice,

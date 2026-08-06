@@ -16,7 +16,7 @@ use tracedecay_domain::{ManifestDigest, ProjectId, ProviderId, UtcMicros};
 use tracedecay_hooks::HookEventEnvelopeV2;
 
 use crate::application::advisory::{
-    Pr13AdvisoryProductionStartupRegistrationV1, ProjectGitHubAnchorAuthorityV1,
+    AdvisoryProductionStartupRegistrationV1, ProjectGitHubAnchorAuthorityV1,
 };
 use crate::application::external_source_acquisition::{
     ExternalSourceAcquisitionOwnerV1, SourceAcquisitionPolicyV1, SourceAcquisitionRunOutcomeV1,
@@ -113,7 +113,7 @@ pub(crate) struct ProductionGitHubExternalAcquisitionV1 {
 impl ProductionGitHubExternalAcquisitionV1 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
-        registration: &Pr13AdvisoryProductionStartupRegistrationV1,
+        registration: &AdvisoryProductionStartupRegistrationV1,
         store: RuntimeExternalSourceStore,
         configuration: OwnedGlobalDbConfigurationControlStore,
         context: RequestContext,
@@ -307,7 +307,7 @@ pub(crate) fn open_external_source_store(
 pub(crate) async fn mount_production_github_external_acquisition(
     invocation: &DaemonInvocationState,
     project_root: &std::path::Path,
-    registration: &Pr13AdvisoryProductionStartupRegistrationV1,
+    registration: &AdvisoryProductionStartupRegistrationV1,
     database: Arc<RegisteredGlobalDb>,
     context: Option<RequestContext>,
     request: Option<GitHubReviewReadRequestV1>,

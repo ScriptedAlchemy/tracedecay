@@ -44,8 +44,8 @@ async fn feedback_cycle_router_upgrades_existing_lsp_sessions_to_advisory_runtim
 }
 
 #[test]
-fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
-    let saved = Pr13HookOrchestrationRequestV1::from_envelope(
+fn hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
+    let saved = HookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SavedEdit {
             file_id: [7; 16],
             changed_range_count: 1,
@@ -56,9 +56,9 @@ fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
         false,
     )
     .unwrap();
-    assert_eq!(saved.trigger, Pr13HookOrchestrationTriggerV1::SavedEdit);
+    assert_eq!(saved.trigger, HookOrchestrationTriggerV1::SavedEdit);
 
-    let stop = Pr13HookOrchestrationRequestV1::from_envelope(
+    let stop = HookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SessionBoundary {
             boundary: HookBoundaryV1::TurnComplete,
         }),
@@ -68,9 +68,9 @@ fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
         false,
     )
     .unwrap();
-    assert_eq!(stop.trigger, Pr13HookOrchestrationTriggerV1::Stop);
+    assert_eq!(stop.trigger, HookOrchestrationTriggerV1::Stop);
 
-    let without_scout_lifecycle = Pr13HookOrchestrationRequestV1::from_envelope(
+    let without_scout_lifecycle = HookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SavedEdit {
             file_id: [7; 16],
             changed_range_count: 1,
@@ -83,12 +83,12 @@ fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
     .unwrap();
     assert_eq!(
         without_scout_lifecycle.trigger,
-        Pr13HookOrchestrationTriggerV1::SavedEdit
+        HookOrchestrationTriggerV1::SavedEdit
     );
     assert!(without_scout_lifecycle.lifecycle.is_none());
 
     assert!(
-        Pr13HookOrchestrationRequestV1::from_envelope(
+        HookOrchestrationRequestV1::from_envelope(
             hook_envelope(HookEventV2::TestLifecycle {
                 test_run_id: [8; 16],
                 test_count: 1,
@@ -103,7 +103,7 @@ fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
         .is_none()
     );
     assert_eq!(
-        Pr13HookOrchestrationRequestV1::from_envelope(
+        HookOrchestrationRequestV1::from_envelope(
             hook_envelope(HookEventV2::SessionBoundary {
                 boundary: HookBoundaryV1::Start,
             }),
@@ -114,24 +114,24 @@ fn pr13_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
         )
         .unwrap()
         .trigger,
-        Pr13HookOrchestrationTriggerV1::Explicit
+        HookOrchestrationTriggerV1::Explicit
     );
 }
 
 #[tokio::test]
-async fn pr13_hook_orchestration_backpressures_without_waiting() {
+async fn hook_orchestration_backpressures_without_waiting() {
     let release = Arc::new(tokio::sync::Notify::new());
     let work_release = Arc::clone(&release);
     let work = move |_| {
         let release = Arc::clone(&work_release);
         async move { release.notified().await }
     };
-    let runtime = BoundedPr13HookOrchestratorV1::new(1, work).unwrap();
+    let runtime = BoundedHookOrchestratorV1::new(1, work).unwrap();
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_completions = Arc::clone(&completions);
     let completed = Arc::new(tokio::sync::Notify::new());
     let completion_notification = Arc::clone(&completed);
-    let mut request = Pr13HookOrchestrationRequestV1::from_envelope(
+    let mut request = HookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SavedEdit {
             file_id: [7; 16],
             changed_range_count: 1,
@@ -149,11 +149,11 @@ async fn pr13_hook_orchestration_backpressures_without_waiting() {
 
     assert_eq!(
         runtime.admit(request.clone()),
-        Pr13HookOrchestrationAdmissionV1::Enqueued
+        HookOrchestrationAdmissionV1::Enqueued
     );
     assert_eq!(
         runtime.admit(request),
-        Pr13HookOrchestrationAdmissionV1::Backpressured
+        HookOrchestrationAdmissionV1::Backpressured
     );
     assert_eq!(completions.load(std::sync::atomic::Ordering::Relaxed), 0);
     release.notify_one();
@@ -168,22 +168,22 @@ async fn pr13_hook_orchestration_backpressures_without_waiting() {
 }
 
 #[tokio::test]
-async fn pr13_hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
+async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
     let ran = Arc::new(tokio::sync::Notify::new());
     let work_ran = Arc::clone(&ran);
-    let runtime = BoundedPr13HookOrchestratorV1::new(1, move |_| {
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_| {
         let ran = Arc::clone(&work_ran);
         async move { ran.notify_one() }
     })
     .unwrap();
-    let runtime: Arc<dyn Pr13HookOrchestrationPortV1> = runtime;
-    pr13_hook_orchestration_registry()
+    let runtime: Arc<dyn HookOrchestrationPortV1> = runtime;
+    hook_orchestration_registry()
         .lock()
         .unwrap()
         .insert(([3; 16], [5; 16]), Arc::downgrade(&runtime));
 
     assert_eq!(
-        admit_registered_pr13_hook_orchestration(
+        admit_registered_hook_orchestration(
             hook_envelope(HookEventV2::SavedEdit {
                 file_id: [7; 16],
                 changed_range_count: 1,
@@ -194,10 +194,10 @@ async fn pr13_hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
             false,
             None,
         ),
-        Pr13HookOrchestrationAdmissionV1::Enqueued
+        HookOrchestrationAdmissionV1::Enqueued
     );
     ran.notified().await;
-    pr13_hook_orchestration_registry()
+    hook_orchestration_registry()
         .lock()
         .unwrap()
         .remove(&([3; 16], [5; 16]));
@@ -265,7 +265,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
         grant_expires_at: UtcMicros(i64::MAX),
     };
     let incumbent_runtime = Arc::new(
-        open_pr12_feedback_runtime(
+        open_feedback_runtime(
             database.clone(),
             project.path(),
             scope.clone(),

@@ -57,7 +57,7 @@ struct ProximityCandidate {
     relation_strength: ProximityRelationStrengthV1,
 }
 
-/// Owned production authority mounted by the PR13 registrar.
+/// Owned production authority mounted by the advisory registrar.
 ///
 /// `sessions` is the already-open canonical project session/observation
 /// database. `graph` is the already-open project graph for this exact
@@ -572,7 +572,7 @@ impl CanonicalProximityEvidenceAuthorityV1 for ProductionProximityEvidenceAuthor
     }
 }
 
-/// Constructor used by the PR13 registrar. Returning an owned trait-object
+/// Constructor used by the advisory registrar. Returning an owned trait-object
 /// keeps the already-open project authorities alive without a new store.
 pub(crate) fn production_proximity_evidence_authority_v1(
     sessions: Arc<RegisteredGlobalDb>,

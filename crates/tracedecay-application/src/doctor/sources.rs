@@ -19,7 +19,7 @@
 //! Family mapping (the finding-family enum is fixed; a source never widens it):
 //! - configuration authority (resolve/pin health) → [`DoctorFindingFamilyV1::Configuration`]
 //! - daemon/runtime health snapshot → [`DoctorFindingFamilyV1::StorageRuntime`]
-//! - host/agent integration conformance → [`DoctorFindingFamilyV1::Advisory`] (PR13
+//! - host/agent integration conformance → [`DoctorFindingFamilyV1::Advisory`] (advisory
 //!   host-capability/conformance evidence)
 //! - mounted canonical feedback owner → [`DoctorFindingFamilyV1::Advisory`]
 //!   (finding/scope/generation/provider/evidence/coverage identity)

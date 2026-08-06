@@ -842,7 +842,7 @@ pub(crate) enum HookStdinRead {
     Oversized,
 }
 
-/// Read host-hook stdin with the PR6 wire message byte cap enforced before
+/// Read host-hook stdin with the host wire message byte cap enforced before
 /// whole-body materialization.
 pub(crate) fn read_stdin_bounded() -> std::io::Result<HookStdinRead> {
     read_stdin_bounded_from(&mut std::io::stdin().lock())

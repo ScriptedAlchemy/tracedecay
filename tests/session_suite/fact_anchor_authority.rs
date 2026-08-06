@@ -1,4 +1,4 @@
-//! PR7 acceptance: fact/anchor writes and resolution hold the writer-authority
+//! Fact-anchor authority acceptance: fact/anchor writes and resolution hold the writer-authority
 //! contract. A revoked or missing authority fails closed with a typed error and
 //! no partial commit, ambiguous project scope never falls back to another
 //! store, linked worktrees resolve through canonical project identity, and
@@ -274,11 +274,11 @@ async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
     let profile_root = canonical(tmp.path());
     let db_path = profile_root.join("projects/fact-anchor-authority/memory.db");
     let lease =
-        acquire_exclusive_for_profile(&profile_root, "pr7 revoked authority fixture").unwrap();
+        acquire_exclusive_for_profile(&profile_root, "revoked authority fixture").unwrap();
     let scope =
-        enter_maintenance_database_scope(&lease, &profile_root, "pr7 revoked authority fixture")
+        enter_maintenance_database_scope(&lease, &profile_root, "revoked authority fixture")
             .unwrap();
-    let authority = DatabaseAuthority::for_runtime(&db_path, "pr7 revoked authority fixture")
+    let authority = DatabaseAuthority::for_runtime(&db_path, "revoked authority fixture")
         .expect("a live maintenance scope must grant the write authority");
     assert_eq!(authority.role(), DatabaseAuthorityRole::Maintenance);
     let db = Database::publish_maintenance_test_runtime(
@@ -418,7 +418,7 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
     let root = ephemeral_safe_fixture_base().join(format!("missing-daemon-{}", std::process::id()));
     let db_path = root.join("global.db");
 
-    let error = match DatabaseAuthority::for_runtime(&db_path, "pr7 missing daemon fixture") {
+    let error = match DatabaseAuthority::for_runtime(&db_path, "missing daemon fixture") {
         Err(error) => error,
         Ok(_) => panic!("a missing daemon must not grant a write authority"),
     };
@@ -430,7 +430,7 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
     );
 
     assert!(
-        DatabaseAuthority::for_runtime(&db_path, "pr7 missing daemon retry").is_err(),
+        DatabaseAuthority::for_runtime(&db_path, "missing daemon retry").is_err(),
         "a repeated authority request must not mint a fallback writer"
     );
     assert!(
@@ -753,11 +753,11 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
     let tmp = TempDir::new().unwrap();
     let profile_root = canonical(tmp.path());
     let db_path = profile_root.join("projects/fact-anchor-authority/memory.db");
-    let lease = acquire_exclusive_for_profile(&profile_root, "pr7 single writer fixture").unwrap();
+    let lease = acquire_exclusive_for_profile(&profile_root, "single writer fixture").unwrap();
     let scope =
-        enter_maintenance_database_scope(&lease, &profile_root, "pr7 single writer fixture")
+        enter_maintenance_database_scope(&lease, &profile_root, "single writer fixture")
             .unwrap();
-    let authority = DatabaseAuthority::for_runtime(&db_path, "pr7 single writer fixture")
+    let authority = DatabaseAuthority::for_runtime(&db_path, "single writer fixture")
         .expect("a live maintenance scope must grant the write authority");
     let db = Database::publish_maintenance_test_runtime(
         &db_path,
@@ -770,7 +770,7 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
 
     // A foreign authority for the same database cannot be minted while the
     // writer authority is held: there is no second writer lane to join.
-    let error = DatabaseAuthority::acquire_test(&db_path, "pr7 second writer fixture")
+    let error = DatabaseAuthority::acquire_test(&db_path, "second writer fixture")
         .expect_err("a second write authority must be rejected");
     assert!(
         error
@@ -781,7 +781,7 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
 
     // A client re-resolving the same database rides the retained authority —
     // one writer token, one owner — instead of opening another writer.
-    let joined = DatabaseAuthority::for_runtime(&db_path, "pr7 joined client fixture")
+    let joined = DatabaseAuthority::for_runtime(&db_path, "joined client fixture")
         .expect("a client must re-join the retained authority");
     assert_eq!(joined.role(), authority.role());
     assert_eq!(

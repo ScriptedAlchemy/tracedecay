@@ -93,12 +93,12 @@ use crate::application::ProjectSourceAccessSnapshot;
 use crate::application::advisory::{
     AdvisoryCycleOutcome, CanonicalProximityEvidenceAuthorityV1, CiExactEvidenceAuthorityV1,
     CiReadOnlyProviderArchiveV1, GitHubCanonicalReviewAnchorAuthorityV1,
-    GitHubCurrentBranchRemapper, Pr13AdvisoryDaemonStartupErrorV1,
-    Pr13AdvisoryDaemonStartupRegistrationV1, Pr13AdvisoryHookLookupNoticeV1,
-    Pr13AdvisoryProductionOpenErrorV1, Pr13AdvisoryProductionOpenV1,
-    Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryProviderAuthoritiesV1,
-    Pr13AdvisoryRuntimeOpenV1, open_pr13_advisory_production_authorities,
-    register_pr13_advisory_daemon_startup,
+    GitHubCurrentBranchRemapper, AdvisoryDaemonStartupErrorV1,
+    AdvisoryDaemonStartupRegistrationV1, AdvisoryHookLookupNoticeV1,
+    AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionStartupRegistrationV1, AdvisoryProviderAuthoritiesV1,
+    AdvisoryRuntimeOpenV1, open_advisory_production_authorities,
+    register_advisory_daemon_startup,
 };
 use crate::application::configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationControlStore, ConfigurationError,
@@ -110,7 +110,7 @@ use crate::application::configuration::{
     configuration_layer_scope_digest,
 };
 use crate::application::feedback::concrete::{
-    Pr12FeedbackRuntime, Pr12FeedbackRuntimeError, ProjectFeedbackStore, open_pr12_feedback_runtime,
+    FeedbackRuntime, FeedbackRuntimeError, ProjectFeedbackStore, open_feedback_runtime,
 };
 use crate::application::feedback::cycle_production::{
     ProductionFeedbackCycleProximityPortV1, production_proximity_feedback_cycle_input,
@@ -125,8 +125,8 @@ use crate::application::feedback::owner::{
     FeedbackReadOperationV1, FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
 };
 use crate::application::feedback::{
-    Pr12FeedbackCycleLspInput, Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError,
-    open_pr12_feedback_cycle_runtime,
+    FeedbackCycleLspInput, FeedbackCycleRuntime, FeedbackCycleRuntimeError,
+    open_feedback_cycle_runtime,
 };
 use crate::application::lsp_runtime::{
     DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
@@ -135,8 +135,8 @@ use crate::application::operation_stream::{
     OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
 };
 use crate::application::primitives::{
-    Pr12PrimitiveDispatch, Pr12PrimitiveInvocation, Pr12PrimitiveProjectRuntime,
-    Pr12PrimitiveRequest,
+    PrimitiveDispatch, PrimitiveInvocation, PrimitiveProjectRuntime,
+    PrimitiveRequest,
 };
 use crate::application::semantic_runtime::{
     ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
@@ -231,9 +231,9 @@ pub(crate) use primitive::{
 };
 pub(in crate::daemon) use types::observe_accepted_feedback_cycle_terminal;
 pub(crate) use types::{
-    BoundedPr13HookOrchestratorV1, DaemonLspInvocationOwner, Pr13HookOrchestrationAdmissionV1,
-    Pr13HookOrchestrationPortV1, Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
-    admit_registered_pr13_hook_orchestration,
+    BoundedHookOrchestratorV1, DaemonLspInvocationOwner, HookOrchestrationAdmissionV1,
+    HookOrchestrationPortV1, HookOrchestrationRequestV1, HookOrchestrationTriggerV1,
+    admit_registered_hook_orchestration,
 };
 // `pub(super)` on these shapes, in their original flat-file home, meant
 // "visible to `daemon::service`" (their home's actual parent); nesting them

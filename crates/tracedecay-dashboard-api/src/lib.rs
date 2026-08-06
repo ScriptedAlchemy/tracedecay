@@ -949,7 +949,7 @@ fn dashboard_request_forbidden(detail: &'static str) -> Response {
 /// Canonical application routes bound to one exact project daemon.
 ///
 /// The active project mounts every route below. The selected-project gateway
-/// constructs only the PR14 feedback read subset from its retained graph.
+/// constructs only the dashboard feedback read subset from its retained graph.
 struct ActiveProjectApplicationRoutes {
     http_router: Router,
     dashboard_configuration_router: Router,
@@ -1029,7 +1029,7 @@ pub async fn router(
         }
     }
 
-    // PR12 application routes are bound to the active-project daemon. When the
+    // application primitive routes are bound to the active-project daemon. When the
     // daemon authority record is unavailable (standalone `tracedecay dashboard`
     // or the in-process test server), mounting them would otherwise fail the
     // whole server before it binds. Degrade gracefully instead — serve the core
@@ -1080,7 +1080,7 @@ fn router_with_active_application(
         .route("/api/delivery/{*tail}", any(active_api_gateway))
         .route("/api/explorer/{*tail}", any(active_api_gateway))
         .route("/api/loom/{*tail}", any(active_api_gateway))
-        // PR14 V2 read-model surfaces bound through the active-project gateway,
+        // V2 read-model surfaces bound through the active-project gateway,
         // mirroring the project-scoped `/api/projects/{id}/…` gateway path.
         .route("/api/doctor/{*tail}", any(active_api_gateway))
         .route("/api/storage/{*tail}", any(active_api_gateway))
@@ -1358,7 +1358,7 @@ fn project_api_router() -> Router<DashboardState> {
             get(explorer_api::read_context),
         )
         .route("/api/loom/temporal", get(loom_api::temporal))
-        // PR14 V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
+        // V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
         // family, plan-38 storage telemetry/findings, code-index freshness, and
         // the typed SSE stream. See `read_model` for the normative envelope.
         // Read-only Doctor/health paths come from the API-owned descriptors in

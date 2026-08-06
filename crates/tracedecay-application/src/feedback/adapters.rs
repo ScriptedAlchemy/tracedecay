@@ -1,4 +1,4 @@
-//! Concrete composition adapters for the PR11 feedback ports.
+//! Concrete composition adapters for the feedback ports.
 //!
 //! These adapters deliberately translate between existing diagnostic and
 //! retrieval contracts. They do not own a diagnostic history, graph, test map,
