@@ -13,8 +13,6 @@ use tracedecay::sessions::cursor::{
     ingest_cursor_user_transcript_event_capped_with_registered_roots,
     try_ingest_cursor_project_sweep_capped as try_ingest_cursor_project_sweep_capped_for_project,
 };
-#[cfg(unix)]
-use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
 use tracedecay::sessions::source::TranscriptIngestResult;
 
 #[cfg(unix)]
@@ -279,7 +277,7 @@ async fn user_cursor_event_without_workspace_fails_closed_on_slug_collision() {
 // Intentional: this test pins process-wide HOME/TRACEDECAY_GLOBAL_DB while the
 // hook resolves its storage paths.
 #[allow(clippy::await_holding_lock)]
-async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
+async fn cursor_pre_compact_without_native_payload_is_read_only_and_unavailable() {
     let tmp = TempDir::new().unwrap();
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
@@ -302,39 +300,14 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     let transcript = tmp.path().join("cursor-session.jsonl");
     std::fs::write(
         &transcript,
-        r#"{"role":"user","message":{"content":[{"type":"text","text":"First durable decision: keep Cursor compaction summaries in LCM."}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"Implementation plan: use cursor-agent as an auxiliary summarizer when Cursor exposes no summary."}]}}
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"First durable decision: publish only authenticated native compaction payloads."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Cursor exposes pressure without native summary content, so publication stays unavailable."}]}}
 {"role":"user","message":{"content":[{"type":"text","text":"Fresh tail should remain replayable."}]}}
 {"role":"assistant","message":{"content":[{"type":"text","text":"Acknowledged fresh tail."}]}}
 "#,
     )
     .unwrap();
 
-    let fake_bin = tmp.path().join(if cfg!(windows) {
-        "cursor-agent-fake.cmd"
-    } else {
-        "cursor-agent-fake"
-    });
-    let fake_body = if cfg!(windows) {
-        "@echo off\r\necho Cursor auxiliary summary: keep compaction summaries in LCM.\r\n"
-    } else {
-        "#!/bin/sh\nprintf '%s\\n' 'Cursor auxiliary summary: keep compaction summaries in LCM.'\n"
-    };
-    std::fs::write(&fake_bin, fake_body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let _summary_env_guards = [
-        EnvVarGuard::set("TRACEDECAY_CURSOR_AGENT_BIN", &fake_bin),
-        EnvVarGuard::set("TRACEDECAY_CURSOR_SUMMARY_MODEL", "fake-cursor-model"),
-        EnvVarGuard::set("TRACEDECAY_CURSOR_SUMMARY_TIMEOUT_SECS", "5"),
-        EnvVarGuard::set(
-            "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
-            tmp.path().join("summary-workspace"),
-        ),
-    ];
     let _daemon = spawn_tracedecay_daemon(&home);
 
     let event = serde_json::json!({
@@ -349,8 +322,10 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
         "context_window_size": 128000
     });
     let outcome = cursor_pre_compact_via_daemon(&event.to_string()).await;
-    assert_eq!(outcome.status, "ok", "{}", outcome.reason);
-    assert_eq!(outcome.summary_nodes_created, 1);
+    assert_eq!(outcome.status, "unavailable");
+    assert_eq!(outcome.reason, "host_payload_unavailable");
+    assert_eq!(outcome.summary_nodes_created, 0);
+    assert!(outcome.summary_node_ids.is_empty());
 
     // The daemon is the sole writer authority for its session store. Stop it
     // before mounting the persisted database for post-run assertions.
@@ -358,40 +333,13 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     let runtime = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id)
         .await
         .unwrap();
-    let node_id = outcome
-        .summary_node_ids
-        .first()
-        .expect("summary node id should be returned");
-    let expanded = runtime
-        .lcm_expand_summary_node_for_test("cursor", "cursor-session", node_id)
-        .await
-        .expect("summary node should expand");
     assert!(
-        expanded
-            .summary
-            .summary_text
-            .contains("Cursor auxiliary summary: keep compaction summaries in LCM.")
-    );
-    let described = runtime
-        .lcm_describe_for_test(LcmDescribeRequest {
-            provider: "cursor".to_string(),
-            session_id: "cursor-session".to_string(),
-            target: LcmDescribeTarget::SummaryNode {
-                node_id: node_id.clone(),
-            },
-        })
-        .await
-        .expect("summary node should describe");
-    let summary = described
-        .summary_node
-        .expect("summary node details should exist");
-    assert_eq!(summary.source_count, 2);
-    assert!(
-        summary
-            .metadata_json
-            .as_deref()
-            .unwrap_or_default()
-            .contains("cursor_agent")
+        runtime
+            .session_for_test(HostAdmissionScope::Project, "cursor", "cursor-session")
+            .await
+            .unwrap()
+            .is_none(),
+        "pressure-only compaction must not ingest the transcript"
     );
 }
 

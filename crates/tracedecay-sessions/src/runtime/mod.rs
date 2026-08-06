@@ -11,7 +11,6 @@ pub mod cline_like;
 pub mod codex;
 pub mod codex_app_server;
 pub mod cursor;
-pub mod cursor_agent;
 pub mod cursor_composer;
 pub mod git_correlation;
 pub mod hermes;

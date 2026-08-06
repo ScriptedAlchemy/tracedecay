@@ -349,7 +349,7 @@ pub enum Commands {
     /// Claude Code PostToolUse hook handler for incremental sync (called by Claude Code)
     #[command(name = "hook-claude-post-tool-use", hide = true)]
     HookClaudePostToolUse,
-    /// Claude Code PostCompact hook handler for native compaction summaries.
+    /// Claude Code PostCompact hook handler for typed native-payload availability.
     #[command(name = "hook-claude-post-compact", hide = true)]
     HookClaudePostCompact,
     /// Claude Code SubagentStart hook handler (called by Claude Code, not by users directly)
@@ -406,7 +406,7 @@ pub enum Commands {
     /// Codex PostToolUse hook handler for incremental sync (called by Codex)
     #[command(name = "hook-codex-post-tool-use", hide = true)]
     HookCodexPostToolUse,
-    /// Codex PostCompact hook handler for app-server LCM summaries (called by Codex)
+    /// Codex PostCompact hook handler for typed native-payload availability
     #[command(name = "hook-codex-post-compact", hide = true)]
     HookCodexPostCompact,
     /// Codex Stop hook handler for final-turn user-session ingestion (called by Codex)

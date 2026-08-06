@@ -49,11 +49,10 @@ diagnostics: paste captured output into `tracedecay_diagnose`, or run
 symbols and callers. The bundled `fixing-build-and-type-errors` skill covers
 this workflow.
 
-The `PostCompact` hook starts `codex app-server` as a short-lived child process
-and sets `TRACEDECAY_CODEX_SUMMARY_CHILD=1` to prevent recursive summary hooks.
-Set `TRACEDECAY_CODEX_BIN` to use a different Codex binary,
-`TRACEDECAY_CODEX_SUMMARY_MODEL` to pin a model, or
-`TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS` to adjust the child timeout.
+The `PostCompact` hook forwards Codex's pressure boundary to the daemon. Codex
+does not expose an authenticated compacted payload through this hook, so the
+daemon reports native-summary publication as unavailable and does not invoke an
+auxiliary model or mutate transcript state.
 
 When Codex starts a thread from compacted context (`SessionStart` source
 `compact`), the plugin injects a short recovery hint through

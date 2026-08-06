@@ -256,27 +256,25 @@ pub async fn hook_cursor_stop() -> i32 {
 /// Cursor `preCompact` hook handler.
 ///
 /// Cursor's compaction event exposes pressure metadata but not Cursor's own
-/// generated summary text. The hook delegates to the daemon, which ingests the
-/// current transcript tail and records the host's pressure event. Native
-/// summary content remains typed unavailable because Cursor does not expose it.
+/// generated summary text. The hook delegates the pressure probe to the daemon
+/// without ingesting the transcript or publishing summary state. Native summary
+/// content remains typed unavailable because Cursor does not expose it.
 /// The hook is fail-open and emits Cursor's empty object shape.
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "preCompact", &event);
-    if std::env::var(crate::sessions::cursor_agent::CURSOR_SUMMARY_CHILD_ENV).is_err() {
-        let outcome = super::cursor_compact::cursor_pre_compact_via_daemon_with_telemetry(
-            &event,
-            Some(&hook_telemetry),
-        )
-        .await;
-        if outcome.status == "error" {
-            eprintln!(
-                "tracedecay Cursor preCompact summary failed: {}",
-                outcome.reason
-            );
-        }
+    let outcome = super::cursor_compact::cursor_pre_compact_via_daemon_with_telemetry(
+        &event,
+        Some(&hook_telemetry),
+    )
+    .await;
+    if outcome.status == "error" {
+        eprintln!(
+            "tracedecay Cursor preCompact pressure probe failed: {}",
+            outcome.reason
+        );
     }
     println!("{}", serde_json::json!({}));
     0
