@@ -10,6 +10,7 @@ mod config_store;
 mod configuration_operation;
 mod coordinator;
 mod fair_scheduler;
+mod graph_provider;
 mod owner;
 mod ports;
 mod production;
@@ -42,6 +43,9 @@ pub use fair_scheduler::{
     SemanticProjectionPublicationLeaseV1, SemanticProjectionScheduleErrorV1,
     SemanticProjectionSchedulerConfigErrorV1, SemanticProjectionSchedulerLimitsV1,
     SemanticProjectionSchedulerStatsV1, SemanticProjectionSchedulingPortV1,
+};
+pub use graph_provider::{
+    RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
 };
 pub use owner::SemanticRuntimeOwnerV1;
 pub use ports::{

@@ -27,9 +27,10 @@ use tracedecay_policy::retrieval_selection::{
 
 use crate::config::SemanticResourceCeilings;
 use crate::store::vector_generations::{
-    DatabaseVectorEvaluationStoreV1, DatabaseVectorGenerationStoreV1, PublishedVectorGenerationV1,
+    DatabaseVectorEvaluationStoreV1, GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
     VectorGenerationBuildIdV1, VectorGenerationPlanV1, VectorProjectionCheckpointV1,
 };
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_code_index::projection::expected_request_digest;
 use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
@@ -78,6 +79,7 @@ use super::ports::{
     SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1, SemanticRuntimeStateV1,
     SemanticRuntimeStatusV1,
 };
+use super::graph_provider::{RetainedSemanticVectorGraphV1, SemanticVectorGraphProviderV1};
 use super::{
     DaemonGlobalSemanticProjectionSchedulerV1, SemanticProjectionBatchV1,
     SemanticProjectionLeaseV1, SemanticProjectionScheduleErrorV1,
@@ -204,6 +206,12 @@ where
 pub struct ProductionSemanticRuntimeV1 {
     handle: DaemonSemanticRuntimeHandleV1,
     database: Arc<Database>,
+    graph: Arc<dyn SemanticVectorGraphProviderV1>,
+    /// Runtime-owned writer lane shared across clones. Every vector-mutation
+    /// path acquires it, so a publication lease freezes pointer movement; the
+    /// graph adapter's watermark CAS independently fails concurrent mutations
+    /// closed.
+    vector_writer: Arc<tokio::sync::Mutex<()>>,
     code_index_store_root: PathBuf,
     lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     resources: SemanticResourceCeilings,
@@ -216,14 +224,25 @@ pub struct SemanticCompatibleCurrentGenerationSnapshotV1 {
     pub vector_generation_id: VectorGenerationIdV1,
 }
 
-pub struct SemanticVectorPublicationLeaseV1<'runtime> {
-    _writer: tokio::sync::MutexGuard<'runtime, ()>,
+pub struct SemanticVectorPublicationLeaseV1 {
+    _writer: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Read/write handles over one retained graph runtime.
+fn graph_vector_store(
+    retained: &RetainedSemanticVectorGraphV1,
+) -> (GraphVectorGenerationStoreV1, Arc<dyn GraphCancellation>) {
+    (
+        GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph())),
+        Arc::clone(retained.cancellation()),
+    )
 }
 
 impl ProductionSemanticRuntimeV1 {
     pub fn new(
         handle: DaemonSemanticRuntimeHandleV1,
         database: Arc<Database>,
+        graph: Arc<dyn SemanticVectorGraphProviderV1>,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
         resources: SemanticResourceCeilings,
     ) -> Self {
@@ -235,6 +254,7 @@ impl ProductionSemanticRuntimeV1 {
         Self::new_with_code_index_store_root(
             handle,
             database,
+            graph,
             code_index_store_root,
             lifecycle,
             resources,
@@ -244,6 +264,7 @@ impl ProductionSemanticRuntimeV1 {
     fn new_with_code_index_store_root(
         handle: DaemonSemanticRuntimeHandleV1,
         database: Arc<Database>,
+        graph: Arc<dyn SemanticVectorGraphProviderV1>,
         code_index_store_root: PathBuf,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
         resources: SemanticResourceCeilings,
@@ -251,6 +272,8 @@ impl ProductionSemanticRuntimeV1 {
         Self {
             handle,
             database,
+            graph,
+            vector_writer: Arc::new(tokio::sync::Mutex::new(())),
             code_index_store_root,
             lifecycle,
             resources,
@@ -262,9 +285,12 @@ impl ProductionSemanticRuntimeV1 {
         &self,
         generation: &CodeIndexPublishedGenerationV1,
     ) -> Result<bool, SemanticRuntimeScheduleFailureV1> {
-        let store = DatabaseVectorGenerationStoreV1::open(self.database.as_ref())
+        let retained = self
+            .graph
+            .graph_for_generation(generation)
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        let (store, cancellation) = graph_vector_store(&retained);
         let projection = LoadedSemanticArtifactV1::lifecycle_projection(
             &self.lifecycle,
             generation.manifest(),
@@ -277,6 +303,7 @@ impl ProductionSemanticRuntimeV1 {
                 &projection,
                 &generation.manifest().generation_id,
                 source_manifest_digest,
+                Arc::clone(&cancellation),
             )
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
@@ -290,6 +317,7 @@ impl ProductionSemanticRuntimeV1 {
                         &projection,
                         &generation.manifest().generation_id,
                         &replay_digest,
+                        Arc::clone(&cancellation),
                     )
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
@@ -773,14 +801,21 @@ impl ProductionSemanticRuntimeV1 {
         source_generation: &CodeGenerationId,
         source_manifest_digest: &ManifestDigest,
     ) -> Result<SemanticCompatibleCurrentGenerationSnapshotV1, SemanticRuntimeBackendErrorV1> {
-        let active = DatabaseVectorGenerationStoreV1::read_active_generation_snapshot_for(
-            self.database.as_ref(),
-            &required.projection,
-            source_generation,
-            source_manifest_digest,
-        )
-        .await
-        .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
+        let retained = self
+            .graph
+            .graph_for_current()
+            .await
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
+        let (store, cancellation) = graph_vector_store(&retained);
+        let active = store
+            .active_generation_snapshot_for(
+                &required.projection,
+                source_generation,
+                source_manifest_digest,
+                Arc::clone(&cancellation),
+            )
+            .await
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
         let active = active.ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
         if active.generation().generation_id() != &required.vector_generation_id {
             return Err(SemanticRuntimeBackendErrorV1::Rejected);
@@ -796,19 +831,25 @@ impl ProductionSemanticRuntimeV1 {
             return Err(SemanticRuntimeBackendErrorV1::Rejected);
         }
         let executable = self.inspect_generation(required).await?;
-        if !DatabaseVectorGenerationStoreV1::active_snapshot_is_current(
-            self.database.as_ref(),
-            active.revision(),
-            active.generation().generation_id(),
-        )
-        .await
-        .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
+        if !store
+            .active_snapshot_is_current(
+                active.revision(),
+                active.generation().generation_id(),
+                cancellation,
+            )
+            .await
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
         {
             return Err(SemanticRuntimeBackendErrorV1::Rejected);
         }
+        // Publication identity stays i64 on the wire; the graph adapter's
+        // monotonic u64 revision maps 1:1 into it and can only overflow after
+        // ~9.2e18 mutations, which we treat as a rejected protocol state.
+        let vector_state_revision = i64::try_from(active.revision())
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
         Ok(SemanticCompatibleCurrentGenerationSnapshotV1 {
             executable,
-            vector_state_revision: active.revision(),
+            vector_state_revision,
             vector_generation_id: active.generation().generation_id().clone(),
         })
     }
@@ -820,19 +861,43 @@ impl ProductionSemanticRuntimeV1 {
         &self,
         expected_revision: i64,
         expected_generation: &VectorGenerationIdV1,
-    ) -> Result<SemanticVectorPublicationLeaseV1<'_>, SemanticRuntimeBackendErrorV1> {
-        let writer = self.database.writer().await;
-        if !DatabaseVectorGenerationStoreV1::active_snapshot_is_current(
-            self.database.as_ref(),
-            expected_revision,
-            expected_generation,
-        )
-        .await
-        .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
+    ) -> Result<SemanticVectorPublicationLeaseV1, SemanticRuntimeBackendErrorV1> {
+        let writer = Arc::clone(&self.vector_writer).lock_owned().await;
+        let expected_revision = u64::try_from(expected_revision)
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+        let retained = self
+            .graph
+            .graph_for_current()
+            .await
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
+        let (store, cancellation) = graph_vector_store(&retained);
+        if !store
+            .active_snapshot_is_current(expected_revision, expected_generation, cancellation)
+            .await
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
         {
             return Err(SemanticRuntimeBackendErrorV1::Rejected);
         }
         Ok(SemanticVectorPublicationLeaseV1 { _writer: writer })
+    }
+
+    /// Freeze every vector-mutation path without validating a revision.
+    ///
+    /// Code-generation retention holds this while it pins the vector
+    /// inventory and deletes superseded sealed generations, so no vector
+    /// publication can begin referencing a generation mid-sweep.
+    pub async fn freeze_vector_mutations(&self) -> SemanticVectorPublicationLeaseV1 {
+        SemanticVectorPublicationLeaseV1 {
+            _writer: Arc::clone(&self.vector_writer).lock_owned().await,
+        }
+    }
+
+    /// Read the durably active vector generation from the current graph,
+    /// or `None` when the graph is unavailable or nothing is active.
+    pub async fn active_vector_generation(&self) -> Option<PublishedVectorGenerationV1> {
+        let retained = self.graph.graph_for_current().await.ok()?;
+        let (store, cancellation) = graph_vector_store(&retained);
+        store.active_generation(cancellation).await.ok().flatten()
     }
 
     fn schedule_saved_generation_fair(
@@ -927,7 +992,9 @@ impl ProductionSemanticRuntimeV1 {
             .then(|| pointer.generation.clone())
         });
         let expected_active = base_generation.clone();
-        let database = Arc::clone(&self.database);
+        let graph = Arc::clone(&self.graph);
+        let writer = Arc::clone(&self.vector_writer);
+        let scheduled_generation = Arc::new(generation.clone());
         let lifecycle_for_load = Arc::clone(&self.lifecycle);
         let lifecycle_for_stage = Arc::clone(&self.lifecycle);
         let lifecycle_for_commit = Arc::clone(&self.lifecycle);
@@ -950,9 +1017,13 @@ impl ProductionSemanticRuntimeV1 {
         let commit_state = Arc::new(tokio::sync::Mutex::new(BatchCommitStateV1::default()));
         let fair_lease = fair_lease.map(Arc::new);
         let resume_state = Arc::clone(&commit_state);
-        let resume_database = Arc::clone(&database);
+        let resume_graph = Arc::clone(&graph);
+        let resume_writer = Arc::clone(&writer);
+        let resume_generation = Arc::clone(&scheduled_generation);
         let commit_lease = fair_lease.clone();
-        let commit_database = Arc::clone(&database);
+        let commit_graph = Arc::clone(&graph);
+        let commit_writer = Arc::clone(&writer);
+        let commit_generation = Arc::clone(&scheduled_generation);
         let stage_state = Arc::clone(&commit_state);
         let _ = self.lifecycle.mark_loading();
         let _ = self.lifecycle.mark_indexing(0, total_units);
@@ -965,18 +1036,26 @@ impl ProductionSemanticRuntimeV1 {
                 LoadedSemanticArtifactV1::from_lifecycle(&lifecycle_for_load, &manifest, resources)
             },
             move || async move {
-                let store = DatabaseVectorGenerationStoreV1::open(resume_database.as_ref())
+                let _writer = resume_writer.lock().await;
+                let retained = resume_graph
+                    .graph_for_generation(resume_generation.as_ref())
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                let cancellation = Arc::clone(retained.cancellation());
+                let store = GraphVectorGenerationStoreV1::open(
+                    Arc::clone(retained.graph()),
+                    Arc::clone(&cancellation),
+                )
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                 // The build identity is a digest of the plan, so reopening the
                 // same plan re-adopts the same staged build rather than
                 // starting a second one.
                 let build = store
-                    .begin_generation(plan)
+                    .begin_generation(plan, Arc::clone(&cancellation))
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                 let checkpoint = store
-                    .staged_checkpoint(&build)
+                    .staged_checkpoint(&build, cancellation)
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
                     .filter(|checkpoint| checkpoint.completed_batches > 0);
@@ -988,7 +1067,9 @@ impl ProductionSemanticRuntimeV1 {
             },
             move |prepared| {
                 let state = Arc::clone(&commit_state);
-                let database = Arc::clone(&commit_database);
+                let graph = Arc::clone(&commit_graph);
+                let writer = Arc::clone(&commit_writer);
+                let generation = Arc::clone(&commit_generation);
                 let lease = commit_lease.clone();
                 async move {
                     if lease
@@ -1002,11 +1083,15 @@ impl ProductionSemanticRuntimeV1 {
                         .build
                         .clone()
                         .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
-                    let store = DatabaseVectorGenerationStoreV1::open(database.as_ref())
+                    let _writer = writer.lock().await;
+                    let retained = graph
+                        .graph_for_generation(generation.as_ref())
                         .await
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                    let cancellation = Arc::clone(retained.cancellation());
+                    let store = GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
                     let next = store
-                        .commit_batch(&build, state.checkpoint.as_ref(), prepared)
+                        .commit_batch(&build, state.checkpoint.as_ref(), prepared, cancellation)
                         .await
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                     state.checkpoint = Some(next);
@@ -1027,11 +1112,15 @@ impl ProductionSemanticRuntimeV1 {
                         .map(SemanticProjectionLeaseV1::try_begin_publication)
                         .transpose()
                         .map_err(fair_schedule_failure)?;
-                    let store = DatabaseVectorGenerationStoreV1::open(database.as_ref())
+                    let _writer = writer.lock().await;
+                    let retained = graph
+                        .graph_for_generation(scheduled_generation.as_ref())
                         .await
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                    let cancellation = Arc::clone(retained.cancellation());
+                    let store = GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
                     let publication = store
-                        .publish_generation(&build, expected_active.as_ref())
+                        .publish_generation(&build, expected_active.as_ref(), cancellation)
                         .await
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                     let _ = lifecycle_for_commit.mark_ready();
@@ -1107,13 +1196,23 @@ impl ProductionSemanticRuntimeV1 {
     {
         let source_manifest_digest =
             semantic_source_manifest_digest(code_generation.projection().request());
-        let mut active = match DatabaseVectorGenerationStoreV1::read_active_generation_for(
-            self.database.as_ref(),
-            request.projection,
-            &code_generation.manifest().generation_id,
-            source_manifest_digest,
-        )
-        .await
+        let Ok(retained) = self.graph.graph_for_generation(code_generation).await else {
+            return execute_calibrated_semantic_query(
+                &NeverCalledSemanticLane,
+                SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Unavailable),
+                mode,
+                fallback,
+            );
+        };
+        let (store, cancellation) = graph_vector_store(&retained);
+        let mut active = match store
+            .active_generation_for(
+                request.projection,
+                &code_generation.manifest().generation_id,
+                source_manifest_digest,
+                Arc::clone(&cancellation),
+            )
+            .await
         {
             Ok(active) => active,
             Err(_) => {
@@ -1132,14 +1231,15 @@ impl ProductionSemanticRuntimeV1 {
                     .changes
                     .manifest_digest;
             if &replay_digest != source_manifest_digest {
-                active = DatabaseVectorGenerationStoreV1::read_active_generation_for(
-                    self.database.as_ref(),
-                    request.projection,
-                    &code_generation.manifest().generation_id,
-                    &replay_digest,
-                )
-                .await
-                .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+                active = store
+                    .active_generation_for(
+                        request.projection,
+                        &code_generation.manifest().generation_id,
+                        &replay_digest,
+                        Arc::clone(&cancellation),
+                    )
+                    .await
+                    .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
             }
         }
         let Some(active) = active else {
@@ -1181,14 +1281,17 @@ impl ProductionSemanticRuntimeV1 {
         target: &VectorGenerationIdV1,
         expected_active: &VectorGenerationIdV1,
     ) -> Result<SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1> {
-        let store = DatabaseVectorGenerationStoreV1::open(self.database.as_ref())
+        let retained = self
+            .graph
+            .graph_for_current()
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let generation =
-            DatabaseVectorGenerationStoreV1::read_generation(self.database.as_ref(), target)
-                .await
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
-                .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
+        let (store, cancellation) = graph_vector_store(&retained);
+        let generation = store
+            .generation(target, Arc::clone(&cancellation))
+            .await
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
+            .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
         let lifecycle = Arc::clone(&self.lifecycle);
         let projection = generation.embedding_key().clone();
         let resources = self.resources;
@@ -1223,8 +1326,9 @@ impl ProductionSemanticRuntimeV1 {
             tokio::task::spawn_blocking(move || handle.prepare_restore(prepared_pointer, artifact))
                 .await
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
+        let _writer = self.vector_writer.lock().await;
         let publication = store
-            .activate_generation(target, Some(expected_active))
+            .activate_generation(target, Some(expected_active), cancellation)
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         debug_assert_eq!(publication.generation_id, pointer.generation);
@@ -1467,13 +1571,17 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
         Result<SemanticExecutableGenerationV1, SemanticRuntimeBackendErrorV1>,
     > {
         Box::pin(async move {
-            let generation = DatabaseVectorGenerationStoreV1::read_generation(
-                self.database.as_ref(),
-                &required.vector_generation_id,
-            )
-            .await
-            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
-            .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
+            let retained = self
+                .graph
+                .graph_for_current()
+                .await
+                .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
+            let (store, cancellation) = graph_vector_store(&retained);
+            let generation = store
+                .generation(&required.vector_generation_id, cancellation)
+                .await
+                .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
+                .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
             let lifecycle = Arc::clone(&self.lifecycle);
             let projection = generation.embedding_key().clone();
             let resources = self.resources;
@@ -2465,6 +2573,9 @@ pub struct SavedGenerationScheduleHookParametersV1 {
     pub worktree_id: WorktreeId,
     pub handle: DaemonSemanticRuntimeHandleV1,
     pub database: Arc<Database>,
+    /// Daemon-implemented resolution to the Grafeo code-graph runtime that
+    /// owns the durable semantic-vector projection.
+    pub graph: Arc<dyn SemanticVectorGraphProviderV1>,
     pub lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     pub resources: SemanticResourceCeilings,
     pub fair_scheduler: DaemonGlobalSemanticProjectionSchedulerV1,
@@ -2484,6 +2595,7 @@ pub fn production_saved_generation_schedule_hook(
         worktree_id,
         handle,
         database,
+        graph,
         lifecycle,
         resources,
         fair_scheduler,
@@ -2491,6 +2603,7 @@ pub fn production_saved_generation_schedule_hook(
     let runtime = Arc::new(ProductionSemanticRuntimeV1::new_with_code_index_store_root(
         handle,
         database,
+        graph,
         code_index_store_root,
         lifecycle,
         resources,
