@@ -563,8 +563,8 @@ It verifies:
 - **Global registry** — daemon-owned project/profile enrollment and availability
 - **User config** — `~/.tracedecay/config.toml` and upload settings
 - **Agent integrations** — MCP server registration, hook installation, tool permissions, prompt rules
-- **Network** — the configured worldwide counter, GitHub releases API, and
-  pricing refresh route; each reports its own available or unavailable state
+- **Network** — the configured worldwide counter and GitHub releases API; each
+  reports its own available or unavailable state
 
 If any tool permissions are missing after an upgrade, Doctor reports the missing
 capability and the supported install/update operation. Doctor only reports
@@ -816,7 +816,7 @@ local results. The available effects are described below.
 ### Worldwide token counter
 
 TraceDecay tracks how many tokens it has saved locally. If you opt in, the
-daemon's accounting/status path uploads that aggregate count to the worldwide
+daemon's token-savings status path uploads that aggregate count to the worldwide
 counter. Repository content, file names, and project names are not part of the
 counter payload. The counter service still receives ordinary transport metadata
 such as the source IP and may derive aggregate geography from it; submitting an
@@ -851,12 +851,22 @@ keyring locator rather than the secret itself. The daemon mounts the source only
 after verifying the exact read-only permission set; missing, ambiguous,
 write-capable, or unverifiable credentials fail closed.
 
-### Pricing refresh
+### Provider usage and pricing
 
-`tracedecay cost` may refresh public model-pricing data and cache it locally.
-The pricing host receives ordinary transport metadata. When it is unavailable,
-cached or embedded pricing is a fallback estimate rather than proof that the
-price is current.
+TraceDecay records provider usage as immutable observations from exact native
+evidence. Each observation retains the provider/model identity, native scope and
+counter semantics, native field/kind, source range, and any native correlation
+identifiers. A read never infers missing identity or counters from a neighboring
+message, and cumulative-to-delta derivation remains deterministic and
+issue-marked.
+
+`tracedecay cost` is a side-effect-free read over those observations. It uses one
+deterministic bundled all-provider pricing table, identified by its content
+digest. It does not make a request-triggered pricing fetch, write a home-directory
+pricing cache, or consult a pricing environment override. Missing native usage,
+unknown models, unavailable observations, or unavailable pricing remain typed
+unknown/unavailable results; TraceDecay never fills them with zero or a stale
+fallback estimate.
 
 ### Semantic-model acquisition
 

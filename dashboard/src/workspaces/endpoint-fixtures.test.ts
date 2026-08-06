@@ -552,7 +552,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(data.savings.ledger?.today.saved_tokens).toBeGreaterThan(0);
     expect(data.savings.ledger?.all_time.saved_tokens).toBeGreaterThan(0);
     expect((data.savings.lifetime_counters?.projects ?? []).length).toBeGreaterThanOrEqual(4);
-    expect(data.turns.available).toBe(true);
+    expect(data.provider_usage.available).toBe(true);
   });
 
   it('GET /api/plugins/analytics/usage — agents (AnalyticsUsageSummaryV1Schema)', () => {
@@ -788,9 +788,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   it('GET /api/costs — canonical cost envelope with an unpriced ledger', () => {
     const env = parse(DashboardEnvelopeV1Schema(CostsReadModelV1Schema), '/api/costs');
     expect(env.payload.usage.length).toBeGreaterThan(0);
-    // Prices are recorded at ingest; a read over unpriced turns must arrive as
-    // a null cost with its reason, or the surface can never be shown refusing
-    // to print $0.00.
+    // An unpriced provider-usage read must arrive as a null cost with its
+    // reason, or the surface can never be shown refusing to print $0.00.
     const cost = env.payload.estimated_cost.find((metric) => metric.metric === 'provider_cost');
     expect(cost?.value).toBeNull();
     expect(cost?.unavailable_reason).toBe('pricing_revision_unavailable');

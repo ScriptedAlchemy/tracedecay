@@ -7,9 +7,11 @@
 //! wire format while later providers retain typed native ordering evidence.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{self, Write};
 
+use schemars::JsonSchema;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -209,7 +211,9 @@ fn is_default_observation_provider(provider: &ProviderId) -> bool {
 pub type ClaudeSourceIdentityV1 = ObservationSourceIdentityV1;
 
 /// Authoritative ownership scope selected before persistence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ObservationScopeV1 {
     Profile,
@@ -1096,6 +1100,178 @@ pub enum CanonicalUnknownStateV1 {
     Malformed,
 }
 
+/// Native grain to which a provider's usage counters apply.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderUsageScopeV1 {
+    Request,
+    Message,
+    Turn,
+    Session,
+    Unknown,
+    Unavailable,
+}
+
+impl ProviderUsageScopeV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Message => "message",
+            Self::Turn => "turn",
+            Self::Session => "session",
+            Self::Unknown => "unknown",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    pub fn from_durable_str(value: &str) -> Option<Self> {
+        match value {
+            "request" => Some(Self::Request),
+            "message" => Some(Self::Message),
+            "turn" => Some(Self::Turn),
+            "session" => Some(Self::Session),
+            "unknown" => Some(Self::Unknown),
+            "unavailable" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
+/// Whether counters are additive for this record or a provider running total.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderUsageCounterSemanticsV1 {
+    Delta,
+    Cumulative,
+    Unknown,
+    Unavailable,
+}
+
+impl ProviderUsageCounterSemanticsV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Delta => "delta",
+            Self::Cumulative => "cumulative",
+            Self::Unknown => "unknown",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    pub fn from_durable_str(value: &str) -> Option<Self> {
+        match value {
+            "delta" => Some(Self::Delta),
+            "cumulative" => Some(Self::Cumulative),
+            "unknown" => Some(Self::Unknown),
+            "unavailable" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
+/// Provider-usage contract dimensions absent from otherwise trustworthy
+/// native counters. A fact remains uncorrelated until every missing dimension
+/// is supplied by native evidence; neighboring observations are not evidence.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderUsageContractDimensionV1 {
+    Model,
+    Scope,
+    CounterSemantics,
+    Correlation,
+}
+
+/// Provider model identity is never inferred from a neighboring message.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderUsageModelV1 {
+    Known { model: String },
+    Unknown { reason: CanonicalUnknownStateV1 },
+    Unavailable { reason: CanonicalUnknownStateV1 },
+}
+
+/// Counters retain missing fields and unavailable evidence without zero filling.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderUsageCountersV1 {
+    Known {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_write_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_tokens: Option<u64>,
+    },
+    Unknown {
+        reason: CanonicalUnknownStateV1,
+    },
+    Unavailable {
+        reason: CanonicalUnknownStateV1,
+    },
+}
+
+/// Immutable read model for one exactly-once provider usage projection.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderUsageObservationV1 {
+    pub observation_id: CanonicalObservationIdV1,
+    pub usage_ordinal: u32,
+    pub receipt_id: String,
+    pub observation_sequence: u64,
+    pub scope: ObservationScopeV1,
+    pub provider: ProviderId,
+    pub model: ProviderUsageModelV1,
+    pub native_scope: ProviderUsageScopeV1,
+    pub counter_semantics: ProviderUsageCounterSemanticsV1,
+    pub counters: ProviderUsageCountersV1,
+    pub session_id: SessionId,
+    pub turn_id: Option<ObservationId>,
+    pub message_id: Option<ObservationId>,
+    pub request_id: Option<ObservationId>,
+    pub native_kind: String,
+    pub native_field: String,
+    pub ordering_domain: ObservationOrderingDomainV1,
+    pub source_range: ObservationSourceRangeV1,
+    pub native_timestamp: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderUsageCursorV1 {
+    pub observation_sequence: u64,
+    pub usage_ordinal: u32,
+    pub upper_observation_sequence: u64,
+    pub scope: ObservationScopeV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderUsageReadV1 {
+    Known {
+        observations: Vec<ProviderUsageObservationV1>,
+        upper_observation_sequence: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<ProviderUsageCursorV1>,
+    },
+    Unknown {
+        reason: CanonicalUnknownStateV1,
+        upper_observation_sequence: u64,
+    },
+    Unavailable {
+        reason: CanonicalUnknownStateV1,
+        upper_observation_sequence: u64,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CanonicalObservationFactV1 {
@@ -1140,7 +1316,20 @@ pub enum CanonicalObservationFactV1 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         success: Option<bool>,
     },
-    Usage {
+    ProviderUsage {
+        model: ProviderUsageModelV1,
+        native_scope: ProviderUsageScopeV1,
+        counter_semantics: ProviderUsageCounterSemanticsV1,
+        counters: ProviderUsageCountersV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<ObservationId>,
+        native_kind: String,
+        native_field: String,
+    },
+    /// Counters captured without enough native evidence to establish a
+    /// provider/model/scope/correlation contract. These remain observation
+    /// evidence only and are never projected into billing or messages.
+    UncorrelatedUsage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1151,6 +1340,11 @@ pub enum CanonicalObservationFactV1 {
         cache_write_tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_tokens: Option<u64>,
+        native_kind: String,
+        native_field: String,
+        missing_dimensions: BTreeSet<ProviderUsageContractDimensionV1>,
     },
     Compaction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1234,7 +1428,8 @@ impl CanonicalObservationFactV1 {
                 content: summary, ..
             } => summary.as_ref(),
             Self::Session { .. }
-            | Self::Usage { .. }
+            | Self::ProviderUsage { .. }
+            | Self::UncorrelatedUsage { .. }
             | Self::Boundary { .. }
             | Self::Unknown { .. } => None,
         }
@@ -1270,6 +1465,58 @@ impl CanonicalObservationFactV1 {
             } => invocation_id
                 .validate()
                 .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?,
+            Self::ProviderUsage {
+                model,
+                counters,
+                request_id,
+                native_kind,
+                native_field,
+                ..
+            } => {
+                if let ProviderUsageModelV1::Known { model } = model {
+                    validate_canonical_label(model)?;
+                }
+                if let Some(request_id) = request_id {
+                    request_id
+                        .validate()
+                        .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+                }
+                validate_canonical_label(native_kind)?;
+                validate_canonical_label(native_field)?;
+                if let ProviderUsageCountersV1::Known {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    reasoning_tokens,
+                    total_tokens,
+                } = counters
+                    && [
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens,
+                        cache_write_tokens,
+                        reasoning_tokens,
+                        total_tokens,
+                    ]
+                    .into_iter()
+                    .all(Option::is_none)
+                {
+                    return Err(ObservationContractError::InvalidCanonicalPayload);
+                }
+            }
+            Self::UncorrelatedUsage {
+                native_kind,
+                native_field,
+                missing_dimensions,
+                ..
+            } => {
+                validate_canonical_label(native_kind)?;
+                validate_canonical_label(native_field)?;
+                if missing_dimensions.is_empty() {
+                    return Err(ObservationContractError::InvalidCanonicalPayload);
+                }
+            }
             Self::Reasoning {
                 visibility,
                 content,
@@ -1309,7 +1556,6 @@ impl CanonicalObservationFactV1 {
             Self::Unknown { native_kind, .. } => validate_canonical_label(native_kind)?,
             Self::Message { .. }
             | Self::ToolResult { .. }
-            | Self::Usage { .. }
             | Self::Compaction { .. }
             | Self::Reasoning { .. }
             | Self::Boundary { .. } => {}

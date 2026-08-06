@@ -478,6 +478,90 @@ pub(super) const TABLES: &[Table] = &[
         ]
     ),
     table!(
+        "observation_provider_usage",
+        [
+            column("projector_version", "TEXT", true, None, 1),
+            column("observation_id", "TEXT", true, None, 2),
+            column("usage_ordinal", "INTEGER", true, None, 3),
+            column("receipt_id", "TEXT", true, None, 0),
+            column("observation_sequence", "INTEGER", true, None, 0),
+            column("scope_kind", "TEXT", true, None, 0),
+            column("project_id", "TEXT", false, None, 0),
+            column("provider", "TEXT", true, None, 0),
+            column("model_json", "TEXT", true, None, 0),
+            column("native_scope", "TEXT", true, None, 0),
+            column("counter_semantics", "TEXT", true, None, 0),
+            column("counters_json", "TEXT", true, None, 0),
+            column("session_id", "TEXT", true, None, 0),
+            column("turn_id", "TEXT", false, None, 0),
+            column("message_id", "TEXT", false, None, 0),
+            column("request_id", "TEXT", false, None, 0),
+            column("native_kind", "TEXT", true, None, 0),
+            column("native_field", "TEXT", true, None, 0),
+            column("ordering_domain", "TEXT", true, None, 0),
+            column("source_start", "INTEGER", true, None, 0),
+            column("source_end", "INTEGER", true, None, 0),
+            column("native_timestamp", "INTEGER", false, None, 0),
+        ],
+        [
+            foreign_key(
+                "observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "receipt_id",
+                "sanitization_receipts",
+                "receipt_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "observation_projection_rebuild_provider_usage",
+        [
+            column("projector_version", "TEXT", true, None, 1),
+            column("generation", "TEXT", true, None, 2),
+            column("observation_id", "TEXT", true, None, 3),
+            column("usage_ordinal", "INTEGER", true, None, 4),
+            column("receipt_id", "TEXT", true, None, 0),
+            column("observation_sequence", "INTEGER", true, None, 0),
+            column("scope_kind", "TEXT", true, None, 0),
+            column("project_id", "TEXT", false, None, 0),
+            column("provider", "TEXT", true, None, 0),
+            column("model_json", "TEXT", true, None, 0),
+            column("native_scope", "TEXT", true, None, 0),
+            column("counter_semantics", "TEXT", true, None, 0),
+            column("counters_json", "TEXT", true, None, 0),
+            column("session_id", "TEXT", true, None, 0),
+            column("turn_id", "TEXT", false, None, 0),
+            column("message_id", "TEXT", false, None, 0),
+            column("request_id", "TEXT", false, None, 0),
+            column("native_kind", "TEXT", true, None, 0),
+            column("native_field", "TEXT", true, None, 0),
+            column("ordering_domain", "TEXT", true, None, 0),
+            column("source_start", "INTEGER", true, None, 0),
+            column("source_end", "INTEGER", true, None, 0),
+            column("native_timestamp", "INTEGER", false, None, 0),
+        ],
+        [
+            foreign_key(
+                "projector_version",
+                "observation_projection_rebuilds",
+                "projector_version",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "observation_projection_rebuilds",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
         "observation_projection_rebuilds",
         [
             column("projector_version", "TEXT", false, None, 1),
@@ -1838,6 +1922,21 @@ pub(super) const INDEXES: &[Index] = &[
             "semantic_kind",
             "status",
             "observation_sequence",
+        ],
+    },
+    Index {
+        table: "observation_provider_usage",
+        name: Some("idx_observation_provider_usage_scope"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "projector_version",
+            "scope_kind",
+            "project_id",
+            "provider",
+            "session_id",
+            "observation_sequence",
+            "usage_ordinal",
         ],
     },
     Index {

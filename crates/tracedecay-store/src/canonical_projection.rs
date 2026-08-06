@@ -66,8 +66,7 @@ pub fn derive_canonical_projection(
         .as_ref()
         .and_then(|fields| fields.project_path.clone())
         .unwrap_or(fallback_project_path);
-    let session_metadata_json =
-        canonical_session_metadata(&provider, session_fields.as_ref(), envelope.facts())?;
+    let session_metadata_json = canonical_session_metadata(&provider, session_fields.as_ref())?;
     let session = SessionRecord {
         provider: provider.clone(),
         session_id: session_id.clone(),
@@ -232,7 +231,6 @@ fn canonical_session_fields(
 fn canonical_session_metadata(
     provider: &str,
     session: Option<&CanonicalSessionFields>,
-    facts: &[CanonicalObservationFactV1],
 ) -> ProjectionStoreResult<Option<String>> {
     let mut metadata = serde_json::Map::new();
     if let Some(session) = session {
@@ -270,32 +268,6 @@ fn canonical_session_metadata(
                 format!("{location_namespace}_location_provenance"),
                 provenance.clone().into(),
             );
-        }
-    }
-    if let Some(CanonicalObservationFactV1::Usage {
-        input_tokens,
-        output_tokens,
-        cache_read_tokens,
-        cache_write_tokens,
-        reasoning_tokens,
-    }) = facts
-        .iter()
-        .find(|fact| matches!(fact, CanonicalObservationFactV1::Usage { .. }))
-    {
-        let mut usage = serde_json::Map::new();
-        for (key, value) in [
-            ("input_tokens", *input_tokens),
-            ("output_tokens", *output_tokens),
-            ("cache_read_input_tokens", *cache_read_tokens),
-            ("cache_creation_input_tokens", *cache_write_tokens),
-            ("reasoning_tokens", *reasoning_tokens),
-        ] {
-            if let Some(value) = value.filter(|value| *value != 0) {
-                usage.insert(key.to_owned(), value.into());
-            }
-        }
-        if !usage.is_empty() {
-            metadata.insert("usage".to_owned(), usage.into());
         }
     }
     if metadata.is_empty() {
@@ -867,16 +839,10 @@ fn canonical_message_fields(
                 timestamp: None,
                 tool_names: None,
             },
-            CanonicalObservationFactV1::Usage { .. } => CanonicalMessageFields {
-                role: "system".to_owned(),
-                text: String::new(),
-                kind: "usage".to_owned(),
-                model: None,
-                timestamp: None,
-                tool_names: None,
-            },
             CanonicalObservationFactV1::Session { .. }
             | CanonicalObservationFactV1::Message { .. }
+            | CanonicalObservationFactV1::ProviderUsage { .. }
+            | CanonicalObservationFactV1::UncorrelatedUsage { .. }
             | CanonicalObservationFactV1::WorkflowLifecycle { .. }
             | CanonicalObservationFactV1::Reasoning { content: None, .. }
             | CanonicalObservationFactV1::Boundary { .. }
@@ -981,12 +947,18 @@ mod tests {
     #[test]
     fn canonical_projection_prefers_authored_message_over_supporting_facts() {
         let envelope = envelope(vec![
-            CanonicalObservationFactV1::Usage {
+            CanonicalObservationFactV1::UncorrelatedUsage {
                 input_tokens: Some(10),
                 output_tokens: Some(4),
                 cache_read_tokens: None,
                 cache_write_tokens: None,
                 reasoning_tokens: None,
+                total_tokens: None,
+                native_kind: "fixture_usage".to_owned(),
+                native_field: "fixture.usage".to_owned(),
+                missing_dimensions: std::collections::BTreeSet::from([
+                    tracedecay_domain::ProviderUsageContractDimensionV1::Model,
+                ]),
             },
             CanonicalObservationFactV1::ToolInvocation {
                 invocation_id: ObservationId::new("tool.fixture").unwrap(),
@@ -1088,12 +1060,18 @@ mod tests {
         );
         let envelope = envelope(vec![
             session_fact,
-            CanonicalObservationFactV1::Usage {
+            CanonicalObservationFactV1::UncorrelatedUsage {
                 input_tokens: Some(12),
                 output_tokens: Some(3),
                 cache_read_tokens: Some(7),
                 cache_write_tokens: Some(0),
                 reasoning_tokens: None,
+                total_tokens: None,
+                native_kind: "fixture_usage".to_owned(),
+                native_field: "fixture.usage".to_owned(),
+                missing_dimensions: std::collections::BTreeSet::from([
+                    tracedecay_domain::ProviderUsageContractDimensionV1::Model,
+                ]),
             },
         ]);
 
@@ -1107,8 +1085,7 @@ mod tests {
             fields.transcript_path.as_deref(),
             Some("/transcripts/session.jsonl")
         );
-        let session_metadata =
-            canonical_session_metadata("codex", Some(&fields), envelope.facts()).unwrap();
+        let session_metadata = canonical_session_metadata("codex", Some(&fields)).unwrap();
         let metadata: serde_json::Value =
             serde_json::from_str(session_metadata.as_deref().unwrap()).unwrap();
         assert_eq!(metadata["source"], "provider_store");
@@ -1121,11 +1098,9 @@ mod tests {
             "/workspace/project/.worktrees/feature"
         );
         assert_eq!(metadata["codex_session_location_provenance"], "profile_pin");
-        assert_eq!(metadata["usage"]["input_tokens"], 12);
         assert!(
-            metadata["usage"]
-                .get("cache_creation_input_tokens")
-                .is_none()
+            metadata.get("usage").is_none(),
+            "provider usage must not become session or message metadata"
         );
 
         let message_metadata: serde_json::Value = serde_json::from_str(
@@ -1162,7 +1137,7 @@ mod tests {
             location_provenance: Some("hook_event".to_owned()),
         };
         let metadata: serde_json::Value = serde_json::from_str(
-            canonical_session_metadata("cursor", Some(&fields), &[])
+            canonical_session_metadata("cursor", Some(&fields))
                 .unwrap()
                 .as_deref()
                 .unwrap(),

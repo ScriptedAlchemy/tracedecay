@@ -215,12 +215,17 @@ fn response_to_proposal(
         return Err(ContextScoutModelErrorV1::TokenBudgetExceeded);
     }
     execution.validate_output(&candidate)?;
-    let estimated_cost_microusd =
-        estimated_cost_microusd(response.model.as_deref(), input_tokens, output_tokens);
+    let estimated_cost_microusd = estimated_cost_microusd(
+        response.provider.as_deref(),
+        response.model.as_deref(),
+        input_tokens,
+        output_tokens,
+    );
     Ok(ContextScoutModelProposalV1 {
         candidate,
         receipt: ContextScoutModelReceiptV1 {
             requested_backend,
+            actual_provider: response.provider,
             actual_model: response.model,
             input_tokens,
             output_tokens,
@@ -230,11 +235,12 @@ fn response_to_proposal(
 }
 
 fn estimated_cost_microusd(
+    provider: Option<&str>,
     model: Option<&str>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
 ) -> Option<u64> {
-    let cost = cost_of_turn(model?, input_tokens?, output_tokens?, 0, 0);
+    let cost = cost_of_turn(provider?, model?, input_tokens?, output_tokens?, 0, 0)?;
     Some((cost * 1_000_000.0).round().clamp(0.0, u64::MAX as f64) as u64)
 }
 
@@ -265,6 +271,7 @@ mod tests {
                 output_text: serde_json::to_string(&valid_candidate()).unwrap(),
                 output_json: Some(serde_json::to_value(valid_candidate()).unwrap()),
                 model: Some("gpt-5.6-test".to_string()),
+                provider: Some("codex".to_string()),
                 input_tokens: Some(32),
                 output_tokens: Some(16),
             })
@@ -283,6 +290,7 @@ mod tests {
                 output_text: serde_json::to_string(&valid_candidate()).unwrap(),
                 output_json: Some(serde_json::to_value(valid_candidate()).unwrap()),
                 model: Some("gpt-5.6-test".to_string()),
+                provider: Some("codex".to_string()),
                 input_tokens: None,
                 output_tokens: None,
             })

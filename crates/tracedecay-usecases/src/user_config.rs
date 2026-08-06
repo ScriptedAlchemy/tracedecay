@@ -77,10 +77,6 @@ pub struct UserConfig {
     #[serde(default)]
     pub last_flags_fetch_at: i64,
 
-    /// UNIX timestamp of last `LiteLLM` pricing fetch.
-    #[serde(default)]
-    pub last_pricing_fetch_at: i64,
-
     /// Version that last ran `install` or `reinstall`. Used to trigger a
     /// silent reinstall when the binary is upgraded.
     #[serde(default)]
@@ -147,7 +143,6 @@ impl Default for UserConfig {
             watcher_debounce: default_watcher_debounce(),
             cached_country_flags: Vec::new(),
             last_flags_fetch_at: 0,
-            last_pricing_fetch_at: 0,
             last_installed_version: String::new(),
             previous_version: String::new(),
             extraction_timeout_secs: default_extraction_timeout_secs(),

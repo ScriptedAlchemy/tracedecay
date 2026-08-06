@@ -10,12 +10,11 @@ afterEach(() => {
 });
 
 describe('CostsPage truth claims', () => {
-  it('separates provider, tokenizer, and estimate coverage without inventing cache causality', async () => {
+  it('separates provider usage from content sizing without inventing cache causality', async () => {
     const payload = savingsOverviewPayload();
     const sessions = payload['sessions'] as Record<string, unknown>;
-    sessions['usage_messages'] = 100;
     sessions['tokenized_messages'] = 300;
-    sessions['estimated_messages'] = 600;
+    sessions['estimated_messages'] = 700;
     sessions['messages'] = 1000;
 
     renderCosts(payload);
@@ -33,7 +32,6 @@ describe('CostsPage truth claims', () => {
     // the session count never came back. Coalescing them printed "0% of 41,204
     // messages carry token counts the provider reported" over four zeroes.
     sessions['messages'] = 41_204;
-    sessions['usage_messages'] = null;
     sessions['tokenized_messages'] = null;
     sessions['estimated_messages'] = null;
     sessions['unknown_model_messages'] = null;
@@ -41,25 +39,19 @@ describe('CostsPage truth claims', () => {
 
     renderCosts(payload);
 
-    expect(await screen.findByText(/the measured share is unknown/i)).toBeTruthy();
-    expect(screen.queryByText(/0% of/i)).toBeNull();
-    expect(screen.getAllByText('not reported').length).toBe(4);
-    // The wider denominator is stated only where it was served.
-    expect(screen.queryByText(/0 messages in 0 sessions/i)).toBeNull();
-    expect(
-      screen.getByText(/messages and sessions the ledger did not report/i),
-    ).toBeTruthy();
+    expect(await screen.findByText(/41,204 content messages/i)).toBeTruthy();
+    expect(screen.getAllByText('not reported').length).toBe(3);
   });
 
-  it('renders failed turn reads as unavailable instead of actual zero spend', async () => {
+  it('renders failed provider usage reads as unavailable instead of actual zero spend', async () => {
     const payload = savingsOverviewPayload();
     // `savings_api::read_failed_block` — the block reports the failure and
     // leaves every figure null rather than settling to zero.
-    payload['turns'] = {
+    payload['provider_usage'] = {
       available: false,
       status: 'read_failed',
-      error: 'failed to read priced turn ledger',
-      turn_count: null,
+      error: 'failed to read priced provider usage',
+      usage_event_count: null,
       total_cost_usd: null,
       total_tokens: null,
       cost_basis: null,
@@ -67,9 +59,9 @@ describe('CostsPage truth claims', () => {
 
     renderCosts(payload);
 
-    expect(await screen.findByText(/priced turn ledger read failed/i)).toBeTruthy();
+    expect(await screen.findByText(/priced provider usage read failed/i)).toBeTruthy();
     expect(screen.queryByText('$0.00')).toBeNull();
-    expect(screen.queryByText(/0 across those turns/i)).toBeNull();
+    expect(screen.queryByText(/0 across those usage events/i)).toBeNull();
   });
 
   it('renders a failed session aggregate separately from an empty ledger', async () => {
@@ -81,11 +73,11 @@ describe('CostsPage truth claims', () => {
       error: 'failed to aggregate session tokens',
       scope: null,
       messages: null,
-      usage_messages: null,
+      provider_usage_events: null,
       tokenized_messages: null,
       estimated_messages: null,
       cost_basis: null,
-      actual: null,
+      provider_actual: null,
       tokenized: null,
       estimated: null,
       session_count: null,

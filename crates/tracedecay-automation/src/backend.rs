@@ -118,6 +118,8 @@ pub struct AgentTaskResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
@@ -613,6 +615,7 @@ mod tests {
                 output_text: "recovered".to_string(),
                 output_json: None,
                 model: None,
+                provider: None,
                 input_tokens: None,
                 output_tokens: None,
             })

@@ -101,7 +101,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         for name in [
             "TRACEDECAY_ENABLE_GLOBAL_DB",
             "TRACEDECAY_DISABLE_GLOBAL_DB",
-            "TRACEDECAY_OFFLINE",
             "TRACEDECAY_GLOBAL_DB",
             "TRACEDECAY_DATA_DIR",
         ] {

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde_json::Value;
@@ -7,7 +8,9 @@ use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
     CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1,
     CanonicalWorkflowEvidenceKindV1, CanonicalWorkflowSemanticKindV1, ObservationId,
-    ObservationOrderingDomainV1, ProviderId, SessionId,
+    ObservationOrderingDomainV1, ProviderId, ProviderUsageContractDimensionV1,
+    ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
+    ProviderUsageScopeV1, SessionId,
 };
 
 use crate::{ObservationRecordParseErrorV1, parse_rfc3339_timestamp};
@@ -49,6 +52,8 @@ pub struct CodexObservationLocation<'a> {
     pub project_path: Option<&'a Path>,
     pub location_path: Option<&'a Path>,
     pub transcript_path: &'a Path,
+    pub turn_id: Option<&'a str>,
+    pub model: Option<&'a str>,
 }
 
 pub fn normalize_codex_observation_with_location(
@@ -93,7 +98,12 @@ fn normalize_codex_observation_inner(
     if let Some(thread_id) = native_thread_id.and_then(observation_id_from_native) {
         relations = relations.with_thread_id(thread_id);
     }
-    if let Some(turn_id) = codex_native_turn_id(payload) {
+    if let Some(turn_id) = codex_native_turn_id(payload).or_else(|| {
+        location
+            .as_ref()
+            .and_then(|location| location.turn_id)
+            .and_then(observation_id_from_native)
+    }) {
         relations = relations.with_turn_id(turn_id);
     }
     if matches!(
@@ -107,6 +117,7 @@ fn normalize_codex_observation_inner(
     }
 
     let mut facts = Vec::new();
+    let context_model = location.as_ref().and_then(|location| location.model);
     if let Some(location) = location {
         facts.push(CanonicalObservationFactV1::Session {
             project_path: location
@@ -145,7 +156,7 @@ fn normalize_codex_observation_inner(
             native_kind: "turn_context".to_string(),
             state: CanonicalUnknownStateV1::Unsupported,
         }),
-        "event_msg" => append_codex_event_facts(payload, timestamp, &mut facts),
+        "event_msg" => append_codex_event_facts(payload, timestamp, context_model, &mut facts),
         "response_item" => {
             append_codex_response_item_facts(payload, timestamp, &stable_record_id, &mut facts);
         }
@@ -240,6 +251,7 @@ fn append_codex_session_meta_agent_relations(
 fn append_codex_event_facts(
     payload: &Value,
     timestamp: Option<i64>,
+    context_model: Option<&str>,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     match payload.get("type").and_then(Value::as_str) {
@@ -262,34 +274,28 @@ fn append_codex_event_facts(
             }
         }
         Some("token_count") => {
-            let usage = payload
-                .get("info")
-                .and_then(|info| {
-                    info.get("last_token_usage")
-                        .or_else(|| info.get("total_token_usage"))
-                })
-                .unwrap_or(payload);
-            let input = canonical_u64(usage.get("input_tokens"));
-            let cache_read = canonical_u64(
-                usage
-                    .get("cached_input_tokens")
-                    .or_else(|| usage.get("cache_read_input_tokens")),
-            );
-            facts.push(CanonicalObservationFactV1::Usage {
-                input_tokens: input.map(|input| input.saturating_sub(cache_read.unwrap_or(0))),
-                output_tokens: canonical_u64(
-                    usage
-                        .get("output_tokens")
-                        .or_else(|| usage.get("completion_tokens")),
+            let info = payload.get("info").unwrap_or(payload);
+            let mut emitted = false;
+            for (usage, semantics, field) in [
+                (
+                    info.get("last_token_usage"),
+                    ProviderUsageCounterSemanticsV1::Delta,
+                    "payload.info.last_token_usage",
                 ),
-                cache_read_tokens: cache_read,
-                cache_write_tokens: canonical_u64(usage.get("cache_write_input_tokens")),
-                reasoning_tokens: canonical_u64(
-                    usage
-                        .get("reasoning_output_tokens")
-                        .or_else(|| usage.get("reasoning_tokens")),
+                (
+                    info.get("total_token_usage"),
+                    ProviderUsageCounterSemanticsV1::Cumulative,
+                    "payload.info.total_token_usage",
                 ),
-            });
+            ] {
+                if let Some(usage) = usage {
+                    append_codex_usage_fact(payload, usage, context_model, semantics, field, facts);
+                    emitted = true;
+                }
+            }
+            if !emitted {
+                append_uncorrelated_codex_usage_fact(payload, info, context_model, facts);
+            }
         }
         Some("thread_goal_updated") => {
             if !append_codex_thread_goal_lifecycle_fact(payload, facts) {
@@ -311,6 +317,130 @@ fn append_codex_event_facts(
             state: CanonicalUnknownStateV1::Absent,
         }),
     }
+}
+
+fn append_uncorrelated_codex_usage_fact(
+    payload: &Value,
+    usage: &Value,
+    context_model: Option<&str>,
+    facts: &mut Vec<CanonicalObservationFactV1>,
+) {
+    let input_tokens = canonical_u64(usage.get("input_tokens"));
+    let output_tokens = canonical_u64(
+        usage
+            .get("output_tokens")
+            .or_else(|| usage.get("completion_tokens")),
+    );
+    let cache_read_tokens = canonical_u64(
+        usage
+            .get("cached_input_tokens")
+            .or_else(|| usage.get("cache_read_input_tokens")),
+    );
+    let cache_write_tokens = canonical_u64(usage.get("cache_write_input_tokens"));
+    let reasoning_tokens = canonical_u64(
+        usage
+            .get("reasoning_output_tokens")
+            .or_else(|| usage.get("reasoning_tokens")),
+    );
+    let total_tokens = canonical_u64(usage.get("total_tokens"));
+    let mut missing_dimensions = BTreeSet::from([
+        ProviderUsageContractDimensionV1::Scope,
+        ProviderUsageContractDimensionV1::CounterSemantics,
+        ProviderUsageContractDimensionV1::Correlation,
+    ]);
+    if context_model
+        .or_else(|| payload.get("model").and_then(Value::as_str))
+        .is_none()
+    {
+        missing_dimensions.insert(ProviderUsageContractDimensionV1::Model);
+    }
+    facts.push(CanonicalObservationFactV1::UncorrelatedUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+        total_tokens,
+        native_kind: "token_count".to_owned(),
+        native_field: "payload.info".to_owned(),
+        missing_dimensions,
+    });
+}
+
+fn append_codex_usage_fact(
+    payload: &Value,
+    usage: &Value,
+    context_model: Option<&str>,
+    counter_semantics: ProviderUsageCounterSemanticsV1,
+    native_field: &str,
+    facts: &mut Vec<CanonicalObservationFactV1>,
+) {
+    let input_tokens = canonical_u64(usage.get("input_tokens"));
+    let output_tokens = canonical_u64(
+        usage
+            .get("output_tokens")
+            .or_else(|| usage.get("completion_tokens")),
+    );
+    let cache_read_tokens = canonical_u64(
+        usage
+            .get("cached_input_tokens")
+            .or_else(|| usage.get("cache_read_input_tokens")),
+    );
+    let cache_write_tokens = canonical_u64(usage.get("cache_write_input_tokens"));
+    let reasoning_tokens = canonical_u64(
+        usage
+            .get("reasoning_output_tokens")
+            .or_else(|| usage.get("reasoning_tokens")),
+    );
+    let total_tokens = canonical_u64(usage.get("total_tokens"));
+    let counters = if [
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+        total_tokens,
+    ]
+    .into_iter()
+    .any(|value| value.is_some())
+    {
+        ProviderUsageCountersV1::Known {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+            total_tokens,
+        }
+    } else {
+        ProviderUsageCountersV1::Unknown {
+            reason: CanonicalUnknownStateV1::Malformed,
+        }
+    };
+    facts.push(CanonicalObservationFactV1::ProviderUsage {
+        model: context_model
+            .or_else(|| payload.get("model").and_then(Value::as_str))
+            .map_or(
+                ProviderUsageModelV1::Unknown {
+                    reason: CanonicalUnknownStateV1::Absent,
+                },
+                |model| ProviderUsageModelV1::Known {
+                    model: model.to_owned(),
+                },
+            ),
+        native_scope: match counter_semantics {
+            ProviderUsageCounterSemanticsV1::Delta => ProviderUsageScopeV1::Request,
+            ProviderUsageCounterSemanticsV1::Cumulative => ProviderUsageScopeV1::Session,
+            ProviderUsageCounterSemanticsV1::Unknown
+            | ProviderUsageCounterSemanticsV1::Unavailable => ProviderUsageScopeV1::Unknown,
+        },
+        counter_semantics,
+        counters,
+        request_id: string_field(payload, "request_id")
+            .and_then(|request_id| observation_id_from_native(&request_id)),
+        native_kind: "token_count".to_owned(),
+        native_field: native_field.to_owned(),
+    });
 }
 
 fn append_codex_thread_goal_lifecycle_fact(
@@ -646,4 +776,153 @@ fn response_item_tool_name(payload: &Value, response_item_type: &str) -> Option<
             "web_search_call" => Some("web_search".to_string()),
             _ => None,
         })
+}
+
+#[cfg(test)]
+mod provider_usage_tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    use serde_json::json;
+    use tracedecay_domain::{
+        CanonicalObservationFactV1, ObservationId, ObservationSourceRangeV1,
+        ProviderUsageContractDimensionV1, ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1,
+        ProviderUsageModelV1, ProviderUsageScopeV1,
+    };
+
+    use super::{CodexObservationLocation, normalize_codex_observation_with_location};
+
+    #[test]
+    fn cumulative_token_count_preserves_native_semantics_and_turn_context() {
+        let native = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "cached_input_tokens": 3,
+                        "reasoning_output_tokens": 1,
+                        "total_tokens": 12
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 20,
+                        "cached_input_tokens": 30,
+                        "reasoning_output_tokens": 5,
+                        "total_tokens": 120
+                    }
+                }
+            }
+        });
+        let envelope = normalize_codex_observation_with_location(
+            &native,
+            "session.fixture",
+            Some("thread.fixture"),
+            ObservationId::new("record.fixture").unwrap(),
+            ObservationSourceRangeV1::new(10, 20).unwrap(),
+            CodexObservationLocation {
+                project_path: None,
+                location_path: None,
+                transcript_path: Path::new("/tmp/rollout.jsonl"),
+                turn_id: Some("turn.fixture"),
+                model: Some("gpt-5.6-codex"),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            envelope.relations().turn_id().map(|id| id.as_str()),
+            Some("turn.fixture")
+        );
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::ProviderUsage {
+                counter_semantics: ProviderUsageCounterSemanticsV1::Delta,
+                native_scope: ProviderUsageScopeV1::Request,
+                counters: ProviderUsageCountersV1::Known {
+                    input_tokens: Some(10),
+                    output_tokens: Some(2),
+                    ..
+                },
+                native_field,
+                ..
+            } if native_field == "payload.info.last_token_usage"
+        )));
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::ProviderUsage {
+                model: ProviderUsageModelV1::Known { model },
+                counter_semantics: ProviderUsageCounterSemanticsV1::Cumulative,
+                native_scope: ProviderUsageScopeV1::Session,
+                counters: ProviderUsageCountersV1::Known {
+                    input_tokens: Some(100),
+                    output_tokens: Some(20),
+                    cache_read_tokens: Some(30),
+                    reasoning_tokens: Some(5),
+                    total_tokens: Some(120),
+                    ..
+                },
+                native_field,
+                ..
+            } if model == "gpt-5.6-codex"
+                && native_field == "payload.info.total_token_usage"
+        )));
+    }
+
+    #[test]
+    fn bare_token_count_info_remains_typed_uncorrelated() {
+        let native = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "total_tokens": 12
+                }
+            }
+        });
+        let envelope = normalize_codex_observation_with_location(
+            &native,
+            "session.fixture",
+            Some("thread.fixture"),
+            ObservationId::new("record.fixture").unwrap(),
+            ObservationSourceRangeV1::new(10, 20).unwrap(),
+            CodexObservationLocation {
+                project_path: None,
+                location_path: None,
+                transcript_path: Path::new("/tmp/rollout.jsonl"),
+                turn_id: Some("turn.fixture"),
+                model: Some("gpt-5.6-codex"),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            envelope
+                .facts()
+                .iter()
+                .all(|fact| !matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. }))
+        );
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::UncorrelatedUsage {
+                input_tokens: Some(10),
+                output_tokens: Some(2),
+                total_tokens: Some(12),
+                native_kind,
+                native_field,
+                missing_dimensions,
+                ..
+            } if native_kind == "token_count"
+                && native_field == "payload.info"
+                && missing_dimensions == &BTreeSet::from([
+                    ProviderUsageContractDimensionV1::Scope,
+                    ProviderUsageContractDimensionV1::CounterSemantics,
+                    ProviderUsageContractDimensionV1::Correlation,
+                ])
+        )));
+    }
 }

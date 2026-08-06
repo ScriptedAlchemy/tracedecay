@@ -148,16 +148,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn insert_turn_for_test(&self, turn: &crate::types::CostTurn) -> bool {
-        self.profile_database.insert_turn(turn).await
-    }
-
-    #[doc(hidden)]
-    pub async fn insert_turns_for_test(&self, turns: &[crate::types::CostTurn]) -> usize {
-        self.profile_database.insert_turns(turns).await
-    }
-
-    #[doc(hidden)]
     pub fn dashboard_test_authority(
         self: &Arc<Self>,
     ) -> Result<crate::dashboard::DashboardHostAdmissionTestAuthorityV1> {

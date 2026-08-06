@@ -17,13 +17,14 @@ use tracedecay_domain::{
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
     LocatorDigest, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass,
-    SessionId, SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1,
-    SourceAggregateFrontierV1, SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1,
-    SourceContentStateV1, SourceCoverageV1, SourceCursorV1, SourceDefinitionV1,
-    SourceDeletionSemanticsV1, SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1,
-    SourceObjectRevisionV1, SourcePartitionFrontierV1, SourcePartitionIdV1,
-    SourceRefetchStrategyV1, SourceSnapshotIdV1, UserProfileId, canonical_sha256,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId,
+    ProviderUsageReadV1, RetentionClass, SessionId, SourceAcquisitionCapabilitiesV1,
+    SourceAcquisitionContractV1, SourceAggregateFrontierV1, SourceBindingOwnerV1, SourceBindingV1,
+    SourceCaptureModeV1, SourceContentStateV1, SourceCoverageV1, SourceCursorV1,
+    SourceDefinitionV1, SourceDeletionSemanticsV1, SourceInstanceId, SourceNativeObjectIdV1,
+    SourceObjectObservationV1, SourceObjectRevisionV1, SourcePartitionFrontierV1,
+    SourcePartitionIdV1, SourceRefetchStrategyV1, SourceSnapshotIdV1, UserProfileId,
+    canonical_sha256,
 };
 use tracedecay_store::ObservationReplayRequest;
 
@@ -177,6 +178,21 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
             ["degraded", "supported", "unavailable", "unknown"],
             "{provider}"
         );
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn native_provider_usage_survives_production_admission() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("HOME", home.path());
+    let _userprofile = EnvVarGuard::set("USERPROFILE", home.path());
+    for provider in ["claude", "codex"] {
+        let outcome = execute_native_provider_path(provider, home.path()).await;
+        assert_eq!(outcome.status, HostAdmissionStatus::Supported, "{provider}");
     }
 }
 
@@ -597,7 +613,23 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             meta["payload"]["cwd"] = project.to_string_lossy().into_owned().into();
             let message =
                 include_str!("fixtures/provider_normalization/codex/agent_message.input.json");
-            std::fs::write(&transcript, format!("{}\n{message}\n", meta)).unwrap();
+            let usage = json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-06T00:00:00Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 2,
+                            "cached_input_tokens": 3,
+                            "reasoning_output_tokens": 1,
+                            "total_tokens": 12
+                        }
+                    }
+                }
+            });
+            std::fs::write(&transcript, format!("{}\n{message}\n{usage}\n", meta)).unwrap();
             codex::try_admit_codex_jsonl_observations_for_project_with_admission(
                 &transcript,
                 &project,
@@ -711,6 +743,52 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         !observations.is_empty(),
         "{provider} native parser must reach observation authority"
     );
+    if matches!(provider, "claude" | "codex") {
+        let usage_observation = observations.iter().find(|stored| {
+            serde_json::from_value::<CanonicalObservationEnvelopeV1>(
+                stored.observation().payload().clone(),
+            )
+            .is_ok_and(|envelope| {
+                envelope
+                    .facts()
+                    .iter()
+                    .any(|fact| matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. }))
+            })
+        });
+        let usage_observation = usage_observation
+            .unwrap_or_else(|| panic!("{provider} usage must survive production admission"));
+        let expected_scope = match scope {
+            HostAdmissionScope::Profile => ObservationScopeV1::Profile,
+            HostAdmissionScope::Project => ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+        };
+        assert_eq!(
+            usage_observation.observation().scope(),
+            &expected_scope,
+            "{provider} provider usage must retain the exact admitted scope"
+        );
+        tracedecay::sessions::claude_observation::drain_projection_queue(
+            &facade,
+            &expected_scope,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .expect("provider usage projection convergence");
+        let projected = runtime
+            .registered_database(scope)
+            .expect("admitted scope must retain its registered database")
+            .provider_usage_observations(&expected_scope, Some(provider), None, 32)
+            .await
+            .expect("provider usage projection must remain readable");
+        assert!(
+            matches!(
+                &projected,
+                ProviderUsageReadV1::Known { observations, .. } if !observations.is_empty()
+            ),
+            "{provider} provider usage must publish with its projection checkpoint: {projected:?}"
+        );
+    }
     assert_external_source_contract(provider, &scope, &project_id, observations[0].observation());
     let committed = runtime
         .external_source_receipt_for_test(scope, observations[0].commit_receipt())
@@ -1273,7 +1351,10 @@ fn assert_legal_host_response(provider: &str, state: &str, expected: &Value, out
         } else {
             &mut document["hookSpecificOutput"]["additionalContext"]
         };
-        assert!(context.is_string(), "{provider}/{state} context response");
+        assert!(
+            context.is_string(),
+            "{provider}/{state} context response: {document}"
+        );
         *context = Value::String("<REDACTED_CONTEXT>".to_string());
         if provider == "cursor" {
             let project_root = &mut document["env"]["TRACEDECAY_PROJECT_ROOT"];

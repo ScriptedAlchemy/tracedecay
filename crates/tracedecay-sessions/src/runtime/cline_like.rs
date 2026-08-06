@@ -1289,8 +1289,14 @@ mod observation_tests {
 
         let facts = parsed.value()["facts"].as_array().unwrap();
         assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0]["kind"], "usage");
+        assert_eq!(facts[0]["kind"], "uncorrelated_usage");
         assert_eq!(facts[0]["input_tokens"], 777);
+        assert_eq!(facts[0]["native_kind"], "usage");
+        assert_eq!(facts[0]["native_field"], "usage");
+        assert_eq!(
+            facts[0]["missing_dimensions"],
+            serde_json::json!(["model", "scope", "counter_semantics", "correlation"])
+        );
     }
 
     #[test]
