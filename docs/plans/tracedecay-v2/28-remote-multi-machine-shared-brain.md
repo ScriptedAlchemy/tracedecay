@@ -4,10 +4,10 @@
 
 Status: active product plan.
 
-PR16 delivers the remote shared Brain as one production journey. It builds on
+This plan delivers the remote shared Brain as one production journey. It builds on
 the existing daemon-owned store, capture, query, API, settings, and
 health surfaces; it does not ship distributed-authority scaffolding that is
-unusable until a later PR.
+unusable until a later delivery.
 
 Earlier enrollment, topology, spool, replica, backup, failover, fixture, and
 packet artifact names are historical evidence, not standalone prerequisites
@@ -41,7 +41,7 @@ writers or losing deletion state.
    typed Brain/node identity with explicit shard placement/revision,
    capabilities, transport profile, and revocable credentials.
    Enrollment records repository/worktree/ref/snapshot identity through the
-   same verified Git relationship model as PR15; hostname, path, or directory
+   same verified Git relationship model as multi-root scope; hostname, path, or directory
    name cannot correlate projects. Local hooks send bounded events to the
    node-local daemon. When the owning shard authority is unreachable, that
    daemon applies the canonical sanitizer and appends eligible canonical
@@ -116,7 +116,7 @@ finding and remediation identities.
 - Verified read replicas/caches retain provenance, generation, watermark, lag,
   and epoch. Possessing a cache handle or manifest never bypasses current
   authorization, project scope, retention, or deletion.
-- The remote offline-capture spool is distinct from PR6's daemon
+- The remote offline-capture spool is distinct from the provider-capture daemon
   host-admission spool. Hooks never own durable sanitization or spool writes.
   Unsaved LSP documents, document versions, overlays, dirty-overlay
   diagnostics, raw JSON-RPC frames, analyzer state, and session-only agent
@@ -142,7 +142,7 @@ finding and remediation identities.
   project/worktree/ref/snapshot identity. Hostname, path, directory name, CWD,
   or enrollment alone cannot merge projects or widen scope.
 - Enrollment and daemon locality confer no Git or GitHub mutation authority.
-  PR16 has no GitHub post, update, reply, resolve, dismiss, push, rebase,
+  The remote Brain has no GitHub post, update, reply, resolve, dismiss, push, rebase,
   force-push, or autonomous repository mutation path.
 - Node revocation immediately blocks commands, replay, cache refresh, backup
   access, restore publication, and promotion credentials. Delayed packets from
@@ -155,7 +155,7 @@ finding and remediation identities.
   authority. Content-addressed structures may support immutable spool
   integrity, deduplication, or gap evidence only.
 
-## PR16 implementation defaults
+## Remote Brain implementation defaults
 
 - Build the first delivery on existing HTTP/SSE, rustls, and the daemon-owned
   rusqlite runtime path. The retired libSQL compatibility/runtime path is not a
@@ -204,8 +204,8 @@ finding and remediation identities.
    replicas, backups, and restores accept only their exact final persisted
    shape. Any other shape returns `ResetRequired` before interpretation and
    requires explicit reset or recreation; it never gains a reader, migration,
-   backfill, dual write, or census path. PR18 adds SDK bindings without
-   replacing these PR16 APIs.
+   backfill, dual write, or census path. The SDK delivery adds bindings without
+   replacing these remote-authority APIs.
 
 ## Replacement and deletion
 
@@ -247,15 +247,16 @@ unavailable, or recovery-required truth. Compatibility checks cover only an
 actually independently released public local/API protocol; every non-final
 stored-data input returns `ResetRequired` before interpretation. Negative
 checks prove unsaved overlays and analyzer state never become durable remote
-records and no client or offline path opens authority storage. The final PR16
+records and no client or offline path opens authority storage. The final
 check is the relevant ordinary all-feature repository test run, not a separate
-acceptance gate; PR16 adds no benchmark harness or placeholder baseline.
+acceptance gate; this delivery adds no benchmark harness or placeholder baseline.
 
-## Not in PR16
+## Not in the remote Brain
 
 - Multi-primary or eventual-authority convergence, CRDT mutation authority,
   last-write-wins conflict resolution, automatic partition promotion, or a
   mandatory hosted control plane.
-- SDK bindings, which ship with PR18.
+- SDK bindings, which ship with the public SDK delivery
+  ([Plan 17](17-official-public-api-and-sdks.md)).
 - Unsanitized capture, durable/remote dirty overlays, hidden replication or
   coverage degradation, or any Git/GitHub mutation.
