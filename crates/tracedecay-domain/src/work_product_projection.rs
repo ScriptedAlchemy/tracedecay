@@ -690,6 +690,9 @@ fn legal_actions(item: &WorkItemV1) -> BTreeSet<WorkLegalActionV1> {
 fn critical_path(
     graph: &WorkProductGraphV1,
 ) -> Result<(Vec<TaskId>, u32), WorkProductContractError> {
+    if graph.items().is_empty() {
+        return Ok((Vec::new(), 0));
+    }
     let mut remaining = graph
         .items()
         .iter()

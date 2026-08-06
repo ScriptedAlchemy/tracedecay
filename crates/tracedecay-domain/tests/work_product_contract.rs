@@ -794,6 +794,22 @@ fn every_work_view_is_a_projection_of_the_same_versioned_selection() {
 }
 
 #[test]
+fn an_initial_empty_graph_has_empty_zero_effort_projections() {
+    let graph = graph(Vec::new());
+    let bundle = WorkProductProjectionBundleV1::from_graph(
+        &graph,
+        &runtime(&graph, UtcMicros(0), Vec::new()),
+        UtcMicros(0),
+    )
+    .unwrap();
+
+    assert!(bundle.critical_path().task_ids().is_empty());
+    assert_eq!(bundle.critical_path().total_effort(), 0);
+    assert_eq!(bundle.workload().total_effort(), 0);
+    assert!(bundle.dag().gating_edges().is_empty());
+}
+
+#[test]
 fn projection_observation_time_controls_scheduled_lane_boundaries() {
     let task_id = id::<TaskId>("task.scheduled");
     let graph = graph(vec![item_scheduled_at(
