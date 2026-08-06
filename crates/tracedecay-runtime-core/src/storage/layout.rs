@@ -165,17 +165,20 @@ pub fn matching_legacy_profile_layouts(
         project_root,
         profile_root,
         excluded_project_id,
+        crate::worktree::is_detached_linked_worktree,
         crate::worktree::git_common_dir,
     )
 }
 
-pub(super) fn matching_legacy_profile_layouts_with_git_resolver<G>(
+pub(super) fn matching_legacy_profile_layouts_with_git_resolver<D, G>(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
+    mut is_detached_linked_worktree: D,
     mut git_common_dir: G,
 ) -> Result<(Vec<StoreLayout>, bool)>
 where
+    D: FnMut(&Path) -> bool,
     G: FnMut(&Path) -> Option<PathBuf>,
 {
     let projects_root = profile_root.join("projects");
@@ -216,7 +219,9 @@ where
     let selected_is_sole_exact_root =
         selected_manifest_matches_exact_root && exact_manifests.is_empty();
     let matching_manifests = if exact_manifests.is_empty() {
-        let project_git_common_dir = git_common_dir(project_root);
+        let project_git_common_dir = (!is_detached_linked_worktree(project_root))
+            .then(|| git_common_dir(project_root))
+            .flatten();
         let mut legacy_git_common_dirs = HashMap::<PathBuf, Option<PathBuf>>::new();
         non_exact_manifests
             .into_iter()

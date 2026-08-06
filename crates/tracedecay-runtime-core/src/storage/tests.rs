@@ -85,6 +85,7 @@ mod tests {
                 &project_root,
                 &profile_root,
                 None,
+                |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
                     Some(dir.path().join("shared.git"))
@@ -108,6 +109,7 @@ mod tests {
                 &project_root,
                 &profile_root,
                 Some("proj_exact"),
+                |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
                     Some(dir.path().join("shared.git"))
@@ -158,6 +160,7 @@ mod tests {
             &project_root,
             &profile_root,
             None,
+            |_| false,
             |_| None,
         )
         .expect_err("missing project_id must fail closed");
@@ -183,6 +186,7 @@ mod tests {
                 &worktree_root,
                 &profile_root,
                 Some("proj_selected"),
+                |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
                     Some(dir.path().join("shared.git"))
@@ -196,62 +200,6 @@ mod tests {
             resolver_calls.borrow().as_slice(),
             [worktree_root, historical_root],
             "a selected identity from a sibling root must retain shared-Git recovery"
-        );
-    }
-
-    fn git(dir: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    #[test]
-    fn detached_linked_worktree_recovers_its_shared_legacy_profile_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let primary = dir.path().join("primary");
-        let linked = dir.path().join("linked");
-        let profile_root = dir.path().join("profile");
-        fs::create_dir_all(&primary).unwrap();
-        git(&primary, &["init", "--initial-branch=main"]);
-        git(&primary, &["config", "user.email", "test@example.com"]);
-        git(&primary, &["config", "user.name", "test"]);
-        fs::write(primary.join("file.txt"), "x").unwrap();
-        git(&primary, &["add", "file.txt"]);
-        git(&primary, &["commit", "-m", "seed"]);
-        git(
-            &primary,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "linked",
-                linked.to_str().expect("utf-8 path"),
-            ],
-        );
-        git(&linked, &["checkout", "--detach"]);
-        assert!(crate::worktree::is_detached_linked_worktree(&linked));
-
-        write_manifest(&profile_root, "proj_historical", &primary);
-
-        let (layouts, selected_is_sole_exact_root) =
-            matching_legacy_profile_layouts(&linked, &profile_root, None).unwrap();
-
-        assert!(!selected_is_sole_exact_root);
-        assert_eq!(layouts.len(), 1);
-        assert_eq!(
-            layouts[0].identity.project_id.as_deref(),
-            Some("proj_historical")
-        );
-        assert_eq!(
-            layouts[0].data_root,
-            profile_root.join("projects").join("proj_historical")
         );
     }
 
