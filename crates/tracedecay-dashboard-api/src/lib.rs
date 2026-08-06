@@ -1149,6 +1149,10 @@ fn project_api_router() -> Router<DashboardState> {
             get(memory_api::curation_activity),
         )
         .route(
+            "/api/plugins/holographic/curation/plan",
+            get(memory_api::curation_plan),
+        )
+        .route(
             "/api/plugins/holographic/curation/runs",
             get(memory_api::curation_runs),
         )
