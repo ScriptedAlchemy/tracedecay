@@ -36,11 +36,11 @@ use tracedecay_application::{
     AdmitExecutionCommand, ApplicationContractError, ApplicationEnvelope, ApplicationOperation,
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
     AttachRuntimeEvidenceCommand, CancellationContext, CancellationSignal, CreateWorkCommand,
-    Deadline, HealthReadRequest, IdempotencyKey, LegalAction, OpaqueCursor, OperationTermination,
-    PageRequest, ProblemOwningLayer, ReplanDependenciesCommand, RequestContext, RequestId,
-    ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
-    RetryDirective, ReviewProposalRequestV1, SafeDiagnostic, SessionLookupRequest,
-    SourceLinesRequest, StreamEvent, StreamEventKind,
+    Deadline, GenerateProposalRequest, GeneratedWorkProposal, HealthReadRequest, IdempotencyKey,
+    LegalAction, OpaqueCursor, OperationTermination, PageRequest, ProblemOwningLayer,
+    ReplanDependenciesCommand, RequestContext, RequestId, ResultContractRef, ResultProjection,
+    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, ReviewProposalRequestV1,
+    SafeDiagnostic, SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
     WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 pub use tracedecay_application::{
@@ -97,9 +97,7 @@ use crate::daemon_client::{
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
     InvocationControls, RequestedOutputFormat, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
-use crate::daemon_contract::{
-    WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
-};
+use crate::daemon_contract::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 mod configuration_wire;
@@ -420,14 +418,12 @@ impl PrimitiveCodeSurfaceRequest {
                     meta: request.meta.into_application(page),
                 })
             }
-            Self::TypeHierarchy(request) => {
-                PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
-                    node_id: request.node_id,
-                    maximum_depth: request.maximum_depth,
-                    scope: request.scope,
-                    meta: request.meta.into_application(page),
-                })
-            }
+            Self::TypeHierarchy(request) => PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
+                node_id: request.node_id,
+                maximum_depth: request.maximum_depth,
+                scope: request.scope,
+                meta: request.meta.into_application(page),
+            }),
             Self::Callers(request) => PrimitiveRequest::Callers(GraphRelationRequest {
                 node_id: request.node_id,
                 maximum_depth: request.maximum_depth,
@@ -976,6 +972,11 @@ async fn invoke_work_operation(
             WorkProjectionSnapshotV1
         ),
         WorkOperation::Delta => core!(WorkProjectionDeltaRequestV1, Delta, WorkProjectionDeltaV1),
+        WorkOperation::GenerateProposal => core!(
+            GenerateProposalRequest,
+            GenerateProposal,
+            GeneratedWorkProposal
+        ),
         WorkOperation::Create => core!(CreateWorkCommand, Create, WorkProjection),
         WorkOperation::ReplanDependencies => {
             core!(

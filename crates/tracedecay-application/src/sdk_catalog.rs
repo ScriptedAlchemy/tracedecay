@@ -174,13 +174,16 @@ mod tests {
     #[test]
     fn sdk_registry_projects_mounted_routes_as_named_direct_methods() {
         let registry = sdk_executable_binding_registry().expect("SDK registry");
-        assert!(
-            registry.iter().all(|availability| !availability
-                .operation_id()
-                .as_str()
-                .starts_with("operation.work.")),
-            "the unavailable Work family must not leak stale SDK bindings"
-        );
+        let work = registry
+            .get(&OperationId::new("operation.work.generate_proposal").expect("operation ID"))
+            .and_then(|availability| availability.binding())
+            .expect("mounted work generate-proposal");
+        assert!(matches!(
+            work.transport(),
+            SdkTransportBindingV1::Http { route_path }
+                if route_path == "/application/work/generate-proposal"
+        ));
+        assert_eq!(work.sdk_method().as_str(), "work_generate_proposal");
 
         let workflow = registry
             .get(&OperationId::new("operation.workflow.register_definition").expect("operation ID"))

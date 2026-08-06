@@ -50,6 +50,7 @@ macro_rules! dashboard_work_routes {
 dashboard_work_routes!(
     Snapshot,
     Delta,
+    GenerateProposal,
     Create,
     ReplanDependencies,
     ReviewProposal,

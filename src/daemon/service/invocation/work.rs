@@ -100,6 +100,23 @@ pub(super) fn execute_work_application(
             deadline,
             WorkApplicationOutcomeV1::Delta,
         ),
+        WorkApplicationInvocationV1::GenerateProposal(request) => complete_work_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services.commands().generate_proposal(
+                &context,
+                registered.configuration_digest.clone(),
+                request,
+            ),
+            observed_at,
+            deadline,
+            WorkApplicationOutcomeV1::GenerateProposal,
+        ),
         WorkApplicationInvocationV1::Create(command) => complete_work_effect(
             &registered,
             request_id,
@@ -197,7 +214,6 @@ pub(super) fn execute_work_application(
 }
 
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_workflow_application(
     registered: RegisteredWorkRuntime,
