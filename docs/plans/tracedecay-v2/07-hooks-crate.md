@@ -2,14 +2,15 @@
 
 ## Status and existing foundation
 
-PR6 captured the supported Claude Code, Codex, Cursor, Hermes, and Kiro event
-semantics. PR13 adds the verified Kimi Code and OpenCode event capabilities
+The initial capture delivery covered the supported Claude Code, Codex, Cursor,
+Hermes, and Kiro event
+semantics. The advisory feedback delivery adds the verified Kimi Code and OpenCode event capabilities
 and replaces the remaining compatibility planners with thin, bounded adapters
 that signal one daemon-owned feedback path. Hooks are transport adapters; they
 do not own product state, synchronization, Git, feedback policy, or peer
 coordination.
 
-PR6 artifact names, inventories, matrices, packets, and intermediate file
+Historical capture-delivery artifact names, inventories, matrices, packets, and intermediate file
 layouts are historical implementation evidence, not prerequisites or
 requirements to recreate. Only an artifact that remains a published public
 wire/API compatibility contract is retained by name; current and future audits
@@ -25,7 +26,7 @@ backfill, dual write, or census path survives. An actually independently
 released public envelope may retain separate protocol negotiation. Fixture
 revisions alone remain insufficient evidence.
 
-## PR13 user outcome
+## Advisory feedback user outcome
 
 After a supported saved edit or agent stop boundary, the host can receive the
 same current TraceDecay feedback available through MCP, CLI, LSP, or native
@@ -56,7 +57,7 @@ corrupt product state, and replay does not duplicate a logical event.
    waits for them. Spool acceptance, daemon admission, feedback completion,
    and display remain distinct outcomes.
 
-## PR13 implementation slices
+## Advisory feedback implementation slices
 
 ### Native edit and stop signaling
 
@@ -180,8 +181,9 @@ state; it never contains the result of work started by that hook.
 
 ## Replacement and deletion
 
-- Remove the reserved pre-PR17 task-placement and ready-commit fields and
-  variants from the PR13 event contract.
+- Remove the reserved task-placement and ready-commit fields and
+  variants from the advisory event contract until the task-handoff capability
+  ships.
 - Treat generated host matrices, exact schema/file inventories, milestone
   gates, and placeholder hook benchmarks as retired historical scaffolding.
   Checked-in native events remain evidence where needed to prove supported
@@ -227,15 +229,15 @@ state; it never contains the result of work started by that hook.
 - Host adapters never open a TraceDecay database, run synchronization, invoke
   Git/GitHub/CI, write another worktree, schedule work, or continue an agent.
 - The relevant host-hook integration tests plus the repository documentation
-  review run through ordinary repository checks, not a PR13 acceptance gate;
+  review run through ordinary repository checks, not a separate acceptance gate;
   no standalone benchmark packet is an acceptance artifact.
 
 ## Later callable extensions
 
-- **PR15:** a multi-root host resolves each root independently through Plan 16
+- **Multi-root operation:** a multi-root host resolves each root independently through Plan 16
   and obtains one binding and event stream per admitted root. Denied or
   ambiguous roots remain explicit and cannot be folded into a neighbor.
-- **PR17:** after Plan 24 ships task identity and Plan 32 ships runtime
+- **Task handoff:** after Plan 24 ships task identity and Plan 32 ships runtime
   receipts, a host may call their application operations with an independently
   authorized task join. The event contract then adds the retained task-placed
   and dependency-ready commit observations under a new capability revision.
