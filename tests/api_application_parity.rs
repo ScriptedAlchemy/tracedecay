@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use axum::body::Body;
+use axum::extract::Extension;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 use tracedecay::application_surface::{
@@ -16,11 +17,12 @@ use tracedecay::daemon_client::{
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
 use tracedecay::mcp::tools::get_tool_definitions;
 use tracedecay_api::{
-    CanonicalInvocationResult, HttpApplicationRequest, HttpSseEvent, application_router,
+    CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
+    HttpApplicationRequest, HttpSseEvent, application_router,
 };
 use tracedecay_application::{
-    APPLICATION_DEFAULT_PROFILE_ID, IdempotencyKey, RequestId, ResultContractRef, RetryDirective,
-    StreamEvent,
+    APPLICATION_DEFAULT_PROFILE_ID, CancellationSignal, Deadline, IdempotencyKey, RequestId,
+    ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCoverageV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,
@@ -35,19 +37,67 @@ const PARITY_FIXTURE: &str =
     include_str!("../benchmarks/pr12-transport-boundary/goldens/application-surface-parity.json");
 
 #[tokio::test]
-async fn removed_feedback_http_routes_do_not_invoke_an_owner() {
-    let owner = |_request: HttpApplicationRequest| async move {
-        panic!("removed feedback route invoked an application owner")
+async fn catalog_advertised_feedback_http_routes_invoke_the_application_owner() {
+    let owner = |request: HttpApplicationRequest| async move {
+        CanonicalInvocationResult::<serde_json::Value>::new(
+            tracedecay_tool_catalog::BindingId::new(format!(
+                "binding.http.{}.v1",
+                request.operation.as_str()
+            ))
+            .expect("binding id"),
+            Err(tracedecay_application::ApplicationProblemEnvelope::new(
+                ResultContractRef::new(
+                    SchemaId::new("schema.test.feedback.result").expect("schema id"),
+                    1,
+                )
+                .expect("result contract"),
+                request.request_id,
+                tracedecay_application::ApplicationProblem::unavailable(
+                    SafeDiagnostic::new("feedback.test_unavailable", "Feedback is unavailable")
+                        .expect("diagnostic"),
+                ),
+            )),
+        )
     };
-    let router = application_router(owner);
-    for route in [
-        "/feedback/diagnostics",
-        "/feedback/get",
-        "/feedback/expand",
-        "/feedback/list",
-        "/feedback/impact",
-        "/feedback/affected-tests",
+    let router = application_router(owner)
+        .layer(Extension(
+            RequestId::new("request.feedback-http-parity").expect("request id"),
+        ))
+        .layer(Extension(HttpApplicationControls {
+            deadline: Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            cancellation: CancellationSignal::active("cancel.feedback-http-parity")
+                .expect("cancellation"),
+        }));
+    let catalog =
+        tracedecay::application_surface::application_surface_catalog().expect("catalog snapshot");
+    let resolver = CatalogBindingResolver::new(&catalog);
+
+    for (route, operation) in [
+        (
+            "/feedback/diagnostics",
+            HttpApplicationOperation::FeedbackDiagnostics,
+        ),
+        ("/feedback/get", HttpApplicationOperation::FeedbackGet),
+        ("/feedback/expand", HttpApplicationOperation::FeedbackExpand),
+        ("/feedback/list", HttpApplicationOperation::FeedbackList),
+        ("/feedback/impact", HttpApplicationOperation::FeedbackImpact),
+        (
+            "/feedback/advisory_cycle",
+            HttpApplicationOperation::FeedbackAdvisoryCycle,
+        ),
     ] {
+        let resolution = BindingResolution {
+            profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
+            operation: SurfaceOperationName::new(operation.as_str()).expect("operation"),
+            protocol_revision: 1,
+            negotiated_features: BTreeSet::new(),
+        };
+        assert!(
+            resolver
+                .resolve_binding(BindingSurface::Http, &resolution)
+                .is_some(),
+            "{route} must remain catalog-advertised"
+        );
         let request = Request::builder()
             .method("POST")
             .uri(route)
@@ -59,7 +109,11 @@ async fn removed_feedback_http_routes_do_not_invoke_an_owner() {
             .oneshot(request)
             .await
             .expect("HTTP response");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{route} must preserve the application problem"
+        );
     }
 }
 

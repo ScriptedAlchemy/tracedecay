@@ -667,6 +667,14 @@ pub fn application_problem_response(application: ApplicationProblemEnvelope) -> 
         .into_response()
 }
 
+/// Build the stable HTTP envelope for a problem owned by transport admission.
+///
+/// The executable uses this for failures that occur before an application
+/// router can mint its own request context, such as project-route resolution.
+pub fn adapter_problem_response(request_id: RequestId, problem: ApplicationProblem) -> Response {
+    application_problem_response(adapter_problem(request_id, problem))
+}
+
 pub(crate) fn invalid_request_problem(
     request_id: RequestId,
     code: &'static str,
@@ -719,6 +727,7 @@ where
 {
     Router::new()
         .route("/git/{operation}", post(git_read::<O>))
+        .route("/feedback/{operation}", post(public_feedback_read::<O>))
         .route("/tests/affected", post(affected_tests::<O>))
         .route("/tests/results", post(test_results::<O>))
         .route("/code/{operation}", post(callable_code_read::<O>))
@@ -783,6 +792,11 @@ fn parse_git_read_operation(operation: &str) -> Option<HttpApplicationOperation>
 
 fn parse_feedback_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
     crate::feedback::feedback_read_operation(operation)
+}
+
+fn parse_public_feedback_operation(operation: &str) -> Option<HttpApplicationOperation> {
+    HttpApplicationOperation::from_catalog_name(&format!("feedback_{operation}"))
+        .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::Feedback)
 }
 
 constant_operation_handlers! {
@@ -856,6 +870,7 @@ macro_rules! parsed_operation_handlers {
 
 parsed_operation_handlers! {
     feedback_read => parse_feedback_read_operation;
+    public_feedback_read => parse_public_feedback_operation;
     git_read => parse_git_read_operation;
     primitive_read => parse_primitive_read_operation;
     callable_code_read => parse_callable_code_operation;
@@ -926,277 +941,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
-        parse_callable_code_operation, parse_configuration_operation,
-        parse_context_scout_operation, parse_feedback_read_operation, parse_git_read_operation,
-    };
-
-    #[test]
-    fn omitted_http_page_query_uses_the_canonical_default() {
-        let query: HttpPageQuery = serde_json::from_value(serde_json::json!({}))
-            .expect("empty HTTP query uses adapter defaults");
-        assert_eq!(query.page_size, DEFAULT_HTTP_PAGE_SIZE);
-        assert!(query.cursor.is_none());
-    }
-
-    #[test]
-    fn git_read_operation_parser_is_exact_and_read_only() {
-        for (route, operation) in [
-            ("status", HttpApplicationOperation::GitStatus),
-            ("diff", HttpApplicationOperation::GitDiff),
-            ("history", HttpApplicationOperation::GitHistory),
-            ("blame", HttpApplicationOperation::GitBlame),
-            ("hunks", HttpApplicationOperation::GitHunks),
-        ] {
-            assert_eq!(parse_git_read_operation(route), Some(operation));
-            assert_eq!(operation.owner_kind(), HttpApplicationOwnerKind::Git);
-            assert_eq!(operation.as_str(), format!("git_{route}"));
-        }
-        for rejected in ["", "preview", "apply", "git_status", "status/"] {
-            assert_eq!(parse_git_read_operation(rejected), None);
-        }
-    }
-
-    #[test]
-    fn feedback_read_operation_parser_is_exact_and_separately_owned() {
-        for (route, operation) in [
-            ("get", HttpApplicationOperation::FeedbackGet),
-            ("expand", HttpApplicationOperation::FeedbackExpand),
-            ("list", HttpApplicationOperation::FeedbackList),
-        ] {
-            assert_eq!(parse_feedback_read_operation(route), Some(operation));
-            assert_eq!(operation.owner_kind(), HttpApplicationOwnerKind::Feedback);
-            assert_eq!(operation.as_str(), format!("feedback_{route}"));
-        }
-        for rejected in ["", "status", "get/", "feedback_get"] {
-            assert_eq!(parse_feedback_read_operation(rejected), None);
-        }
-    }
-
-    #[test]
-    fn callable_code_operation_parser_is_exact_and_separately_owned() {
-        for (name, operation, owner) in [
-            (
-                "code_exact_occurrence",
-                HttpApplicationOperation::CodeExactOccurrence,
-                HttpApplicationOwnerKind::CallableCode,
-            ),
-            (
-                "code_phrase_search",
-                HttpApplicationOperation::CodePhraseSearch,
-                HttpApplicationOwnerKind::CallableCode,
-            ),
-            (
-                "code_symbol_search",
-                HttpApplicationOperation::CodeSymbolSearch,
-                HttpApplicationOwnerKind::Primitive,
-            ),
-            (
-                "code_signature_search",
-                HttpApplicationOperation::CodeSignatureSearch,
-                HttpApplicationOwnerKind::Primitive,
-            ),
-            (
-                "code_implementations",
-                HttpApplicationOperation::CodeImplementations,
-                HttpApplicationOwnerKind::Primitive,
-            ),
-            (
-                "code_type_hierarchy",
-                HttpApplicationOperation::CodeTypeHierarchy,
-                HttpApplicationOwnerKind::Primitive,
-            ),
-            (
-                "code_callers",
-                HttpApplicationOperation::CodeCallers,
-                HttpApplicationOwnerKind::Primitive,
-            ),
-            (
-                "code_callees",
-                HttpApplicationOperation::CodeCallees,
-                HttpApplicationOwnerKind::CallableCode,
-            ),
-            (
-                "code_facets",
-                HttpApplicationOperation::CodeFacets,
-                HttpApplicationOwnerKind::CallableCode,
-            ),
-            (
-                "code_timeline",
-                HttpApplicationOperation::CodeTimeline,
-                HttpApplicationOwnerKind::CallableCode,
-            ),
-            (
-                "code_declaration",
-                HttpApplicationOperation::CodeDeclaration,
-                HttpApplicationOwnerKind::CallableCode,
-            ),
-            (
-                "code_definition",
-                HttpApplicationOperation::CodeDefinition,
-                HttpApplicationOwnerKind::CallableCode,
-            ),
-            (
-                "code_type_definition",
-                HttpApplicationOperation::CodeTypeDefinition,
-                HttpApplicationOwnerKind::CallableCode,
-            ),
-            (
-                "code_references",
-                HttpApplicationOperation::CodeReferences,
-                HttpApplicationOwnerKind::CallableCode,
-            ),
-        ] {
-            assert_eq!(parse_callable_code_operation(name), Some(operation));
-            assert_eq!(operation.as_str(), name);
-            assert_eq!(operation.owner_kind(), owner);
-        }
-        for rejected in [
-            "",
-            "exact_occurrence",
-            "phrase_search",
-            "callees",
-            "code_callers/",
-            "code_callees/",
-        ] {
-            assert_eq!(parse_callable_code_operation(rejected), None);
-        }
-    }
-
-    #[test]
-    fn configuration_operation_parser_is_exact_and_closed() {
-        let expected = [
-            (
-                "configuration_list",
-                HttpApplicationOperation::ConfigurationList,
-            ),
-            (
-                "configuration_explain",
-                HttpApplicationOperation::ConfigurationExplain,
-            ),
-            (
-                "configuration_get",
-                HttpApplicationOperation::ConfigurationGet,
-            ),
-            (
-                "configuration_set",
-                HttpApplicationOperation::ConfigurationSet,
-            ),
-            (
-                "configuration_unset",
-                HttpApplicationOperation::ConfigurationUnset,
-            ),
-            (
-                "configuration_batch",
-                HttpApplicationOperation::ConfigurationBatch,
-            ),
-            (
-                "configuration_write_credential",
-                HttpApplicationOperation::ConfigurationWriteCredential,
-            ),
-            (
-                "configuration_observed_state",
-                HttpApplicationOperation::ConfigurationObservedState,
-            ),
-            (
-                "configuration_protected_preview",
-                HttpApplicationOperation::ConfigurationProtectedPreview,
-            ),
-            (
-                "configuration_protected_apply",
-                HttpApplicationOperation::ConfigurationProtectedApply,
-            ),
-            (
-                "configuration_rollback_preview",
-                HttpApplicationOperation::ConfigurationRollbackPreview,
-            ),
-            (
-                "configuration_rollback_apply",
-                HttpApplicationOperation::ConfigurationRollbackApply,
-            ),
-            (
-                "configuration_audit",
-                HttpApplicationOperation::ConfigurationAudit,
-            ),
-        ];
-
-        for (name, operation) in expected {
-            assert_eq!(parse_configuration_operation(name), Some(operation));
-            assert_eq!(operation.as_str(), name);
-            assert_eq!(
-                operation.owner_kind(),
-                super::HttpApplicationOwnerKind::Configuration
-            );
-        }
-        for rejected in [
-            "",
-            "list",
-            "configuration",
-            "configuration_LIST",
-            "configuration_list/",
-            "configuration_unknown",
-        ] {
-            assert_eq!(parse_configuration_operation(rejected), None);
-        }
-    }
-
-    #[test]
-    fn context_scout_operation_parser_is_exact_and_backend_only() {
-        for operation in [
-            HttpApplicationOperation::ContextScoutStatus,
-            HttpApplicationOperation::ContextScoutRecent,
-            HttpApplicationOperation::ContextScoutExplain,
-            HttpApplicationOperation::ContextScoutCapability,
-            HttpApplicationOperation::ContextScoutBudget,
-            HttpApplicationOperation::ContextScoutPause,
-            HttpApplicationOperation::ContextScoutResume,
-            HttpApplicationOperation::ContextScoutCancel,
-            HttpApplicationOperation::ContextScoutClaim,
-            HttpApplicationOperation::ContextScoutDelivery,
-            HttpApplicationOperation::ContextScoutFeedback,
-        ] {
-            assert_eq!(
-                parse_context_scout_operation(operation.as_str()),
-                Some(operation)
-            );
-            assert_eq!(
-                operation.owner_kind(),
-                HttpApplicationOwnerKind::ContextScout
-            );
-        }
-        assert_eq!(parse_context_scout_operation("context_scout"), None);
-        assert_eq!(parse_context_scout_operation("context_scout_status/"), None);
-    }
-
-    #[test]
-    fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
-        assert_eq!(HttpApplicationOperation::ALL.len(), 66);
-        for operation in HttpApplicationOperation::ALL {
-            assert_eq!(
-                HttpApplicationOperation::from_tool_name(&format!(
-                    "tracedecay_{}",
-                    operation.as_str()
-                )),
-                Some(operation),
-                "{} must round-trip through the canonical tool name",
-                operation.as_str()
-            );
-        }
-        assert_eq!(
-            HttpApplicationOperation::from_tool_name("tracedecay_diagnostics"),
-            Some(HttpApplicationOperation::DiagnosticsRead)
-        );
-        assert!(!HttpApplicationOperation::GitPreview.is_http_exposed());
-        assert!(!HttpApplicationOperation::GitApply.is_http_exposed());
-        assert_eq!(
-            HttpApplicationOperation::GitPreview.owner_kind(),
-            HttpApplicationOwnerKind::Git
-        );
-        assert_eq!(
-            HttpApplicationOperation::GitApply.owner_kind(),
-            HttpApplicationOwnerKind::Git
-        );
-    }
-}
+mod tests;
