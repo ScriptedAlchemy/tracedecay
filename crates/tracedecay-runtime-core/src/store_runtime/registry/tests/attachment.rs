@@ -71,8 +71,9 @@ impl FakeAttachment {
                 queued_operations: 3,
                 queued_bytes: 512,
                 writer_busy_events: 0,
-                wal_bytes: 4_096,
-                memory_estimate_bytes: 8_192,
+                writer: Some(PhysicalWriterRuntimeSnapshot::default()),
+                wal_bytes: Some(4_096),
+                memory_estimate_bytes: Some(8_192),
             }),
             fail_drain: AtomicBool::new(false),
             retain_work_after_drain: AtomicBool::new(false),
@@ -195,13 +196,14 @@ async fn publication_and_aliases_share_and_retain_one_physical_attachment() {
         &first.inner.attachment,
         &alias.inner.attachment
     ));
-    let inventory = registry.inventory(tracedecay_store::AdmissionConfigV1::default(), 0);
+    let inventory = registry.inventory(tracedecay_store::AdmissionConfigV1::default(), None);
     let observed = inventory
         .entries
         .iter()
         .find(|entry| entry.health.binding == *first.binding())
         .unwrap();
     assert!(observed.health.writer_present);
+    assert!(observed.physical.writer.is_some());
     assert_eq!(observed.physical.reader_handles, 2);
     assert_eq!(observed.health.queued_operations, 3);
     assert_eq!(observed.health.queued_bytes, 512);
@@ -314,7 +316,7 @@ async fn blocking_join_releases_registry_lock_and_reserves_evicted_and_opening_k
     let (inventory_sender, inventory_receiver) = mpsc::channel();
     let inventory_thread = std::thread::spawn(move || {
         let inventory =
-            inventory_registry.inventory(tracedecay_store::AdmissionConfigV1::default(), 0);
+            inventory_registry.inventory(tracedecay_store::AdmissionConfigV1::default(), None);
         inventory_sender.send(inventory).unwrap();
     });
     let inventory = inventory_receiver.recv_timeout(Duration::from_secs(1));

@@ -20,6 +20,7 @@ pub struct WriterOperationCounters {
     pub shed_operations: u64,
     pub retried_operations: u64,
     pub cancelled_operations: u64,
+    pub deadline_exceeded_operations: u64,
     pub conflicted_operations: u64,
 }
 
