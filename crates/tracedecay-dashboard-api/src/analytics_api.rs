@@ -432,6 +432,35 @@ fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Optio
     })
 }
 
+/// `GET /api/plugins/analytics/agents` — sessions per managed subagent,
+/// straight from the session store. The same summary the overview embeds,
+/// exposed on its own so the Agents workspace can read subagent context
+/// without paying for the full hook-analytics fold.
+pub async fn agents(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<AnalyticsAgentsPayloadV1>>> {
+    match typed_agent_usage_summary(state.lcm_db.as_deref()).await {
+        Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            Some(payload),
+            "analytics_agents_source_unavailable",
+        )),
+        Ok(payload) => {
+            let count = payload.by_agent.len() as u64;
+            Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(count, "managed_agents"),
+                Some(payload),
+            ))
+        }
+        Err(error) => Json(DashboardEnvelopeV1::error(
+            scope_from_state(&state),
+            None,
+            error,
+        )),
+    }
+}
+
 /// `GET /api/plugins/analytics/hints`
 pub async fn hints(
     State(state): State<DashboardState>,

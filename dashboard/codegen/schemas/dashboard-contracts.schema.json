@@ -1975,7 +1975,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsHintsPayloadV1"
+              "$ref": "#/$defs/AnalyticsAgentsPayloadV1"
             },
             {
               "type": "null"
@@ -2046,7 +2046,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsUnderusedPayloadV1"
+              "$ref": "#/$defs/AnalyticsHintsPayloadV1"
             },
             {
               "type": "null"
@@ -2117,7 +2117,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsDiagnosticsPayloadV1"
+              "$ref": "#/$defs/AnalyticsUnderusedPayloadV1"
             },
             {
               "type": "null"
@@ -2259,7 +2259,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/SavingsOverviewPayloadV1"
+              "$ref": "#/$defs/AnalyticsDiagnosticsPayloadV1"
             },
             {
               "type": "null"
@@ -2330,7 +2330,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmSessionPayloadV1"
+              "$ref": "#/$defs/SavingsOverviewPayloadV1"
             },
             {
               "type": "null"
@@ -2401,7 +2401,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmTimelinePayloadV1"
+              "$ref": "#/$defs/LcmSessionPayloadV1"
             },
             {
               "type": "null"
@@ -2472,7 +2472,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmOverviewPayloadV1"
+              "$ref": "#/$defs/LcmTimelinePayloadV1"
             },
             {
               "type": "null"
@@ -2543,7 +2543,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmSearchPayloadV1"
+              "$ref": "#/$defs/LcmOverviewPayloadV1"
             },
             {
               "type": "null"
@@ -2591,6 +2591,77 @@
       "type": "object"
     },
     "DashboardEnvelopeV125": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmSearchPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV126": {
       "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
       "properties": {
         "authorization": {
@@ -12347,17 +12418,20 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "analytics_agents": {
+      "$ref": "#/$defs/DashboardEnvelopeV117"
+    },
     "analytics_diagnostics": {
-      "$ref": "#/$defs/DashboardEnvelopeV119"
+      "$ref": "#/$defs/DashboardEnvelopeV120"
     },
     "analytics_hints": {
-      "$ref": "#/$defs/DashboardEnvelopeV117"
+      "$ref": "#/$defs/DashboardEnvelopeV118"
     },
     "analytics_overview": {
       "$ref": "#/$defs/DashboardEnvelopeV115"
     },
     "analytics_underused": {
-      "$ref": "#/$defs/DashboardEnvelopeV118"
+      "$ref": "#/$defs/DashboardEnvelopeV119"
     },
     "analytics_usage": {
       "$ref": "#/$defs/DashboardEnvelopeV116"
@@ -12391,7 +12465,7 @@
       "$ref": "#/$defs/DashboardEnvelopeV12"
     },
     "feedback_status": {
-      "$ref": "#/$defs/DashboardEnvelopeV125"
+      "$ref": "#/$defs/DashboardEnvelopeV126"
     },
     "graph_call_chain": {
       "$ref": "#/$defs/StructureReadV1"
@@ -12427,16 +12501,16 @@
       "$ref": "#/$defs/StructureReadV14"
     },
     "lcm_overview": {
-      "$ref": "#/$defs/DashboardEnvelopeV123"
-    },
-    "lcm_search": {
       "$ref": "#/$defs/DashboardEnvelopeV124"
     },
+    "lcm_search": {
+      "$ref": "#/$defs/DashboardEnvelopeV125"
+    },
     "lcm_session": {
-      "$ref": "#/$defs/DashboardEnvelopeV121"
+      "$ref": "#/$defs/DashboardEnvelopeV122"
     },
     "lcm_timeline": {
-      "$ref": "#/$defs/DashboardEnvelopeV122"
+      "$ref": "#/$defs/DashboardEnvelopeV123"
     },
     "loom_temporal": {
       "$ref": "#/$defs/LoomTemporalPayloadV1"
@@ -12488,7 +12562,7 @@
       "$ref": "#/$defs/DashboardEnvelopeV14"
     },
     "savings_overview": {
-      "$ref": "#/$defs/DashboardEnvelopeV120"
+      "$ref": "#/$defs/DashboardEnvelopeV121"
     },
     "savings_sessions": {
       "$ref": "#/$defs/SavingsSessionsPayloadV1"
@@ -12569,6 +12643,7 @@
     "memory_fact_detail",
     "analytics_overview",
     "analytics_usage",
+    "analytics_agents",
     "analytics_hints",
     "analytics_underused",
     "analytics_diagnostics",
