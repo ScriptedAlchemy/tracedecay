@@ -62,7 +62,7 @@ Production builds do not expose the integration-fixture authority escape hatch.
 
 ```compile_fail
 use std::path::Path;
-use tracedecay::db::DatabaseAuthority;
+use tracedecay_runtime_core::db::DatabaseAuthority;
 
 let _ = DatabaseAuthority::acquire_test(Path::new("/tmp/fixture.db"), "fixture");
 ```
@@ -70,7 +70,7 @@ let _ = DatabaseAuthority::acquire_test(Path::new("/tmp/fixture.db"), "fixture")
 Debug assertions alone do not enable daemonless writable authority:
 
 ```
-use tracedecay::db::DatabaseAuthority;
+use tracedecay_runtime_core::db::DatabaseAuthority;
 use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
 };
