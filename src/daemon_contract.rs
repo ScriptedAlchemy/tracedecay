@@ -52,7 +52,7 @@ use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 use crate::application::feedback::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackSourceEventV1,
 };
-use crate::application::primitives::Pr12PrimitiveRequest;
+use crate::application::primitives::PrimitiveRequest;
 use crate::application_surface::{
     ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
     GitPreviewSurfaceRequest, GitReadSurfaceRequest,
@@ -445,7 +445,7 @@ pub(crate) enum DaemonInvocationPayload {
     },
     PrimitiveRead {
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
-        request: Pr12PrimitiveRequest,
+        request: PrimitiveRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -810,7 +810,7 @@ impl DaemonInvocationRequest {
     pub(crate) fn primitive(
         request_id: impl Into<String>,
         operation: crate::application_surface::ApplicationSurfaceOperation,
-        request: Pr12PrimitiveRequest,
+        request: PrimitiveRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -818,7 +818,7 @@ impl DaemonInvocationRequest {
         let payload = match (operation, request) {
             (
                 crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact,
-                Pr12PrimitiveRequest::Impact(request),
+                PrimitiveRequest::Impact(request),
             ) => DaemonInvocationPayload::PrimitiveImpact {
                 request,
                 observed_at,
@@ -827,7 +827,7 @@ impl DaemonInvocationRequest {
             },
             (
                 crate::application_surface::ApplicationSurfaceOperation::AffectedTests,
-                Pr12PrimitiveRequest::AffectedFileTests(request),
+                PrimitiveRequest::AffectedFileTests(request),
             ) => DaemonInvocationPayload::PrimitiveAffectedTests {
                 request,
                 observed_at,
@@ -836,7 +836,7 @@ impl DaemonInvocationRequest {
             },
             (
                 crate::application_surface::ApplicationSurfaceOperation::TestResults,
-                Pr12PrimitiveRequest::RecentTestResults(page),
+                PrimitiveRequest::RecentTestResults(page),
             ) => DaemonInvocationPayload::PrimitiveTestResults {
                 page,
                 observed_at,
@@ -845,55 +845,55 @@ impl DaemonInvocationRequest {
             },
             (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::SessionLookup,
-                request @ Pr12PrimitiveRequest::SessionLookup(_),
+                request @ PrimitiveRequest::SessionLookup(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::QualifiedName,
-                request @ Pr12PrimitiveRequest::QualifiedName(_),
+                request @ PrimitiveRequest::QualifiedName(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::CallChain,
-                request @ Pr12PrimitiveRequest::CallChain(_),
+                request @ PrimitiveRequest::CallChain(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::FileDependents,
-                request @ Pr12PrimitiveRequest::FileDependents(_),
+                request @ PrimitiveRequest::FileDependents(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::SourceLines,
-                request @ Pr12PrimitiveRequest::SourceLines(_),
+                request @ PrimitiveRequest::SourceLines(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::SourceBody,
-                request @ Pr12PrimitiveRequest::SourceBody(_),
+                request @ PrimitiveRequest::SourceBody(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::SourceOutline,
-                request @ Pr12PrimitiveRequest::SourceOutline(_),
+                request @ PrimitiveRequest::SourceOutline(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::ModuleApi,
-                request @ Pr12PrimitiveRequest::ModuleApi(_),
+                request @ PrimitiveRequest::ModuleApi(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::FileMetadata,
-                request @ Pr12PrimitiveRequest::FileMetadata(_),
+                request @ PrimitiveRequest::FileMetadata(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::HealthRead,
-                request @ Pr12PrimitiveRequest::HealthRead(_),
+                request @ PrimitiveRequest::HealthRead(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::HealthDelta,
-                request @ Pr12PrimitiveRequest::HealthDelta(_),
+                request @ PrimitiveRequest::HealthDelta(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::StorageStatus,
-                request @ Pr12PrimitiveRequest::StorageStatus(_),
+                request @ PrimitiveRequest::StorageStatus(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::DiagnosticsRead,
-                request @ Pr12PrimitiveRequest::DiagnosticsRead(_),
+                request @ PrimitiveRequest::DiagnosticsRead(_),
             ) => {
                 DaemonInvocationPayload::PrimitiveRead {
                     surface_operation,

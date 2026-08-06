@@ -22,7 +22,7 @@ application_identifier!(
     CancellationTokenId => ("cancellation token id", 512),
 );
 
-/// The resolved PR11 scope is one exact project/repository/worktree root.
+/// The resolved resolved configuration scope is one exact project/repository/worktree root.
 ///
 /// Paths, CWDs, labels, and mutable branch spellings are deliberately absent.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

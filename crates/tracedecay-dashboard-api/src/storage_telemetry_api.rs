@@ -1,5 +1,5 @@
 //! `GET /api/storage/telemetry` — per-store size, free-page ratio, and typed
-//! budget/growth dimensions (plan 38 §7 read models over the PR14 envelope).
+//! budget/growth dimensions (plan 38 §7 read models over the dashboard envelope).
 //!
 //! The size samples are **real**: the dashboard invokes the application
 //! [`StoreSizeTelemetryPort`] over retained runtime health readers. The runtime

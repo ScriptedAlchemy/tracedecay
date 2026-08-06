@@ -128,7 +128,7 @@ const PRE_DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Http,
 ];
 
-const PR14_DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
+const DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
@@ -137,7 +137,7 @@ const PR14_DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
 
 fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface] {
     match spec.operation {
-        "health_read" | "storage_status" | "diagnostics_read" => &PR14_DASHBOARD_PRIMITIVE_SURFACES,
+        "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
 }

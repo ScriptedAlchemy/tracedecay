@@ -492,7 +492,7 @@ impl LanguageServerDoctorPort for LanguageServerDoctorAdapterV1 {
 pub fn observability_read_from_model(
     model: Result<
         crate::application::feedback::observations::FeedbackObservationReadModelV1,
-        crate::application::feedback::concrete::Pr12FeedbackRuntimeError,
+        crate::application::feedback::concrete::FeedbackRuntimeError,
     >,
 ) -> ObservabilityReadV1 {
     match model {

@@ -13,7 +13,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tower::ServiceExt;
 use tracedecay::application::ProjectSourceAccessSnapshot;
-use tracedecay::application::feedback::concrete::open_pr12_feedback_runtime;
+use tracedecay::application::feedback::concrete::open_feedback_runtime;
 use tracedecay::application::feedback::owner::{
     FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
 };
@@ -21,7 +21,7 @@ use tracedecay::application::operation_stream::{
     OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
     OperationKind, OperationStreamConfig,
 };
-use tracedecay::application::primitives::{Pr12PrimitiveRequest, StorageStatusPrimitiveRequest};
+use tracedecay::application::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
 use tracedecay::application_output::json::json_line as canonical_json_line;
 use tracedecay::application_output::markdown::render as render_markdown;
 use tracedecay::application_output::view::CanonicalHumanView;
@@ -420,7 +420,7 @@ fn copy_dir(source: &Path, destination: &Path) {
 }
 
 fn storage_status_request() -> ApplicationSurfaceRequest {
-    ApplicationSurfaceRequest::Primitive(Pr12PrimitiveRequest::StorageStatus(
+    ApplicationSurfaceRequest::Primitive(PrimitiveRequest::StorageStatus(
         StorageStatusPrimitiveRequest {
             include_details: false,
         },
@@ -2448,7 +2448,7 @@ async fn feedback_handle_bootstrap_reads() {
     let scope = resolved_scope("feedback");
     let observed_at = wall_clock_micros();
     let access = feedback_access(&scope, observed_at);
-    let runtime = open_pr12_feedback_runtime(database, project.path(), scope, access)
+    let runtime = open_feedback_runtime(database, project.path(), scope, access)
         .await
         .expect("feedback runtime");
     let owner = runtime.owner();

@@ -71,7 +71,7 @@ pub(crate) enum NativeGitIndexApplyOutcomeV1 {
 
 /// Fixed native boundary used by the daemon transaction coordinator.
 ///
-/// Implementations may use only the internal PR11 stage/unstage/commit
+/// Implementations may use only the internal native stage/unstage/commit
 /// adapters. Every post-admission result is classified so safe failures can
 /// receive an abort receipt while unknown commit-boundary state is reconciled
 /// exactly once rather than replayed.

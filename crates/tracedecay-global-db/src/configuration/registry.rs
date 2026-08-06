@@ -70,7 +70,7 @@ pub struct ConfigurationRegistry {
 }
 
 impl ConfigurationRegistry {
-    /// Build the PR11 core registry. In addition to authority, policy,
+    /// Build the core registry. In addition to authority, policy,
     /// collection, analyzer, and topology definitions, this includes every
     /// project-scoped runtime scalar.
     pub fn core() -> Result<Self, ConfigurationRegistryError> {

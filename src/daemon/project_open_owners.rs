@@ -1,4 +1,4 @@
-//! Project-open registration for PR11–PR13 production owners.
+//! Project-open registration for Git, feedback, and advisory production owners.
 //!
 //! After Scout bootstrap and successful cache publication, the daemon mounts
 //! concrete feedback, cycle, primitive, LSP, advisory, and Hook/Scout host-
@@ -45,12 +45,12 @@ use tracedecay_lsp::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{
-    BoundedPr13HookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
+    BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
     DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
     DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrationError,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
-    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError, Pr13HookOrchestrationRequestV1,
-    Pr13HookOrchestrationTriggerV1, advisory_cycle_invocation_result,
+    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError, HookOrchestrationRequestV1,
+    HookOrchestrationTriggerV1, advisory_cycle_invocation_result,
 };
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
@@ -76,11 +76,11 @@ use crate::application::advisory::{
     AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, CiSourceAccessAuthorityV1,
     GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
     GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
-    GitHubReviewRuntimeOwnerConfigV1, Pr13AdvisoryHookLookupNoticeV1,
-    Pr13AdvisoryHookNoticeQueueV1, Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
-    Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryRuntimeOpenV1,
+    GitHubReviewRuntimeOwnerConfigV1, AdvisoryHookLookupNoticeV1,
+    AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
     ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
-    discover_production_ci_failure_request_v1, register_pr13_advisory_hook_notice_queue,
+    discover_production_ci_failure_request_v1, register_advisory_hook_notice_queue,
 };
 use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::application::feedback::observations::{
@@ -88,7 +88,7 @@ use crate::application::feedback::observations::{
     Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
 };
 use crate::application::feedback::{
-    Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput,
+    FeedbackCycleInvocation, FeedbackCycleLspInput,
     ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
     ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
     resolve_production_feedback_cycle_parts,
@@ -96,8 +96,8 @@ use crate::application::feedback::{
 use crate::application::lsp_runtime::DaemonLspSessionFactory;
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
-    Pr12ProductionPrimitiveOpenRequestV1, admitted_root_uri_for_project,
-    locator_digest_for_project, open_pr12_production_primitive_runtime,
+    ProductionPrimitiveOpenRequestV1, admitted_root_uri_for_project,
+    locator_digest_for_project, open_production_primitive_runtime,
 };
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::context_scout_lifecycle::AuthorityRegistrationV1;
@@ -132,8 +132,8 @@ pub(super) const LSP_WORKSPACE_USE_CASE_ID_V1: &str = "use-case.application.lsp.
 
 #[derive(Clone)]
 struct ProjectOpenAdvisoryFeedbackCycleV1 {
-    registration: Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
-    lsp_input: Pr12FeedbackCycleLspInput,
+    registration: Arc<AdvisoryProductionStartupRegistrationV1>,
+    lsp_input: FeedbackCycleLspInput,
     root_uri: String,
     feedback_scope: FeedbackScopeV1,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
@@ -860,12 +860,12 @@ impl ProductionFeedbackCycleAuthorizationPort for ProjectOpenFeedbackCycleAuthor
 }
 
 fn unavailable_advisory_hook_notice(
-    _notice: &Pr13AdvisoryHookLookupNoticeV1,
+    _notice: &AdvisoryHookLookupNoticeV1,
 ) -> tracedecay_hooks::HookFeedbackDeliveryOutcomeV1 {
     tracedecay_hooks::HookFeedbackDeliveryOutcomeV1::Unavailable
 }
 
-fn unavailable_advisory_hook_sink() -> Arc<Pr13AdvisoryHookNoticeSinkV1> {
+fn unavailable_advisory_hook_sink() -> Arc<AdvisoryHookNoticeSinkV1> {
     Arc::new(unavailable_advisory_hook_notice)
 }
 
@@ -1159,7 +1159,7 @@ pub(super) async fn register_project_open_production_owners(
             message: format!("project-open admitted root URI denied: {error}"),
         })?;
     let primitive_runtime =
-        open_pr12_production_primitive_runtime(Pr12ProductionPrimitiveOpenRequestV1::new(
+        open_production_primitive_runtime(ProductionPrimitiveOpenRequestV1::new(
             graph.clone(),
             Arc::clone(&session_db),
             Arc::new(invocation.code_index_schedulers.clone()),
@@ -1578,9 +1578,9 @@ async fn register_production_feedback_cycle(
     mounted_providers: Vec<MountedLspProvider>,
 ) -> Result<
     Option<(
-        Arc<crate::application::feedback::Pr12FeedbackCycleRuntime>,
+        Arc<crate::application::feedback::FeedbackCycleRuntime>,
         FeedbackScopeV1,
-        crate::application::feedback::Pr12FeedbackCycleLspInput,
+        crate::application::feedback::FeedbackCycleLspInput,
     )>,
 > {
     let configuration_digest = &configuration.snapshot.effective_behavior_digest;
@@ -1701,8 +1701,8 @@ async fn register_production_advisory_owner(
     resolved_scope: ResolvedScope,
     source_access: ProjectSourceAccessSnapshot,
     feedback_scope: FeedbackScopeV1,
-    feedback_cycle: Arc<crate::application::feedback::Pr12FeedbackCycleRuntime>,
-    feedback_lsp_input: Pr12FeedbackCycleLspInput,
+    feedback_cycle: Arc<crate::application::feedback::FeedbackCycleRuntime>,
+    feedback_lsp_input: FeedbackCycleLspInput,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
     scout_configuration: crate::application::configuration::ConfigurationCurrentStateV1,
@@ -1779,7 +1779,7 @@ async fn register_production_advisory_owner(
             message: "project-open CI anchor store failed: invalid feedback scope".to_string(),
         })?,
     ) as _;
-    let hook_notices = Pr13AdvisoryHookNoticeQueueV1::new(feedback_scope.clone());
+    let hook_notices = AdvisoryHookNoticeQueueV1::new(feedback_scope.clone());
     let hook_v2 = hook_notices.sink();
     let legacy_hook = unavailable_advisory_hook_sink();
     let (hook_project_id, hook_worktree_id) = crate::hooks::hook_scope_locators(&resolved_scope);
@@ -1820,14 +1820,14 @@ async fn register_production_advisory_owner(
             });
         }
     }
-    if !register_pr13_advisory_hook_notice_queue(hook_project_id, hook_worktree_id, &hook_notices) {
+    if !register_advisory_hook_notice_queue(hook_project_id, hook_worktree_id, &hook_notices) {
         return Err(TraceDecayError::Config {
             message: "project-open advisory Hook notice queue registration failed".to_owned(),
         });
     }
     let feedback_runtime = feedback_cycle.feedback_runtime();
     let feedback_scope_for_work = feedback_scope.clone();
-    let input = Pr13AdvisoryRuntimeOpenV1 {
+    let input = AdvisoryRuntimeOpenV1 {
         database: database.clone(),
         project_root: project_root.to_path_buf(),
         resolved_scope,
@@ -1840,7 +1840,7 @@ async fn register_production_advisory_owner(
         &project_runtime_db,
         github_provider.as_ref(),
     )?;
-    let production = Pr13AdvisoryProductionOpenV1 {
+    let production = AdvisoryProductionOpenV1 {
         database,
         project_runtime_db: Arc::clone(&project_runtime_db),
         graph,
@@ -1925,7 +1925,7 @@ async fn register_production_advisory_owner(
         })?;
     let registered_root = project_root.to_path_buf();
     let work_root = registered_root.clone();
-    let work = move |request: Pr13HookOrchestrationRequestV1| {
+    let work = move |request: HookOrchestrationRequestV1| {
         let registration = Arc::clone(&registration);
         let feedback_lsp_input = Arc::clone(&feedback_lsp_input);
         let graph = Arc::clone(&scout_claim_graph);
@@ -1940,7 +1940,7 @@ async fn register_production_advisory_owner(
         let indexed_files = indexed_files.clone();
         let external_acquisition = external_acquisition.clone();
         async move {
-            run_production_pr13_hook_cycle(
+            run_production_hook_cycle(
                 request,
                 registration,
                 feedback_lsp_input,
@@ -1960,8 +1960,8 @@ async fn register_production_advisory_owner(
         }
     };
     let orchestrator =
-        BoundedPr13HookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {
-            message: "project-open PR13 Hook orchestration capacity is invalid".to_owned(),
+        BoundedHookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {
+            message: "project-open hook orchestration capacity is invalid".to_owned(),
         })?;
     invocation
         .advisory_runtime_registrar()
@@ -1973,20 +1973,20 @@ async fn register_production_advisory_owner(
         )
         .await
         .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open PR13 Hook orchestration failed: {error}"),
+            message: format!("project-open hook orchestration failed: {error}"),
         })?;
     Ok(Some(()))
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_production_pr13_hook_cycle(
-    request: Pr13HookOrchestrationRequestV1,
-    registration: Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
-    feedback_lsp_input: Pr12FeedbackCycleLspInput,
+async fn run_production_hook_cycle(
+    request: HookOrchestrationRequestV1,
+    registration: Arc<AdvisoryProductionStartupRegistrationV1>,
+    feedback_lsp_input: FeedbackCycleLspInput,
     graph: Arc<crate::tracedecay::TraceDecay>,
     scout_owner: Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
-    feedback_runtime: Arc<crate::application::feedback::concrete::Pr12FeedbackRuntime>,
+    feedback_runtime: Arc<crate::application::feedback::concrete::FeedbackRuntime>,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
     ci_discovery_config: Option<ProductionCiProviderConfigV1>,
     feedback_scope: FeedbackScopeV1,
@@ -2006,8 +2006,8 @@ async fn run_production_pr13_hook_cycle(
         return;
     };
     let diagnostic_trigger = match request.trigger {
-        Pr13HookOrchestrationTriggerV1::SavedEdit => DiagnosticTrigger::DocumentSave,
-        Pr13HookOrchestrationTriggerV1::Stop | Pr13HookOrchestrationTriggerV1::Explicit => {
+        HookOrchestrationTriggerV1::SavedEdit => DiagnosticTrigger::DocumentSave,
+        HookOrchestrationTriggerV1::Stop | HookOrchestrationTriggerV1::Explicit => {
             DiagnosticTrigger::ExplicitDocumentDiagnostics
         }
     };
@@ -2028,10 +2028,10 @@ async fn run_production_pr13_hook_cycle(
             return;
         }
     };
-    if request.trigger == Pr13HookOrchestrationTriggerV1::Stop {
+    if request.trigger == HookOrchestrationTriggerV1::Stop {
         invocation.request.input.request.trigger = FeedbackTriggerV1::AgentStopGate;
         let Ok(validated) =
-            Pr12FeedbackCycleInvocation::new(invocation.context, invocation.request)
+            FeedbackCycleInvocation::new(invocation.context, invocation.request)
         else {
             observe_hook_feedback_cycle_terminal(
                 &registration.host_delivery.source_observations,
@@ -2178,9 +2178,9 @@ async fn run_production_pr13_hook_cycle(
         return;
     };
     let trigger = match request.trigger {
-        Pr13HookOrchestrationTriggerV1::SavedEdit => ContextScoutTriggerV1::SavedEdit,
-        Pr13HookOrchestrationTriggerV1::Stop => ContextScoutTriggerV1::StopBoundary,
-        Pr13HookOrchestrationTriggerV1::Explicit => ContextScoutTriggerV1::ExplicitRequest,
+        HookOrchestrationTriggerV1::SavedEdit => ContextScoutTriggerV1::SavedEdit,
+        HookOrchestrationTriggerV1::Stop => ContextScoutTriggerV1::StopBoundary,
+        HookOrchestrationTriggerV1::Explicit => ContextScoutTriggerV1::ExplicitRequest,
     };
     let recent = scout_owner.recent_exact(canonical.address, 32).await.ok();
     let has_recent_delivery = recent
@@ -2247,14 +2247,14 @@ async fn run_production_pr13_hook_cycle(
 
 fn observe_hook_feedback_cycle_terminal(
     observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
-    request: &Pr13HookOrchestrationRequestV1,
+    request: &HookOrchestrationRequestV1,
     outcome: Plan26FeedbackOutcomeV1,
 ) {
     let envelope = request.hook.envelope();
     let trigger = match request.trigger {
-        Pr13HookOrchestrationTriggerV1::SavedEdit => "saved_edit",
-        Pr13HookOrchestrationTriggerV1::Stop => "stop",
-        Pr13HookOrchestrationTriggerV1::Explicit => "explicit",
+        HookOrchestrationTriggerV1::SavedEdit => "saved_edit",
+        HookOrchestrationTriggerV1::Stop => "stop",
+        HookOrchestrationTriggerV1::Explicit => "explicit",
     };
     let Ok(subject) = canonical_sha256(&(
         "tracedecay.feedback.accepted-hook-cycle.v1",
@@ -2283,7 +2283,7 @@ fn observe_hook_feedback_cycle_terminal(
 fn hook_feedback_document_uri_or_observe(
     project_root: &Path,
     indexed_files: &[String],
-    request: &Pr13HookOrchestrationRequestV1,
+    request: &HookOrchestrationRequestV1,
     observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
 ) -> Option<String> {
     let document_uri = hook_feedback_document_uri(project_root, indexed_files, request);
@@ -2304,7 +2304,7 @@ fn hook_feedback_document_uri_or_observe(
 fn hook_feedback_document_uri(
     project_root: &Path,
     indexed_files: &[String],
-    request: &Pr13HookOrchestrationRequestV1,
+    request: &HookOrchestrationRequestV1,
 ) -> Option<String> {
     let logical_path = match &request.hook.envelope().event {
         tracedecay_hooks::HookEventV2::SavedEdit { file_id, .. } => {
@@ -3112,7 +3112,7 @@ mod tests {
         }
     }
 
-    fn saved_edit_hook_request(file_id: [u8; 16]) -> Pr13HookOrchestrationRequestV1 {
+    fn saved_edit_hook_request(file_id: [u8; 16]) -> HookOrchestrationRequestV1 {
         let capabilities = vec![tracedecay_hooks::HookCapabilityV1 {
             family: tracedecay_hooks::HookEventFamily::SavedEdit,
             support: tracedecay_hooks::stock_event_support(
@@ -3129,7 +3129,7 @@ mod tests {
             binding_token: [6; 32],
             capabilities,
         };
-        Pr13HookOrchestrationRequestV1::from_envelope(
+        HookOrchestrationRequestV1::from_envelope(
             crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_envelope(
                 &tracedecay_hooks::HookEventEnvelopeV2 {
                     schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
@@ -3358,8 +3358,8 @@ mod tests {
 
     #[test]
     fn unavailable_legacy_hook_accepts_each_notice_borrow_without_retaining_it() {
-        fn notice(suffix: &str) -> Pr13AdvisoryHookLookupNoticeV1 {
-            Pr13AdvisoryHookLookupNoticeV1 {
+        fn notice(suffix: &str) -> AdvisoryHookLookupNoticeV1 {
+            AdvisoryHookLookupNoticeV1 {
                 scope: FeedbackScopeV1 {
                     project_id: ProjectId::new("project.hook-lifetime").expect("project"),
                     repository_id: RepositoryId::new("repository.hook-lifetime")

@@ -842,7 +842,7 @@ fn default_excludes_still_catch_target_and_worktrees() {
 }
 
 // ---------------------------------------------------------------------------
-// PR11 topology policy resolution
+// Topology policy resolution
 //
 // The sole resolver produces the pinned snapshot and src/config/topology.rs
 // extracts its one complete work-topology policy, failing closed on every

@@ -337,7 +337,7 @@ impl ScoreDomainCalibrationV1 {
 
 /// query scope is explicitly single-root (Plan 25: federation means composing
 /// independent evidence lanes within one authorized root; Plan 16 multi-root
-/// execution remains PR15 work).
+/// execution remains future work).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalScope {

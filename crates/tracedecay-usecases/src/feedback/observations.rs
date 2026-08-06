@@ -323,7 +323,7 @@ pub enum Plan26SseLifecycleV1 {
     Disconnected,
 }
 
-/// Closed PR11-PR13 source-event family. All values are bounded enums,
+/// Closed feedback source-event family. All values are bounded enums,
 /// digests, counts, or durations; provider payloads never enter this type.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]

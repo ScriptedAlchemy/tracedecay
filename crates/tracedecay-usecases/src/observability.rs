@@ -26,7 +26,7 @@ const ANALYTICS_DESCRIPTOR: &str = "analytics-events.v1";
 const COST_DESCRIPTOR: &str = "provider-costs.v1";
 const FEEDBACK_DESCRIPTOR: &str = "feedback-system-quality.v1";
 
-/// Canonical wire projection used by every PR14 surface. Adapters may wrap the
+/// Canonical wire projection used by every dashboard wire surface. Adapters may wrap the
 /// value in their transport framing but may not recompute metrics or coverage.
 fn canonical_observatory_value(
     model: &ObservatoryReadModelV1,
@@ -1113,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn pr14_surface_serializers_preserve_values_denominators_and_coverage() {
+    fn surface_serializers_preserve_values_denominators_and_coverage() {
         let observatory = observatory_unavailable_read_model(
             Some("scope:parity"),
             10,

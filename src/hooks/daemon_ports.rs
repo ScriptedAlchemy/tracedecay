@@ -25,7 +25,7 @@ pub(crate) struct DaemonAdmissionPort<'a> {
     project_root: &'a Path,
     session_id: Option<&'a str>,
     lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
-    feedback_notice: Mutex<Option<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>>,
+    feedback_notice: Mutex<Option<crate::application::advisory::AdvisoryHookLookupNoticeV1>>,
     /// The caller's hook span, so the admission round trip is attributed like
     /// every other hook/daemon call. Passing `None` here reported hosts that
     /// route through the native dispatcher as having done no daemon IPC at all.
@@ -50,7 +50,7 @@ impl<'a> DaemonAdmissionPort<'a> {
 
     pub(crate) fn take_feedback_notice(
         &self,
-    ) -> Option<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1> {
+    ) -> Option<crate::application::advisory::AdvisoryHookLookupNoticeV1> {
         self.feedback_notice
             .lock()
             .ok()
@@ -61,7 +61,7 @@ impl<'a> DaemonAdmissionPort<'a> {
 pub(crate) struct DaemonAdmissionResponseV1 {
     pub(crate) immediate: HookImmediateAdmissionV1,
     pub(crate) feedback_notice:
-        Option<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>,
+        Option<crate::application::advisory::AdvisoryHookLookupNoticeV1>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -83,7 +83,7 @@ struct DaemonAdmissionResponseWireV1 {
     disposition: Option<HookTransportDispositionV1>,
     orchestration: Option<serde_json::Value>,
     ready_guidance: Option<HookReadyGuidanceV1>,
-    feedback_notice: Option<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>,
+    feedback_notice: Option<crate::application::advisory::AdvisoryHookLookupNoticeV1>,
     reason: Option<String>,
 }
 
@@ -211,7 +211,7 @@ async fn timed_daemon_hook_action(
 }
 
 /// Daemon-backed Hook feedback-notice delivery. Acknowledgement crosses the
-/// local daemon boundary; finding content stays in the PR12 store.
+/// local daemon boundary; finding content stays in the feedback publication store.
 pub(crate) struct DaemonFeedbackNoticeDeliveryPort<'a> {
     project_root: &'a Path,
 }
@@ -222,13 +222,13 @@ impl<'a> DaemonFeedbackNoticeDeliveryPort<'a> {
     }
 }
 
-impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>
+impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::AdvisoryHookLookupNoticeV1>
     for DaemonFeedbackNoticeDeliveryPort<'_>
 {
     fn deliver_hook_v2<'a>(
         &'a self,
         envelope: &'a HookEventEnvelopeV2,
-        feedback: &'a crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+        feedback: &'a crate::application::advisory::AdvisoryHookLookupNoticeV1,
         deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move {
@@ -249,7 +249,7 @@ impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::Pr13AdvisoryH
     fn deliver_legacy<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+        _feedback: &'a crate::application::advisory::AdvisoryHookLookupNoticeV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn daemon_feedback_notice_survives_admission_decode() {
-        let notice = crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
+        let notice = crate::application::advisory::AdvisoryHookLookupNoticeV1 {
             scope: FeedbackScopeV1 {
                 project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
                 repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),

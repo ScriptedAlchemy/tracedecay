@@ -1,6 +1,6 @@
 //! Public feedback read bindings for Plan 21 / Plan 37 surfaces.
 //!
-//! These bindings project the PR11 feedback-cycle result. They never create a
+//! These bindings project the feedback-cycle result. They never create a
 //! second finding store and never execute follow-up work.
 
 use tracedecay_tool_catalog::{
@@ -45,7 +45,7 @@ struct FeedbackSurfaceSpec {
     surfaces: &'static [BindingSurface],
 }
 
-/// Canonical feedback reads retain their PR12 transports and gain the PR14
+/// Canonical feedback reads retain their primitive transports and gain the
 /// dashboard adapter without changing the application owner.
 const FEEDBACK_READ_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,

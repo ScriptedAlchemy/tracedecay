@@ -627,7 +627,7 @@ async fn dispatch_decoded(
     started: Instant,
     admission: &DaemonAdmissionPort<'_>,
     delivery: &impl AsyncHookFeedbackDeliveryPortV1<
-        crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+        crate::application::advisory::AdvisoryHookLookupNoticeV1,
     >,
 ) -> HookDispatch {
     let PreparedBoundHook {
@@ -781,7 +781,7 @@ pub(crate) async fn commit_context_scout_feedback(
 
 fn render_host_delivery(
     guidance: Option<String>,
-    feedback_notice: Option<&crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>,
+    feedback_notice: Option<&crate::application::advisory::AdvisoryHookLookupNoticeV1>,
 ) -> Option<String> {
     let notice = feedback_notice
         .and_then(|notice| serde_json::to_string(notice).ok())

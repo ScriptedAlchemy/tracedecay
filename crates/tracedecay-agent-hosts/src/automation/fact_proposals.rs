@@ -1,6 +1,6 @@
 //! Authority-backed automation fact proposals.
 //!
-//! `fact_proposals.json` was the pre-PR7 authority.  It is now read once as a
+//! `fact_proposals.json` was the legacy pre-authority store.  It is now read once as a
 //! bounded legacy import and then archived.  The separate projection file is
 //! strictly post-commit display metadata; proposal state, CAS, and applied
 //! facts always come from [`MemoryApplication`].
@@ -45,7 +45,7 @@ static FACT_PROPOSAL_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 #[serde(rename_all = "snake_case")]
 pub enum FactProposalState {
     PendingApproval,
-    /// Legacy-only input state. PR7 never persists a durable applying state.
+    /// Legacy-only input state. The durable fact authority never persists an applying state.
     Applying,
     Applied,
     Rejected,
@@ -87,13 +87,13 @@ pub struct FactProposalRecord {
     pub validation: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
-    /// Canonical PR7 fact identity. Never coerce this into a numeric mapping.
+    /// Canonical durable fact identity. Never coerce this into a numeric mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_canonical_fact_id: Option<String>,
     /// Legacy numeric mapping, populated only when the authority has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_fact_id: Option<i64>,
-    /// Pre-PR7 display-only field. New authority-backed projections leave it
+    /// Legacy display-only field. New authority-backed projections leave it
     /// empty rather than manufacturing a legacy write outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apply_outcome: Option<AddFactOutcome>,
@@ -421,7 +421,7 @@ pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
             normalize_fact_content(command.content()),
         );
         if !submitted_semantic_keys.insert(semantic_key) {
-            // Preserve the pre-PR7 exact-duplicate contract: different
+            // Preserve the legacy exact-duplicate contract: different
             // evidence annotations for the same fact assertion are a partial
             // no-op, not a second proposal or promotion.
             continue;
@@ -434,7 +434,7 @@ pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
         if !submitted_proposal_ids.insert(proposal.proposal_id().as_str().to_string()) {
             // The authority collapsed this exact canonical command/digest into
             // an earlier proposal. Keep one display record so a duplicate
-            // model item remains a partial no-op, as it was before PR7.
+            // model item remains a partial no-op, as under the legacy store.
             continue;
         }
         records.push(
@@ -553,7 +553,7 @@ pub async fn load_fact_proposal<A: FactCompatibilityStore>(
     }))
 }
 
-/// There is deliberately no authoritative `Applying` state in PR7.
+/// There is deliberately no authoritative `Applying` state.
 pub async fn list_applying_fact_proposals<A: FactCompatibilityStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,

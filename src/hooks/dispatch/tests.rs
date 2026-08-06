@@ -47,7 +47,7 @@ fn hook_binding_uses_exact_resolved_worktree_and_revision_epoch() {
 }
 
 #[test]
-fn every_host_with_a_native_pr13_event_receives_a_daemon_binding() {
+fn every_host_with_a_native_advisory_event_receives_a_daemon_binding() {
     let hosts = [
         HookHostV1::ClaudeCode,
         HookHostV1::Codex,
@@ -140,7 +140,7 @@ fn daemon_admission_response_rejects_open_or_incoherent_actions() {
 
 #[test]
 fn daemon_feedback_notice_survives_into_host_delivery() {
-    let notice = crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
+    let notice = crate::application::advisory::AdvisoryHookLookupNoticeV1 {
         scope: FeedbackScopeV1 {
             project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
             repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
@@ -199,7 +199,7 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     assert!(rendered.starts_with("TraceDecay feedback ready for authorized lookup: "));
     let encoded = rendered.split_once(": ").unwrap().1;
     assert_eq!(
-        serde_json::from_str::<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>(
+        serde_json::from_str::<crate::application::advisory::AdvisoryHookLookupNoticeV1>(
             encoded
         )
         .unwrap(),
@@ -211,13 +211,13 @@ struct RecordingFeedbackDeliveryPort {
     calls: Mutex<usize>,
 }
 
-impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>
+impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::AdvisoryHookLookupNoticeV1>
     for RecordingFeedbackDeliveryPort
 {
     fn deliver_hook_v2<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+        _feedback: &'a crate::application::advisory::AdvisoryHookLookupNoticeV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move {
@@ -229,15 +229,15 @@ impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::Pr13AdvisoryH
     fn deliver_legacy<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+        _feedback: &'a crate::application::advisory::AdvisoryHookLookupNoticeV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
     }
 }
 
-fn sample_notice() -> crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
-    crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
+fn sample_notice() -> crate::application::advisory::AdvisoryHookLookupNoticeV1 {
+    crate::application::advisory::AdvisoryHookLookupNoticeV1 {
         scope: FeedbackScopeV1 {
             project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
             repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
@@ -255,7 +255,7 @@ fn sample_notice() -> crate::application::advisory::Pr13AdvisoryHookLookupNotice
 }
 
 fn sample_envelope(
-    notice: &crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+    notice: &crate::application::advisory::AdvisoryHookLookupNoticeV1,
 ) -> HookEventEnvelopeV2 {
     HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
@@ -444,7 +444,7 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
     );
     assert_eq!(calls[2].1["action"], "hook_v2_feedback_notice_delivery");
     assert_eq!(
-        serde_json::from_value::<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>(
+        serde_json::from_value::<crate::application::advisory::AdvisoryHookLookupNoticeV1>(
             calls[2].1["feedback_notice"].clone()
         )
         .unwrap(),

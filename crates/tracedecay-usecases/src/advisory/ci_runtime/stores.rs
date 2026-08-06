@@ -1,4 +1,4 @@
-//! Project-owned CI retention and code-anchor stores for PR13 production open.
+//! Project-owned CI retention and code-anchor stores for advisory production open.
 
 use std::sync::Arc;
 

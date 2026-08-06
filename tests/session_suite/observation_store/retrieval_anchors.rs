@@ -121,7 +121,7 @@ async fn project_runtime_at(
 }
 
 #[tokio::test]
-async fn pr7_copied_prompt_anchor_persists_exact_source_evidence_binding() {
+async fn copied_prompt_anchor_persists_exact_source_evidence_binding() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -179,7 +179,7 @@ async fn pr7_copied_prompt_anchor_persists_exact_source_evidence_binding() {
 }
 
 #[tokio::test]
-async fn pr7_project_move_reresolves_retained_anchor_through_registered_identity() {
+async fn project_move_reresolves_retained_anchor_through_registered_identity() {
     let tmp = TempDir::new().unwrap();
     let profile_root = tmp.path().join(".tracedecay");
     let old_root = tmp.path().join("old").join("project");

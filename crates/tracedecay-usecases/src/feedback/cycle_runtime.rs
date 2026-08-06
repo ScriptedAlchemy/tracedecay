@@ -1,4 +1,4 @@
-//! Concrete, one-shot PR12 feedback-cycle composition.
+//! Concrete, one-shot feedback-cycle composition.
 //!
 //! The runtime only composes existing application ports and direct graph
 //! queries. It owns no provider lifecycle, source write, or second feedback
@@ -45,7 +45,7 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::db::Database;
 
 use super::concrete::{
-    Pr12FeedbackRuntime, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore,
+    FeedbackRuntime, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore,
 };
 use super::diagnostics::{DatabaseDiagnosticStore, DiagnosticStoreFeedbackProvider};
 use super::observations::{
@@ -56,32 +56,32 @@ use super::observations::{
 /// Resolves one LSP lifecycle request to the already-authorized, bounded
 /// application input. The caller owns URI-to-identity resolution, cancellation,
 /// deadline, and budget measurement.
-pub type Pr12FeedbackCycleLspInput = Arc<
+pub type FeedbackCycleLspInput = Arc<
     dyn Fn(
             FeedbackCycleRequest,
-        ) -> LspRuntimeFuture<Result<Pr12FeedbackCycleInvocation, LspRuntimeFailure>>
+        ) -> LspRuntimeFuture<Result<FeedbackCycleInvocation, LspRuntimeFailure>>
         + Send
         + Sync,
 >;
 
 /// Complete input for exactly one canonical feedback-cycle invocation.
 #[derive(Clone)]
-pub struct Pr12FeedbackCycleInvocation {
+pub struct FeedbackCycleInvocation {
     pub context: RequestContext,
     pub request: FeedbackCycleExecutionRequest,
 }
 
-impl Pr12FeedbackCycleInvocation {
+impl FeedbackCycleInvocation {
     pub fn new(
         context: RequestContext,
         request: FeedbackCycleExecutionRequest,
-    ) -> Result<Self, Pr12FeedbackCycleRuntimeError> {
+    ) -> Result<Self, FeedbackCycleRuntimeError> {
         let invocation = Self { context, request };
         invocation.validate()?;
         Ok(invocation)
     }
 
-    pub fn validate(&self) -> Result<(), Pr12FeedbackCycleRuntimeError> {
+    pub fn validate(&self) -> Result<(), FeedbackCycleRuntimeError> {
         self.context.validate()?;
         self.request.validate()?;
         if !matches!(
@@ -91,7 +91,7 @@ impl Pr12FeedbackCycleInvocation {
                 | FeedbackTriggerV1::ExplicitDiagnostics
                 | FeedbackTriggerV1::AgentStopGate
         ) {
-            return Err(Pr12FeedbackCycleRuntimeError::UnsupportedTrigger);
+            return Err(FeedbackCycleRuntimeError::UnsupportedTrigger);
         }
         Ok(())
     }
@@ -102,7 +102,7 @@ impl Pr12FeedbackCycleInvocation {
 /// The handles grant no authority by possession. Resolving either handle
 /// re-enters the existing feedback read owner, which rechecks route authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr12FeedbackFindingHandlesV1 {
+pub struct FeedbackFindingHandlesV1 {
     pub finding_id: FeedbackFindingId,
     pub retrieval_anchor_id: Option<RetrievalAnchorId>,
     pub get_handle: String,
@@ -113,15 +113,15 @@ pub struct Pr12FeedbackFindingHandlesV1 {
 /// and later dashboard projections. Evidence remains reference-only in the
 /// underlying result; this layer adds only authorized, short-lived handles.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr12CanonicalFeedbackResultV1 {
+pub struct CanonicalFeedbackResultV1 {
     pub execution: FeedbackCycleExecutionResult,
-    pub finding_handles: Vec<Pr12FeedbackFindingHandlesV1>,
+    pub finding_handles: Vec<FeedbackFindingHandlesV1>,
 }
 
-impl Pr12CanonicalFeedbackResultV1 {
+impl CanonicalFeedbackResultV1 {
     fn new(
         execution: FeedbackCycleExecutionResult,
-        finding_handles: Vec<Pr12FeedbackFindingHandlesV1>,
+        finding_handles: Vec<FeedbackFindingHandlesV1>,
     ) -> Result<Self, ApplicationContractError> {
         let result = Self {
             execution,
@@ -182,7 +182,7 @@ impl Pr12CanonicalFeedbackResultV1 {
     }
 }
 
-impl Deref for Pr12CanonicalFeedbackResultV1 {
+impl Deref for CanonicalFeedbackResultV1 {
     type Target = FeedbackCycleExecutionResult;
 
     fn deref(&self) -> &Self::Target {
@@ -191,22 +191,22 @@ impl Deref for Pr12CanonicalFeedbackResultV1 {
 }
 
 #[derive(Debug, Error)]
-pub enum Pr12FeedbackCycleRuntimeError {
+pub enum FeedbackCycleRuntimeError {
     #[error("feedback cycle contract is invalid")]
     Contract(#[from] ApplicationContractError),
     #[error("feedback cycle requires at least one managed diagnostic provider")]
     NoManagedDiagnosticProviders,
     #[error("feedback cycle request provider identities differ from its admission set")]
     ProviderSetMismatch,
-    #[error("feedback cycle trigger is not supported by PR12")]
+    #[error("feedback cycle trigger is not supported by the feedback cycle runtime")]
     UnsupportedTrigger,
     /// Retained for compatibility with callers that classify older rejection
     /// results. Session-only overlays now execute through the isolated path.
-    #[error("PR12 feedback cycles require durable saved content")]
+    #[error("feedback cycles require durable saved content")]
     NonDurableRequest,
 }
 
-impl Pr12FeedbackCycleRuntimeError {
+impl FeedbackCycleRuntimeError {
     fn lsp_failure_class(&self) -> &'static str {
         match self {
             Self::Contract(_) => "feedback-cycle-contract",
@@ -218,7 +218,7 @@ impl Pr12FeedbackCycleRuntimeError {
     }
 }
 
-type Pr12FeedbackCycleService = FeedbackCycleService<
+type ProductionFeedbackCycleService = FeedbackCycleService<
     SharedFeedbackRuntimeState,
     GenerationBoundFeedbackDiagnosticsAdapter<
         DiagnosticStoreFeedbackProvider<DatabaseDiagnosticStore>,
@@ -234,24 +234,24 @@ type Pr12FeedbackCycleService = FeedbackCycleService<
 /// [`FeedbackCycleService`]; only its durable compare-and-record boundary can
 /// publish a terminal result.
 #[derive(Clone)]
-pub struct Pr12FeedbackCycleRuntime {
-    feedback: Arc<Pr12FeedbackRuntime>,
+pub struct FeedbackCycleRuntime {
+    feedback: Arc<FeedbackRuntime>,
     publications: ProjectFeedbackStore,
-    service: Arc<Pr12FeedbackCycleService>,
-    lsp_input: Pr12FeedbackCycleLspInput,
+    service: Arc<ProductionFeedbackCycleService>,
+    lsp_input: FeedbackCycleLspInput,
     provider_admissions: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
     source_observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
-/// Opens the one concrete PR12 feedback-cycle owner from already-open project
+/// Opens the one concrete feedback-cycle owner from already-open project
 /// authorities. Diagnostics are bound directly to the project database,
 /// graph/test queries retain their existing services, and publication reuses
 /// the exact store and route authorization owned by `feedback`.
 #[allow(clippy::too_many_arguments)]
-pub fn open_pr12_feedback_cycle_runtime(
+pub fn open_feedback_cycle_runtime(
     database: Database,
-    feedback: Arc<Pr12FeedbackRuntime>,
+    feedback: Arc<FeedbackRuntime>,
     runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
     provider_admissions: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
@@ -261,11 +261,11 @@ pub fn open_pr12_feedback_cycle_runtime(
     operation: ApplicationOperation,
     graph_operation: ApplicationOperation,
     tests_operation: ApplicationOperation,
-    lsp_input: Pr12FeedbackCycleLspInput,
+    lsp_input: FeedbackCycleLspInput,
     code_index_identity: Option<Arc<dyn CodeIndexPublicationIdentityPortV1>>,
-) -> Result<Arc<Pr12FeedbackCycleRuntime>, Pr12FeedbackCycleRuntimeError> {
+) -> Result<Arc<FeedbackCycleRuntime>, FeedbackCycleRuntimeError> {
     if provider_admissions.is_empty() {
-        return Err(Pr12FeedbackCycleRuntimeError::NoManagedDiagnosticProviders);
+        return Err(FeedbackCycleRuntimeError::NoManagedDiagnosticProviders);
     }
 
     let publications = feedback.publication_store();
@@ -293,7 +293,7 @@ pub fn open_pr12_feedback_cycle_runtime(
         operation,
     );
 
-    Ok(Arc::new(Pr12FeedbackCycleRuntime {
+    Ok(Arc::new(FeedbackCycleRuntime {
         feedback,
         publications,
         service: Arc::new(service),
@@ -304,8 +304,8 @@ pub fn open_pr12_feedback_cycle_runtime(
     }))
 }
 
-impl Pr12FeedbackCycleRuntime {
-    pub fn feedback_runtime(&self) -> Arc<Pr12FeedbackRuntime> {
+impl FeedbackCycleRuntime {
+    pub fn feedback_runtime(&self) -> Arc<FeedbackRuntime> {
         Arc::clone(&self.feedback)
     }
 
@@ -324,7 +324,7 @@ impl Pr12FeedbackCycleRuntime {
         Arc::clone(&self.source_observations)
     }
 
-    /// Input for `ConcretePr12FeedbackLspSource` to share this cycle with
+    /// Input for `ConcreteFeedbackLspSource` to share this cycle with
     /// managed diagnostics and context projections.
     pub fn context_projection_input(self: &Arc<Self>) -> Arc<dyn FeedbackCycleRuntimePort> {
         self.clone()
@@ -334,13 +334,13 @@ impl Pr12FeedbackCycleRuntime {
     /// canonical result. It never schedules retries or follow-up work.
     pub async fn run_once(
         &self,
-        invocation: Pr12FeedbackCycleInvocation,
-    ) -> Result<Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleRuntimeError> {
+        invocation: FeedbackCycleInvocation,
+    ) -> Result<CanonicalFeedbackResultV1, FeedbackCycleRuntimeError> {
         invocation.validate()?;
         if !self.admits_provider_set(&invocation.request.providers) {
-            return Err(Pr12FeedbackCycleRuntimeError::ProviderSetMismatch);
+            return Err(FeedbackCycleRuntimeError::ProviderSetMismatch);
         }
-        let Pr12FeedbackCycleInvocation { context, request } = invocation;
+        let FeedbackCycleInvocation { context, request } = invocation;
         let requested_durability = request.input.request.durability();
         let execution = self.service.execute(&context, request).await?;
         Ok(self.compose_canonical_result(execution, requested_durability)?)
@@ -354,7 +354,7 @@ impl Pr12FeedbackCycleRuntime {
         context: &RequestContext,
         request: FeedbackCycleExecutionRequest,
         advisory: FeedbackCycleAdvisoryV1,
-    ) -> Result<Pr12CanonicalFeedbackResultV1, ApplicationContractError> {
+    ) -> Result<CanonicalFeedbackResultV1, ApplicationContractError> {
         if !self.admits_provider_set(&request.providers) {
             return Err(ApplicationContractError::Inconsistent {
                 field: "feedback cycle provider set",
@@ -372,7 +372,7 @@ impl Pr12FeedbackCycleRuntime {
         &self,
         execution: FeedbackCycleExecutionResult,
         requested_durability: FeedbackDurabilityV1,
-    ) -> Result<Pr12CanonicalFeedbackResultV1, ApplicationContractError> {
+    ) -> Result<CanonicalFeedbackResultV1, ApplicationContractError> {
         if execution.cycle.durability != requested_durability {
             return Err(ApplicationContractError::Inconsistent {
                 field: "feedback result durability",
@@ -381,7 +381,7 @@ impl Pr12FeedbackCycleRuntime {
         if execution.cycle.durability != FeedbackDurabilityV1::Durable
             || execution.publication.is_none()
         {
-            return Pr12CanonicalFeedbackResultV1::new(execution, Vec::new());
+            return CanonicalFeedbackResultV1::new(execution, Vec::new());
         }
 
         let observed_at = execution.usage.completed_at;
@@ -412,14 +412,14 @@ impl Pr12FeedbackCycleRuntime {
             } else {
                 None
             };
-            finding_handles.push(Pr12FeedbackFindingHandlesV1 {
+            finding_handles.push(FeedbackFindingHandlesV1 {
                 finding_id: finding.finding_id.clone(),
                 retrieval_anchor_id: finding.retrieval_anchor_id.clone(),
                 get_handle,
                 expansion_handle,
             });
         }
-        Pr12CanonicalFeedbackResultV1::new(execution, finding_handles)
+        CanonicalFeedbackResultV1::new(execution, finding_handles)
     }
 
     fn admits_provider_set(&self, providers: &[DiagnosticProviderIdentity]) -> bool {
@@ -467,7 +467,7 @@ fn feedback_expansion_request(
     }))
 }
 
-impl FeedbackCycleRuntimePort for Pr12FeedbackCycleRuntime {
+impl FeedbackCycleRuntimePort for FeedbackCycleRuntime {
     fn execute(
         &self,
         request: FeedbackCycleRequest,
@@ -873,7 +873,7 @@ impl FeedbackObservationPort for SharedFeedbackObservations {
 
 fn lsp_trigger_matches_invocation(
     trigger: DiagnosticTrigger,
-    invocation: &Pr12FeedbackCycleInvocation,
+    invocation: &FeedbackCycleInvocation,
 ) -> bool {
     matches!(
         (trigger, invocation.request.input.request.trigger),
@@ -1004,14 +1004,14 @@ mod tests {
         .unwrap();
         let execution = execution(cycle);
         assert!(
-            Pr12CanonicalFeedbackResultV1::new(execution.clone(), Vec::new()).is_ok(),
+            CanonicalFeedbackResultV1::new(execution.clone(), Vec::new()).is_ok(),
             "session-only results remain usable in their owner session"
         );
 
         let mut leaked = execution;
         leaked.dedupe_key =
             Some(tracedecay_domain::feedback::FeedbackDedupeKeyV1::new("dedupe.overlay").unwrap());
-        assert!(Pr12CanonicalFeedbackResultV1::new(leaked, Vec::new()).is_err());
+        assert!(CanonicalFeedbackResultV1::new(leaked, Vec::new()).is_err());
     }
 
     #[test]

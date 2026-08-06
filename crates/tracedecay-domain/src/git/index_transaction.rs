@@ -209,7 +209,7 @@ pub enum GitIndexReceiptOutcomeV1 {
     NeedsInspection,
 }
 
-/// Durable, integrity-protected receipt for one PR11 index transaction.
+/// Durable, integrity-protected receipt for one Git index transaction.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitIndexTransactionReceiptV1 {

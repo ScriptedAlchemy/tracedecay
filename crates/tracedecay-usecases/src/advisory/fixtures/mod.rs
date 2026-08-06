@@ -1,4 +1,4 @@
-//! Checked-in source captures for the PR13 composite acceptance scenario.
+//! Checked-in source captures for the composite advisory acceptance scenario.
 //!
 //! GitHub review prose is retained because the production decoder and
 //! authorized expansion path must prove lossless body evidence. CI log and
@@ -244,7 +244,7 @@ pub fn load_advisory_source_backed_composite_fixture_v1()
     )?;
     require_eq(
         str_at(&thread, "/capture/operation_name")?,
-        "TraceDecayPR13ReviewThreads".to_owned(),
+        "TraceDecayReviewThreads".to_owned(),
         "review-thread operation name",
     )?;
     require_eq(

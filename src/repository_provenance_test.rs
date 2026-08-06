@@ -256,7 +256,7 @@ fn unstaged_changes_never_claim_a_clean_repository() {
     assert_eq!(
         capture.evidence().dirty_state(),
         &EvidenceAvailabilityV1::Unknown,
-        "PR7 does not run a worktree status scan"
+        "provenance reads do not run a worktree status scan"
     );
 }
 
