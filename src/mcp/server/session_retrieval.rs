@@ -1196,7 +1196,7 @@ impl DaemonSessionRetrievalService {
                 Ok(offset) => offset,
                 Err(error) => return expand_execution_error(error, self.empty_temporal()),
             },
-            None => command.source_offset(),
+            None => 0,
         };
         let request = LcmExpandRequest {
             provider: command.provider().to_string(),

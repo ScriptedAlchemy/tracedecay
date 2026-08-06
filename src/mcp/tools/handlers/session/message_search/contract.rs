@@ -244,7 +244,6 @@ pub(crate) struct LcmExpandServiceCommand {
     target: LcmExpandTarget,
     grain: RetrievalGrainV1,
     content_slice: LcmContentSlice,
-    source_offset: usize,
     source_limit: Option<usize>,
     cursor: Option<String>,
     store_scope: SessionRetrievalStoreScope,
@@ -258,7 +257,6 @@ impl LcmExpandServiceCommand {
         target: LcmExpandTarget,
         grain: RetrievalGrainV1,
         content_slice: LcmContentSlice,
-        source_offset: usize,
         source_limit: Option<usize>,
         cursor: Option<String>,
         store_scope: SessionRetrievalStoreScope,
@@ -269,7 +267,6 @@ impl LcmExpandServiceCommand {
             target,
             grain,
             content_slice,
-            source_offset,
             source_limit,
             cursor,
             store_scope,
@@ -294,10 +291,6 @@ impl LcmExpandServiceCommand {
 
     pub(crate) const fn content_slice(&self) -> LcmContentSlice {
         self.content_slice
-    }
-
-    pub(crate) const fn source_offset(&self) -> usize {
-        self.source_offset
     }
 
     pub(crate) const fn source_limit(&self) -> Option<usize> {

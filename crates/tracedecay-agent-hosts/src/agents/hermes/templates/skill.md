@@ -55,9 +55,9 @@ compresses a session.
    `tracedecay_lcm_load_session` (default `temporal_mode=forensic`), then use
    `lcm_describe` / `tracedecay_lcm_describe` and `lcm_expand` /
    `tracedecay_lcm_expand` to open only the needed DAG node or payload.
-   Summary node IDs are opaque strings, not integers. `source_offset`,
-   `source_limit`, and the opaque continuation cursor apply only to summary
-   source pages; raw and external payload expansion use content pagination.
+   Summary node IDs are opaque strings, not integers. `source_limit` and the
+   opaque continuation cursor apply only to summary source pages; raw and
+   external payload expansion use content pagination.
    Continue a summary page only by returning its opaque `next_cursor`
    unchanged with the same target, source limit, and content slice; changing a
    bound continuation input is denied.
