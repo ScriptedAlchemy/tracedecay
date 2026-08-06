@@ -334,6 +334,28 @@ fn heartbeat_staleness() {
     assert!(old.heartbeat_stale());
 }
 
+/// The backstop is the freshness floor: a store older than one interval must
+/// be covered even while the watcher heartbeat is perfectly healthy, because
+/// the watcher reacts to git metadata alone and a live heartbeat says nothing
+/// about working-tree edits or missed hook deliveries. Gating coverage on a
+/// stale heartbeat is exactly the defect that left live profiles hours stale.
+#[test]
+fn backstop_covers_stale_store_regardless_of_heartbeat_liveness() {
+    // Healthy watcher + stale store: the pre-fix conjunction skipped this.
+    assert_eq!(
+        backstop::coverage_action(false, true),
+        Some("backstop_store_stale")
+    );
+    // Dead watcher + stale store: classic backstop coverage.
+    assert_eq!(
+        backstop::coverage_action(true, true),
+        Some("backstop_watcher_stale")
+    );
+    // A fresh store is never re-synced, whatever the heartbeat says.
+    assert_eq!(backstop::coverage_action(false, false), None);
+    assert_eq!(backstop::coverage_action(true, false), None);
+}
+
 /// The shared coordinator must not start a second store-writing lifetime while
 /// the first one is held. Paused Tokio time plus Notify/oneshot handshakes make
 /// this a scheduling-state assertion rather than a wall-clock sleep.
