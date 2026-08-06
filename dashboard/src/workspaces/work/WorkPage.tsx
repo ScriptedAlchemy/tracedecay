@@ -1,5 +1,5 @@
 import { StateChip } from '../../ui/StateChip.tsx';
-import { Corners, Legend, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx';
+import { Corners, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { type DashboardScope, useScope } from '../../data/scope/store.ts';
 import { WorkBoard, useSelectedTask } from './WorkBoard.tsx';
 import { WorkCommands, WorkCreate } from './WorkCommands.tsx';
@@ -9,51 +9,13 @@ import { resumeCursor, useWorkDelta, useWorkSnapshot } from './workQueries.ts';
 /**
  * Work — channel thirteen.
  *
- * This page reads. Backend `3f43664cb` mounted the nine canonical Work routes
- * and contracted their payloads, so the board below is the daemon's own
- * `WorkProjectionSnapshotV1` rather than the boundary this workspace used to
- * draw in its place.
- *
- * What has not changed is the rule the boundary existed to keep. Every value
+ * This page reads. The daemon mounts the nine canonical Work routes and
+ * contracts their payloads, so the board below is the daemon's own
+ * `WorkProjectionSnapshotV1` rather than an inferred stand-in. Every value
  * here came off a generated contract; nothing is inferred, and a route that
- * refuses is reported as the refusal it was. The residual panel at the foot of
- * the page is what remains genuinely unavailable — it shrank rather than
- * disappeared, and each line says why.
+ * refuses is reported as the refusal it was. Execution belongs to the Workflow
+ * runtime, which has its own workspace — this channel is the task graph.
  */
-
-/**
- * The runtime-attempt operations the dashboard deliberately does not expose.
- *
- * Mirrors `WorkOperation::ATTEMPT` (`crates/tracedecay-api/src/work.rs`), in
- * its declared order. `work_api.rs` asserts that none of them is mounted on
- * the dashboard, so they are absent by the backend's own rule rather than by
- * omission here.
- *
- * It named eight. The canonical constant declares nine: `attempt_finish` was
- * missing, and the count printed beside the list came from `.length`, so the
- * page stated a total that was wrong by one and named a withheld set that was
- * short by the operation which ends an attempt. The keys are carried verbatim
- * from the descriptor and rendered for display, rather than being retyped as
- * prose, so a future divergence is a changed key rather than a changed
- * sentence.
- *
- * There is no generated inventory to derive this from: the operation catalog
- * is not part of the dashboard contract bundle, so `contract_schema.rs` exports
- * no schema naming these ids. `workRoutes.ts` mirrors the same descriptor by
- * hand for the same reason. `workModel.test.ts` holds this list against the
- * Rust constant directly, which is the tie the old comment only claimed.
- */
-export const WITHHELD_ATTEMPT_OPERATION_KEYS = [
-  'attempt_acquire_lease',
-  'attempt_renew_lease',
-  'attempt_start',
-  'attempt_publish_progress',
-  'attempt_publish_artifact',
-  'attempt_cancel',
-  'attempt_recover',
-  'attempt_finish',
-  'attempt_terminalize',
-] as const;
 
 export function workScopeProvenance(scope: DashboardScope): string {
   switch (scope.kind) {
@@ -82,11 +44,6 @@ export function workScopeProvenance(scope: DashboardScope): string {
     }
   }
 }
-
-/** The same operations, as the sentence names them. */
-const WITHHELD_ATTEMPT_OPERATIONS = WITHHELD_ATTEMPT_OPERATION_KEYS.map((key) =>
-  key.slice('attempt_'.length).replace(/_/g, ' '),
-);
 
 export function WorkPage() {
   const scope = useScope((state) => state.scope);
@@ -187,26 +144,6 @@ export function WorkPage() {
             </>
           )}
 
-          <aside className="min-w-0" aria-label="Work boundary">
-            <div className="rounded-sm border border-edge bg-surface-2 p-2">
-              <Legend
-                trailing={<StateChip kind="unsupported" detail="runtime attempts" />}
-              >
-                What this channel still does not open
-              </Legend>
-              <p className="mt-1 text-3xs text-text-muted">
-                The dashboard mounts the two read routes and the seven commands.
-                It mounts none of the {WITHHELD_ATTEMPT_OPERATIONS.length}{' '}
-                runtime-attempt operations —{' '}
-                {WITHHELD_ATTEMPT_OPERATIONS.join(', ')} — because{' '}
-                <code className="font-mono">work_api.rs</code> asserts the dashboard
-                must not expose them. Proposal review, proposal acceptance and
-                evidence attachment are mounted but undrawn: no generated contract
-                in this build lists the pending proposals or the runs they would
-                name.
-              </p>
-            </div>
-          </aside>
         </div>
       </div>
     </div>

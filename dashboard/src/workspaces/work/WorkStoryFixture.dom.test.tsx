@@ -1,9 +1,17 @@
 /**
  * The Work surface, against the fixtures the visual audit serves it.
  *
- * The component fixture remains useful while the Work authority is
- * unavailable, but the visual-audit registry must not advertise an unmounted
- * route. The rendering test separately preserves the fixture contract.
+ * `stories/registry.ts` records whether each surface renders a wired page or a
+ * truthful gate, and the audit manifest reports that flag beside the
+ * screenshots. Work's entry said `wired: false` long after its nine routes
+ * landed, and the fixture module served nothing under `/api/work/**` — so the
+ * resolver's catch-all answered `{}`, `workApi.ts` refused it as
+ * `unsupported_schema`, and the audit shot a refusal plate. The flag and the
+ * picture agreed, and both were behind the code.
+ *
+ * Flipping the flag alone would have made them disagree instead. This test is
+ * the thing that keeps them together: it renders the page against the exact
+ * fixture bodies the audit installs and asserts the board is drawn from them.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -52,9 +60,9 @@ function renderWork() {
 }
 
 describe('the Work surface the visual audit screenshots', () => {
-  it('does not advertise the unavailable route as a wired surface', () => {
+  it('is recorded as wired', () => {
     const work = STORY_SURFACES.find((surface) => surface.id === 'work');
-    expect(work).toBeUndefined();
+    expect(work?.wired).toBe(true);
   });
 
   it('draws the board from the fixture, not a refusal plate', async () => {

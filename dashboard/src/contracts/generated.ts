@@ -2125,7 +2125,9 @@ export const ReviewProposalCommandSchema = z.object({
 });
 export type ReviewProposalCommand = z.infer<typeof ReviewProposalCommandSchema>;
 
-/** A proposal review records a non-accepting disposition. */
+/** A proposal review records a non-accepting disposition. Acceptance remains a
+separate command so callers cannot accidentally collapse review into
+approval. */
 export const ReviewProposalDispositionV1Schema = z.enum(["rejected", "superseded"]);
 export type ReviewProposalDispositionV1 = z.infer<typeof ReviewProposalDispositionV1Schema>;
 

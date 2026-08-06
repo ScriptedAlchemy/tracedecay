@@ -40,11 +40,8 @@ use tracedecay_application::{
     PageRequest, ProblemOwningLayer, ReplanDependenciesCommand, RequestContext, RequestId,
     ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
     RetryDirective, ReviewProposalRequestV1, SafeDiagnostic, SessionLookupRequest,
-    SourceLinesRequest, StreamEvent, StreamEventKind, WorkAttemptAcquireLeaseRequestV1,
-    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
-    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
-    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
-    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    SourceLinesRequest, StreamEvent, StreamEventKind,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 pub use tracedecay_application::{
     ConfigurationAuditRequestV1 as ConfigurationAuditSurfaceRequest,
@@ -101,7 +98,7 @@ use crate::daemon_client::{
     InvocationControls, RequestedOutputFormat, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
 use crate::daemon_contract::{
-    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkAttemptInvocationV1,
+    WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
@@ -972,36 +969,6 @@ async fn invoke_work_operation(
         }};
     }
 
-    macro_rules! attempt {
-        ($request_ty:ty, $variant:ident) => {{
-            let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
-                return tracedecay_api::work_invalid_request_response(request_id);
-            };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::work_attempt(
-                request_id.as_str(),
-                WorkAttemptInvocationV1::$variant(decoded.into()),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
-            invoke_registered_http::<WorkAttemptResponseV1, _>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::WorkAttempt {
-                        scope,
-                        outcome,
-                    } => Some((scope, *outcome)),
-                    _ => None,
-                },
-            )
-            .await
-        }};
-    }
-
     match operation {
         WorkOperation::Snapshot => core!(
             WorkProjectionSnapshotRequestV1,
@@ -1032,21 +999,6 @@ async fn invoke_work_operation(
             WorkProjection
         ),
         WorkOperation::AcceptTask => core!(AcceptTaskCommand, AcceptTask, WorkProjection),
-        WorkOperation::AttemptAcquireLease => {
-            attempt!(WorkAttemptAcquireLeaseRequestV1, AcquireLease)
-        }
-        WorkOperation::AttemptRenewLease => attempt!(WorkAttemptRenewLeaseRequestV1, RenewLease),
-        WorkOperation::AttemptStart => attempt!(WorkAttemptStartRequestV1, Start),
-        WorkOperation::AttemptPublishProgress => {
-            attempt!(WorkAttemptPublishProgressRequestV1, PublishProgress)
-        }
-        WorkOperation::AttemptPublishArtifact => {
-            attempt!(WorkAttemptPublishArtifactRequestV1, PublishArtifact)
-        }
-        WorkOperation::AttemptCancel => attempt!(WorkAttemptCancelRequestV1, Cancel),
-        WorkOperation::AttemptRecover => attempt!(WorkAttemptRecoverRequestV1, Recover),
-        WorkOperation::AttemptFinish => attempt!(WorkAttemptFinishRequestV1, Finish),
-        WorkOperation::AttemptTerminalize => attempt!(WorkAttemptTerminalizeRequestV1, Terminalize),
     }
 }
 

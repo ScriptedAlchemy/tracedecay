@@ -504,6 +504,8550 @@ pub const UNAVAILABLE_OPERATIONS: &[UnavailableOperationCapability] = &[
     },
 ];
 #[allow(clippy::all)]
+pub mod work_accept_proposal {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///`AcceptProposalCommand`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "AcceptProposalCommand",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "review"
+        ///  ],
+        ///  "properties": {
+        ///    "review": {
+        ///      "$ref": "#/definitions/ReviewProposalCommand"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct AcceptProposalCommand {
+            pub review: ReviewProposalCommand,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`ReviewProposalCommand`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "expected_version",
+        ///    "occurred_at",
+        ///    "proposal_digest",
+        ///    "proposal_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "expected_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "proposal_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "proposal_id": {
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct ReviewProposalCommand {
+            pub command_id: WorkCommandId,
+            pub expected_version: u64,
+            pub occurred_at: UtcMicros,
+            pub proposal_digest: ManifestDigest,
+            pub proposal_id: ProposalId,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RuntimeEvidenceRef`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_digest",
+        ///    "run_id",
+        ///    "terminal"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "terminal": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RuntimeEvidenceRef {
+            pub evidence_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub terminal: bool,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkAuthority`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "policy_digest",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAuthority {
+            pub actor_id: ActorId,
+            pub policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub worktree_id: WorktreeId,
+        }
+        ///`WorkProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authority",
+        ///    "dependencies",
+        ///    "execution_admitted",
+        ///    "history_len",
+        ///    "runtime_evidence",
+        ///    "task_accepted",
+        ///    "task_id",
+        ///    "title",
+        ///    "version"
+        ///  ],
+        ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ProposalId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "authority": {
+        ///      "$ref": "#/definitions/WorkAuthority"
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "execution_admitted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "history_len": {
+        ///      "type": "integer",
+        ///      "format": "uint",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "runtime_evidence": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RuntimeEvidenceRef"
+        ///      }
+        ///    },
+        ///    "task_accepted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    },
+        ///    "version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_proposal: ::std::option::Option<ProposalId>,
+            pub authority: WorkAuthority,
+            pub dependencies: Vec<TaskId>,
+            pub execution_admitted: bool,
+            pub history_len: u32,
+            pub runtime_evidence: ::std::vec::Vec<RuntimeEvidenceRef>,
+            pub task_accepted: bool,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+            pub version: u64,
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::AcceptProposalCommand;
+    pub type Result = result::WorkProjection;
+}
+typed_operation!(
+    WorkAcceptProposal,
+    work_accept_proposal,
+    "operation.work.accept_proposal",
+    "/application/work/accept-proposal",
+    "binding.http.work.accept_proposal",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    "schema.work.accept_proposal.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod work_accept_task {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///`AcceptTaskCommand`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "AcceptTaskCommand",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "expected_version",
+        ///    "occurred_at",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "expected_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct AcceptTaskCommand {
+            pub command_id: WorkCommandId,
+            pub expected_version: u64,
+            pub occurred_at: UtcMicros,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RuntimeEvidenceRef`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_digest",
+        ///    "run_id",
+        ///    "terminal"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "terminal": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RuntimeEvidenceRef {
+            pub evidence_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub terminal: bool,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkAuthority`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "policy_digest",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAuthority {
+            pub actor_id: ActorId,
+            pub policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub worktree_id: WorktreeId,
+        }
+        ///`WorkProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authority",
+        ///    "dependencies",
+        ///    "execution_admitted",
+        ///    "history_len",
+        ///    "runtime_evidence",
+        ///    "task_accepted",
+        ///    "task_id",
+        ///    "title",
+        ///    "version"
+        ///  ],
+        ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ProposalId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "authority": {
+        ///      "$ref": "#/definitions/WorkAuthority"
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "execution_admitted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "history_len": {
+        ///      "type": "integer",
+        ///      "format": "uint",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "runtime_evidence": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RuntimeEvidenceRef"
+        ///      }
+        ///    },
+        ///    "task_accepted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    },
+        ///    "version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_proposal: ::std::option::Option<ProposalId>,
+            pub authority: WorkAuthority,
+            pub dependencies: Vec<TaskId>,
+            pub execution_admitted: bool,
+            pub history_len: u32,
+            pub runtime_evidence: ::std::vec::Vec<RuntimeEvidenceRef>,
+            pub task_accepted: bool,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+            pub version: u64,
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::AcceptTaskCommand;
+    pub type Result = result::WorkProjection;
+}
+typed_operation!(
+    WorkAcceptTask,
+    work_accept_task,
+    "operation.work.accept_task",
+    "/application/work/accept-task",
+    "binding.http.work.accept_task",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    "schema.work.accept_task.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod work_admit_execution {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///`AdmitExecutionCommand`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "AdmitExecutionCommand",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "expected_version",
+        ///    "occurred_at",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "expected_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct AdmitExecutionCommand {
+            pub command_id: WorkCommandId,
+            pub expected_version: u64,
+            pub occurred_at: UtcMicros,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RuntimeEvidenceRef`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_digest",
+        ///    "run_id",
+        ///    "terminal"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "terminal": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RuntimeEvidenceRef {
+            pub evidence_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub terminal: bool,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkAuthority`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "policy_digest",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAuthority {
+            pub actor_id: ActorId,
+            pub policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub worktree_id: WorktreeId,
+        }
+        ///`WorkProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authority",
+        ///    "dependencies",
+        ///    "execution_admitted",
+        ///    "history_len",
+        ///    "runtime_evidence",
+        ///    "task_accepted",
+        ///    "task_id",
+        ///    "title",
+        ///    "version"
+        ///  ],
+        ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ProposalId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "authority": {
+        ///      "$ref": "#/definitions/WorkAuthority"
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "execution_admitted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "history_len": {
+        ///      "type": "integer",
+        ///      "format": "uint",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "runtime_evidence": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RuntimeEvidenceRef"
+        ///      }
+        ///    },
+        ///    "task_accepted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    },
+        ///    "version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_proposal: ::std::option::Option<ProposalId>,
+            pub authority: WorkAuthority,
+            pub dependencies: Vec<TaskId>,
+            pub execution_admitted: bool,
+            pub history_len: u32,
+            pub runtime_evidence: ::std::vec::Vec<RuntimeEvidenceRef>,
+            pub task_accepted: bool,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+            pub version: u64,
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::AdmitExecutionCommand;
+    pub type Result = result::WorkProjection;
+}
+typed_operation!(
+    WorkAdmitExecution,
+    work_admit_execution,
+    "operation.work.admit_execution",
+    "/application/work/admit-execution",
+    "binding.http.work.admit_execution",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    "schema.work.admit_execution.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod work_attach_runtime_evidence {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///`AttachRuntimeEvidenceCommand`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "AttachRuntimeEvidenceCommand",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "evidence",
+        ///    "expected_version",
+        ///    "occurred_at",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "evidence": {
+        ///      "$ref": "#/definitions/RuntimeEvidenceRef"
+        ///    },
+        ///    "expected_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct AttachRuntimeEvidenceCommand {
+            pub command_id: WorkCommandId,
+            pub evidence: RuntimeEvidenceRef,
+            pub expected_version: u64,
+            pub occurred_at: UtcMicros,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RuntimeEvidenceRef`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_digest",
+        ///    "run_id",
+        ///    "terminal"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "terminal": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RuntimeEvidenceRef {
+            pub evidence_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub terminal: bool,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RuntimeEvidenceRef`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_digest",
+        ///    "run_id",
+        ///    "terminal"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "terminal": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RuntimeEvidenceRef {
+            pub evidence_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub terminal: bool,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkAuthority`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "policy_digest",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAuthority {
+            pub actor_id: ActorId,
+            pub policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub worktree_id: WorktreeId,
+        }
+        ///`WorkProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authority",
+        ///    "dependencies",
+        ///    "execution_admitted",
+        ///    "history_len",
+        ///    "runtime_evidence",
+        ///    "task_accepted",
+        ///    "task_id",
+        ///    "title",
+        ///    "version"
+        ///  ],
+        ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ProposalId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "authority": {
+        ///      "$ref": "#/definitions/WorkAuthority"
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "execution_admitted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "history_len": {
+        ///      "type": "integer",
+        ///      "format": "uint",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "runtime_evidence": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RuntimeEvidenceRef"
+        ///      }
+        ///    },
+        ///    "task_accepted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    },
+        ///    "version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_proposal: ::std::option::Option<ProposalId>,
+            pub authority: WorkAuthority,
+            pub dependencies: Vec<TaskId>,
+            pub execution_admitted: bool,
+            pub history_len: u32,
+            pub runtime_evidence: ::std::vec::Vec<RuntimeEvidenceRef>,
+            pub task_accepted: bool,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+            pub version: u64,
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::AttachRuntimeEvidenceCommand;
+    pub type Result = result::WorkProjection;
+}
+typed_operation!(
+    WorkAttachRuntimeEvidence,
+    work_attach_runtime_evidence,
+    "operation.work.attach_runtime_evidence",
+    "/application/work/attach-runtime-evidence",
+    "binding.http.work.attach_runtime_evidence",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    "schema.work.attach_runtime_evidence.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod work_create {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///`CreateWorkCommand`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "CreateWorkCommand",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "occurred_at",
+        ///    "task_id",
+        ///    "title"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "dependencies": {
+        ///      "default": [],
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct CreateWorkCommand {
+            pub command_id: WorkCommandId,
+            #[serde(default = "defaults::create_work_command_dependencies")]
+            pub dependencies: Vec<TaskId>,
+            pub occurred_at: UtcMicros,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /// Generation of default values for serde.
+        pub mod defaults {
+            pub(super) fn create_work_command_dependencies() -> Vec<super::TaskId> {
+                vec![]
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RuntimeEvidenceRef`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_digest",
+        ///    "run_id",
+        ///    "terminal"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "terminal": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RuntimeEvidenceRef {
+            pub evidence_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub terminal: bool,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkAuthority`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "policy_digest",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAuthority {
+            pub actor_id: ActorId,
+            pub policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub worktree_id: WorktreeId,
+        }
+        ///`WorkProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authority",
+        ///    "dependencies",
+        ///    "execution_admitted",
+        ///    "history_len",
+        ///    "runtime_evidence",
+        ///    "task_accepted",
+        ///    "task_id",
+        ///    "title",
+        ///    "version"
+        ///  ],
+        ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ProposalId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "authority": {
+        ///      "$ref": "#/definitions/WorkAuthority"
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "execution_admitted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "history_len": {
+        ///      "type": "integer",
+        ///      "format": "uint",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "runtime_evidence": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RuntimeEvidenceRef"
+        ///      }
+        ///    },
+        ///    "task_accepted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    },
+        ///    "version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_proposal: ::std::option::Option<ProposalId>,
+            pub authority: WorkAuthority,
+            pub dependencies: Vec<TaskId>,
+            pub execution_admitted: bool,
+            pub history_len: u32,
+            pub runtime_evidence: ::std::vec::Vec<RuntimeEvidenceRef>,
+            pub task_accepted: bool,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+            pub version: u64,
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::CreateWorkCommand;
+    pub type Result = result::WorkProjection;
+}
+typed_operation!(
+    WorkCreate,
+    work_create,
+    "operation.work.create",
+    "/application/work/create",
+    "binding.http.work.create",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    "schema.work.create.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod work_delta {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectionGenerationId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectionGenerationId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectionGenerationId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectionGenerationId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectionGenerationId> for ::std::string::String {
+            fn from(value: ProjectionGenerationId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectionGenerationId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectionGenerationId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectionGenerationId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkProjectionDeltaRequestV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjectionDeltaRequestV1",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "cursor",
+        ///    "page_size"
+        ///  ],
+        ///  "properties": {
+        ///    "cursor": {
+        ///      "$ref": "#/definitions/WorkProjectionResumeCursorV1"
+        ///    },
+        ///    "page_size": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjectionDeltaRequestV1 {
+            pub cursor: WorkProjectionResumeCursorV1,
+            pub page_size: u32,
+        }
+        ///`WorkProjectionResumeCursorV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "generation_id",
+        ///    "token"
+        ///  ],
+        ///  "properties": {
+        ///    "generation_id": {
+        ///      "$ref": "#/definitions/ProjectionGenerationId"
+        ///    },
+        ///    "token": {
+        ///      "type": "string"
+        ///    }
+        ///  }
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub struct WorkProjectionResumeCursorV1 {
+            pub generation_id: ProjectionGenerationId,
+            pub token: ::std::string::String,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectionGenerationId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectionGenerationId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectionGenerationId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectionGenerationId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectionGenerationId> for ::std::string::String {
+            fn from(value: ProjectionGenerationId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectionGenerationId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectionGenerationId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectionGenerationId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RuntimeEvidenceRef`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_digest",
+        ///    "run_id",
+        ///    "terminal"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "terminal": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RuntimeEvidenceRef {
+            pub evidence_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub terminal: bool,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkAuthority`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "policy_digest",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAuthority {
+            pub actor_id: ActorId,
+            pub policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub worktree_id: WorktreeId,
+        }
+        ///`WorkProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authority",
+        ///    "dependencies",
+        ///    "execution_admitted",
+        ///    "history_len",
+        ///    "runtime_evidence",
+        ///    "task_accepted",
+        ///    "task_id",
+        ///    "title",
+        ///    "version"
+        ///  ],
+        ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ProposalId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "authority": {
+        ///      "$ref": "#/definitions/WorkAuthority"
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "execution_admitted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "history_len": {
+        ///      "type": "integer",
+        ///      "format": "uint",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "runtime_evidence": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RuntimeEvidenceRef"
+        ///      }
+        ///    },
+        ///    "task_accepted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    },
+        ///    "version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_proposal: ::std::option::Option<ProposalId>,
+            pub authority: WorkAuthority,
+            pub dependencies: Vec<TaskId>,
+            pub execution_admitted: bool,
+            pub history_len: u32,
+            pub runtime_evidence: ::std::vec::Vec<RuntimeEvidenceRef>,
+            pub task_accepted: bool,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+            pub version: u64,
+        }
+        ///`WorkProjectionCoverageV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "returned",
+        ///        "state",
+        ///        "total"
+        ///      ],
+        ///      "properties": {
+        ///        "returned": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "complete"
+        ///        },
+        ///        "total": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "cursor",
+        ///        "range",
+        ///        "returned",
+        ///        "state",
+        ///        "total"
+        ///      ],
+        ///      "properties": {
+        ///        "cursor": {
+        ///          "$ref": "#/definitions/WorkProjectionResumeCursorV1"
+        ///        },
+        ///        "range": {
+        ///          "$ref": "#/definitions/WorkProjectionSequenceRangeV1"
+        ///        },
+        ///        "returned": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        },
+        ///        "total": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "cap",
+        ///        "cursor",
+        ///        "range",
+        ///        "returned",
+        ///        "state",
+        ///        "total"
+        ///      ],
+        ///      "properties": {
+        ///        "cap": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "cursor": {
+        ///          "$ref": "#/definitions/WorkProjectionResumeCursorV1"
+        ///        },
+        ///        "range": {
+        ///          "$ref": "#/definitions/WorkProjectionSequenceRangeV1"
+        ///        },
+        ///        "returned": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "capped"
+        ///        },
+        ///        "total": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state")]
+        pub enum WorkProjectionCoverageV1 {
+            #[serde(rename = "complete")]
+            Complete { returned: u32, total: u32 },
+            #[serde(rename = "partial")]
+            Partial {
+                cursor: WorkProjectionResumeCursorV1,
+                range: WorkProjectionSequenceRangeV1,
+                returned: u32,
+                total: u32,
+            },
+            #[serde(rename = "capped")]
+            Capped {
+                cap: u32,
+                cursor: WorkProjectionResumeCursorV1,
+                range: WorkProjectionSequenceRangeV1,
+                returned: u32,
+                total: u32,
+            },
+        }
+        ///`WorkProjectionDeltaV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjectionDeltaV1",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "changed",
+        ///    "coverage",
+        ///    "from_sequence",
+        ///    "generation_id",
+        ///    "removed",
+        ///    "to_sequence"
+        ///  ],
+        ///  "properties": {
+        ///    "changed": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkProjection"
+        ///      }
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/WorkProjectionCoverageV1"
+        ///    },
+        ///    "from_sequence": {
+        ///      "$ref": "#/definitions/WorkProjectionSequenceV1"
+        ///    },
+        ///    "generation_id": {
+        ///      "$ref": "#/definitions/ProjectionGenerationId"
+        ///    },
+        ///    "removed": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "to_sequence": {
+        ///      "$ref": "#/definitions/WorkProjectionSequenceV1"
+        ///    }
+        ///  }
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub struct WorkProjectionDeltaV1 {
+            pub changed: ::std::vec::Vec<WorkProjection>,
+            pub coverage: WorkProjectionCoverageV1,
+            pub from_sequence: WorkProjectionSequenceV1,
+            pub generation_id: ProjectionGenerationId,
+            pub removed: Vec<TaskId>,
+            pub to_sequence: WorkProjectionSequenceV1,
+        }
+        ///`WorkProjectionResumeCursorV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "generation_id",
+        ///    "token"
+        ///  ],
+        ///  "properties": {
+        ///    "generation_id": {
+        ///      "$ref": "#/definitions/ProjectionGenerationId"
+        ///    },
+        ///    "token": {
+        ///      "type": "string"
+        ///    }
+        ///  }
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub struct WorkProjectionResumeCursorV1 {
+            pub generation_id: ProjectionGenerationId,
+            pub token: ::std::string::String,
+        }
+        ///`WorkProjectionSequenceRangeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "end_inclusive",
+        ///    "start_exclusive"
+        ///  ],
+        ///  "properties": {
+        ///    "end_inclusive": {
+        ///      "$ref": "#/definitions/WorkProjectionSequenceV1"
+        ///    },
+        ///    "start_exclusive": {
+        ///      "$ref": "#/definitions/WorkProjectionSequenceV1"
+        ///    }
+        ///  }
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub struct WorkProjectionSequenceRangeV1 {
+            pub end_inclusive: WorkProjectionSequenceV1,
+            pub start_exclusive: WorkProjectionSequenceV1,
+        }
+        ///`WorkProjectionSequenceV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjectionSequenceV1",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 0.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct WorkProjectionSequenceV1(pub u64);
+        impl ::std::ops::Deref for WorkProjectionSequenceV1 {
+            type Target = u64;
+            fn deref(&self) -> &u64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkProjectionSequenceV1> for u64 {
+            fn from(value: WorkProjectionSequenceV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<u64> for WorkProjectionSequenceV1 {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkProjectionSequenceV1 {
+            type Err = <u64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProjectionSequenceV1 {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for WorkProjectionSequenceV1 {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for WorkProjectionSequenceV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::WorkProjectionDeltaRequestV1;
+    pub type Result = result::WorkProjectionDeltaV1;
+}
+typed_operation!(
+    WorkDelta,
+    work_delta,
+    "operation.work.delta",
+    "/application/work/delta",
+    "binding.http.work.delta",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    "schema.work.delta.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod work_replan_dependencies {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///`ReplanDependenciesCommand`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "ReplanDependenciesCommand",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "expected_version",
+        ///    "occurred_at",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "dependencies": {
+        ///      "default": [],
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "expected_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct ReplanDependenciesCommand {
+            pub command_id: WorkCommandId,
+            #[serde(default = "defaults::replan_dependencies_command_dependencies")]
+            pub dependencies: Vec<TaskId>,
+            pub expected_version: u64,
+            pub occurred_at: UtcMicros,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /// Generation of default values for serde.
+        pub mod defaults {
+            pub(super) fn replan_dependencies_command_dependencies() -> Vec<super::TaskId> {
+                vec![]
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RuntimeEvidenceRef`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_digest",
+        ///    "run_id",
+        ///    "terminal"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "terminal": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RuntimeEvidenceRef {
+            pub evidence_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub terminal: bool,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkAuthority`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "policy_digest",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAuthority {
+            pub actor_id: ActorId,
+            pub policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub worktree_id: WorktreeId,
+        }
+        ///`WorkProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authority",
+        ///    "dependencies",
+        ///    "execution_admitted",
+        ///    "history_len",
+        ///    "runtime_evidence",
+        ///    "task_accepted",
+        ///    "task_id",
+        ///    "title",
+        ///    "version"
+        ///  ],
+        ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ProposalId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "authority": {
+        ///      "$ref": "#/definitions/WorkAuthority"
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "execution_admitted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "history_len": {
+        ///      "type": "integer",
+        ///      "format": "uint",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "runtime_evidence": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RuntimeEvidenceRef"
+        ///      }
+        ///    },
+        ///    "task_accepted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    },
+        ///    "version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_proposal: ::std::option::Option<ProposalId>,
+            pub authority: WorkAuthority,
+            pub dependencies: Vec<TaskId>,
+            pub execution_admitted: bool,
+            pub history_len: u32,
+            pub runtime_evidence: ::std::vec::Vec<RuntimeEvidenceRef>,
+            pub task_accepted: bool,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+            pub version: u64,
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::ReplanDependenciesCommand;
+    pub type Result = result::WorkProjection;
+}
+typed_operation!(
+    WorkReplanDependencies,
+    work_replan_dependencies,
+    "operation.work.replan_dependencies",
+    "/application/work/replan-dependencies",
+    "binding.http.work.replan_dependencies",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    "schema.work.replan_dependencies.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod work_review_proposal {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`ReviewProposalCommand`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "expected_version",
+        ///    "occurred_at",
+        ///    "proposal_digest",
+        ///    "proposal_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "expected_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "proposal_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "proposal_id": {
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct ReviewProposalCommand {
+            pub command_id: WorkCommandId,
+            pub expected_version: u64,
+            pub occurred_at: UtcMicros,
+            pub proposal_digest: ManifestDigest,
+            pub proposal_id: ProposalId,
+            pub task_id: TaskId,
+        }
+        /**A proposal review records a non-accepting disposition. Acceptance remains a
+        separate command so callers cannot accidentally collapse review into
+        approval.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A proposal review records a non-accepting disposition. Acceptance remains a\nseparate command so callers cannot accidentally collapse review into\napproval.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "rejected",
+        ///    "superseded"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum ReviewProposalDispositionV1 {
+            #[serde(rename = "rejected")]
+            Rejected,
+            #[serde(rename = "superseded")]
+            Superseded,
+        }
+        impl ::std::fmt::Display for ReviewProposalDispositionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Rejected => f.write_str("rejected"),
+                    Self::Superseded => f.write_str("superseded"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for ReviewProposalDispositionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "rejected" => Ok(Self::Rejected),
+                    "superseded" => Ok(Self::Superseded),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for ReviewProposalDispositionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for ReviewProposalDispositionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for ReviewProposalDispositionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`ReviewProposalRequestV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "ReviewProposalRequestV1",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "disposition",
+        ///    "review"
+        ///  ],
+        ///  "properties": {
+        ///    "disposition": {
+        ///      "$ref": "#/definitions/ReviewProposalDispositionV1"
+        ///    },
+        ///    "review": {
+        ///      "$ref": "#/definitions/ReviewProposalCommand"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct ReviewProposalRequestV1 {
+            pub disposition: ReviewProposalDispositionV1,
+            pub review: ReviewProposalCommand,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RuntimeEvidenceRef`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_digest",
+        ///    "run_id",
+        ///    "terminal"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "terminal": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RuntimeEvidenceRef {
+            pub evidence_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub terminal: bool,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkAuthority`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "policy_digest",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAuthority {
+            pub actor_id: ActorId,
+            pub policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub worktree_id: WorktreeId,
+        }
+        ///`WorkProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authority",
+        ///    "dependencies",
+        ///    "execution_admitted",
+        ///    "history_len",
+        ///    "runtime_evidence",
+        ///    "task_accepted",
+        ///    "task_id",
+        ///    "title",
+        ///    "version"
+        ///  ],
+        ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ProposalId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "authority": {
+        ///      "$ref": "#/definitions/WorkAuthority"
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "execution_admitted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "history_len": {
+        ///      "type": "integer",
+        ///      "format": "uint",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "runtime_evidence": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RuntimeEvidenceRef"
+        ///      }
+        ///    },
+        ///    "task_accepted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    },
+        ///    "version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_proposal: ::std::option::Option<ProposalId>,
+            pub authority: WorkAuthority,
+            pub dependencies: Vec<TaskId>,
+            pub execution_admitted: bool,
+            pub history_len: u32,
+            pub runtime_evidence: ::std::vec::Vec<RuntimeEvidenceRef>,
+            pub task_accepted: bool,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+            pub version: u64,
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::ReviewProposalRequestV1;
+    pub type Result = result::WorkProjection;
+}
+typed_operation!(
+    WorkReviewProposal,
+    work_review_proposal,
+    "operation.work.review_proposal",
+    "/application/work/review-proposal",
+    "binding.http.work.review_proposal",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    "schema.work.review_proposal.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod work_snapshot {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///`WorkProjectionSnapshotRequestV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjectionSnapshotRequestV1",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "page_size"
+        ///  ],
+        ///  "properties": {
+        ///    "page_size": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjectionSnapshotRequestV1 {
+            pub page_size: u32,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectionGenerationId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectionGenerationId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectionGenerationId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectionGenerationId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectionGenerationId> for ::std::string::String {
+            fn from(value: ProjectionGenerationId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectionGenerationId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectionGenerationId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectionGenerationId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RuntimeEvidenceRef`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_digest",
+        ///    "run_id",
+        ///    "terminal"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "terminal": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RuntimeEvidenceRef {
+            pub evidence_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub terminal: bool,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkAuthority`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "policy_digest",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAuthority {
+            pub actor_id: ActorId,
+            pub policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub worktree_id: WorktreeId,
+        }
+        ///`WorkProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authority",
+        ///    "dependencies",
+        ///    "execution_admitted",
+        ///    "history_len",
+        ///    "runtime_evidence",
+        ///    "task_accepted",
+        ///    "task_id",
+        ///    "title",
+        ///    "version"
+        ///  ],
+        ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ProposalId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "authority": {
+        ///      "$ref": "#/definitions/WorkAuthority"
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "execution_admitted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "history_len": {
+        ///      "type": "integer",
+        ///      "format": "uint",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "runtime_evidence": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RuntimeEvidenceRef"
+        ///      }
+        ///    },
+        ///    "task_accepted": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    },
+        ///    "version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_proposal: ::std::option::Option<ProposalId>,
+            pub authority: WorkAuthority,
+            pub dependencies: Vec<TaskId>,
+            pub execution_admitted: bool,
+            pub history_len: u32,
+            pub runtime_evidence: ::std::vec::Vec<RuntimeEvidenceRef>,
+            pub task_accepted: bool,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+            pub version: u64,
+        }
+        ///`WorkProjectionCoverageV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "returned",
+        ///        "state",
+        ///        "total"
+        ///      ],
+        ///      "properties": {
+        ///        "returned": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "complete"
+        ///        },
+        ///        "total": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "cursor",
+        ///        "range",
+        ///        "returned",
+        ///        "state",
+        ///        "total"
+        ///      ],
+        ///      "properties": {
+        ///        "cursor": {
+        ///          "$ref": "#/definitions/WorkProjectionResumeCursorV1"
+        ///        },
+        ///        "range": {
+        ///          "$ref": "#/definitions/WorkProjectionSequenceRangeV1"
+        ///        },
+        ///        "returned": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        },
+        ///        "total": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "cap",
+        ///        "cursor",
+        ///        "range",
+        ///        "returned",
+        ///        "state",
+        ///        "total"
+        ///      ],
+        ///      "properties": {
+        ///        "cap": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "cursor": {
+        ///          "$ref": "#/definitions/WorkProjectionResumeCursorV1"
+        ///        },
+        ///        "range": {
+        ///          "$ref": "#/definitions/WorkProjectionSequenceRangeV1"
+        ///        },
+        ///        "returned": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "capped"
+        ///        },
+        ///        "total": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state")]
+        pub enum WorkProjectionCoverageV1 {
+            #[serde(rename = "complete")]
+            Complete { returned: u32, total: u32 },
+            #[serde(rename = "partial")]
+            Partial {
+                cursor: WorkProjectionResumeCursorV1,
+                range: WorkProjectionSequenceRangeV1,
+                returned: u32,
+                total: u32,
+            },
+            #[serde(rename = "capped")]
+            Capped {
+                cap: u32,
+                cursor: WorkProjectionResumeCursorV1,
+                range: WorkProjectionSequenceRangeV1,
+                returned: u32,
+                total: u32,
+            },
+        }
+        ///`WorkProjectionResumeCursorV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "generation_id",
+        ///    "token"
+        ///  ],
+        ///  "properties": {
+        ///    "generation_id": {
+        ///      "$ref": "#/definitions/ProjectionGenerationId"
+        ///    },
+        ///    "token": {
+        ///      "type": "string"
+        ///    }
+        ///  }
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub struct WorkProjectionResumeCursorV1 {
+            pub generation_id: ProjectionGenerationId,
+            pub token: ::std::string::String,
+        }
+        ///`WorkProjectionSequenceRangeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "end_inclusive",
+        ///    "start_exclusive"
+        ///  ],
+        ///  "properties": {
+        ///    "end_inclusive": {
+        ///      "$ref": "#/definitions/WorkProjectionSequenceV1"
+        ///    },
+        ///    "start_exclusive": {
+        ///      "$ref": "#/definitions/WorkProjectionSequenceV1"
+        ///    }
+        ///  }
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub struct WorkProjectionSequenceRangeV1 {
+            pub end_inclusive: WorkProjectionSequenceV1,
+            pub start_exclusive: WorkProjectionSequenceV1,
+        }
+        ///`WorkProjectionSequenceV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjectionSequenceV1",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 0.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct WorkProjectionSequenceV1(pub u64);
+        impl ::std::ops::Deref for WorkProjectionSequenceV1 {
+            type Target = u64;
+            fn deref(&self) -> &u64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkProjectionSequenceV1> for u64 {
+            fn from(value: WorkProjectionSequenceV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<u64> for WorkProjectionSequenceV1 {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkProjectionSequenceV1 {
+            type Err = <u64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProjectionSequenceV1 {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for WorkProjectionSequenceV1 {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for WorkProjectionSequenceV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkProjectionSnapshotV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjectionSnapshotV1",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "generation_id",
+        ///    "projections",
+        ///    "sequence"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/WorkProjectionCoverageV1"
+        ///    },
+        ///    "generation_id": {
+        ///      "$ref": "#/definitions/ProjectionGenerationId"
+        ///    },
+        ///    "projections": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkProjection"
+        ///      }
+        ///    },
+        ///    "sequence": {
+        ///      "$ref": "#/definitions/WorkProjectionSequenceV1"
+        ///    }
+        ///  }
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub struct WorkProjectionSnapshotV1 {
+            pub coverage: WorkProjectionCoverageV1,
+            pub generation_id: ProjectionGenerationId,
+            pub projections: ::std::vec::Vec<WorkProjection>,
+            pub sequence: WorkProjectionSequenceV1,
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::WorkProjectionSnapshotRequestV1;
+    pub type Result = result::WorkProjectionSnapshotV1;
+}
+typed_operation!(
+    WorkSnapshot,
+    work_snapshot,
+    "operation.work.snapshot",
+    "/application/work/snapshot",
+    "binding.http.work.snapshot",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    "schema.work.snapshot.result",
+    1
+);
+#[allow(clippy::all)]
 pub mod workflow_definition_history {
     pub mod request {
         /// Error types.
