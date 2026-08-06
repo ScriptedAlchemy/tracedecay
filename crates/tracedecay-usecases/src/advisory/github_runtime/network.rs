@@ -1398,7 +1398,6 @@ impl GitHubCiReadOnlyClientV1 {
         )
     }
 
-    #[allow(dead_code)] // Plan 37 PR-review CI jobs — staged
     pub(crate) fn read_workflow_jobs<'a>(
         &'a self,
         context: &'a RequestContext,
