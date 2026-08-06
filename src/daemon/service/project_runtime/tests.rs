@@ -824,9 +824,9 @@ async fn cancelled_shutdown_caller_does_not_abandon_the_registry_drain() {
 }
 
 #[tokio::test]
-async fn cancelled_publication_releases_while_shutdown_reaper_is_waiting() {
+async fn cancelled_publication_releases_while_shutdown_drain_is_waiting() {
     let registry = Arc::new(ProjectRuntimeRegistryV1::default());
-    let project = root("shutdown-reaper-split");
+    let project = root("shutdown-drain-split");
     let publisher_registry = Arc::clone(&registry);
     let (build_started, build_is_started) = tokio::sync::oneshot::channel();
     let (_continue_build, build_may_continue) = tokio::sync::oneshot::channel::<()>();

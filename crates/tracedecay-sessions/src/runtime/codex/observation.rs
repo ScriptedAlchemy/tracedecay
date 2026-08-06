@@ -295,6 +295,8 @@ async fn try_admit_codex_jsonl_observations(
                                 .projection_project_path(context_state.cwd.as_deref()),
                             location_path: context_state.cwd.as_deref(),
                             transcript_path: path,
+                            turn_id: context_state.turn_id.as_deref(),
+                            model: context_state.model.as_deref(),
                         },
                     )?;
                     stable_record_id = Some(record_id);

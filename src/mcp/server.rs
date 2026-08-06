@@ -69,7 +69,8 @@ use dispatch_settlement::RetainedDispatchAuthority;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 pub(crate) use lifecycle::{
-    ProjectServerResponseLifecycle, StartupCatchUpMachineV1, VersionCheckState,
+    McpBackgroundTaskOwner, ProjectServerResponseLifecycle, StartupCatchUpMachineV1,
+    VersionCheckState,
 };
 pub(crate) use live_transcript_refresh::{
     LiveTranscriptRefreshJoin, join_required_live_transcript_refresh,
@@ -222,17 +223,19 @@ pub struct McpServer {
     /// handler await, so a swap never contends with in-flight calls. Calls
     /// already running when a swap lands finish against the old snapshot;
     /// each call is internally consistent.
-    /// `Arc` so the detached branch-reopen task can hold a cheap clone and swap
+    /// `Arc` so the retained branch-reopen task can hold a cheap clone and swap
     /// the freshly opened instance in when it lands.
     cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
-    /// Single-flights branch reopen work. Held by the detached reopen task, not
+    /// Single-flights branch reopen work. Held by the retained reopen task, not
     /// by the request that noticed the drift: a reopen is a full DB open plus a
     /// sealed restore, and no caller ever waits on it.
     branch_reopen: Arc<tokio::sync::Mutex<()>>,
-    /// Count of completed branch reopens (success or failure). Lets tests and
-    /// callers observe that a detached swap has landed without exposing the
-    /// task handle.
+    /// Count of settled branch reopens (success, failure, cancellation, or
+    /// shutdown-time rejection) without exposing the retained task handle.
     branch_reopen_completions: Arc<AtomicU64>,
+    /// Retains non-request maintenance futures so shutdown can fence task
+    /// admission, cancel every live future, and join it before stores close.
+    background_tasks: McpBackgroundTaskOwner,
     stats: ServerStats,
     method_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
@@ -241,7 +244,7 @@ pub struct McpServer {
     diagnostics_cache: crate::diagnostics::DiagnosticsCache,
     diagnostics_lsp: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
-    /// `Arc` so the detached D4 background-refresh task can hold a cheap
+    /// `Arc` so the retained D4 background-refresh task can hold a cheap
     /// clone and swap in the freshly synced map on completion.
     file_token_map: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     /// Running total of tokens saved by serving from the graph.
@@ -330,10 +333,8 @@ pub struct McpServer {
     /// this holds the relative path prefix (e.g. `"src/mcp"`). Listing tools
     /// use it as the default path filter. `None` when cwd == project root.
     scope_prefix: Option<String>,
-    /// Set to `true` after `shutdown` runs once; makes shutdown idempotent so
-    /// callers can invoke it explicitly after `run` returns without re-running
-    /// persistence logic.
-    shutdown_done: AtomicBool,
+    /// Retains the single shutdown coordinator independently of its waiters.
+    shutdown: connection::McpShutdownCompletion,
     /// When true, every `tools/call` response gains a `_meta.duration_us`
     /// field measuring the handler's pure execution time. Toggled by
     /// `tracedecay serve --timings`. Off by default to keep responses clean.
@@ -362,12 +363,12 @@ pub struct McpServer {
     /// previous flag soup carried. `Arc` so the detached ingest task can
     /// settle the same machine that waiters and shutdown read.
     startup_catch_up: Arc<StartupCatchUpMachineV1>,
-    /// `true` while a detached sync-on-read refresh (D4) is in flight.
+    /// `true` while a retained sync-on-read refresh (D4) is in flight.
     /// Single-flights the background refresh: `compare_exchange`d to `true`
     /// before spawning and cleared on completion. Also read by the D7
     /// staleness banner so an in-progress refresh emits the informational
     /// "refresh in progress" note instead of the manual-sync warning.
-    /// `Arc` so the detached refresh task holds a cheap clone to clear it on
+    /// `Arc` so the retained refresh task holds a cheap clone to clear it on
     /// completion.
     background_refresh_running: Arc<AtomicBool>,
     /// UNIX timestamp (secs) of the most recent sync-on-read background
@@ -380,7 +381,7 @@ pub struct McpServer {
     /// *completed*. `0` = never. Read by the D7 staleness banner so a refresh
     /// that finished within `read_cooldown_secs` suppresses the banner
     /// entirely (the index is as fresh as auto-sync can make it). `Arc` so
-    /// the detached refresh task can stamp it on completion.
+    /// the retained refresh task can stamp it on completion.
     last_background_refresh_done_at: Arc<AtomicI64>,
     /// The `[sync]` config resolved once at construction from the project
     /// root (plus `TRACEDECAY_SYNC_*` env overrides). Cached so the read
@@ -843,6 +844,7 @@ impl McpServer {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
             branch_reopen_completions: Arc::new(AtomicU64::new(0)),
+            background_tasks: McpBackgroundTaskOwner::default(),
             stats: ServerStats::new(),
             method_call_counts: std::sync::Mutex::new(HashMap::new()),
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),
@@ -900,7 +902,7 @@ impl McpServer {
             }),
             pending_notifications: std::sync::Mutex::new(Vec::new()),
             scope_prefix,
-            shutdown_done: AtomicBool::new(false),
+            shutdown: connection::McpShutdownCompletion::default(),
             timings_enabled: AtomicBool::new(telemetry_config.timings),
             last_staleness_check_at: AtomicI64::new(0),
             last_automation_notice_check_at: AtomicI64::new(0),

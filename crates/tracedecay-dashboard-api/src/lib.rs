@@ -100,7 +100,7 @@ pub mod project_registry;
 mod projects;
 mod read_model;
 mod savings_api;
-mod savings_pricing;
+use tracedecay_usecases::provider_pricing as savings_pricing;
 pub mod scope;
 mod settings_api;
 pub use settings_api::{
@@ -301,8 +301,9 @@ pub struct DashboardState {
     /// Daemon-owned canonical session retrieval authority used by LCM browse
     /// routes. Those routes never retain or open a session database.
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
-    /// Global accounting DB (savings ledger, lifetime counters, turns) used
-    /// by the Savings & Cost tab, when available.
+    /// Global accounting DB for the savings ledger and lifetime counters used
+    /// by the Savings & Cost tab. Provider usage lives in the retained project
+    /// session store exposed separately through `lcm_db`.
     pub savings_db: Option<Arc<RegisteredGlobalDb>>,
     /// Display path of the global accounting DB.
     pub savings_db_path: String,
@@ -1563,7 +1564,7 @@ fn selected_project_application_read(
         "feedback/get" | "feedback/expand" | "feedback/list" => {
             Some(SelectedProjectApplicationRead::Feedback)
         }
-        _ => WorkOperation::CORE
+        _ => WorkOperation::ALL
             .into_iter()
             .filter(|operation| operation.is_read_only())
             .any(|operation| tail.strip_prefix("work/") == Some(operation.route_segment()))
@@ -2038,11 +2039,7 @@ mod authority_tests {
         let application = ActiveProjectApplicationRoutes {
             http_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::NO_CONTENT }))
-                .route("/work/snapshot", post(|| async { StatusCode::NO_CONTENT }))
-                .route(
-                    "/work/attempt/start",
-                    post(|| async { StatusCode::ACCEPTED }),
-                ),
+                .route("/work/snapshot", post(|| async { StatusCode::NO_CONTENT })),
             dashboard_configuration_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::ACCEPTED })),
             dashboard_feedback_router: Router::new()
@@ -2102,20 +2099,6 @@ mod authority_tests {
             .await
             .expect("dashboard Work response");
         assert_eq!(work.status(), StatusCode::NO_CONTENT);
-
-        let attempt = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/work/attempt/start")
-                    .header("content-type", "application/json")
-                    .body(Body::from("{}"))
-                    .expect("dashboard Work attempt request"),
-            )
-            .await
-            .expect("dashboard Work attempt response");
-        assert_eq!(attempt.status(), StatusCode::METHOD_NOT_ALLOWED);
 
         let selected = app
             .oneshot(
@@ -2350,7 +2333,9 @@ mod authority_tests {
             let value: Value = serde_json::from_slice(&body).expect("LCM aggregate json");
 
             assert_eq!(value["domain_state"], "ready", "{uri}");
-            assert_eq!(value["coverage"]["complete"], true, "{uri}");
+            assert_eq!(value["coverage"]["completeness"], "complete", "{uri}");
+            assert_eq!(value["coverage"]["eligible"], 1, "{uri}");
+            assert_eq!(value["coverage"]["examined"], 1, "{uri}");
             assert_eq!(value["payload"]["exists"], true, "{uri}");
         }
     }
@@ -2441,7 +2426,7 @@ mod authority_tests {
         assert_eq!(value["domain_state"], "unknown");
         assert_eq!(value["payload"]["savings"]["available"], false);
         assert_eq!(value["payload"]["sessions"]["available"], false);
-        assert_eq!(value["payload"]["turns"]["available"], false);
+        assert_eq!(value["payload"]["provider_usage"]["available"], false);
     }
 
     #[test]
@@ -2461,8 +2446,8 @@ mod authority_tests {
             assert_eq!(selected_project_application_read(&Method::GET, tail), None);
         }
 
-        // Every Work command, and every attempt operation, stays refused: a
-        // selected project is read-only through this gateway.
+        // Every Work command stays refused: a selected project is read-only
+        // through this gateway.
         for operation in WorkOperation::ALL {
             if operation.is_read_only() {
                 continue;

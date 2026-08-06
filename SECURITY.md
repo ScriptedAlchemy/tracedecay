@@ -65,12 +65,15 @@ Outbound connections are limited to:
 | `github.com` | Download binary during `tracedecay upgrade` | None (public releases) | Error shown to user |
 | `huggingface.co` and Hugging Face artifact hosts | Download missing, revision-pinned semantic-model artifacts when semantic auto-download is enabled | None | Semantic retrieval reports model acquisition state or failure; exact, lexical, and graph retrieval remain available |
 | `tracedecay-counter.enzinol.workers.dev` | Aggregate tracedecayd counter (endpoint keeps its pre-rename name) | None | Silently ignored |
-| `raw.githubusercontent.com` | Fetch model pricing from [LiteLLM](https://github.com/BerriAI/litellm) | None (public file) | Falls back to embedded pricing |
 
-The pricing fetch only runs during `tracedecay cost` and is cached for 24
-hours at `~/.tracedecay/pricing.json`. Semantic model downloads use a private
-TraceDecay cache, verify catalog-pinned lengths and SHA-256 digests before
-publication, and can be disabled with `HF_HUB_OFFLINE`.
+Provider usage and pricing do not add an outbound connection. `tracedecay cost`
+reads immutable provider-native usage observations and the deterministic bundled
+all-provider pricing table, identified by its content digest. Reads are
+side-effect-free: there is no request-triggered network refresh, home-directory
+pricing cache, or pricing environment override. Missing, unknown, or unavailable
+evidence remains typed rather than becoming a zero or a stale estimate. Semantic
+model downloads use a private TraceDecay cache, verify catalog-pinned lengths and
+SHA-256 digests before publication, and can be disabled with `HF_HUB_OFFLINE`.
 
 ### Credentials and secrets
 

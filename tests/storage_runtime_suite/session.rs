@@ -95,7 +95,6 @@ struct HelperProbe {
     journal_mode: Value,
     quick_check: Value,
     full_check: Value,
-    allowlisted_count: Value,
     session_store: BTreeMap<String, SessionTableProbe>,
 }
 
@@ -1170,7 +1169,6 @@ fn probe_with_rusqlite_helper(copied: &CopiedStore, label: &str) -> HelperProbe 
         journal_mode,
         quick_check,
         full_check,
-        allowlisted_count,
         session_store,
     }
 }
@@ -1323,7 +1321,6 @@ fn assert_helper_probes_agree(probes: &[&HelperProbe]) {
         assert_eq!(probe.journal_mode, first.journal_mode);
         assert_eq!(probe.quick_check, first.quick_check);
         assert_eq!(probe.full_check, first.full_check);
-        assert_eq!(probe.allowlisted_count, first.allowlisted_count);
         for spec in SESSION_TABLES {
             assert_eq!(
                 helper_table(probe, spec.table).schema,

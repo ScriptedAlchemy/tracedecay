@@ -89,7 +89,7 @@ D = delegated (thin arm), I = inlined (fat arm, extraction candidate).
 | 35 | `EnableUploadCounter` | 1244-1249 | I | 5 | saves global config |
 | 36 | `Gitignore` | 1250-1280 | I | 30 | 4-way branch (on/off/unknown/None); writes project config |
 | 37 | `Doctor` | 1281-1283 | D | 2 | `doctor::run_doctor` |
-| 38 | `Cost` | 1284-1440 | I | 156 | network pricing refresh; 4-way output format branching |
+| 38 | `Cost` | 1284-1440 | I | 156 | bundled all-provider pricing read; 4-way output format branching |
 | 39 | `Bench` | 1441-1478 | I | 37 | runs retrieval benchmark |
 | 40 | `Gain` | 1479-1486 | D | 7 | delegated |
 | 41 | `Monitor` | 1487-1492 | D | 5 | blocks (live watcher) |
@@ -116,7 +116,7 @@ Ranked by (complexity × blast radius):
 2. **`Status` arm (520-692).** Largest single arm. Mixes a runtime-telemetry
    branch, an interactive stdin prompt (non-interactive early-return),
    network calls with caching (worldwide total 60s cache at 588, country flags
-   1800s cache at 606), global-DB upsert, accounting ingest, branch-meta load,
+   1800s cache at 606), global-DB upsert, provider-usage read, branch-meta load,
    and two display paths (`short` header vs full table). The network-cache
    blocks are subtle and have no tests.
 
@@ -125,10 +125,11 @@ Ranked by (complexity × blast radius):
    `InstallContext` inline 5+ times. `Reinstall`/`UpdatePlugin`/`Uninstall`
    repeat the `home_dir`/`which_tracedecay`/`InstallContext` boilerplate.
 
-4. **`Cost` arm (1284-1440).** Network call (`pricing::refresh_if_stale`) then
-   a 4-way output switch (`export=csv` / `export=json` / `by_model` /
+4. **`Cost` arm (1284-1440).** Side-effect-free read of immutable provider-usage
+   observations against the deterministic bundled all-provider pricing table,
+   then a 4-way output switch (`export=csv` / `export=json` / `by_model` /
    `by_task` / default) with per-format table formatting. The formatting is
-   pure but entangled with the global-DB/network setup.
+   pure but entangled with the global-DB setup.
 
 5. **Silent-reinstall block (316-368).** Runs on *every* non-skipped command.
    Version-predicate logic (`transition_needs_reinstall` /
@@ -245,7 +246,7 @@ Consequence: to make an extracted handler unit-testable from `tests/`, either
 | `Bench` | Requires an initialized index and runs queries (medium runtime) |
 | `Install`, `Reinstall`, `UpdatePlugin`, `Uninstall` | Filesystem mutation of agent configs in the user's real home; `Install` also opens an **interactive** TTY picker |
 | `Status` (default path) | Network (`fetch_worldwide_total`, `fetch_country_flags`), global-DB upsert, and an interactive stdin prompt when uninitialized |
-| `Cost` | Network (`pricing::refresh_if_stale` LiteLLM fetch) + global-DB ingest |
+| `Cost` | Side-effect-free bundled pricing/usage read + global-DB read |
 | `DisableUploadCounter` / `EnableUploadCounter` / `Gitignore { on/off }` | Write global/project config to the real home/cwd |
 | `ResetCounter` | Mutates the project-local counter DB |
 | `Tool` | Dispatches an MCP tool; per-tool side effects vary (already has its own test suite in `tool_command.rs`-adjacent tests) |

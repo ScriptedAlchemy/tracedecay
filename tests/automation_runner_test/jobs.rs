@@ -76,6 +76,7 @@ impl AgentTaskBackend for ContentBackend {
             output_text: self.content.to_string(),
             output_json: None,
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
@@ -498,6 +499,7 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
                 output_text: "done".to_string(),
                 output_json: None,
                 model: Some("fixture-model".to_string()),
+                provider: Some("fixture".to_string()),
                 input_tokens: None,
                 output_tokens: None,
             })
@@ -551,6 +553,7 @@ async fn user_job_pre_run_command_runs_from_project_root() {
                 output_text: "done".to_string(),
                 output_json: None,
                 model: Some("fixture-model".to_string()),
+                provider: Some("fixture".to_string()),
                 input_tokens: None,
                 output_tokens: None,
             })
@@ -628,6 +631,7 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
                 output_text: "done".to_string(),
                 output_json: None,
                 model: Some("fixture-model".to_string()),
+                provider: Some("fixture".to_string()),
                 input_tokens: None,
                 output_tokens: None,
             })
@@ -709,6 +713,7 @@ async fn user_job_does_not_attach_archived_managed_skills() {
                 output_text: "done".to_string(),
                 output_json: None,
                 model: Some("fixture-model".to_string()),
+                provider: Some("fixture".to_string()),
                 input_tokens: None,
                 output_tokens: None,
             })
@@ -871,6 +876,7 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
                 output_text: "done".to_string(),
                 output_json: None,
                 model: Some("fixture-model".to_string()),
+                provider: Some("fixture".to_string()),
                 input_tokens: None,
                 output_tokens: None,
             })

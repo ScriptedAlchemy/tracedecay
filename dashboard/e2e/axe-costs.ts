@@ -31,8 +31,8 @@ export const COSTS_SCENARIOS: readonly Scenario[] = [
     overrides: {},
     assert: async (page) => {
       await assertMetricPlateTruth(page, 'the canonical cost panel');
-      // Prices are recorded at ingest. Turns counted without a pricing
-      // revision have no cost — which is an accounting state, not $0.00.
+      // Provider usage without an exact model price has no cost — which is an
+      // accounting state, not $0.00.
       const cost = await plateReading(page, 'provider_cost');
       expectEqual(cost.figure, '—', 'an unpriced cost, which a zero bill would falsify');
       expectEqual(cost.available, 'false', 'the unpriced cost is marked unavailable');
@@ -76,7 +76,7 @@ export const COSTS_SCENARIOS: readonly Scenario[] = [
       // The whole point of two boundaries: the other read still answered. Read
       // through visible text only — `ReadoutBar`'s `label` becomes an
       // `aria-label` on a plain div rather than anything on screen.
-      await expectVisibleText(page, 'turn ledger', 'the savings ledger survived the failure');
+      await expectVisibleText(page, 'provider usage', 'the savings ledger survived the failure');
       await expectVisibleText(page, 'total cost', 'the spend readout survived too');
       await expectVisibleText(page, 'Where the tokens go', 'and so did the token mix');
     },

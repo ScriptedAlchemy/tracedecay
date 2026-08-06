@@ -24,6 +24,33 @@ pub struct RegisteredGlobalDb {
     authority: DatabaseAuthority,
 }
 
+/// Core Work command and projection services over the registered exact-SQL
+/// channel.
+pub struct RegisteredWorkApplicationServicesV1 {
+    commands:
+        tracedecay_application::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>,
+    projections: tracedecay_application::WorkProjectionReadService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+}
+
+impl RegisteredWorkApplicationServicesV1 {
+    pub fn commands(
+        &self,
+    ) -> &tracedecay_application::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
+    {
+        &self.commands
+    }
+
+    pub fn projections(
+        &self,
+    ) -> &tracedecay_application::WorkProjectionReadService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.projections
+    }
+}
+
 /// Workflow definition reads and journaled mutation authority over the
 /// registered exact-SQL channel.
 ///
@@ -336,6 +363,25 @@ impl RegisteredGlobalDb {
         Ok(handle)
     }
 
+    pub fn work_storage(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
+    {
+        let handle = self
+            .runtime
+            .authorized_exact_sql_handle(self.authority.clone())
+            .map_err(|error| {
+                registered_error("attach registered Work storage", format!("{error:?}"))
+            })?;
+        validate_registered_identity(
+            handle.binding(),
+            handle.verified_locator(),
+            self.runtime.binding(),
+            self.runtime.locator().verified(),
+        )?;
+        Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle))
+    }
+
     pub fn authorized_scope_set_storage(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<
@@ -363,8 +409,19 @@ impl RegisteredGlobalDb {
         )
     }
 
-    /// Attaches the workflow-definition/task-handoff authority over the
-    /// registered exact-SQL handle.
+    pub fn work_application_services(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<RegisteredWorkApplicationServicesV1> {
+        let storage = self.work_storage()?;
+        Ok(RegisteredWorkApplicationServicesV1 {
+            commands: tracedecay_application::WorkService::new(storage.clone()),
+            projections: tracedecay_application::WorkProjectionReadService::new(storage),
+        })
+    }
+
+    /// Attaches the PR17 workflow-definition/task-handoff authority over the
+    /// registered Work exact-SQL handle. Installs `workflow_*` tables
+    /// idempotently through the same handle `work_storage` validates.
     pub fn workflow_storage(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<
@@ -385,8 +442,6 @@ impl RegisteredGlobalDb {
         })
     }
 
-    /// Attaches the single-use handoff-open authority through the same
-    /// registered exact-SQL handle as workflow state.
     pub fn handoff_open_storage(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<
