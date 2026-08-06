@@ -498,6 +498,62 @@ async fn linked_route_reuses_primary_authority_while_shadow_writer_is_held() {
     engine.shutdown_all().await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_fences_git_index_transactions_and_joins_store_actors() {
+    let home = TempDir::new().expect("isolated home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let repository = home.join("repository");
+    std::fs::create_dir_all(&repository).expect("create repository");
+    run_git(&repository, &["init", "-b", "main", "--quiet"]);
+    std::fs::write(repository.join("README.md"), "shutdown fence fixture\n").expect("fixture");
+    run_git(&repository, &["add", "."]);
+    run_git(&repository, &["commit", "-m", "fixture", "--quiet"]);
+
+    let handshake = DaemonHandshake {
+        project_path: Some(repository.clone()),
+        allow_init: true,
+        client_identity: test_client_identity_for(home.join("client")),
+        ..test_handshake_defaults()
+    };
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "git-shutdown-fence-test",
+    );
+    engine
+        .open_project_server(&handshake)
+        .await
+        .expect("project open must mount the Git transaction service");
+
+    let registry = engine.store_administration.git_index_transaction_services();
+    registry
+        .for_repository_root(&repository)
+        .await
+        .expect("owner lookup before shutdown")
+        .expect("project open must mount exactly one Git invocation owner");
+
+    engine.shutdown_all().await;
+
+    // Post-fence admission is a truthful typed unavailable state — not a
+    // hang, a transport error, or an empty success.
+    assert!(matches!(
+        registry.for_repository_root(&repository).await,
+        Err(tracedecay_application::GitIndexTransactionPortError::DaemonUnavailable)
+    ));
+
+    // The idempotent receipt proves engine shutdown already closed the one
+    // mounted service and joined its store actor thread, so the registered
+    // session database Arc retained by the actor dropped with
+    // `shutdown_servers` rather than at process exit.
+    let receipt = registry
+        .shutdown()
+        .await
+        .expect("idempotent shutdown receipt");
+    assert_eq!(receipt.services_closed, 1);
+    assert_eq!(receipt.store_actors_joined, 1);
+}
+
 #[tokio::test]
 async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() {
     let tasks = super::super::ProjectOpenTasks::default();
