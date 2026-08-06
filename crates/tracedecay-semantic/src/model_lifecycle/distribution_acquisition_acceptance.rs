@@ -157,4 +157,18 @@ fn distribution_local_evaluation_import_admits_verified_jina_without_network_or_
         owner.status().state,
         Some(SemanticModelLifecycleStateV1::Installed { .. })
     ));
+    drop(owner);
+
+    // Restart re-admission must verify the imported manifest against exact
+    // process runtime evidence (fastembed/ort build revision), not a coarse
+    // family label.
+    let reopened = SemanticModelLifecycleOwnerV1::open_default(root.path())
+        .expect("reopen the evaluator lifecycle root");
+    let readmitted = reopened
+        .select_model(Some(crate::DEFAULT_FASTEMBED_MODEL_ID), false)
+        .expect("re-admit the imported artifact under exact runtime evidence");
+    assert!(matches!(
+        readmitted.state,
+        Some(SemanticModelLifecycleStateV1::Installed { .. })
+    ));
 }
