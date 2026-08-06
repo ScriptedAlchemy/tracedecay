@@ -439,6 +439,8 @@ impl RequestContext {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use super::{CancellationSignal, CancellationState};
     use tracedecay_domain::UtcMicros;
 
@@ -477,5 +479,33 @@ mod tests {
         assert!(!signal.is_cancelled());
         assert_eq!(signal.cancelled_at(), None);
         assert!(matches!(signal.context().state, CancellationState::Active));
+    }
+
+    #[test]
+    fn concurrent_cancellation_and_commit_have_one_winner() {
+        for attempt in 0..128 {
+            let signal =
+                CancellationSignal::active(format!("cancel.commit-race.{attempt}")).unwrap();
+            let barrier = Arc::new(Barrier::new(3));
+            let cancel_signal = signal.clone();
+            let cancel_barrier = Arc::clone(&barrier);
+            let cancel = std::thread::spawn(move || {
+                cancel_barrier.wait();
+                cancel_signal.cancel(UtcMicros(attempt))
+            });
+            let commit_signal = signal.clone();
+            let commit_barrier = Arc::clone(&barrier);
+            let commit = std::thread::spawn(move || {
+                commit_barrier.wait();
+                commit_signal.try_begin_commit()
+            });
+
+            barrier.wait();
+            let cancelled = cancel.join().expect("cancellation contender");
+            let committed = commit.join().expect("commit contender");
+            assert_ne!(cancelled, committed);
+            assert_eq!(signal.commit_started(), committed);
+            assert_eq!(signal.cancelled_at(), cancelled.then_some(UtcMicros(attempt)));
+        }
     }
 }
