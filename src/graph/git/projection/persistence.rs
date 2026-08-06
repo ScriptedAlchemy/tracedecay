@@ -20,13 +20,15 @@ use super::{
     HISTORY_WINDOW_SECS, MAX_CHANGED_FILES_PER_COMMIT, MAX_CHANGED_PATH_REFERENCES,
     MAX_COMMIT_RECORD_PATH_BYTES, MAX_DURABLE_FRONTIER, MAX_PATH_BYTES, MAX_PROJECTION_ENTITIES,
     MAX_UNIQUE_PATHS, MAX_WINDOW_COMMITS, NAMESPACE_DOMAIN, PROJECTION, PROJECTION_PAGE_SIZE,
-    ProjectionCountersV1, ReadyStateV1, STATE_LABEL, STATE_PROPERTY, WorkingStateV1,
+    ProjectionCountersV1, ReadyStateV1, STAGING_NAMESPACE_DOMAIN, STATE_LABEL, STATE_PROPERTY,
+    WorkingStateV1,
 };
 
 pub(super) trait PersistedStateV1: DeserializeOwned {
     fn validate(
         &self,
         binding: &GitHealthProjectionBindingV1,
+        allow_reference_drift: bool,
     ) -> Result<(), GitHealthProjectionError>;
 }
 
@@ -34,8 +36,9 @@ impl PersistedStateV1 for ReadyStateV1 {
     fn validate(
         &self,
         binding: &GitHealthProjectionBindingV1,
+        allow_reference_drift: bool,
     ) -> Result<(), GitHealthProjectionError> {
-        validate_source(&self.source, binding)?;
+        validate_source(&self.source, binding, allow_reference_drift)?;
         validate_counters(&self.counters)
     }
 }
@@ -44,8 +47,9 @@ impl PersistedStateV1 for WorkingStateV1 {
     fn validate(
         &self,
         binding: &GitHealthProjectionBindingV1,
+        allow_reference_drift: bool,
     ) -> Result<(), GitHealthProjectionError> {
-        validate_source(&self.target, binding)?;
+        validate_source(&self.target, binding, allow_reference_drift)?;
         validate_counters(&self.counters)?;
         if self.pending.len() > MAX_DURABLE_FRONTIER {
             return corrupt("working frontier exceeds its durable bound");
@@ -63,8 +67,11 @@ impl PersistedStateV1 for WorkingStateV1 {
 pub(super) fn validate_source(
     source: &GitHealthProjectionSourceV1,
     binding: &GitHealthProjectionBindingV1,
+    allow_reference_drift: bool,
 ) -> Result<(), GitHealthProjectionError> {
-    if &source.binding != binding {
+    if &source.binding != binding
+        && !(allow_reference_drift && storage_binding_matches(&source.binding, binding))
+    {
         return corrupt("persisted source binding does not match the mounted authority");
     }
     source
@@ -93,6 +100,17 @@ pub(super) fn validate_source(
     Ok(())
 }
 
+pub(super) fn storage_binding_matches(
+    left: &GitHealthProjectionBindingV1,
+    right: &GitHealthProjectionBindingV1,
+) -> bool {
+    left.profile_id == right.profile_id
+        && left.store_id == right.store_id
+        && left.scope.project_id == right.scope.project_id
+        && left.scope.repository_id == right.scope.repository_id
+        && left.scope.worktree_id == right.scope.worktree_id
+}
+
 fn validate_counters(counters: &ProjectionCountersV1) -> Result<(), GitHealthProjectionError> {
     if counters.commits_projected > MAX_WINDOW_COMMITS
         || counters.unique_paths > MAX_UNIQUE_PATHS
@@ -118,14 +136,14 @@ impl GitHealthProjectionStoreV1 {
     pub(super) fn read_state<T: PersistedStateV1>(
         &self,
         binding: &GitHealthProjectionBindingV1,
+        namespace: &GraphNamespace,
         identity: &str,
+        allow_reference_drift: bool,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<T>, GitHealthProjectionError> {
-        let Some(entity) = self.database.entity(
-            &namespace(binding)?,
-            &GraphEntityId::new(identity)?,
-            cancellation,
-        )?
+        let Some(entity) =
+            self.database
+                .entity(namespace, &GraphEntityId::new(identity)?, cancellation)?
         else {
             return Ok(None);
         };
@@ -138,20 +156,20 @@ impl GitHealthProjectionStoreV1 {
         }
         let state: T = serde_json::from_slice(bytes_property(&entity, STATE_PROPERTY)?)
             .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))?;
-        state.validate(binding)?;
+        state.validate(binding, allow_reference_drift)?;
         Ok(Some(state))
     }
 
     pub(super) fn projection_entities(
         &self,
-        binding: &GitHealthProjectionBindingV1,
+        namespace: &GraphNamespace,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<GraphEntity>, GitHealthProjectionError> {
         let mut entities = Vec::new();
         let mut after_entity = None;
         loop {
             let page = self.database.read_projection(GraphProjectionReadRequest {
-                namespace: namespace(binding)?,
+                namespace: namespace.clone(),
                 projection: projection()?,
                 after_entity,
                 after_relation: None,
@@ -173,8 +191,10 @@ impl GitHealthProjectionStoreV1 {
 }
 
 pub(super) fn authenticate_snapshot_entities(
-    entities: Vec<GraphEntity>,
-    ready: &ReadyStateV1,
+    entities: &[GraphEntity],
+    source: &GitHealthProjectionSourceV1,
+    counters: &ProjectionCountersV1,
+    required_state: &str,
 ) -> Result<(), GitHealthProjectionError> {
     let mut commits = 0usize;
     let mut changed_references = 0usize;
@@ -184,13 +204,12 @@ pub(super) fn authenticate_snapshot_entities(
     let commit_label = BTreeSet::from([GraphLabel::new(COMMIT_LABEL)?]);
     let file_label = BTreeSet::from([GraphLabel::new(FILE_LABEL)?]);
     let state_label = BTreeSet::from([GraphLabel::new(STATE_LABEL)?]);
-    let mut ready_state_seen = false;
-    let mut working_state_seen = false;
+    let mut required_state_seen = false;
     for entity in entities {
         if entity.labels == commit_label {
             let record = commit_record_from_entity(&entity, None)?;
-            if record.committed_at_epoch_secs < ready.source.window_start_epoch_secs
-                || record.committed_at_epoch_secs >= ready.source.window_end_epoch_secs
+            if record.committed_at_epoch_secs < source.window_start_epoch_secs
+                || record.committed_at_epoch_secs >= source.window_end_epoch_secs
             {
                 return corrupt("persisted commit lies outside the authenticated source window");
             }
@@ -210,22 +229,21 @@ pub(super) fn authenticate_snapshot_entities(
                 return corrupt("Git health projection contains duplicate file paths");
             }
         } else if entity.labels == state_label {
-            match entity.identity.as_str() {
-                super::READY_ENTITY if !ready_state_seen => ready_state_seen = true,
-                super::WORKING_ENTITY if !working_state_seen => working_state_seen = true,
-                _ => return corrupt("Git health projection contains an unauthenticated state"),
+            if entity.identity.as_str() == required_state && !required_state_seen {
+                required_state_seen = true;
+            } else {
+                return corrupt("Git health projection contains an unauthenticated state");
             }
         } else {
             return corrupt("Git health projection contains an unauthenticated entity");
         }
     }
-    if commits != ready.counters.commits_projected
-        || changed_references != ready.counters.changed_path_references
-        || path_bytes != ready.counters.path_bytes
-        || expected_churn.len() != ready.counters.unique_paths
+    if commits != counters.commits_projected
+        || changed_references != counters.changed_path_references
+        || path_bytes != counters.path_bytes
+        || expected_churn.len() != counters.unique_paths
         || expected_churn != stored_churn
-        || !ready_state_seen
-        || !working_state_seen
+        || !required_state_seen
     {
         return corrupt("persisted projection entities do not authenticate ready counters");
     }
@@ -426,8 +444,21 @@ pub(super) fn file_entity_id(path: &str) -> Result<GraphEntityId, GitHealthProje
 pub(super) fn namespace(
     binding: &GitHealthProjectionBindingV1,
 ) -> Result<GraphNamespace, GitHealthProjectionError> {
+    projection_namespace(NAMESPACE_DOMAIN, binding)
+}
+
+pub(super) fn staging_namespace(
+    binding: &GitHealthProjectionBindingV1,
+) -> Result<GraphNamespace, GitHealthProjectionError> {
+    projection_namespace(STAGING_NAMESPACE_DOMAIN, binding)
+}
+
+fn projection_namespace(
+    domain: &str,
+    binding: &GitHealthProjectionBindingV1,
+) -> Result<GraphNamespace, GitHealthProjectionError> {
     let digest = canonical_sha256(&(
-        NAMESPACE_DOMAIN,
+        domain,
         &binding.scope.project_id,
         &binding.profile_id,
         &binding.store_id,

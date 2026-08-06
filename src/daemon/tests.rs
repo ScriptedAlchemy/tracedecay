@@ -44,6 +44,44 @@ mod scheduler_config;
 mod scheduler_shutdown;
 mod socket;
 
+#[test]
+fn database_owner_rekey_collision_preserves_the_published_owner_and_route() {
+    fn owner(name: &str) -> StoreOwnerKey {
+        StoreOwnerKey {
+            profile_root: PathBuf::from(format!("/profile/{name}")),
+            global_db_path: PathBuf::from(format!("/profile/{name}/global.db")),
+            project_id: Some(name.to_owned()),
+            store_root: PathBuf::from(format!("/store/{name}")),
+            graph_db_path: PathBuf::from(format!("/store/{name}/graph.db")),
+        }
+    }
+
+    let old = ProjectServerKey {
+        owner: owner("old"),
+        project_root: PathBuf::from("/project"),
+        scope_prefix: None,
+    };
+    let new = ProjectServerKey {
+        owner: owner("new"),
+        project_root: PathBuf::from("/project"),
+        scope_prefix: None,
+    };
+    let route = ProjectRouteKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_path: PathBuf::from("/project"),
+        scope_prefix: None,
+    };
+    let mut registry = DatabaseOwnerRegistry::default();
+    registry.insert_route(route.clone(), old.clone(), "old");
+    registry.insert(new.clone(), "new");
+
+    assert!(!registry.rekey(&old, &new));
+    assert_eq!(registry.get(&old), Some(&"old"));
+    assert_eq!(registry.get(&new), Some(&"new"));
+    assert_eq!(registry.aliases.get(&route), Some(&old));
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ObservedMcpRoute {
     Rmcp,

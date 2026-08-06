@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::{
     GitHealthProjectionAvailabilityV1, GitHealthProjectionBindingV1,
-    GitHealthProjectionChurnEntryV1, GitHealthProjectionChurnPageV1, GitHealthProjectionCoverageV1,
+    GitHealthProjectionChurnCursorV1, GitHealthProjectionChurnEntryV1,
+    GitHealthProjectionChurnPageV1, GitHealthProjectionCoverageV1,
     GitHealthProjectionPartialReasonV1, GitHealthProjectionSnapshotV1, GitHealthProjectionSourceV1,
     GitHealthProjectionUnavailableReasonV1,
 };
@@ -24,6 +25,7 @@ use crate::application::context::CancellationToken;
 
 mod native;
 mod persistence;
+mod read;
 
 pub(crate) use native::capture_source;
 use native::{
@@ -32,7 +34,8 @@ use native::{
 };
 use persistence::{
     authenticate_snapshot_entities, coalesce_mutations, commit_entity, commit_entity_id,
-    commit_record_from_entity, file_entity, file_entity_id, namespace, projection, state_entity,
+    commit_record_from_entity, file_entity, file_entity_id, namespace, projection,
+    staging_namespace, state_entity, storage_binding_matches,
 };
 
 const HISTORY_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
@@ -61,7 +64,7 @@ const FILE_LABEL: &str = "GitHealthFile";
 const STATE_LABEL: &str = "GitHealthProjectionState";
 const GENERATION_DOMAIN: &str = "tracedecay.git-health.projection-generation.v1";
 const NAMESPACE_DOMAIN: &str = "tracedecay.git-health.namespace.v1";
-const RESET_GENERATION_DOMAIN: &str = "tracedecay.git-health.reset-generation.v1";
+const STAGING_NAMESPACE_DOMAIN: &str = "tracedecay.git-health.staging-namespace.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitHealthProjectionProgressV1 {
@@ -78,6 +81,8 @@ pub(crate) enum GitHealthProjectionError {
     InvalidBatchLimit,
     #[error("Git health projection scope no longer matches the mounted worktree")]
     ScopeDrift,
+    #[error("Git health projection changed while a page was being read")]
+    SnapshotChanged,
     #[error("native Git health source is unavailable: {0}")]
     Git(String),
     #[error("Git health graph projection is unavailable: {0}")]
@@ -92,6 +97,7 @@ impl GitHealthProjectionError {
     pub(crate) const fn unavailable_reason(&self) -> GitHealthProjectionUnavailableReasonV1 {
         match self {
             Self::ScopeDrift => GitHealthProjectionUnavailableReasonV1::ScopeDrift,
+            Self::SnapshotChanged => GitHealthProjectionUnavailableReasonV1::ProjectionChanged,
             Self::Git(_) => GitHealthProjectionUnavailableReasonV1::NativeGitUnavailable,
             Self::Graph(_) | Self::InvalidBatchLimit => {
                 GitHealthProjectionUnavailableReasonV1::ProjectionStoreUnavailable
@@ -254,231 +260,6 @@ impl GitHealthProjectionStoreV1 {
         Self { database }
     }
 
-    pub(crate) fn reset_binding(
-        &self,
-        binding: &GitHealthProjectionBindingV1,
-        cancellation: &CancellationToken,
-    ) -> Result<(), GitHealthProjectionError> {
-        cancellation_checkpoint(cancellation)?;
-        let generation = tracedecay_domain::canonical_sha256(&(RESET_GENERATION_DOMAIN, binding))
-            .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))?;
-        let graph_cancellation: Arc<dyn GraphCancellation> =
-            Arc::new(TokenCancellation(cancellation.clone()));
-        self.database.replace_projection(ProjectionReplacement {
-            namespace: namespace(binding)?,
-            projection: projection()?,
-            source_generation: SourceGeneration::new(generation.as_str())?,
-            next_watermark: GraphWatermark::new(format!("{}:reset", generation.as_str()))?,
-            entities: Vec::new(),
-            relations: Vec::new(),
-            cancellation: graph_cancellation,
-        })?;
-        Ok(())
-    }
-
-    pub(crate) fn read(
-        &self,
-        binding: &GitHealthProjectionBindingV1,
-    ) -> GitHealthProjectionAvailabilityV1 {
-        self.read_inner(binding).unwrap_or_else(|error| {
-            GitHealthProjectionAvailabilityV1::Unavailable {
-                reason: error.unavailable_reason(),
-            }
-        })
-    }
-
-    fn read_inner(
-        &self,
-        binding: &GitHealthProjectionBindingV1,
-    ) -> Result<GitHealthProjectionAvailabilityV1, GitHealthProjectionError> {
-        let cancellation: Arc<dyn GraphCancellation> =
-            Arc::new(TokenCancellation(CancellationToken::new()));
-        let ready =
-            self.read_state::<ReadyStateV1>(binding, READY_ENTITY, Arc::clone(&cancellation))?;
-        let working =
-            self.read_state::<WorkingStateV1>(binding, WORKING_ENTITY, Arc::clone(&cancellation))?;
-        self.authenticate_projection_commit(
-            binding,
-            ready.as_ref(),
-            working.as_ref(),
-            Arc::clone(&cancellation),
-        )?;
-        if let Some(working) = working.as_ref().filter(|working| !working.complete) {
-            return Ok(GitHealthProjectionAvailabilityV1::Warming {
-                target: Some(working.target.clone()),
-            });
-        }
-        let Some(ready) = ready else {
-            return Ok(GitHealthProjectionAvailabilityV1::Warming {
-                target: working.map(|working| working.target),
-            });
-        };
-        if working
-            .as_ref()
-            .is_some_and(|working| working.target != ready.source)
-        {
-            return Err(GitHealthProjectionError::Corrupt(
-                "complete working state disagrees with ready source".to_owned(),
-            ));
-        }
-        let entities = self.projection_entities(binding, cancellation)?;
-        authenticate_snapshot_entities(entities, &ready)?;
-        Ok(GitHealthProjectionAvailabilityV1::Ready {
-            snapshot: GitHealthProjectionSnapshotV1 {
-                source: ready.source,
-                commits_projected: ready.counters.commits_projected,
-                batches_completed: ready.counters.batches_completed,
-                churn_entries: ready.counters.unique_paths,
-                coverage: ready.counters.coverage,
-            },
-        })
-    }
-
-    pub(crate) fn read_churn_page(
-        &self,
-        binding: &GitHealthProjectionBindingV1,
-        snapshot: &GitHealthProjectionSnapshotV1,
-        after_cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<GitHealthProjectionChurnPageV1, GitHealthProjectionError> {
-        if snapshot.source.binding != *binding {
-            return Err(GitHealthProjectionError::ScopeDrift);
-        }
-        let cancellation: Arc<dyn GraphCancellation> =
-            Arc::new(TokenCancellation(CancellationToken::new()));
-        let database = self.database.snapshot()?;
-        self.authenticate_projection_source(
-            &database,
-            binding,
-            &snapshot.source,
-            snapshot.batches_completed,
-            Some(
-                snapshot
-                    .commits_projected
-                    .saturating_add(snapshot.churn_entries)
-                    .saturating_add(2),
-            ),
-            Arc::clone(&cancellation),
-        )?;
-        let page = database.read_projection(GraphProjectionReadRequest {
-            namespace: namespace(binding)?,
-            projection: projection()?,
-            after_entity: after_cursor.map(GraphEntityId::new).transpose()?,
-            after_relation: None,
-            max_entities: limit.min(PROJECTION_PAGE_SIZE),
-            max_relations: 0,
-            cancellation,
-        })?;
-        let file_label = std::collections::BTreeSet::from([GraphLabel::new(FILE_LABEL)?]);
-        let mut entries = Vec::new();
-        for entity in page.entities {
-            if entity.labels == file_label {
-                let (path, churn) = persistence::file_record_from_entity(&entity)?;
-                entries.push(GitHealthProjectionChurnEntryV1 { path, churn });
-            }
-        }
-        Ok(GitHealthProjectionChurnPageV1 {
-            entries,
-            next_cursor: page
-                .next_entity
-                .map(|identity| identity.as_str().to_owned()),
-        })
-    }
-
-    fn authenticate_projection_commit(
-        &self,
-        binding: &GitHealthProjectionBindingV1,
-        ready: Option<&ReadyStateV1>,
-        working: Option<&WorkingStateV1>,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<(), GitHealthProjectionError> {
-        let Some(source) = working
-            .map(|state| {
-                (
-                    &state.target,
-                    state.counters.batches_completed,
-                    state.complete.then(|| {
-                        state
-                            .counters
-                            .commits_projected
-                            .saturating_add(state.counters.unique_paths)
-                            .saturating_add(2)
-                    }),
-                )
-            })
-            .or_else(|| {
-                ready.map(|state| {
-                    (
-                        &state.source,
-                        state.counters.batches_completed,
-                        Some(
-                            state
-                                .counters
-                                .commits_projected
-                                .saturating_add(state.counters.unique_paths)
-                                .saturating_add(2),
-                        ),
-                    )
-                })
-            })
-        else {
-            return Ok(());
-        };
-        let database = self.database.snapshot()?;
-        self.authenticate_projection_source(
-            &database,
-            binding,
-            source.0,
-            source.1,
-            source.2,
-            cancellation,
-        )
-    }
-
-    fn authenticate_projection_source(
-        &self,
-        database: &GraphSnapshot,
-        binding: &GitHealthProjectionBindingV1,
-        source: &GitHealthProjectionSourceV1,
-        batches_completed: u64,
-        expected_entities: Option<usize>,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<(), GitHealthProjectionError> {
-        let telemetry = database
-            .projection_telemetry(GraphProjectionTelemetryRequest {
-                namespace: namespace(binding)?,
-                projection: projection()?,
-                cancellation,
-            })?
-            .ok_or_else(|| {
-                GitHealthProjectionError::Corrupt(
-                    "persisted Git health state has no Grafeo projection commit".to_owned(),
-                )
-            })?;
-        let expected_watermark = if batches_completed == 0 {
-            format!("{}:initialize", source.projection_generation.as_str())
-        } else {
-            format!(
-                "{}:{}",
-                source.projection_generation.as_str(),
-                batches_completed
-            )
-        };
-        if telemetry.source_generation.as_str() != source.projection_generation.as_str()
-            || telemetry.watermark.as_str() != expected_watermark
-            || telemetry.relation_count != 0
-            || expected_entities.is_some_and(|expected| {
-                u64::try_from(expected).ok() != Some(telemetry.entity_count)
-            })
-        {
-            return Err(GitHealthProjectionError::Corrupt(
-                "Grafeo projection generation, watermark, or cardinality does not authenticate persisted Git health state"
-                    .to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
     pub(crate) fn advance(
         &self,
         repository_root: &Path,
@@ -513,21 +294,68 @@ impl GitHealthProjectionStoreV1 {
         let target = capture_source(repository_root, binding, now_epoch_secs)?;
         let graph_cancellation: Arc<dyn GraphCancellation> =
             Arc::new(TokenCancellation(cancellation.clone()));
+        let active_namespace = namespace(binding)?;
+        let staging_namespace = staging_namespace(binding)?;
         let ready = self.read_state::<ReadyStateV1>(
             binding,
+            &active_namespace,
             READY_ENTITY,
+            true,
             Arc::clone(&graph_cancellation),
         )?;
         let persisted_working = self.read_state::<WorkingStateV1>(
             binding,
+            &staging_namespace,
             WORKING_ENTITY,
+            true,
             Arc::clone(&graph_cancellation),
         )?;
+        if let Some(ready) = ready.as_ref() {
+            self.authenticate_projection_commit(
+                &active_namespace,
+                &ready.source,
+                ready.counters.batches_completed,
+                Some(
+                    ready
+                        .counters
+                        .commits_projected
+                        .saturating_add(ready.counters.unique_paths)
+                        .saturating_add(1),
+                ),
+                Arc::clone(&graph_cancellation),
+            )?;
+        }
+        if let Some(working) = persisted_working.as_ref() {
+            self.authenticate_projection_commit(
+                &staging_namespace,
+                &working.target,
+                working.counters.batches_completed,
+                working.complete.then(|| {
+                    working
+                        .counters
+                        .commits_projected
+                        .saturating_add(working.counters.unique_paths)
+                        .saturating_add(1)
+                }),
+                Arc::clone(&graph_cancellation),
+            )?;
+        }
         if ready.as_ref().is_some_and(|ready| ready.source == target)
             && persisted_working
                 .as_ref()
                 .is_none_or(|working| working.complete || working.target != target)
         {
+            return Ok(GitHealthProjectionProgressV1 {
+                target,
+                commits_examined: 0,
+                complete: true,
+            });
+        }
+        if let Some(working) = persisted_working
+            .as_ref()
+            .filter(|working| working.complete && working.target == target)
+        {
+            self.publish_ready_from_staging(binding, working, Arc::clone(&graph_cancellation))?;
             return Ok(GitHealthProjectionProgressV1 {
                 target,
                 commits_examined: 0,
@@ -572,8 +400,6 @@ impl GitHealthProjectionStoreV1 {
         let mut commits_examined = 0usize;
         let mut queue_items_examined = 0usize;
         let mut batch_seen = BTreeSet::new();
-        let (existing_commits, existing_churn) =
-            self.projection_index(binding, Arc::clone(&graph_cancellation))?;
         let mut churn_updates = BTreeMap::<String, usize>::new();
         while queue_items_examined < commit_batch_limit && !working.complete {
             cancellation_checkpoint(cancellation)?;
@@ -585,7 +411,9 @@ impl GitHealthProjectionStoreV1 {
             if !batch_seen.insert(oid.clone()) {
                 continue;
             }
-            if working.stop_at.as_ref() == Some(&oid) || existing_commits.contains(&oid) {
+            if working.stop_at.as_ref() == Some(&oid)
+                || self.staged_commit_exists(binding, &oid, Arc::clone(&graph_cancellation))?
+            {
                 continue;
             }
             if working.history_commits_traversed >= history_commit_limit {
@@ -618,6 +446,12 @@ impl GitHealthProjectionStoreV1 {
                 working.admit_parents(&record.parents);
                 continue;
             }
+            let existing_churn = self.staged_churn_for_paths(
+                binding,
+                &record.changed_files,
+                &churn_updates,
+                Arc::clone(&graph_cancellation),
+            )?;
             if let Some(reason) =
                 self.admission_failure(&working, &record, &churn_updates, &existing_churn)?
             {
@@ -696,19 +530,10 @@ impl GitHealthProjectionStoreV1 {
             WORKING_ENTITY,
             &working,
         )?));
-        if working.complete {
-            mutations.push(GraphMutation::UpsertEntity(state_entity(
-                READY_ENTITY,
-                &ReadyStateV1 {
-                    source: working.target.clone(),
-                    counters: working.counters.clone(),
-                },
-            )?));
-        }
         cancellation_checkpoint(cancellation)?;
         require_current_target(repository_root, binding, now_epoch_secs, &target)?;
         self.database.apply(GraphWriteBatch::new(
-            namespace(binding)?,
+            staging_namespace(binding)?,
             projection()?,
             SourceGeneration::new(target.projection_generation.as_str())?,
             GraphWatermark::new(format!(
@@ -719,11 +544,70 @@ impl GitHealthProjectionStoreV1 {
             coalesce_mutations(mutations),
             graph_cancellation,
         )?)?;
+        if working.complete {
+            let graph_cancellation: Arc<dyn GraphCancellation> =
+                Arc::new(TokenCancellation(cancellation.clone()));
+            self.publish_ready_from_staging(binding, &working, graph_cancellation)?;
+        }
         Ok(GitHealthProjectionProgressV1 {
             target,
             commits_examined,
             complete: working.complete,
         })
+    }
+
+    fn publish_ready_from_staging(
+        &self,
+        binding: &GitHealthProjectionBindingV1,
+        working: &WorkingStateV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), GitHealthProjectionError> {
+        let staging_namespace = staging_namespace(binding)?;
+        self.authenticate_projection_commit(
+            &staging_namespace,
+            &working.target,
+            working.counters.batches_completed,
+            Some(
+                working
+                    .counters
+                    .commits_projected
+                    .saturating_add(working.counters.unique_paths)
+                    .saturating_add(1),
+            ),
+            Arc::clone(&cancellation),
+        )?;
+        let mut entities =
+            self.projection_entities(&staging_namespace, Arc::clone(&cancellation))?;
+        authenticate_snapshot_entities(
+            &entities,
+            &working.target,
+            &working.counters,
+            WORKING_ENTITY,
+        )?;
+        entities.retain(|entity| entity.identity.as_str() != WORKING_ENTITY);
+        entities.push(state_entity(
+            READY_ENTITY,
+            &ReadyStateV1 {
+                source: working.target.clone(),
+                counters: working.counters.clone(),
+            },
+        )?);
+        self.database.replace_projection(ProjectionReplacement {
+            namespace: namespace(binding)?,
+            projection: projection()?,
+            source_generation: SourceGeneration::new(
+                working.target.projection_generation.as_str(),
+            )?,
+            next_watermark: GraphWatermark::new(format!(
+                "{}:{}",
+                working.target.projection_generation.as_str(),
+                working.counters.batches_completed
+            ))?,
+            entities,
+            relations: Vec::new(),
+            cancellation,
+        })?;
+        Ok(())
     }
 
     fn initialize_target(
@@ -735,7 +619,7 @@ impl GitHealthProjectionStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<WorkingStateV1, GitHealthProjectionError> {
         let reusable_candidate = ready
-            .filter(|ready| ready.source.binding == target.binding)
+            .filter(|ready| storage_binding_matches(&ready.source.binding, &target.binding))
             .filter(|ready| ready.counters.coverage == GitHealthProjectionCoverageV1::Complete)
             .filter(|ready| {
                 target.window_start_epoch_secs >= ready.source.window_start_epoch_secs
@@ -759,20 +643,33 @@ impl GitHealthProjectionStoreV1 {
             || WorkingStateV1::empty(target.clone()),
             |ready| WorkingStateV1::from_ready(target.clone(), ready),
         );
-        if reusable.is_none() {
-            self.database.replace_projection(ProjectionReplacement {
-                namespace: namespace(binding)?,
-                projection: projection()?,
-                source_generation: SourceGeneration::new(target.projection_generation.as_str())?,
-                next_watermark: GraphWatermark::new(format!(
-                    "{}:initialize",
-                    target.projection_generation.as_str()
-                ))?,
-                entities: vec![state_entity(WORKING_ENTITY, &working)?],
-                relations: Vec::new(),
-                cancellation,
-            })?;
-        }
+        let mut entities = if let Some(ready) = reusable {
+            let mut entities =
+                self.projection_entities(&namespace(binding)?, Arc::clone(&cancellation))?;
+            authenticate_snapshot_entities(
+                &entities,
+                &ready.source,
+                &ready.counters,
+                READY_ENTITY,
+            )?;
+            entities.retain(|entity| entity.identity.as_str() != READY_ENTITY);
+            entities
+        } else {
+            Vec::new()
+        };
+        entities.push(state_entity(WORKING_ENTITY, &working)?);
+        self.database.replace_projection(ProjectionReplacement {
+            namespace: staging_namespace(binding)?,
+            projection: projection()?,
+            source_generation: SourceGeneration::new(target.projection_generation.as_str())?,
+            next_watermark: GraphWatermark::new(format!(
+                "{}:initialize",
+                target.projection_generation.as_str()
+            ))?,
+            entities,
+            relations: Vec::new(),
+            cancellation,
+        })?;
         Ok(working)
     }
 
@@ -782,7 +679,8 @@ impl GitHealthProjectionStoreV1 {
         working: &mut WorkingStateV1,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<GraphMutation>, GitHealthProjectionError> {
-        let entities = self.projection_entities(binding, Arc::clone(&cancellation))?;
+        let entities =
+            self.projection_entities(&staging_namespace(binding)?, Arc::clone(&cancellation))?;
         let mut stored_churn = BTreeMap::new();
         let mut expired = Vec::new();
         for entity in entities {
@@ -887,28 +785,56 @@ impl GitHealthProjectionStoreV1 {
         Ok(None)
     }
 
-    fn projection_index(
+    fn staged_commit_exists(
         &self,
         binding: &GitHealthProjectionBindingV1,
+        oid: &GitOidV1,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<(BTreeSet<GitOidV1>, BTreeMap<String, usize>), GitHealthProjectionError> {
-        let mut commits = BTreeSet::new();
+    ) -> Result<bool, GitHealthProjectionError> {
+        let entity = self.database.entity(
+            &staging_namespace(binding)?,
+            &commit_entity_id(oid)?,
+            cancellation,
+        )?;
+        if let Some(entity) = entity {
+            commit_record_from_entity(&entity, Some(oid))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn staged_churn_for_paths(
+        &self,
+        binding: &GitHealthProjectionBindingV1,
+        paths: &[String],
+        pending: &BTreeMap<String, usize>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<BTreeMap<String, usize>, GitHealthProjectionError> {
+        let namespace = staging_namespace(binding)?;
         let mut churn = BTreeMap::new();
-        for entity in self.projection_entities(binding, cancellation)? {
-            if entity
-                .labels
-                .contains(&tracedecay_graph_db::GraphLabel::new(COMMIT_LABEL)?)
-            {
-                commits.insert(commit_record_from_entity(&entity, None)?.oid);
-            } else if entity
-                .labels
-                .contains(&tracedecay_graph_db::GraphLabel::new(FILE_LABEL)?)
-            {
-                let (path, count) = persistence::file_record_from_entity(&entity)?;
-                churn.insert(path, count);
+        for path in paths {
+            if pending.contains_key(path) {
+                continue;
+            }
+            if cancellation.is_cancelled() {
+                return Err(GitHealthProjectionError::Cancelled);
+            }
+            if let Some(entity) = self.database.entity(
+                &namespace,
+                &file_entity_id(path)?,
+                Arc::clone(&cancellation),
+            )? {
+                let (stored_path, count) = persistence::file_record_from_entity(&entity)?;
+                if stored_path != *path {
+                    return Err(GitHealthProjectionError::Corrupt(
+                        "Git health churn point read returned the wrong path".to_owned(),
+                    ));
+                }
+                churn.insert(stored_path, count);
             }
         }
-        Ok((commits, churn))
+        Ok(churn)
     }
 }
 

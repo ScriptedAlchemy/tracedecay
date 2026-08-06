@@ -186,7 +186,13 @@ fn read_churn(
     let mut cursor = None;
     loop {
         let page = store
-            .read_churn_page(binding, snapshot, cursor.as_deref(), 256)
+            .read_churn_page(
+                binding,
+                snapshot,
+                cursor.as_ref(),
+                256,
+                &CancellationToken::new(),
+            )
             .expect("churn page");
         churn.extend(
             page.entries
@@ -236,7 +242,9 @@ fn a_second_head_projects_only_the_new_commit() {
         finish_projection(&store, repository.path(), &binding, NOW_SECS),
         12
     );
-    let GitHealthProjectionAvailabilityV1::Ready { snapshot: before } = store.read(&binding) else {
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot: before } =
+        store.read(&binding, &CancellationToken::new())
+    else {
         panic!("baseline projection must be ready");
     };
     assert_eq!(before.coverage, GitHealthProjectionCoverageV1::Complete);
@@ -261,7 +269,9 @@ fn a_second_head_projects_only_the_new_commit() {
         1,
         "a fast-forward must resume from the durable prior frontier"
     );
-    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&binding) else {
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
+        store.read(&binding, &CancellationToken::new())
+    else {
         panic!("incremental projection must be ready");
     };
     assert_eq!(snapshot.commits_projected, 13);
@@ -269,6 +279,121 @@ fn a_second_head_projects_only_the_new_commit() {
         read_churn(&store, &binding, &snapshot).get("history.rs"),
         Some(&13)
     );
+}
+
+#[test]
+fn refresh_keeps_the_complete_active_projection_readable_until_atomic_publication() {
+    let repository = repository();
+    for ordinal in 0..4 {
+        commit_file(repository.path(), ordinal, "history.rs");
+    }
+    let binding = binding(repository.path());
+    let store_root = TempDir::new().expect("projection root");
+    let store = store(&store_root);
+    finish_projection(&store, repository.path(), &binding, NOW_SECS);
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot: baseline } =
+        store.read(&binding, &CancellationToken::new())
+    else {
+        panic!("baseline projection must be ready");
+    };
+    commit_file(repository.path(), 4, "history.rs");
+    commit_file(repository.path(), 5, "new.rs");
+
+    let progress = store
+        .advance(
+            repository.path(),
+            &binding,
+            NOW_SECS,
+            1,
+            &CancellationToken::new(),
+        )
+        .expect("first refresh batch");
+    assert!(!progress.complete);
+    let GitHealthProjectionAvailabilityV1::Refreshing { snapshot, target } =
+        store.read(&binding, &CancellationToken::new())
+    else {
+        panic!("old complete projection must remain readable during refresh");
+    };
+    assert_eq!(snapshot.source, baseline.source);
+    assert_ne!(target, baseline.source);
+    assert_eq!(
+        read_churn(&store, &binding, &snapshot).get("history.rs"),
+        Some(&4)
+    );
+    assert!(!read_churn(&store, &binding, &snapshot).contains_key("new.rs"));
+
+    finish_projection(&store, repository.path(), &binding, NOW_SECS);
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
+        store.read(&binding, &CancellationToken::new())
+    else {
+        panic!("completed refresh must publish atomically");
+    };
+    assert_eq!(
+        read_churn(&store, &binding, &snapshot).get("new.rs"),
+        Some(&1)
+    );
+}
+
+#[test]
+fn churn_cursor_rejects_a_different_completed_generation() {
+    let repository = repository();
+    commit_file(repository.path(), 0, "history.rs");
+    let binding = binding(repository.path());
+    let store_root = TempDir::new().expect("projection root");
+    let store = store(&store_root);
+    finish_projection(&store, repository.path(), &binding, NOW_SECS);
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot: baseline } =
+        store.read(&binding, &CancellationToken::new())
+    else {
+        panic!("baseline projection must be ready");
+    };
+    let first_page = store
+        .read_churn_page(&binding, &baseline, None, 1, &CancellationToken::new())
+        .expect("first generation page");
+    let cursor = first_page
+        .next_cursor
+        .expect("multi-entity projection cursor");
+    commit_file(repository.path(), 1, "history.rs");
+    finish_projection(&store, repository.path(), &binding, NOW_SECS);
+    let GitHealthProjectionAvailabilityV1::Ready {
+        snapshot: refreshed,
+    } = store.read(&binding, &CancellationToken::new())
+    else {
+        panic!("refreshed projection must be ready");
+    };
+
+    assert!(matches!(
+        store.read_churn_page(
+            &binding,
+            &refreshed,
+            Some(&cursor),
+            1,
+            &CancellationToken::new(),
+        ),
+        Err(GitHealthProjectionError::SnapshotChanged)
+    ));
+}
+
+#[test]
+fn churn_page_observes_retained_cancellation_before_reading() {
+    let repository = repository();
+    commit_file(repository.path(), 0, "history.rs");
+    let binding = binding(repository.path());
+    let store_root = TempDir::new().expect("projection root");
+    let store = store(&store_root);
+    finish_projection(&store, repository.path(), &binding, NOW_SECS);
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
+        store.read(&binding, &CancellationToken::new())
+    else {
+        panic!("projection must be ready");
+    };
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    assert!(matches!(
+        store.read_churn_page(&binding, &snapshot, None, 1, &cancellation),
+        Err(GitHealthProjectionError::Cancelled)
+    ));
 }
 
 #[test]
@@ -323,7 +448,9 @@ fn non_monotonic_ancestor_inside_window_is_not_omitted() {
 
     finish_projection(&store, repository.path(), &binding, NOW_SECS);
 
-    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&binding) else {
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
+        store.read(&binding, &CancellationToken::new())
+    else {
         panic!("projection must be ready");
     };
     assert_eq!(snapshot.coverage, GitHealthProjectionCoverageV1::Complete);
@@ -360,7 +487,9 @@ fn exhausted_history_bound_is_persisted_as_partial_not_complete() {
         )
         .expect("bounded projection");
     assert!(progress.complete);
-    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&binding) else {
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
+        store.read(&binding, &CancellationToken::new())
+    else {
         panic!("bounded projection must publish a typed result");
     };
     assert_eq!(
@@ -383,7 +512,9 @@ fn day_rollover_prunes_expired_commits_and_paths_without_rewalking_head() {
 
     let examined = finish_projection(&store, repository.path(), &binding, NOW_SECS + 86_400);
     assert_eq!(examined, 0, "window expiry must not rewalk unchanged HEAD");
-    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&binding) else {
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
+        store.read(&binding, &CancellationToken::new())
+    else {
         panic!("rolled projection must be ready");
     };
     assert_eq!(snapshot.commits_projected, 1);
@@ -402,7 +533,9 @@ fn commits_at_or_after_window_end_are_not_projected() {
     let store = store(&store_root);
     finish_projection(&store, repository.path(), &binding, NOW_SECS);
 
-    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&binding) else {
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
+        store.read(&binding, &CancellationToken::new())
+    else {
         panic!("projection must be ready");
     };
     assert_eq!(snapshot.commits_projected, 1);
@@ -420,7 +553,9 @@ fn oversized_root_tree_stops_at_the_path_bound_with_partial_coverage() {
     let store = store(&store_root);
     finish_projection(&store, repository.path(), &binding, NOW_SECS);
 
-    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&binding) else {
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
+        store.read(&binding, &CancellationToken::new())
+    else {
         panic!("bounded projection must publish typed partial coverage");
     };
     assert_eq!(
@@ -484,7 +619,9 @@ fn reopen_resumes_the_persisted_frontier() {
         finish_projection(&reopened, repository.path(), &binding, NOW_SECS),
         8
     );
-    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = reopened.read(&binding) else {
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
+        reopened.read(&binding, &CancellationToken::new())
+    else {
         panic!("resumed projection must become ready");
     };
     assert_eq!(snapshot.commits_projected, 11);
@@ -499,7 +636,13 @@ fn persisted_state_with_a_foreign_project_profile_and_store_is_typed_as_corrupt(
     let store = store(&store_root);
     finish_projection(&store, repository.path(), &binding, NOW_SECS);
     let mut ready = store
-        .read_state::<super::ReadyStateV1>(&binding, super::READY_ENTITY, live_graph_cancellation())
+        .read_state::<super::ReadyStateV1>(
+            &binding,
+            &super::persistence::namespace(&binding).expect("namespace"),
+            super::READY_ENTITY,
+            true,
+            live_graph_cancellation(),
+        )
         .expect("ready state")
         .expect("ready state exists");
     let generation = ready.source.projection_generation.as_str().to_owned();
@@ -528,7 +671,7 @@ fn persisted_state_with_a_foreign_project_profile_and_store_is_typed_as_corrupt(
         ),
     );
     assert_eq!(
-        store.read(&binding),
+        store.read(&binding, &CancellationToken::new()),
         GitHealthProjectionAvailabilityV1::Unavailable {
             reason:
                 tracedecay_application::GitHealthProjectionUnavailableReasonV1::CorruptProjection,
@@ -545,7 +688,13 @@ fn persisted_source_identity_must_match_its_authenticated_generation() {
     let store = store(&store_root);
     finish_projection(&store, repository.path(), &binding, NOW_SECS);
     let mut ready = store
-        .read_state::<super::ReadyStateV1>(&binding, super::READY_ENTITY, live_graph_cancellation())
+        .read_state::<super::ReadyStateV1>(
+            &binding,
+            &super::persistence::namespace(&binding).expect("namespace"),
+            super::READY_ENTITY,
+            true,
+            live_graph_cancellation(),
+        )
         .expect("ready state")
         .expect("ready state exists");
     let generation = ready.source.projection_generation.as_str().to_owned();
@@ -564,7 +713,7 @@ fn persisted_source_identity_must_match_its_authenticated_generation() {
         ),
     );
     assert_eq!(
-        store.read(&binding),
+        store.read(&binding, &CancellationToken::new()),
         GitHealthProjectionAvailabilityV1::Unavailable {
             reason:
                 tracedecay_application::GitHealthProjectionUnavailableReasonV1::CorruptProjection,
@@ -580,13 +729,18 @@ fn persisted_commit_payload_must_authenticate_its_entity_identity() {
     let store_root = TempDir::new().expect("projection root");
     let store = store(&store_root);
     finish_projection(&store, repository.path(), &binding, NOW_SECS);
-    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&binding) else {
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
+        store.read(&binding, &CancellationToken::new())
+    else {
         panic!("projection ready");
     };
     let generation = snapshot.source.projection_generation.as_str().to_owned();
     let watermark = format!("{generation}:{}", snapshot.batches_completed);
     let mut entity = store
-        .projection_entities(&binding, live_graph_cancellation())
+        .projection_entities(
+            &super::persistence::namespace(&binding).expect("namespace"),
+            live_graph_cancellation(),
+        )
         .expect("projection entities")
         .into_iter()
         .find(|entity| {
@@ -611,7 +765,7 @@ fn persisted_commit_payload_must_authenticate_its_entity_identity() {
         GraphMutation::UpsertEntity(entity),
     );
     assert_eq!(
-        store.read(&binding),
+        store.read(&binding, &CancellationToken::new()),
         GitHealthProjectionAvailabilityV1::Unavailable {
             reason:
                 tracedecay_application::GitHealthProjectionUnavailableReasonV1::CorruptProjection,
@@ -628,7 +782,13 @@ fn persisted_projection_commit_metadata_must_match_ready_generation_and_watermar
     let store = store(&store_root);
     finish_projection(&store, repository.path(), &binding, NOW_SECS);
     let ready = store
-        .read_state::<super::ReadyStateV1>(&binding, super::READY_ENTITY, live_graph_cancellation())
+        .read_state::<super::ReadyStateV1>(
+            &binding,
+            &super::persistence::namespace(&binding).expect("namespace"),
+            super::READY_ENTITY,
+            true,
+            live_graph_cancellation(),
+        )
         .expect("ready state")
         .expect("ready state exists");
     apply_corruption(
@@ -643,7 +803,7 @@ fn persisted_projection_commit_metadata_must_match_ready_generation_and_watermar
     );
 
     assert_eq!(
-        store.read(&binding),
+        store.read(&binding, &CancellationToken::new()),
         GitHealthProjectionAvailabilityV1::Unavailable {
             reason:
                 tracedecay_application::GitHealthProjectionUnavailableReasonV1::CorruptProjection,

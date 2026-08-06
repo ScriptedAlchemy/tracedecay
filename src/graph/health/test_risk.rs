@@ -263,7 +263,7 @@ pub async fn analyze_test_risk(
         | GitHealthProjectionAvailabilityV1::Unavailable { .. } => None,
     };
     if let (Some(reader), Some(snapshot)) = (git_health, ready_snapshot.as_ref()) {
-        match read_relevant_churn(reader, snapshot, &risks) {
+        match read_relevant_churn(reader, snapshot, &risks).await {
             Ok(churn) => apply_churn(&mut risks, &churn),
             Err(reason) => {
                 git_history = GitHealthProjectionAvailabilityV1::Unavailable { reason };
@@ -331,7 +331,7 @@ pub async fn analyze_test_risk(
     })
 }
 
-fn read_relevant_churn(
+async fn read_relevant_churn(
     reader: &GitHealthProjectionReadServiceV1,
     snapshot: &GitHealthProjectionSnapshotV1,
     risks: &[RiskEntry],
@@ -351,7 +351,8 @@ fn read_relevant_churn(
     let mut churn_entries_seen = 0usize;
     let mut relevant = HashMap::new();
     for _ in 0..max_pages {
-        let page = reader.read_churn_page(cursor.as_deref(), GIT_HEALTH_CHURN_PAGE_LIMIT)?;
+        tokio::task::yield_now().await;
+        let page = reader.read_churn_page(cursor.as_ref(), GIT_HEALTH_CHURN_PAGE_LIMIT)?;
         churn_entries_seen = churn_entries_seen
             .checked_add(page.entries.len())
             .ok_or(GitHealthProjectionUnavailableReasonV1::CorruptProjection)?;
@@ -459,9 +460,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tracedecay_application::{
-        GitHealthProjectionBindingV1, GitHealthProjectionChurnEntryV1,
-        GitHealthProjectionChurnPageV1, GitHealthProjectionCoverageV1,
-        GitHealthProjectionReadPortV1, GitHealthProjectionSourceV1, ResolvedScope,
+        GitHealthProjectionBindingV1, GitHealthProjectionChurnCursorV1,
+        GitHealthProjectionChurnEntryV1, GitHealthProjectionChurnPageV1,
+        GitHealthProjectionCoverageV1, GitHealthProjectionReadPortV1, GitHealthProjectionSourceV1,
+        ResolvedScope,
     };
     use tracedecay_domain::{
         GitOidV1, ManifestDigest, ProjectId, RefId, RepositoryId, SourceStoreId, UserProfileId,
@@ -488,7 +490,7 @@ mod tests {
         fn read_churn_page(
             &self,
             _binding: &GitHealthProjectionBindingV1,
-            after_cursor: Option<&str>,
+            after_cursor: Option<&GitHealthProjectionChurnCursorV1>,
             limit: usize,
         ) -> std::result::Result<
             GitHealthProjectionChurnPageV1,
@@ -496,9 +498,9 @@ mod tests {
         > {
             assert!(limit <= GIT_HEALTH_CHURN_PAGE_LIMIT);
             let call = self.calls.fetch_add(1, Ordering::AcqRel);
-            let (range, next_cursor) = match (call, after_cursor) {
+            let (range, has_next) = match (call, after_cursor) {
                 (0, None) => (0..256, Some("page-1".to_owned())),
-                (1, Some("page-1")) => (256..300, None),
+                (1, Some(cursor)) if cursor.after_entity == "page-1" => (256..300, None),
                 _ => panic!("unexpected churn page request"),
             };
             Ok(GitHealthProjectionChurnPageV1 {
@@ -512,7 +514,11 @@ mod tests {
                         churn: ordinal + 1,
                     })
                     .collect(),
-                next_cursor,
+                next_cursor: has_next.map(|after_entity| GitHealthProjectionChurnCursorV1 {
+                    source: self.snapshot.source.clone(),
+                    batches_completed: self.snapshot.batches_completed,
+                    after_entity,
+                }),
             })
         }
     }
@@ -532,8 +538,8 @@ mod tests {
         .expect("binding")
     }
 
-    #[test]
-    fn test_risk_pages_churn_and_retains_only_matching_paths() {
+    #[tokio::test]
+    async fn test_risk_pages_churn_and_retains_only_matching_paths() {
         let binding = fixture_binding();
         let snapshot = GitHealthProjectionSnapshotV1 {
             source: GitHealthProjectionSourceV1 {
@@ -569,7 +575,9 @@ mod tests {
             churn: None,
         }];
 
-        let relevant = read_relevant_churn(&reader, &snapshot, &risks).expect("paged churn");
+        let relevant = read_relevant_churn(&reader, &snapshot, &risks)
+            .await
+            .expect("paged churn");
 
         assert_eq!(relevant.len(), 1);
         assert_eq!(relevant.get("src/target.rs"), Some(&300));

@@ -76,7 +76,15 @@ pub struct GitHealthProjectionChurnEntryV1 {
 #[serde(deny_unknown_fields)]
 pub struct GitHealthProjectionChurnPageV1 {
     pub entries: Vec<GitHealthProjectionChurnEntryV1>,
-    pub next_cursor: Option<String>,
+    pub next_cursor: Option<GitHealthProjectionChurnCursorV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHealthProjectionChurnCursorV1 {
+    pub source: GitHealthProjectionSourceV1,
+    pub batches_completed: u64,
+    pub after_entity: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,6 +115,7 @@ pub enum GitHealthProjectionUnavailableReasonV1 {
     ScopeDrift,
     NativeGitUnavailable,
     ProjectionStoreUnavailable,
+    ProjectionChanged,
     ResetRequired,
     CorruptProjection,
 }
@@ -142,7 +151,7 @@ pub trait GitHealthProjectionReadPortV1: Send + Sync {
     fn read_churn_page(
         &self,
         binding: &GitHealthProjectionBindingV1,
-        after_cursor: Option<&str>,
+        after_cursor: Option<&GitHealthProjectionChurnCursorV1>,
         limit: usize,
     ) -> Result<GitHealthProjectionChurnPageV1, GitHealthProjectionUnavailableReasonV1>;
 }
@@ -207,7 +216,7 @@ impl GitHealthProjectionReadServiceV1 {
 
     pub fn read_churn_page(
         &self,
-        after_cursor: Option<&str>,
+        after_cursor: Option<&GitHealthProjectionChurnCursorV1>,
         limit: usize,
     ) -> Result<GitHealthProjectionChurnPageV1, GitHealthProjectionUnavailableReasonV1> {
         let inner = self

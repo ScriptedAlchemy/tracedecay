@@ -370,6 +370,7 @@ pub(super) async fn production_project_server(
         git_health_projection_reader.clone(),
         git_health_binding,
         Arc::clone(&route_registered),
+        cancellation.clone(),
     );
     let code_search_admission = query_mcp_admission::admit_query_mcp_read(
         Some(&profile_identity),

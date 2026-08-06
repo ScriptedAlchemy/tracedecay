@@ -692,17 +692,20 @@ impl McpServer {
                         reason,
                         "reopened index onto the live branch"
                     );
+                    if let Some(reconcile) = &reconcile {
+                        if let Err(error) = reconcile(Arc::clone(&fresh)).await {
+                            tracing::warn!(
+                                error = %error,
+                                reason,
+                                "index reopen retained the prior graph after owner reconciliation failed"
+                            );
+                            completions.fetch_add(1, Ordering::Release);
+                            return;
+                        }
+                    }
                     {
                         let mut guard = cg_cell.write().await;
                         *guard = Arc::clone(&fresh);
-                    }
-                    // The owner reconcile runs here, after the swap, rather
-                    // than inside the request that noticed the drift: it takes
-                    // the daemon's store writer lane, and a live `tools/call`
-                    // must never park on it. That call has already answered on
-                    // the snapshot it held.
-                    if let Some(reconcile) = &reconcile {
-                        reconcile(Arc::clone(&fresh)).await;
                     }
                     // New branch DB ⇒ new file set; refresh the token
                     // accounting map.

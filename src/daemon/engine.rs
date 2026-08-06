@@ -702,21 +702,22 @@ impl DaemonEngine {
                     .store_administration
                     .with_writer_in(scope, || async {
                         if !route_registered.load(Ordering::Acquire) {
-                            return None;
+                            return Ok(None);
                         }
                         let new_key = match ProjectServerKey::from_open_project(&fresh, &handshake)
                         {
                             Ok(key) => key,
                             Err(error) => {
-                                eprintln!(
-                                    "[tracedecay] failed to rekey daemon database owner: {error}"
-                                );
-                                return None;
+                                return Err(TraceDecayError::Config {
+                                    message: format!(
+                                        "failed to resolve the reopened daemon database owner: {error}"
+                                    ),
+                                });
                             }
                         };
                         let mut current = current_key.lock().await;
                         if *current == new_key {
-                            return None;
+                            return Ok(None);
                         }
                         let old_key = current.clone();
                         let rekeyed = engine
@@ -726,7 +727,9 @@ impl DaemonEngine {
                             .await
                             .rekey(&old_key, &new_key);
                         if !rekeyed {
-                            route_registered.store(false, Ordering::Release);
+                            return Err(TraceDecayError::Config {
+                                message: "daemon database owner rekey failed".to_owned(),
+                            });
                         }
                         let project_path = fresh.project_root().to_path_buf();
                         let new_session_db = match new_key.owner.project_id.as_deref() {
@@ -742,32 +745,22 @@ impl DaemonEngine {
                         };
                         *current_project_path.lock().await = project_path;
                         *current = new_key.clone();
-                        Some((
+                        Ok(Some((
                             old_key,
                             new_key,
                             new_session_db,
                             fresh.project_root().to_path_buf(),
-                            rekeyed,
-                        ))
+                        )))
                     })
-                    .await;
-                if let Some((old_key, new_key, new_session_db, project_path, acquire_new)) =
-                    transition
-                {
+                    .await?;
+                if let Some((old_key, new_key, new_session_db, project_path)) = transition {
                     let old_owner = old_key.owner.clone();
                     let new_owner = new_key.owner.clone();
                     let outcome = engine
-                        .rekey_project_maintenance(
-                            &old_key,
-                            new_key,
-                            project_path,
-                            handshake,
-                            acquire_new,
-                        )
+                        .rekey_project_maintenance(&old_key, new_key, project_path, handshake, true)
                         .await;
                     if outcome == MaintenanceRekeyOutcome::Completed {
-                        if acquire_new
-                            && engine.lifecycle.accepting()
+                        if engine.lifecycle.accepting()
                             && let Some(new_session_db) = new_session_db
                         {
                             engine
@@ -784,6 +777,7 @@ impl DaemonEngine {
                         }
                     }
                 }
+                Ok(())
             })
         })
     }

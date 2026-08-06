@@ -285,13 +285,12 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         if old == new {
             return true;
         }
+        if !self.servers.contains_key(old) || self.servers.contains_key(new) {
+            return false;
+        }
         let Some(server) = self.servers.remove(old) else {
             return false;
         };
-        if self.servers.contains_key(new) {
-            self.aliases.retain(|_, key| key != old);
-            return false;
-        }
         self.servers.insert(new.clone(), server);
         for key in self.aliases.values_mut() {
             if key == old {

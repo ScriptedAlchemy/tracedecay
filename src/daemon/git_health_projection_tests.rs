@@ -235,6 +235,16 @@ async fn ref_rekey_retires_the_old_reader_and_keeps_one_owner() {
     let old_port: Arc<dyn GitHealthProjectionReadPortV1> = Arc::new(old_lease);
     let reader = GitHealthProjectionReadServiceV1::new(old_binding.clone(), old_port)
         .expect("binding-pinned reader");
+    let old_snapshot = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let GitHealthProjectionAvailabilityV1::Ready { snapshot } = reader.read() {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("old projection should become ready");
     git(repository.path(), &["switch", "--quiet", "-c", "other"]);
     let new_binding = binding(repository.path());
     let new_lease = registry
@@ -246,6 +256,16 @@ async fn ref_rekey_retires_the_old_reader_and_keeps_one_owner() {
         )
         .await
         .expect("rekeyed mount");
+    assert_eq!(
+        reader.read(),
+        GitHealthProjectionAvailabilityV1::Ready {
+            snapshot: old_snapshot
+        },
+        "mounting the replacement must not retire the published reader"
+    );
+    reader
+        .read_churn_page(None, 1)
+        .expect("published reader remains pageable until rebind");
     let new_port: Arc<dyn GitHealthProjectionReadPortV1> = Arc::new(new_lease);
     reader
         .rebind(new_binding.clone(), new_port)
@@ -264,6 +284,48 @@ async fn ref_rekey_retires_the_old_reader_and_keeps_one_owner() {
     assert_eq!(snapshot.source.binding, new_binding);
     assert_eq!(reader.binding().expect("reader binding"), new_binding);
     drop(reader);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_remount_retains_the_old_binding_and_owner() {
+    let repository = repository();
+    let stores = TempDir::new().expect("store root");
+    let store_path = stores.path().join("shared.grafeo");
+    let registry = GitHealthProjectionRegistryV1::new(1);
+    let old_binding = binding(repository.path());
+    let old_lease = registry
+        .mount(
+            repository.path(),
+            store_path.clone(),
+            old_binding.clone(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("old ref mount");
+    git(repository.path(), &["switch", "--quiet", "-c", "other"]);
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    assert!(matches!(
+        registry
+            .mount(
+                repository.path(),
+                store_path,
+                binding(repository.path()),
+                &cancellation,
+            )
+            .await,
+        Err(GitHealthProjectionMountErrorV1::Cancelled)
+    ));
+    assert_eq!(registry.owner_count(), 1);
+    assert!(!matches!(
+        old_lease.read_projection(&old_binding),
+        GitHealthProjectionAvailabilityV1::Unavailable {
+            reason: tracedecay_application::GitHealthProjectionUnavailableReasonV1::NotMounted,
+        }
+    ));
+    drop(old_lease);
     registry.shutdown().await;
 }
 
@@ -300,7 +362,7 @@ async fn daemon_projection_is_read_through_the_binding_pinned_service() {
     let mut cursor = None;
     let entry = loop {
         let page = reader
-            .read_churn_page(cursor.as_deref(), 1)
+            .read_churn_page(cursor.as_ref(), 1)
             .expect("bounded churn page");
         if let Some(entry) = page.entries.into_iter().next() {
             break entry;

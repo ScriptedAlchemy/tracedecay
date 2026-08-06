@@ -160,20 +160,21 @@ pub(super) fn portable_database_owner_reconciler(
             let transition = store_administration
                 .with_writer_in(scope, || async {
                     if !route_registered.load(Ordering::Acquire) {
-                        return None;
+                        return Ok(None);
                     }
                     let new_key = match ProjectServerKey::from_open_project(&fresh, &handshake) {
                         Ok(key) => key,
                         Err(error) => {
-                            eprintln!(
-                                "[tracedecay] failed to rekey daemon database owner: {error}"
-                            );
-                            return None;
+                            return Err(TraceDecayError::Config {
+                                message: format!(
+                                    "failed to resolve the reopened daemon database owner: {error}"
+                                ),
+                            });
                         }
                     };
                     let mut current = current_key.lock().await;
                     if *current == new_key {
-                        return None;
+                        return Ok(None);
                     }
                     let old_key = current.clone();
                     let rekeyed = store_administration
@@ -182,17 +183,18 @@ pub(super) fn portable_database_owner_reconciler(
                         .await
                         .rekey(&old_key, &new_key);
                     if !rekeyed {
-                        route_registered.store(false, Ordering::Release);
+                        return Err(TraceDecayError::Config {
+                            message: "portable daemon database owner rekey failed".to_owned(),
+                        });
                     }
                     *current = new_key.clone();
-                    Some((old_key.owner, new_key.owner, rekeyed))
+                    Ok(Some((old_key.owner, new_key.owner)))
                 })
-                .await;
-            let Some((old_owner, new_owner, rekeyed)) = transition else {
-                return;
+                .await?;
+            let Some((old_owner, new_owner)) = transition else {
+                return Ok(());
             };
-            if rekeyed
-                && new_owner.project_id.is_some()
+            if new_owner.project_id.is_some()
                 && let Ok(database) = store_administration
                     .registered_project_session_database(fresh.project_root(), fresh.store_layout())
                     .await
@@ -207,6 +209,7 @@ pub(super) fn portable_database_owner_reconciler(
                     .retire_project(&old_owner)
                     .await;
             }
+            Ok(())
         })
     })
 }

@@ -124,6 +124,7 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
             let observed = Arc::clone(&observed);
             Box::pin(async move {
                 observed.lock().unwrap().push(fresh.db_path());
+                Ok(())
             })
         })
     };
@@ -154,9 +155,67 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
             .await,
         "the detached reopen must land"
     );
+    assert_eq!(
+        observed.lock().unwrap().len(),
+        1,
+        "the successful owner reconcile must complete before the graph swap"
+    );
     let fresh = server.reopen_if_branch_drifted().await;
     assert_eq!(fresh.serving_branch(), Some("feature"));
     assert_eq!(observed.lock().unwrap().as_slice(), &[fresh.db_path()]);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn branch_reopen_keeps_the_old_graph_when_owner_reconciliation_fails() {
+    let (cg, dir, fixture_authority) = init_indexed_repo().await;
+    let root = dir.path();
+    cg.checkpoint().await.unwrap();
+    let layout = cg.store_layout().clone();
+    drop(cg);
+
+    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    meta.add_branch("feature", "branches/feature.db", "main");
+    crate::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
+    std::fs::create_dir_all(layout.data_root.join("branches")).unwrap();
+    std::fs::copy(
+        &layout.graph_db_path,
+        layout.data_root.join("branches/feature.db"),
+    )
+    .unwrap();
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    git(root, &["checkout", "-q", "main"]);
+    let main = fixture_authority
+        ._runtime
+        .open_project_graph_for_test(root, crate::tracedecay::TraceDecayOpenOptions::default())
+        .await
+        .unwrap();
+    let callback: DatabaseOwnerReconciler = Arc::new(move |_fresh| {
+        Box::pin(async move {
+            Err(crate::errors::TraceDecayError::Config {
+                message: "injected owner reconciliation failure".to_owned(),
+            })
+        })
+    });
+    let server = McpServer::new_with_context(
+        McpServerConstructionContext::direct(main, None).with_database_owner_reconciler(callback),
+    )
+    .await;
+
+    git(root, &["checkout", "-q", "feature"]);
+    let before = server.branch_reopens_completed();
+    let served = server.reopen_if_branch_drifted().await;
+    assert_eq!(served.serving_branch(), Some("main"));
+    assert!(
+        server
+            .wait_for_branch_reopen(before, std::time::Duration::from_secs(30))
+            .await
+    );
+    assert_eq!(
+        server.reopen_if_branch_drifted().await.serving_branch(),
+        Some("main"),
+        "typed reconcile failure must retain the old graph"
+    );
     server.shutdown().await;
 }
 

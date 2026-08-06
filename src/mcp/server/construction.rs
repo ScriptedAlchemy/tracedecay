@@ -21,7 +21,10 @@ use super::hook_writes::{
 /// awaited while the graph write guard is held so readers see the swap and
 /// registry rekey atomically.
 pub(crate) type DatabaseOwnerReconciler = Arc<
-    dyn Fn(Arc<TraceDecay>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
+    dyn Fn(Arc<TraceDecay>) -> Pin<Box<dyn Future<Output = crate::errors::Result<()>> + Send>>
+        + Send
+        + Sync
+        + 'static,
 >;
 
 /// Cohesive dependencies used to construct an MCP server.
