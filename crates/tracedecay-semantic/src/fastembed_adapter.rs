@@ -52,7 +52,9 @@ use tracedecay_domain::{
     EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId,
 };
 
-use super::artifact_store::AdmittedArtifactV1;
+use super::artifact_store::{
+    AdmittedArtifactV1, FASTEMBED_RUNTIME_BUILD_REVISION_V1, FASTEMBED_RUNTIME_FAMILY_V1,
+};
 use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1, Sha256DigestHex};
 use super::model_catalog::{CatalogMemberPinV1, CatalogedFastEmbedModelV1, catalog_package_digest};
 use crate::SemanticResourceCeilings;
@@ -520,8 +522,8 @@ impl AdmittedProjectionArtifactV1 {
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: model.max_length.min(resources.max_sequence_length),
-            runtime_backend: "fastembed-ort".to_owned(),
-            runtime_build_revision: "fastembed-v5".to_owned(),
+            runtime_backend: FASTEMBED_RUNTIME_FAMILY_V1.to_owned(),
+            runtime_build_revision: FASTEMBED_RUNTIME_BUILD_REVISION_V1.to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
             dimensions: model.expected_dimensions,
             metric: EmbeddingMetricV1::Cosine,

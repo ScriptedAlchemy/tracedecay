@@ -51,6 +51,8 @@ fn seed_product_cache(root: &Path, fixture: &Path, owner: &SemanticModelLifecycl
 }
 
 #[test]
+#[ignore = "requires the verified Jina fixture and isolated profile provided by \
+            scripts/check-distribution-acceptance.sh, which runs this with --run-ignored"]
 fn distribution_background_acquisition_installs_verified_jina_model() {
     let profile_parent = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_PROFILE_PARENT")
         .map(std::path::PathBuf::from)
@@ -125,6 +127,8 @@ fn distribution_background_acquisition_installs_verified_jina_model() {
 }
 
 #[test]
+#[ignore = "requires the verified Jina fixture and isolated profile provided by \
+            scripts/check-distribution-acceptance.sh, which runs this with --run-ignored"]
 fn distribution_local_evaluation_import_admits_verified_jina_without_network_or_profile() {
     let profile_parent = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_PROFILE_PARENT")
         .map(std::path::PathBuf::from)
@@ -135,16 +139,36 @@ fn distribution_local_evaluation_import_admits_verified_jina_without_network_or_
     fs::create_dir_all(&profile_parent).expect("create isolated runtime parent");
     let root = tempfile::tempdir_in(profile_parent).expect("create isolated lifecycle root");
 
-    let owner = open_local_semantic_evaluation_lifecycle(
-        root.path(),
-        &fixture,
-        SemanticResourceCeilings::default(),
-        1,
-    )
-    .expect("import exact catalog members through the production verifier");
+    // The evaluator manifest pins the full cataloged truncation length, so the
+    // evaluation ceiling must admit that capability rather than the tighter
+    // default serving budget.
+    let catalog = super::FastEmbedModelCatalogV1::production();
+    let model = catalog
+        .get(crate::DEFAULT_FASTEMBED_MODEL_ID)
+        .expect("production catalog must contain the default Jina model");
+    let resources = SemanticResourceCeilings {
+        max_sequence_length: model.max_length,
+        ..SemanticResourceCeilings::default()
+    };
+    let owner = open_local_semantic_evaluation_lifecycle(root.path(), &fixture, resources, 1)
+        .expect("import exact catalog members through the production verifier");
 
     assert!(matches!(
         owner.status().state,
+        Some(SemanticModelLifecycleStateV1::Installed { .. })
+    ));
+    drop(owner);
+
+    // Restart re-admission must verify the imported manifest against exact
+    // process runtime evidence (fastembed/ort build revision), not a coarse
+    // family label.
+    let reopened = SemanticModelLifecycleOwnerV1::open_default(root.path())
+        .expect("reopen the evaluator lifecycle root");
+    let readmitted = reopened
+        .select_model(Some(crate::DEFAULT_FASTEMBED_MODEL_ID), false)
+        .expect("re-admit the imported artifact under exact runtime evidence");
+    assert!(matches!(
+        readmitted.state,
         Some(SemanticModelLifecycleStateV1::Installed { .. })
     ));
 }
