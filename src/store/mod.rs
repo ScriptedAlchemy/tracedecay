@@ -39,7 +39,7 @@ pub mod vector_generation_test_support {
     };
 
     pub use super::vector_generations::{
-        DatabaseVectorGenerationStoreV1, PublishedVectorGenerationV1, VectorGenerationBuildIdV1,
+        GraphVectorGenerationStoreV1, PublishedVectorGenerationV1, VectorGenerationBuildIdV1,
         VectorGenerationIdV1, VectorGenerationPlanV1, VectorGenerationPublicationV1,
         VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1,
         VectorProjectionCheckpointV1,

@@ -911,7 +911,6 @@ pub async fn collect_code_generation_retention_findings(
         GenerationDigestVerificationV1, ScopeRootRetentionPlanV1,
         plan_code_generation_retention_with_verification, plan_scope_root_retention,
     };
-    use crate::store::vector_generations::GraphVectorGenerationStoreV1;
     use tracedecay_application::storage::{
         CodeGenerationRetentionRecordV1, StorageByteSizeV1, StoreKeyV1,
         code_generation_retention_finding,
@@ -929,24 +928,14 @@ pub async fn collect_code_generation_retention_findings(
     // Published vectors live in the mounted code graph; without it the
     // protection set cannot be proven and the census reads as Unknown rather
     // than "nothing is pinned".
-    let Some(provider) =
-        super::code_index_scheduler::semantic_vector_graph::project_semantic_vector_graph_provider(
+    let Some(vector_readable_sources) =
+        super::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
             project_root,
         )
-    else {
-        return DoctorStorageFamilyReadV1::Unknown;
-    };
-    let Ok(retained) = provider.graph_for_current().await else {
-        return DoctorStorageFamilyReadV1::Unknown;
-    };
-    let store = GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
-    let Ok(inventory) = store
-        .retention_inventory(Arc::clone(retained.cancellation()))
         .await
     else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    let vector_readable_sources = inventory.retained_readable_sources();
     let root = code_index_store_root.to_path_buf();
     // The shared parent that holds every scope root for this repository. A
     // stranded sibling scope is invisible to the scope-local census above, so
