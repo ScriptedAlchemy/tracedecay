@@ -5,7 +5,23 @@ with residual advanced workflow controls in the advanced workflow delivery by th
 sequencing decision. It was written 2026-07-25 after the dashboard grammar library landed.
 Semantics are owned by
 [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md); this doc
-owns how those semantics look, move, and connect. Normative like 11a/11b: every
+owns how those semantics look, move, and connect.
+
+Delivery status (2026-08-06 mount audit): the core Work read/command/SSE path
+is delivery-current on the integration tip. All nine `operation.work.*`
+operations (`create`, `snapshot`, `delta`, `accept_task`, `accept_proposal`,
+`review_proposal`, `admit_execution`, `attach_runtime_evidence`,
+`replan_dependencies`) are mounted daemon → dashboard-api HTTP → SDK
+registries → dashboard Work workspace, with the stage-grouped board, TaskId
+deep links, `task_activity` SSE, snapshot/delta reads, and seven command
+surfaces (verified: work_authority 8/8, dashboard-api routes 6/6, SDK facade
+8/8, dashboard 1149/1149). The DAG/critical-path, timeline/attempt-weave,
+causal, and workload-cortex projections are not yet built. They remain
+committed in-scope V2 deliverables of this plan — not descoped — whose data
+dependency is attempt/execution evidence owned by the
+[Plan 32](32-dynamic-workflow-runtime-and-sdk.md) workflow runtime: the
+attempt family was deliberately deleted in the Work restore and returns with
+Plan 32 execution evidence. Normative like 11a/11b: every
 channel encodes a stated measurement, absence is drawn, degenerate
 distributions are said rather than drawn, caps are captioned.
 
@@ -133,12 +149,16 @@ evidence manifest.
 
 ## Dependencies and sequencing
 
-1. Plan 24 task/plan stores + executor semantics (owner: Plan 24) — blocking.
+1. Plan 24 task/plan stores + executor semantics (owner: Plan 24) — delivered
+   for the core read/command path.
 2. commit↔session correlation + span refresh fix — blocking for the weave
    projection (chip filed 2026-07-25).
-3. `task_activity` SSE family — thin, after Plan 24 lands events.
-4. Build order inside the core delivery: Kanban + DAG first (pure projections over the
-   store), weave/causal second (need correlation fix), cortex workload last.
+3. `task_activity` SSE family — delivered.
+4. Plan 32 attempt/execution evidence — blocking for the DAG/critical-path,
+   timeline, causal, and workload projections; those views ship in full once
+   the workflow runtime supplies attempt data.
+5. Build order for the remaining views: Kanban is shipped; DAG first (pure
+   projection over the store), weave/causal second (need correlation fix),
+   cortex workload last (needs volume to be worth aggregating).
    The advanced delivery then layers advanced workflow controls without replacing projections
    or canonical selection.
-   (needs volume to be worth aggregating).
