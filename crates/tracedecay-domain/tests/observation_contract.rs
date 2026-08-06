@@ -15,9 +15,10 @@ use tracedecay_domain::{
     MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES,
     ObservationCollisionOutcomeV1, ObservationContractError, ObservationId,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, PayloadReferenceV1, ProjectId, ProviderId, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId, classify_observation_collision,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
+    ProviderId, ProviderUsageContractDimensionV1, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId, classify_observation_collision,
 };
 
 fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
@@ -114,6 +115,44 @@ fn json_structure_metrics(value: &Value) -> (usize, usize) {
 
 fn nested_arrays(depth: usize) -> Value {
     (0..depth).fold(Value::Null, |value, _| Value::Array(vec![value]))
+}
+
+#[test]
+fn uncorrelated_usage_retains_native_evidence_and_requires_missing_dimensions() {
+    let fact = |missing_dimensions| CanonicalObservationFactV1::UncorrelatedUsage {
+        input_tokens: Some(11),
+        output_tokens: Some(7),
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        total_tokens: Some(18),
+        native_kind: "_usage".to_owned(),
+        native_field: "usage".to_owned(),
+        missing_dimensions,
+    };
+    let valid = fact(BTreeSet::from([
+        ProviderUsageContractDimensionV1::Model,
+        ProviderUsageContractDimensionV1::Scope,
+    ]));
+    let wire = serde_json::to_value(&valid).unwrap();
+    assert_eq!(wire["total_tokens"], 18);
+    assert_eq!(wire["native_kind"], "_usage");
+    assert_eq!(wire["native_field"], "usage");
+    assert_eq!(wire["missing_dimensions"], json!(["model", "scope"]));
+
+    let error = CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("fixture-provider").unwrap(),
+        "usage",
+        ObservationId::new("usage.fixture").unwrap(),
+        CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap()),
+        vec![fact(BTreeSet::new())],
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SnapshotOrder,
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(error, ObservationContractError::InvalidCanonicalPayload);
 }
 
 #[test]
@@ -424,12 +463,18 @@ fn canonical_envelope_rejects_every_limit_overflow() {
         ObservationContractError::CanonicalEnvelopeTooManyValues
     );
 
-    let fact = CanonicalObservationFactV1::Usage {
+    let fact = CanonicalObservationFactV1::UncorrelatedUsage {
         input_tokens: None,
         output_tokens: None,
         cache_read_tokens: None,
         cache_write_tokens: None,
         reasoning_tokens: None,
+        total_tokens: None,
+        native_kind: "fixture_usage".to_string(),
+        native_field: "fixture.usage".to_string(),
+        missing_dimensions: std::collections::BTreeSet::from([
+            tracedecay_domain::ProviderUsageContractDimensionV1::Model,
+        ]),
     };
     let facts_error = CanonicalObservationEnvelopeV1::new(
         ProviderId::new("fixture-provider").unwrap(),

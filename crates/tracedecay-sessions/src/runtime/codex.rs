@@ -13,9 +13,8 @@
 //!   (`payload.message`).
 //! * `event_msg` with `payload.type == "agent_message"` — a real assistant reply
 //!   (`payload.message`).
-//! * `event_msg` with `payload.type == "token_count"` — per-API-call usage; a
-//!   turn's tool loop emits one per call, so a turn's true cost is the *sum*
-//!   (see [`CodexTurnUsage`]).
+//! * `event_msg` with `payload.type == "token_count"` — provider usage captured
+//!   by the canonical observation path, not conversational message metadata.
 //! * `event_msg` with `payload.type == "thread_goal_updated"` — the structured
 //!   session goal and its lifecycle (`payload.goal.{objective,status,tokensUsed,
 //!   timeUsedSeconds,createdAt,updatedAt}`). `TraceDecay` records each state as a
@@ -53,7 +52,6 @@ mod observation;
 mod records;
 #[cfg(test)]
 mod tests;
-mod usage;
 
 use std::path::{Path, PathBuf};
 
@@ -65,6 +63,14 @@ use records::{
     response_item_tool_event_from_line, timestamp_from_record,
 };
 
+use crate::runtime::jsonl_observation_admission::{
+    namespace_replacement_message_ids, preflight_and_parse_new,
+};
+use crate::runtime::shared::{StoredCursor, TranscriptScopeMatcher, title_from_messages};
+use crate::runtime::source::{
+    FileDiscoveryReport, ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds,
+    TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, stream_new_jsonl,
+};
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
 pub use observation::{
     CodexJsonlAdmissionProgress, try_admit_codex_jsonl_observations_for_profile,
@@ -73,16 +79,6 @@ pub use observation::{
     try_admit_codex_jsonl_observations_for_project,
     try_admit_codex_jsonl_observations_for_project_with_admission,
     try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation,
-};
-pub use usage::{CodexTurnUsage, flush_turn_usage, merge_usage_counters};
-
-use crate::runtime::jsonl_observation_admission::{
-    namespace_replacement_message_ids, preflight_and_parse_new,
-};
-use crate::runtime::shared::{StoredCursor, TranscriptScopeMatcher, title_from_messages};
-use crate::runtime::source::{
-    FileDiscoveryReport, ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds,
-    TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, stream_new_jsonl,
 };
 
 const PROVIDER: &str = "codex";
@@ -207,7 +203,6 @@ impl TranscriptSource for CodexSource {
 
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
         let mut messages = Vec::new();
-        let mut turn_usage = CodexTurnUsage::default();
         // Collapses identical consecutive goal states within this parse pass:
         // `thread_goal_updated` fires on every token/time tick, so only an
         // objective- or status-change opens a new `goal` row.
@@ -252,9 +247,6 @@ impl TranscriptSource for CodexSource {
             // summary before the line is routed to its owning handler below.
             structured.observe_summary(&line.value);
             if is_context_record {
-                continue;
-            }
-            if turn_usage.observe(&line.value) {
                 continue;
             }
             if let Some(rows) = structured.event_from_line(
@@ -334,7 +326,6 @@ impl TranscriptSource for CodexSource {
                 line.offset,
                 context_state.compaction_depth + 1,
             ) {
-                flush_turn_usage(&mut messages, &mut turn_usage);
                 context_state.compaction_depth += 1;
                 context::annotate_message(
                     &mut message,
@@ -366,11 +357,6 @@ impl TranscriptSource for CodexSource {
                 path,
                 line.offset,
             ) {
-                // A new user prompt closes the previous turn: attach that
-                // turn's summed API-call usage to its assistant reply.
-                if message.role == "user" {
-                    flush_turn_usage(&mut messages, &mut turn_usage);
-                }
                 context::annotate_message(
                     &mut message,
                     context_state.cwd.as_deref(),
@@ -379,9 +365,6 @@ impl TranscriptSource for CodexSource {
                 messages.push(message);
             }
         }
-        // The final turn's trailing token_count(s) arrive after its
-        // agent_message; flush them onto it.
-        flush_turn_usage(&mut messages, &mut turn_usage);
         // Emit any `exec_command` calls whose paired output never arrived in
         // this pass so the tool call is not silently dropped.
         for mut message in structured.flush_pending(&meta, path) {

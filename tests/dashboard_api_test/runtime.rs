@@ -196,20 +196,6 @@ impl DashboardTestRuntimeV1 {
             .await;
     }
 
-    pub(crate) async fn insert_turn_for_test(
-        &self,
-        turn: &tracedecay_runtime_core::types::CostTurn,
-    ) -> bool {
-        self.profile_database.insert_turn(turn).await
-    }
-
-    pub(crate) async fn insert_turns_for_test(
-        &self,
-        turns: &[tracedecay_runtime_core::types::CostTurn],
-    ) -> usize {
-        self.profile_database.insert_turns(turns).await
-    }
-
     pub(crate) async fn upsert_session_for_test(
         &self,
         scope: HostAdmissionScope,

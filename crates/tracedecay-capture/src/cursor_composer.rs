@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
@@ -5,7 +7,7 @@ use tracedecay_domain::{
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
     CanonicalWorkflowSemanticKindV1, ObservationId, ObservationOrderingDomainV1,
-    ObservationSourceIdentityV1, ProviderId, SessionId,
+    ObservationSourceIdentityV1, ProviderId, ProviderUsageContractDimensionV1, SessionId,
 };
 
 use crate::ObservationRecordParseErrorV1;
@@ -164,13 +166,26 @@ pub fn normalize_cursor_composer_observation_with_message_id(
     if let Some(token_count) = native.get("tokenCount") {
         let input_tokens = composer_canonical_u64(token_count.get("inputTokens"));
         let output_tokens = composer_canonical_u64(token_count.get("outputTokens"));
-        if input_tokens.is_some() || output_tokens.is_some() {
-            facts.push(CanonicalObservationFactV1::Usage {
+        let total_tokens = composer_canonical_u64(
+            token_count
+                .get("totalTokens")
+                .or_else(|| token_count.get("total_tokens")),
+        );
+        if input_tokens.is_some() || output_tokens.is_some() || total_tokens.is_some() {
+            facts.push(CanonicalObservationFactV1::UncorrelatedUsage {
                 input_tokens,
                 output_tokens,
                 cache_read_tokens: None,
                 cache_write_tokens: None,
                 reasoning_tokens: None,
+                total_tokens,
+                native_kind: "bubble".to_string(),
+                native_field: "tokenCount".to_string(),
+                missing_dimensions: BTreeSet::from([
+                    ProviderUsageContractDimensionV1::Model,
+                    ProviderUsageContractDimensionV1::Scope,
+                    ProviderUsageContractDimensionV1::CounterSemantics,
+                ]),
             });
         }
     }

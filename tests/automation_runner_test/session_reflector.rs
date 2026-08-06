@@ -1192,6 +1192,7 @@ impl AgentTaskBackend for NoSummaryReplayBackend {
             output_text: json!({"facts": []}).to_string(),
             output_json: Some(json!({"facts": []})),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })

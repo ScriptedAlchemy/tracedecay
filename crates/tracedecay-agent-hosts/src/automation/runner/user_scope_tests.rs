@@ -299,6 +299,7 @@ impl AgentTaskBackend for JsonBackend {
             output_text: self.output.to_string(),
             output_json: Some(self.output.clone()),
             model: Some("fixture-model".to_string()),
+            provider: Some("fixture-provider".to_string()),
             input_tokens: Some(10),
             output_tokens: Some(20),
         })

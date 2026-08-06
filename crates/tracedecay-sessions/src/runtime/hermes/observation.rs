@@ -9,7 +9,8 @@ use tracedecay_domain::{
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProviderId, RetentionClass, SessionId,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProviderId, ProviderUsageCounterSemanticsV1,
+    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, RetentionClass, SessionId,
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
@@ -91,7 +92,7 @@ struct HermesNativeObservation {
     tool_name: Option<String>,
     tool_calls: Option<Value>,
     timestamp: Option<f64>,
-    usage: HermesNativeUsage,
+    usage: Option<HermesNativeUsage>,
     project_path: Option<String>,
     location_path: Option<String>,
     title: Option<String>,
@@ -121,6 +122,7 @@ pub fn native_observation_record(
     projection: &HermesProjectionMetadata,
     source: ObservationSourceIdentityV1,
     range: ObservationSourceRangeV1,
+    include_session_usage: bool,
 ) -> Result<HermesObservationRecord, ObservationCoverageReason> {
     if [row.timestamp, row.session_started_at, row.session_ended_at]
         .into_iter()
@@ -158,13 +160,13 @@ pub fn native_observation_record(
         "source": row.session_source,
         "profile": projection.profile,
         "location_provenance": projection.location_provenance,
-        "usage": {
+        "usage": include_session_usage.then(|| json!({
             "input_tokens": row.session_input_tokens,
             "output_tokens": row.session_output_tokens,
             "cache_read_tokens": row.session_cache_read_tokens,
             "cache_write_tokens": row.session_cache_write_tokens,
             "reasoning_tokens": row.session_reasoning_tokens,
-        },
+        })),
     });
     let native_record_id = stable_native_id("hermes.native", &immutable_message_evidence(&native))
         .map_err(|()| ObservationCoverageReason::MalformedFrame)?;
@@ -291,20 +293,35 @@ pub fn normalize_native_observation(
     });
     // Reasoning before Usage so reasoning-only rows project as reasoning_visible
     // instead of an empty usage fallback when Message is absent.
-    if let Some((
-        input_tokens,
-        output_tokens,
-        cache_read_tokens,
-        cache_write_tokens,
-        reasoning_tokens,
-    )) = canonical_usage(&native.usage)?
-    {
-        facts.push(CanonicalObservationFactV1::Usage {
+    if let Some(usage) = native.usage.as_ref()
+        && let Some((
             input_tokens,
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
             reasoning_tokens,
+        )) = canonical_usage(usage)?
+    {
+        facts.push(CanonicalObservationFactV1::ProviderUsage {
+            model: native.model.map_or(
+                ProviderUsageModelV1::Unknown {
+                    reason: tracedecay_domain::CanonicalUnknownStateV1::Absent,
+                },
+                |model| ProviderUsageModelV1::Known { model },
+            ),
+            native_scope: ProviderUsageScopeV1::Session,
+            counter_semantics: ProviderUsageCounterSemanticsV1::Cumulative,
+            counters: ProviderUsageCountersV1::Known {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                reasoning_tokens,
+                total_tokens: None,
+            },
+            request_id: None,
+            native_kind: "session".to_owned(),
+            native_field: "sessions.token_counters".to_owned(),
         });
     }
 
@@ -489,6 +506,16 @@ pub(super) fn prepare_observation_row_with_cancellation(
             .tool_name
             .as_deref()
             .is_none_or(|value| value.trim().is_empty())
+        && !(row.is_session_usage_frontier
+            && [
+                row.session_input_tokens,
+                row.session_output_tokens,
+                row.session_cache_read_tokens,
+                row.session_cache_write_tokens,
+                row.session_reasoning_tokens,
+            ]
+            .into_iter()
+            .any(|counter| counter.is_some()))
     {
         Some(ObservationCoverageReason::BlankFrame)
     } else {
@@ -499,7 +526,13 @@ pub(super) fn prepare_observation_row_with_cancellation(
     } else {
         let projection = projection
             .ok_or_else(|| "admitted Hermes row has no projection metadata".to_string())?;
-        match native_observation_record(row, projection, source.clone(), range) {
+        match native_observation_record(
+            row,
+            projection,
+            source.clone(),
+            range,
+            row.is_session_usage_frontier,
+        ) {
             Err(reason) => HermesAdmissionAction::Cover(reason),
             Ok(normalized) => {
                 let encoded = serde_json::to_vec(&normalized.native)

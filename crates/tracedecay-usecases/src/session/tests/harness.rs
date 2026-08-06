@@ -718,12 +718,18 @@ fn fixture_observation(
     let message_id = ObservationId::new(message_id).unwrap();
     let record_id = ObservationId::new(record_id).unwrap();
     let facts = if without_payload {
-        vec![CanonicalObservationFactV1::Usage {
+        vec![CanonicalObservationFactV1::UncorrelatedUsage {
             input_tokens: None,
             output_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
             reasoning_tokens: None,
+            total_tokens: None,
+            native_kind: "fixture_usage".to_owned(),
+            native_field: "fixture.usage".to_owned(),
+            missing_dimensions: std::collections::BTreeSet::from([
+                tracedecay_domain::ProviderUsageContractDimensionV1::Model,
+            ]),
         }]
     } else {
         vec![CanonicalObservationFactV1::Message {

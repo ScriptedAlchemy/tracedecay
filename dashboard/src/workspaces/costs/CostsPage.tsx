@@ -9,7 +9,7 @@ import {
 } from '../../contracts/generated.ts';
 import { logFraction } from '../../viz/scale.ts';
 import {
-  costPerTurn,
+  costPerUsageEvent,
   summarizeCoverage,
   summarizeProjectSpread,
   summarizeTokenMix,
@@ -42,7 +42,7 @@ export function CostsPage() {
       <div className="flex items-baseline gap-3 border-b border-edge-subtle px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Costs</h1>
         <span className="min-w-0 truncate text-2xs text-text-muted">
-          priced turn ledger, cache savings, and the canonical cost observations
+          priced provider usage, cache savings, and canonical cost observations
         </span>
       </div>
       {/* Two independent reads. The savings overview and the canonical Plan 26
@@ -77,12 +77,15 @@ function SavingsLedger() {
         const lifetime = data.savings.lifetime_counters;
         const spread = summarizeProjectSpread(lifetime?.projects ?? []);
         const mix =
-          data.sessions.available && data.sessions.actual
-            ? summarizeTokenMix(data.sessions.actual)
+          data.sessions.available && data.sessions.provider_actual
+            ? summarizeTokenMix(data.sessions.provider_actual)
             : null;
         const coverage = data.sessions.available ? summarizeCoverage(data.sessions) : null;
-        const perTurn = data.turns.available
-          ? costPerTurn(data.turns.total_cost_usd, data.turns.turn_count)
+        const perUsageEvent = data.provider_usage.available
+          ? costPerUsageEvent(
+              data.provider_usage.total_cost_usd,
+              data.provider_usage.usage_event_count,
+            )
           : null;
         // The truncated title needs both counts to say anything; the contract
         // makes them non-null whenever the counters block itself is, so the
@@ -99,9 +102,9 @@ function SavingsLedger() {
         return (
           <>
             <p className="border-b border-edge-subtle px-4 py-1.5 text-2xs text-text-muted">
-              {data.turns.available
-                ? `turn ledger · ${data.turns.cost_basis ?? 'unknown'} cost basis`
-                : 'turn ledger unavailable'}
+              {data.provider_usage.available
+                ? `provider usage · ${data.provider_usage.cost_basis ?? 'unknown'} cost basis`
+                : 'provider usage unavailable'}
             </p>
 
             {/* Spend first, and at the display tier. Everything below it is
@@ -115,35 +118,45 @@ function SavingsLedger() {
                 {
                   label: 'total cost',
                   value:
-                    data.turns.available && data.turns.total_cost_usd != null
-                      ? `$${data.turns.total_cost_usd.toLocaleString(undefined, {
+                    data.provider_usage.available && data.provider_usage.total_cost_usd != null
+                      ? `$${data.provider_usage.total_cost_usd.toLocaleString(undefined, {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
                         })}`
                       : '—',
-                  note: data.turns.cost_basis
-                    ? `${data.turns.cost_basis} basis`
+                  note: data.provider_usage.cost_basis
+                    ? `${data.provider_usage.cost_basis} basis`
                     : 'basis unreported',
                 },
                 {
-                  label: 'per turn',
-                  value: perTurn != null ? `$${perTurn.toFixed(3)}` : '—',
-                  note: 'derived: cost ÷ turns',
+                  label: 'per usage event',
+                  value: perUsageEvent != null ? `$${perUsageEvent.toFixed(3)}` : '—',
+                  note: 'derived: cost ÷ provider usage events',
                 },
                 {
-                  label: 'turns',
-                  ...splitTokens(data.turns.available ? data.turns.turn_count : undefined),
-                  note: 'priced turn ledger',
+                  label: 'usage events',
+                  ...splitTokens(
+                    data.provider_usage.available
+                      ? data.provider_usage.usage_event_count
+                      : undefined,
+                  ),
+                  note: 'canonical provider usage',
                 },
                 {
                   label: 'tokens',
-                  ...splitTokens(data.turns.available ? data.turns.total_tokens : undefined),
-                  note: 'across those turns',
+                  ...splitTokens(
+                    data.provider_usage.available ? data.provider_usage.total_tokens : undefined,
+                  ),
+                  note: 'across those usage events',
                 },
               ]}
             />
-            {!data.turns.available ? (
-              <ReadFailure band label="Priced turn ledger read failed" detail={data.turns.error} />
+            {!data.provider_usage.available ? (
+              <ReadFailure
+                band
+                label="Priced provider usage read failed"
+                detail={data.provider_usage.error}
+              />
             ) : null}
 
             {/* The four windows are nested: today is inside 7d is inside 30d
@@ -195,7 +208,7 @@ function SavingsLedger() {
                     detail={data.sessions.error}
                   />
                 ) : mix ? (
-                  <TokenMixPlate mix={mix} sessions={data.sessions} />
+                  <TokenMixPlate mix={mix} />
                 ) : (
                   <p className="text-2xs text-text-muted">
                     the session ledger reported no token breakdown
@@ -213,7 +226,7 @@ function SavingsLedger() {
                 )}
               </OverviewCard>
 
-              <OverviewCard title="How much of the ledger is measured">
+              <OverviewCard title="How content tokens were counted">
                 {!data.sessions.available ? (
                   <ReadFailure
                     label="Session ledger read failed"
@@ -222,35 +235,13 @@ function SavingsLedger() {
                 ) : coverage ? (
                   <figure className="flex flex-col gap-2">
                     <p className="text-xs leading-relaxed text-text-primary">
-                      {coverage.measuredShare != null ? (
-                        <>
-                          {Math.round(coverage.measuredShare * 100)}% of{' '}
-                          {coverage.messages.toLocaleString()} messages carry token counts
-                          the provider reported. The remainder separates locally tokenized
-                          messages from estimates; together those sources form the{' '}
-                          <span className="td-value">
-                            {String(data.sessions.cost_basis ?? 'mixed')}
-                          </span>{' '}
-                          cost basis.
-                        </>
-                      ) : (
-                        <>
-                          The ledger holds {coverage.messages.toLocaleString()} messages and
-                          reported no provider-measured count among them, so the measured
-                          share is unknown — not none. The rows below print only the classes
-                          the ledger did report, against the{' '}
-                          <span className="td-value">
-                            {String(data.sessions.cost_basis ?? 'mixed')}
-                          </span>{' '}
-                          cost basis it names.
-                        </>
-                      )}
+                      The ledger holds {coverage.messages.toLocaleString()} content messages.
+                      Local tokenization and explicit estimates form its{' '}
+                      <span className="td-value">
+                        {String(data.sessions.cost_basis ?? 'estimated')}
+                      </span>{' '}
+                      counting basis. Provider billing events are reported separately above.
                     </p>
-                    <ShareRow
-                      label="provider-reported"
-                      value={coverage.usage}
-                      total={coverage.messages}
-                    />
                     <ShareRow
                       label="tokenized"
                       value={coverage.tokenized}
@@ -317,13 +308,8 @@ function SavingsLedger() {
  */
 function TokenMixPlate({
   mix,
-  sessions,
 }: {
   mix: TokenMix;
-  sessions: {
-    session_count?: number | null | undefined;
-    messages?: number | null | undefined;
-  };
 }) {
   const rest = mix.dominant ? mix.classes.slice(1) : mix.classes;
   const ceiling = rest.reduce((max, entry) => Math.max(max, entry.tokens), 0);
@@ -352,14 +338,10 @@ function TokenMixPlate({
             figureWidth="wide"
           />
         ))}
-        {/* The denominator is only worth stating when the ledger served it. A
-          * "0 messages in 0 sessions" caption under real token figures reads as
-          * a measurement of an empty ledger, which is the opposite of what an
-          * unreported count means. */}
         <figcaption className="text-3xs leading-relaxed text-text-muted">
-          {sessions.messages != null && sessions.session_count != null
-            ? `The provider-reported token breakdown across ${sessions.messages.toLocaleString()} messages in ${sessions.session_count.toLocaleString()} sessions — a different, wider denominator than the priced turn ledger above.`
-            : 'The provider-reported token breakdown, over a span of messages and sessions the ledger did not report — a different, wider denominator than the priced turn ledger above.'}
+          The canonical provider-reported token breakdown. Its usage-event denominator is
+          reported in the spend readout above and is never inferred from session message
+          counts.
         </figcaption>
       </figure>
     </div>

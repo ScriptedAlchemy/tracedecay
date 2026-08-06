@@ -25,7 +25,7 @@
   "fact_kinds": [
     "tool_invocation",
     "reasoning",
-    "usage"
+    "provider_usage"
   ],
   "encoded_must_contain": [
     "terminal",

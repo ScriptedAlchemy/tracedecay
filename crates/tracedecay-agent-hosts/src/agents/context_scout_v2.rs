@@ -501,6 +501,8 @@ pub enum ContextScoutModelBackendV1 {
 pub struct ContextScoutModelReceiptV1 {
     pub requested_backend: ContextScoutModelBackendV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
@@ -740,6 +742,10 @@ fn valid_model_receipt(
 ) -> bool {
     requested_backend == ContextScoutModelBackendV1::CodexAppServer
         && receipt.requested_backend == requested_backend
+        && receipt
+            .actual_provider
+            .as_deref()
+            .is_some_and(|provider| provider == "codex")
         && receipt
             .actual_model
             .as_ref()
@@ -1928,6 +1934,7 @@ mod tests {
     fn model_receipt() -> ContextScoutModelReceiptV1 {
         ContextScoutModelReceiptV1 {
             requested_backend: ContextScoutModelBackendV1::CodexAppServer,
+            actual_provider: Some("codex".to_owned()),
             actual_model: Some("configured-test-model".to_owned()),
             input_tokens: Some(10),
             output_tokens: Some(5),
@@ -1945,6 +1952,22 @@ mod tests {
             MAX_SCOUT_MODEL_INPUT_TOKENS,
             MAX_SCOUT_MODEL_OUTPUT_TOKENS,
         ));
+    }
+
+    #[test]
+    fn successful_model_receipt_requires_exact_provider_identity() {
+        for provider in [None, Some("claude".to_owned())] {
+            let receipt = ContextScoutModelReceiptV1 {
+                actual_provider: provider,
+                ..model_receipt()
+            };
+            assert!(!valid_model_receipt(
+                &receipt,
+                ContextScoutModelBackendV1::CodexAppServer,
+                MAX_SCOUT_MODEL_INPUT_TOKENS,
+                MAX_SCOUT_MODEL_OUTPUT_TOKENS,
+            ));
+        }
     }
 
     #[test]

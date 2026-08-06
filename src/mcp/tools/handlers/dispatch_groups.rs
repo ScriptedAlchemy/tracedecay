@@ -565,6 +565,10 @@ pub(super) async fn dispatch_memory_tools(
                 args,
                 options.global_db.map(std::sync::Arc::as_ref),
                 options.accounting_db,
+                options
+                    .session_authorities
+                    .project_registered
+                    .map(std::sync::Arc::as_ref),
             )
             .await
         }

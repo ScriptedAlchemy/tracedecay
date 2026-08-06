@@ -9,9 +9,9 @@
  * missing when it is.
  *
  * The `provider_cost` measurement is normally the clearest example of why that
- * matters. Prices are recorded at ingest, so the projector emits a cost metric
- * with a null value and `pricing_revision_unavailable` whenever the turns it
- * counted were never priced. That is a real accounting state, and the plate
+ * matters. Provider usage is priced at read time, so the projector emits a
+ * null cost whenever exact provider/model pricing is unavailable. That is a
+ * real accounting state, and the plate
  * renders it as one instead of as `$0.00`.
  */
 import { CostsReadModelV1Schema, type CostsReadModelV1 } from '../../contracts/generated.ts';
@@ -72,8 +72,8 @@ function HorizonFields({ model }: { model: CostsReadModelV1 }) {
  *
  * Plan 11 asks Costs for a latency breakdown alongside tokens and cost. The
  * canonical cost projection has no latency measurement in it: `CostsReadModelV1`
- * carries `usage` and `estimated_cost` only, and neither the accounting-turn
- * ledger nor the savings ledger records a per-call duration for the projector
+ * carries `usage` and `estimated_cost` only, and neither provider-usage
+ * observations nor the savings ledger record a per-call duration for the projector
  * to measure. There is therefore no provider or model latency anywhere behind
  * this surface.
  *
@@ -97,7 +97,7 @@ function LatencyBreakdown() {
       <StateChip kind="unsupported" detail="no provider latency is measured" />
       <p className="text-3xs leading-snug text-text-muted">
         The canonical cost projection measures usage and estimated cost only. Neither the
-        accounting-turn ledger nor the savings ledger records a per-call duration, so no
+        provider-usage observations nor the savings ledger record a per-call duration, so no
         provider or model latency exists to break down here. Retrieval-side latency is
         measured, and is reported by Observatory as{' '}
         <span className="td-value">feedback latency p95</span> over its own population — it is

@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use tracedecay_domain::ObservationScopeV1;
+use tracedecay_store::StoreShardScopeV1;
 
 use crate::automation::run_ledger::load_run_records;
 use crate::errors::{Result, TraceDecayError};
@@ -260,6 +262,7 @@ pub(super) async fn handle_analytics(
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
     analytics_db: Option<&RegisteredGlobalDb>,
+    project_sessions: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
     let all_projects = parse_scope(&args)?;
     let window_days = parse_window_days(&args);
@@ -284,9 +287,31 @@ pub(super) async fn handle_analytics(
     .await;
     let observatory = crate::application::observability::observatory_mcp_value(&observatory)
         .map_err(config_error)?;
-    let costs =
-        crate::application::observability::costs_read_model(gdb, scope.filter.as_deref(), since)
-            .await;
+    let provider_scope = if all_projects {
+        None
+    } else {
+        project_sessions.and_then(|sessions| {
+            let StoreShardScopeV1::ProjectSessions { project_id } =
+                &sessions.binding().shard_id.scope
+            else {
+                return None;
+            };
+            (cg.store_layout().identity.project_id.as_deref() == Some(project_id.as_str())).then(
+                || ObservationScopeV1::Project {
+                    project_id: project_id.clone(),
+                },
+            )
+        })
+    };
+    let provider_usage_db = if all_projects { None } else { project_sessions };
+    let costs = crate::application::observability::costs_read_model(
+        gdb,
+        provider_usage_db,
+        provider_scope.as_ref(),
+        scope.filter.as_deref(),
+        since,
+    )
+    .await;
     let costs = crate::application::observability::costs_mcp_value(&costs).map_err(config_error)?;
 
     let mut value = json!({

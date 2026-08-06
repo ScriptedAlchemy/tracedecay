@@ -10,7 +10,8 @@ use tracedecay_application::{
     ObservatoryReadModelV1, now_micros,
 };
 use tracedecay_domain::{
-    CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityTerminalResultV1,
+    CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
+    ObservabilityTerminalResultV1, ObservationScopeV1,
 };
 
 use crate::feedback::observations::{
@@ -18,6 +19,12 @@ use crate::feedback::observations::{
     FeedbackSystemMetricUnitV1, Plan26CoverageV1,
 };
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
+
+use crate::provider_pricing::load_table;
+use crate::provider_usage::{
+    AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
+    price_provider_usage, provider_usage_aggregate,
+};
 
 const EVENT_LIMIT: usize = 10_000;
 const OBSERVABILITY_SCAN_PAGE: usize = 64;
@@ -865,9 +872,9 @@ pub fn costs_unavailable_read_model(
                 metric(
                     "provider_tokens",
                     "tokens",
-                    "ingested_provider_turns",
-                    MetricSourceV1::AccountingTurn,
-                    "accounting-turn.v1",
+                    "provider_usage_observations",
+                    MetricSourceV1::ProviderUsageObservation,
+                    "provider-usage-observation.v1",
                 ),
                 metric(
                     "saved_tokens",
@@ -880,9 +887,9 @@ pub fn costs_unavailable_read_model(
             vec![metric(
                 "provider_cost",
                 "usd",
-                "priced_provider_turns",
-                MetricSourceV1::AccountingTurn,
-                "accounting-turn.v1",
+                "priced_provider_usage_observations",
+                MetricSourceV1::ProviderUsageObservation,
+                "provider-usage-observation.v1",
             )],
         )
     };
@@ -898,75 +905,156 @@ pub fn costs_unavailable_read_model(
     }
 }
 
-/// Canonical Costs projection. Prices are recorded at ingest; transports never
-/// join a pricing table or recompute dollar formulas.
+fn provider_token_total(aggregate: &ProviderUsageAggregateV1) -> Option<u64> {
+    if aggregate.coverage != ProviderUsageCoverageV1::Complete {
+        return None;
+    }
+    aggregate
+        .totals
+        .input_tokens?
+        .checked_add(aggregate.totals.output_tokens?)
+}
+
+fn provider_token_total_since(
+    aggregate: &ProviderUsageAggregateV1,
+    since_seconds: i64,
+) -> Option<u64> {
+    if since_seconds <= 0 {
+        return provider_token_total(aggregate);
+    }
+    if aggregate.coverage != ProviderUsageCoverageV1::Complete {
+        return None;
+    }
+    aggregate.deltas.iter().try_fold(0_u64, |total, delta| {
+        let timestamp = delta.native_timestamp?;
+        if timestamp < since_seconds {
+            return Some(total);
+        }
+        let tokens = delta
+            .counters
+            .input_tokens?
+            .checked_add(delta.counters.output_tokens?)?;
+        total.checked_add(tokens)
+    })
+}
+
+fn provider_coverage(aggregate: &ProviderUsageAggregateV1) -> MetricCoverageV1 {
+    let observed = aggregate.deltas.len() as u64;
+    let unknown = aggregate.issues.len() as u64;
+    let state = match aggregate.coverage {
+        ProviderUsageCoverageV1::Complete => CoverageStateV1::Known,
+        ProviderUsageCoverageV1::Partial => CoverageStateV1::Partial,
+        ProviderUsageCoverageV1::Unavailable => CoverageStateV1::Unknown,
+    };
+    coverage(
+        (aggregate.coverage == ProviderUsageCoverageV1::Complete)
+            .then_some(aggregate.observations_seen),
+        observed,
+        unknown,
+        state,
+    )
+}
+
+/// Canonical costs projection over separate savings and provider authorities.
+///
+/// Provider usage is read only when the caller supplies both the retained
+/// project session store and its exact typed scope. Projectless/profile-wide
+/// callers receive typed unavailable provider metrics.
 pub async fn costs_read_model(
-    db: &RegisteredGlobalDb,
+    savings_db: &RegisteredGlobalDb,
+    provider_usage_db: Option<&RegisteredGlobalDb>,
+    provider_scope: Option<&ObservationScopeV1>,
     scope_ref: Option<&str>,
     since_seconds: i64,
 ) -> CostsReadModelV1 {
-    let since = since_seconds.max(0) as u64;
-    // `turns.project_hash` is a provider-import label, not an authoritative
-    // ProjectId. Never return global turn totals under a project-scoped label.
-    let accounting = if scope_ref.is_none() {
-        db.accounting_totals_since(since).await
-    } else {
-        None
+    let provider_usage = match (provider_usage_db, provider_scope) {
+        (Some(db), Some(scope)) => provider_usage_aggregate(db, scope, None, None).await,
+        _ => ProviderUsageAggregateV1 {
+            coverage: ProviderUsageCoverageV1::Unavailable,
+            observations_seen: 0,
+            totals: AggregatedProviderUsageCountersV1::unknown(),
+            deltas: Vec::new(),
+            issues: Vec::new(),
+            upper_observation_sequence: None,
+        },
     };
+    costs_read_model_with_provider_usage(savings_db, scope_ref, since_seconds, &provider_usage)
+        .await
+}
+
+/// Builds the costs projection from an already-pinned provider-usage read.
+/// Dashboard composite reads use this to avoid rescanning the same immutable
+/// observation frontier for sibling panels.
+pub async fn costs_read_model_with_provider_usage(
+    db: &RegisteredGlobalDb,
+    scope_ref: Option<&str>,
+    since_seconds: i64,
+    provider_usage: &ProviderUsageAggregateV1,
+) -> CostsReadModelV1 {
     let savings = db
         .savings_totals_with_watermark(scope_ref, since_seconds)
         .await
         .ok();
     let observed_at_micros = now_micros().0;
+    let pricing = load_table();
+    let cost_summary = price_provider_usage(provider_usage, pricing, since_seconds);
+    let provider_cost = cost_summary.total_cost_usd;
+    let priced_usage = cost_summary
+        .usage_events
+        .saturating_sub(cost_summary.unpriced_events);
+    let unpriced_usage = cost_summary.unpriced_events;
     let read_horizon = horizon(since_seconds, observed_at_micros);
-    let accounting_watermark = accounting.map_or_else(
-        || "turns:unknown".to_string(),
-        |(turns, _, _, latest)| format!("turns:{turns}:{latest}"),
+    let provider_watermark = provider_usage.upper_observation_sequence.map_or_else(
+        || "provider-usage:unknown".to_string(),
+        |upper| format!("provider-usage:{upper}"),
     );
     let savings_watermark = savings.as_ref().map_or_else(
         || "savings:unknown".to_string(),
         |(_, latest)| format!("savings:{latest}"),
     );
-    let accounting_coverage = accounting.map_or_else(
-        || coverage(None, 0, 1, CoverageStateV1::Unknown),
-        |(turns, _, _, _)| coverage(Some(turns), turns, 0, CoverageStateV1::Known),
-    );
+    let usage_coverage = provider_coverage(provider_usage);
     let savings_coverage = savings.as_ref().map_or_else(
         || coverage(None, 0, 1, CoverageStateV1::Unknown),
         |(totals, _)| coverage(Some(totals.calls), totals.calls, 0, CoverageStateV1::Known),
     );
-    let accounting_reason = accounting.is_none().then_some(if scope_ref.is_some() {
-        "project_turn_scope_unavailable"
-    } else {
-        "accounting_store_unavailable"
-    });
+    let provider_reason = (provider_usage.coverage != ProviderUsageCoverageV1::Complete).then_some(
+        if provider_usage.coverage == ProviderUsageCoverageV1::Partial {
+            "provider_usage_partial"
+        } else {
+            "provider_usage_unavailable"
+        },
+    );
     let savings_reason = savings.is_none().then_some("savings_store_unavailable");
-    let tokens = accounting.map(|(_, tokens, _, _)| tokens as f64);
+    let tokens =
+        provider_token_total_since(provider_usage, since_seconds).map(|value| value as f64);
     let saved_tokens = savings
         .as_ref()
         .map(|(totals, _)| totals.saved_tokens as f64);
-    let pricing_reason = accounting
-        .is_some()
-        .then_some("pricing_revision_unavailable")
-        .or(accounting_reason);
+    let pricing_reason = if provider_usage.coverage == ProviderUsageCoverageV1::Unavailable {
+        provider_reason
+    } else if provider_cost.is_none() {
+        Some("provider_model_pricing_unavailable")
+    } else {
+        None
+    };
     let usage = vec![
         measurement(MeasurementSpec {
             descriptor: MeasurementDescriptor::new(
                 COST_DESCRIPTOR,
                 "provider_tokens",
                 "tokens",
-                "ingested_provider_turns",
+                "provider_usage_observations",
             ),
             provenance: MeasurementProvenance::new(
-                MetricSourceV1::AccountingTurn,
-                "accounting-turn.v1",
+                MetricSourceV1::ProviderUsageObservation,
+                "provider-usage-observation.v1",
                 "costs-projector.v1",
-                &accounting_watermark,
+                &provider_watermark,
             ),
             horizon: &read_horizon,
-            coverage: accounting_coverage.clone(),
+            coverage: usage_coverage.clone(),
             value: tokens,
-            unavailable_reason: accounting_reason,
+            unavailable_reason: provider_reason,
         }),
         measurement(MeasurementSpec {
             descriptor: MeasurementDescriptor::new(
@@ -992,33 +1080,28 @@ pub async fn costs_read_model(
             COST_DESCRIPTOR,
             "provider_cost",
             "usd",
-            "priced_provider_turns",
+            "priced_provider_usage_observations",
         ),
         provenance: MeasurementProvenance::new(
-            MetricSourceV1::AccountingTurn,
-            "accounting-turn.v1",
+            MetricSourceV1::ProviderUsageObservation,
+            "provider-usage-observation.v1",
             "costs-projector.v1",
-            &accounting_watermark,
+            &provider_watermark,
         ),
         horizon: &read_horizon,
-        coverage: if accounting.is_some() {
-            coverage(
-                None,
-                accounting.map_or(0, |value| value.0),
-                1,
-                CoverageStateV1::Unknown,
-            )
+        coverage: if provider_cost.is_some() {
+            coverage(Some(priced_usage), priced_usage, 0, CoverageStateV1::Known)
         } else {
-            accounting_coverage
+            coverage(None, priced_usage, unpriced_usage, CoverageStateV1::Partial)
         },
-        value: None,
+        value: provider_cost,
         unavailable_reason: pricing_reason,
     })];
     let known = usage
         .iter()
         .chain(&estimated_cost)
         .all(|metric| metric.coverage.state == CoverageStateV1::Known);
-    let watermark = format!("{accounting_watermark};{savings_watermark}");
+    let watermark = format!("{provider_watermark};{savings_watermark}");
     CostsReadModelV1 {
         authorized_scope_ref: scope_ref.unwrap_or("all").to_string(),
         horizon: read_horizon,
@@ -1027,13 +1110,16 @@ pub async fn costs_read_model(
         current: known,
         usage,
         estimated_cost,
-        pricing_revision: None,
+        pricing_revision: Some(cost_summary.pricing_revision),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_usage::{
+        AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
+    };
     use tracedecay_domain::{
         ObservabilityPayloadV1, ObservabilityRetentionClassV1, RetrievalQueryObservedV1,
     };
@@ -1086,6 +1172,52 @@ mod tests {
         assert_eq!(value.state, CoverageStateV1::Partial);
         assert_eq!(value.unknown, 2);
         assert_eq!(value.eligible, None);
+    }
+
+    #[test]
+    fn provider_token_metric_is_absent_for_partial_or_incomplete_evidence() {
+        let aggregate = ProviderUsageAggregateV1 {
+            coverage: ProviderUsageCoverageV1::Partial,
+            observations_seen: 2,
+            totals: AggregatedProviderUsageCountersV1 {
+                input_tokens: Some(10),
+                output_tokens: Some(4),
+                ..AggregatedProviderUsageCountersV1::unknown()
+            },
+            deltas: Vec::new(),
+            issues: Vec::new(),
+            upper_observation_sequence: Some(2),
+        };
+        assert_eq!(provider_token_total(&aggregate), None);
+
+        let aggregate = ProviderUsageAggregateV1 {
+            coverage: ProviderUsageCoverageV1::Complete,
+            totals: AggregatedProviderUsageCountersV1 {
+                input_tokens: Some(10),
+                output_tokens: None,
+                ..AggregatedProviderUsageCountersV1::unknown()
+            },
+            ..aggregate
+        };
+        assert_eq!(provider_token_total(&aggregate), None);
+    }
+
+    #[test]
+    fn complete_provider_usage_sums_input_and_output_without_double_counting_total() {
+        let aggregate = ProviderUsageAggregateV1 {
+            coverage: ProviderUsageCoverageV1::Complete,
+            observations_seen: 2,
+            totals: AggregatedProviderUsageCountersV1 {
+                input_tokens: Some(10),
+                output_tokens: Some(4),
+                total_tokens: Some(14),
+                ..AggregatedProviderUsageCountersV1::unknown()
+            },
+            deltas: Vec::new(),
+            issues: Vec::new(),
+            upper_observation_sequence: Some(2),
+        };
+        assert_eq!(provider_token_total(&aggregate), Some(14));
     }
 
     #[test]

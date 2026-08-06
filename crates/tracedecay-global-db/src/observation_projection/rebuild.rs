@@ -8,16 +8,16 @@ use tracedecay_sessions::compatibility::{
     derived_text_for_index, derived_text_for_snippet, projected_content_hash,
 };
 use tracedecay_store::{
-    ObservationProjection, ProjectedObservation, ProjectionPersistOutcome,
-    ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, SessionMessageRecord,
-    SessionRecord, WorkflowFactProjection, workflow_semantic_kind,
+    ObservationProjection, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation,
+    ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
+    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection,
+    SessionMessageRecord, SessionRecord, WorkflowFactProjection, workflow_semantic_kind,
 };
 
 use super::super::session_temporal::record_canonical_observation_effect;
 use super::apply::{
     apply_effect, apply_skip_disposition, derive_projection_for_rebuild,
-    derive_projection_with_alias, verify_effect,
+    derive_projection_with_alias, stage_provider_usage_effects, verify_effect,
 };
 use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,
@@ -620,6 +620,7 @@ async fn activate_projection_rebuild_transaction(
     activate_rebuild_messages(transaction, &job.generation).await?;
     activate_rebuild_provenance(transaction, &job.generation).await?;
     activate_rebuild_workflow_facts(transaction, &job.generation).await?;
+    activate_rebuild_provider_usage(transaction, &job.generation).await?;
     activate_rebuild_dispositions(transaction, &job.generation).await?;
 
     transaction
@@ -1368,6 +1369,7 @@ async fn stage_rebuild_effect(
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
+    stage_provider_usage_effects(conn, generation, sequence, observation).await?;
     match effect {
         ObservationProjection::Message(projection) => {
             stage_rebuild_message(conn, generation, sequence, observation, projection).await
@@ -1392,6 +1394,36 @@ async fn stage_rebuild_effect(
             stage_rebuild_disposition(conn, generation, observation, *reason).await
         }
     }
+}
+
+async fn activate_rebuild_provider_usage(
+    conn: &impl Executor,
+    generation: &str,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO observation_provider_usage (
+            projector_version, observation_id, usage_ordinal, receipt_id,
+            observation_sequence, scope_kind, project_id, provider, model_json,
+            native_scope, counter_semantics, counters_json, session_id, turn_id,
+            message_id, request_id, native_kind, native_field, ordering_domain,
+            source_start, source_end, native_timestamp
+         )
+         SELECT ?1, observation_id, usage_ordinal, receipt_id,
+                observation_sequence, scope_kind, project_id, provider, model_json,
+                native_scope, counter_semantics, counters_json, session_id, turn_id,
+                message_id, request_id, native_kind, native_field, ordering_domain,
+                source_start, source_end, native_timestamp
+         FROM observation_projection_rebuild_provider_usage
+         WHERE projector_version = ?2 AND generation = ?3",
+        params![
+            PROVIDER_USAGE_PROJECTOR_VERSION,
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            generation
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("activate rebuilt provider usage", error))
 }
 
 async fn clear_active_projection(

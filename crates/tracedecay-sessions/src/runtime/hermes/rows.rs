@@ -29,6 +29,9 @@ pub struct HermesRow {
     pub session_cache_read_tokens: Option<i64>,
     pub session_cache_write_tokens: Option<i64>,
     pub session_reasoning_tokens: Option<i64>,
+    /// True only for the authority's current highest active message row in
+    /// this session. Joined mutable session counters are emitted only here.
+    pub is_session_usage_frontier: bool,
     /// `messages.active` soft-delete flag (0 = rewound/undone turn). Legacy
     /// stores without the column read as 1.
     pub active: i64,

@@ -5,7 +5,8 @@ use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
     CanonicalReasoningVisibilityV1, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceRangeV1, RetentionClass, SessionId,
+    ObservationSourceGenerationV1, ObservationSourceRangeV1, ProviderUsageCounterSemanticsV1,
+    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, RetentionClass, SessionId,
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
@@ -86,6 +87,7 @@ fn fixture(row_id: i64) -> HermesRow {
         session_cache_read_tokens: Some(4),
         session_cache_write_tokens: Some(3),
         session_reasoning_tokens: Some(2),
+        is_session_usage_frontier: true,
         active: 1,
         sql_value_oversized: false,
         sql_measured_bytes: 0,
@@ -95,7 +97,14 @@ fn fixture(row_id: i64) -> HermesRow {
 fn normalized(row: &HermesRow, start: u64) -> HermesObservationRecord {
     let source = observation_source(row).unwrap();
     let range = ObservationSourceRangeV1::new(start, row.id as u64).unwrap();
-    native_observation_record(row, &fixture_projection(), source, range).unwrap()
+    native_observation_record(
+        row,
+        &fixture_projection(),
+        source,
+        range,
+        row.is_session_usage_frontier,
+    )
+    .unwrap()
 }
 
 fn fixture_projection() -> HermesProjectionMetadata {
@@ -108,7 +117,19 @@ fn fixture_projection() -> HermesProjectionMetadata {
 }
 
 fn canonical(row: &HermesRow, start: u64) -> CanonicalObservationEnvelopeV1 {
-    let record = normalized(row, start);
+    canonical_with_session_usage(row, start, true)
+}
+
+fn canonical_with_session_usage(
+    row: &HermesRow,
+    start: u64,
+    include_session_usage: bool,
+) -> CanonicalObservationEnvelopeV1 {
+    let mut native = normalized(row, start);
+    if !include_session_usage {
+        native.native["usage"] = Value::Null;
+    }
+    let record = native;
     let encoded = serde_json::to_vec(&record.native).unwrap();
     let parsed = parse_normalized_observation_record_v1(
         &encoded,
@@ -118,6 +139,58 @@ fn canonical(row: &HermesRow, start: u64) -> CanonicalObservationEnvelopeV1 {
     )
     .unwrap();
     serde_json::from_value(parsed.value().clone()).unwrap()
+}
+
+#[test]
+fn repeated_joined_session_totals_emit_only_at_the_session_frontier() {
+    let mut first = fixture(7);
+    first.is_session_usage_frontier = false;
+    let second = fixture(8);
+    let first_envelope = canonical_with_session_usage(&first, 0, first.is_session_usage_frontier);
+    let second_envelope =
+        canonical_with_session_usage(&second, 7, second.is_session_usage_frontier);
+    assert!(first_envelope.facts().iter().all(|fact| {
+        !matches!(
+            fact,
+            CanonicalObservationFactV1::ProviderUsage { .. }
+                | CanonicalObservationFactV1::UncorrelatedUsage { .. }
+        )
+    }));
+    assert_eq!(
+        second_envelope
+            .facts()
+            .iter()
+            .filter(|fact| matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn newly_observed_session_frontier_preserves_updated_cumulative_totals() {
+    let mut updated = fixture(8);
+    updated.session_input_tokens = Some(21);
+    updated.session_output_tokens = Some(9);
+    let envelope = canonical_with_session_usage(&updated, 7, updated.is_session_usage_frontier);
+
+    assert!(envelope.facts().iter().any(|fact| matches!(
+        fact,
+        CanonicalObservationFactV1::ProviderUsage {
+            model: ProviderUsageModelV1::Known { model },
+            native_scope: ProviderUsageScopeV1::Session,
+            counter_semantics: ProviderUsageCounterSemanticsV1::Cumulative,
+            counters: ProviderUsageCountersV1::Known {
+                input_tokens: Some(21),
+                output_tokens: Some(9),
+                ..
+            },
+            request_id: None,
+            native_kind,
+            native_field,
+        } if model == "model-redacted"
+            && native_kind == "session"
+            && native_field == "sessions.token_counters"
+    )));
 }
 
 #[tokio::test]
@@ -236,12 +309,18 @@ fn normalized_payload_contains_only_typed_canonical_facts() {
     )));
     assert!(envelope.facts().iter().any(|fact| matches!(
         fact,
-        CanonicalObservationFactV1::Usage {
-            input_tokens: Some(10),
-            output_tokens: Some(5),
-            cache_read_tokens: Some(4),
-            cache_write_tokens: Some(3),
-            reasoning_tokens: Some(2),
+        CanonicalObservationFactV1::ProviderUsage {
+            native_scope: ProviderUsageScopeV1::Session,
+            counter_semantics: ProviderUsageCounterSemanticsV1::Cumulative,
+            counters: ProviderUsageCountersV1::Known {
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                cache_read_tokens: Some(4),
+                cache_write_tokens: Some(3),
+                reasoning_tokens: Some(2),
+                total_tokens: None,
+            },
+            ..
         }
     )));
     assert!(envelope.facts().iter().any(|fact| matches!(
@@ -981,6 +1060,44 @@ fn write_minimal_legacy_state_db(path: &std::path::Path, rows: usize) {
     transaction.commit().unwrap();
 }
 
+fn write_usage_state_db(path: &std::path::Path, rows: usize) {
+    let mut conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode = DELETE;
+         CREATE TABLE sessions (
+             id TEXT PRIMARY KEY,
+             model TEXT,
+             input_tokens INTEGER,
+             output_tokens INTEGER,
+             cache_read_tokens INTEGER,
+             cache_write_tokens INTEGER,
+             reasoning_tokens INTEGER
+         );
+         CREATE TABLE messages (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             session_id TEXT NOT NULL,
+             role TEXT NOT NULL,
+             content TEXT,
+             timestamp REAL NOT NULL,
+             active INTEGER NOT NULL DEFAULT 1
+         );
+         INSERT INTO sessions (id, model, input_tokens, output_tokens)
+         VALUES ('usage-session', 'hermes-model', 10, 5);",
+    )
+    .unwrap();
+    let transaction = conn.transaction().unwrap();
+    for index in 0..rows {
+        transaction
+            .execute(
+                "INSERT INTO messages (session_id, role, content, timestamp)
+                 VALUES ('usage-session', 'assistant', ?1, ?2)",
+                rusqlite::params![format!("usage row {index}"), index as f64],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
 fn sqlite_sidecar(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);
@@ -1149,4 +1266,99 @@ async fn legacy_schema_paginates_without_gaps_or_duplicates() {
         .map(|row| row.id)
         .collect::<Vec<_>>();
     assert_eq!(ids, (1..=(CHUNK_ROWS + 3) as i64).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn multi_page_session_emits_one_usage_checkpoint_and_a_later_frontier_updates_it() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let path = dir.path().join("state.db");
+    write_usage_state_db(&path, CHUNK_ROWS + 3);
+
+    let conn = open_read_only_strict(&path).await.unwrap();
+    let select_sql = select_new_messages_sql(
+        &message_columns(&conn).await.unwrap(),
+        &table_columns(&conn, "sessions").await.unwrap(),
+    );
+    let first = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
+        .await
+        .unwrap();
+    let second = read_new_rows_strict(&conn, &select_sql, first.new_cursor)
+        .await
+        .unwrap();
+    let checkpoint_rows = first
+        .items
+        .iter()
+        .chain(&second.items)
+        .filter(|row| row.is_session_usage_frontier)
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoint_rows.len(), 1);
+    assert_eq!(checkpoint_rows[0].id, (CHUNK_ROWS + 3) as i64);
+    let checkpoint = canonical_with_session_usage(
+        checkpoint_rows[0],
+        (checkpoint_rows[0].id - 1) as u64,
+        checkpoint_rows[0].is_session_usage_frontier,
+    );
+    assert_eq!(
+        checkpoint
+            .facts()
+            .iter()
+            .filter(|fact| matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. }))
+            .count(),
+        1
+    );
+    drop(conn);
+
+    let prior_frontier = (CHUNK_ROWS + 3) as u64;
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer
+        .execute(
+            "UPDATE sessions SET input_tokens = 21, output_tokens = 9
+             WHERE id = 'usage-session'",
+            (),
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO messages (session_id, role, content, timestamp)
+             VALUES ('usage-session', 'assistant', 'updated frontier', 9999.0)",
+            (),
+        )
+        .unwrap();
+    drop(writer);
+
+    let conn = open_read_only_strict(&path).await.unwrap();
+    let select_sql = select_new_messages_sql(
+        &message_columns(&conn).await.unwrap(),
+        &table_columns(&conn, "sessions").await.unwrap(),
+    );
+    let updated = read_new_rows_strict(
+        &conn,
+        &select_sql,
+        StoredCursor {
+            position: prior_frontier,
+            mtime: 0,
+            file_id: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.items.len(), 1);
+    assert!(updated.items[0].is_session_usage_frontier);
+    assert_eq!(updated.items[0].session_input_tokens, Some(21));
+    assert_eq!(updated.items[0].session_output_tokens, Some(9));
+    let updated_checkpoint = canonical_with_session_usage(&updated.items[0], prior_frontier, true);
+    assert!(updated_checkpoint.facts().iter().any(|fact| matches!(
+        fact,
+        CanonicalObservationFactV1::ProviderUsage {
+            native_scope: ProviderUsageScopeV1::Session,
+            counter_semantics: ProviderUsageCounterSemanticsV1::Cumulative,
+            counters: ProviderUsageCountersV1::Known {
+                input_tokens: Some(21),
+                output_tokens: Some(9),
+                ..
+            },
+            ..
+        }
+    )));
 }

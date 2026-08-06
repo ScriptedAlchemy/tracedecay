@@ -56,9 +56,10 @@ deleted unless an explicit destructive command asks for it.
 ### A2. Existing `~/.tracedecay/` user data directories
 
 If the user has `~/.tracedecay/` and no `~/.tracedecay/`, TraceDecay must keep using
-`~/.tracedecay/` for user-scoped state such as `global.db`, monitor mmap/lock files,
-and compatible caches. New users should default to `~/.tracedecay/`. If both exist,
-`~/.tracedecay/` wins.
+`~/.tracedecay/` for user-scoped state such as `global.db` and monitor mmap/lock
+files. New users should default to `~/.tracedecay/`. If both exist,
+`~/.tracedecay/` wins. Provider pricing is not a home-directory cache: reads use
+the immutable bundled all-provider table.
 
 ### A3. Legacy project discovery for maintenance commands
 
@@ -170,10 +171,14 @@ The following `TRACEDECAY_*` variables remain accepted as fallbacks for their
 - `TRACEDECAY_RESEARCH_BLOCK_REASON`.
 - `TRACEDECAY_PROJECT_ROOT`.
 - `TRACEDECAY_DISABLE_SUBPROCESS`.
-- `TRACEDECAY_OFFLINE`.
-- `TRACEDECAY_MODEL_PRICES_PATH`.
 - `TRACEDECAY_PLUGIN_PATH`, but only where an implementation actually honors it; docs
   must not promise this fallback beyond verified code paths.
+
+Provider usage and pricing are deliberately outside this fallback list. The
+runtime does not consult a model-pricing environment path or pricing-specific
+offline toggle, and it does not read a home-directory pricing cache. Cost reads
+use immutable provider usage observations and the deterministic bundled
+all-provider pricing table; missing evidence remains typed unknown/unavailable.
 
 Boolean parsing should be made consistent before changing semantics. Today,
 `DISABLE_TRACEDECAY` is exact-string `true`, while many `brand_env()` consumers use
@@ -265,7 +270,7 @@ Every audited surface maps to exactly one policy category below.
 | Surface | Category | Required behavior |
 |---|---:|---|
 | Project `.tracedecay/` data dir and `tracedecay.db` | A | Use in place when `.tracedecay/` is absent; no auto-migration. |
-| User `~/.tracedecay/` data dir, `global.db`, monitor files, cache defaults | A | Use in place when `~/.tracedecay/` is absent; new users default to `~/.tracedecay/`. |
+| User `~/.tracedecay/` data dir, `global.db`, monitor files | A | Use in place when `~/.tracedecay/` is absent; new users default to `~/.tracedecay/`. |
 | Project root discovery for `.tracedecay/tracedecay.db` | A | Continue detecting for list/status/wipe-style maintenance. |
 | Branch metadata DB filenames in legacy dirs | A | Keep `tracedecay.db` for legacy active data dirs. |
 | Dashboard curation artifacts under legacy active dir | A | Store under the active data dir, including `.tracedecay/` when that is active. |
@@ -276,7 +281,6 @@ Every audited surface maps to exactly one policy category below.
 | `TRACEDECAY_GLOBAL_DB` | C | Accept fallback with warning; `TRACEDECAY_GLOBAL_DB` wins. |
 | `TRACEDECAY_ENABLE_GLOBAL_DB` / `TRACEDECAY_DISABLE_GLOBAL_DB` | C | Accept fallback with warning; keep test hermeticity for both names. |
 | Hook/extraction env fallbacks (`TRACEDECAY_RESEARCH_BLOCK_REASON`, `TRACEDECAY_PROJECT_ROOT`, `TRACEDECAY_DISABLE_SUBPROCESS`) | C | Accept fallback with warning; new names win. |
-| Savings pricing env fallbacks (`TRACEDECAY_OFFLINE`, `TRACEDECAY_MODEL_PRICES_PATH`) | C | Accept fallback with warning; do not leak values in logs. |
 | Hermes historical project pins | B | Read only as cleanup provenance, then remove generated routing state; never use for runtime routing or store conversion. |
 | Hermes plugin list, memory provider, and context-engine aliases named `tracedecay` | B | Rewrite/remove to canonical `tracedecay` behavior. |
 | `$TRACEDECAY_PLUGIN_PATH` and `.tracedecay/plugins/` docs claim | C | Warn/accept only where implemented; otherwise document as pending compatibility. |
