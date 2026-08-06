@@ -33,24 +33,35 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (temp, project_root, tracedecay_dir)
 }
 
-#[test]
-fn branch_admin_selection_does_not_mutate_before_commit() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
+fn prepare_remove(project_root: &Path, tracedecay_dir: &Path) -> PreparedBranchAdminMutation {
+    prepare_branch_admin_mutation(
+        project_root,
+        tracedecay_dir,
         BranchAdminAction::Remove {
             branch: "feature".to_string(),
         },
         14,
         7,
     )
-    .unwrap();
-    assert_eq!(
-        prepared.database_paths(),
-        &[tracedecay_dir.join("branches/feature.db")]
-    );
-    assert!(tracedecay_dir.join("branches/feature.db").exists());
+    .unwrap()
+}
+
+fn failpoint(message: &str) -> crate::errors::Result<()> {
+    Err(crate::errors::TraceDecayError::Config {
+        message: message.to_string(),
+    })
+}
+
+#[test]
+fn selection_is_read_only_and_commit_unlinks_exact_family() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    std::fs::write(db.with_extension("db-wal"), b"wal").unwrap();
+    std::fs::write(db.with_extension("db-shm"), b"shm").unwrap();
+    let prepared = prepare_remove(&project_root, &tracedecay_dir);
+
+    assert_eq!(prepared.database_paths(), std::slice::from_ref(&db));
+    assert!(db.exists());
     assert!(
         crate::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
@@ -59,9 +70,108 @@ fn branch_admin_selection_does_not_mutate_before_commit() {
 
     let report = prepared.commit().unwrap();
     assert_eq!(report.outcome, BranchAdminOutcome::Removed);
-    assert!(!tracedecay_dir.join("branches/feature.db").exists());
+    assert!(!db.exists());
+    assert!(!db.with_extension("db-wal").exists());
+    assert!(!db.with_extension("db-shm").exists());
     assert!(
         !crate::branch_meta::load_branch_meta(&tracedecay_dir)
+            .unwrap()
+            .is_tracked("feature")
+    );
+}
+
+#[test]
+fn crash_before_metadata_cas_preserves_route_and_files() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    let error = prepare_remove(&project_root, &tracedecay_dir)
+        .commit_with_hook(|boundary| {
+            if boundary == BranchAdminCommitBoundary::BeforeMetadataCas {
+                failpoint("crash before metadata CAS")
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("crash before metadata CAS"));
+    assert!(db.exists());
+    assert!(
+        crate::branch_meta::load_branch_meta(&tracedecay_dir)
+            .unwrap()
+            .is_tracked("feature")
+    );
+}
+
+#[test]
+fn crash_after_metadata_cas_leaves_only_unreferenced_files() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    let error = prepare_remove(&project_root, &tracedecay_dir)
+        .commit_with_hook(|boundary| {
+            if boundary == BranchAdminCommitBoundary::AfterMetadataCas {
+                failpoint("crash after metadata CAS")
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("crash after metadata CAS"));
+    assert!(db.exists());
+    assert!(
+        !crate::branch_meta::load_branch_meta(&tracedecay_dir)
+            .unwrap()
+            .is_tracked("feature")
+    );
+}
+
+#[test]
+fn metadata_cas_rejects_changed_store_path_without_unlink() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    let prepared = prepare_remove(&project_root, &tracedecay_dir);
+    let mut changed = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    changed.branches.get_mut("feature").unwrap().db_file = "branches/recreated.db".to_owned();
+    crate::branch_meta::save_branch_meta(&tracedecay_dir, &changed).unwrap();
+
+    let error = prepared.commit().unwrap_err();
+
+    assert!(error.to_string().contains("destructive CAS refused"));
+    assert!(db.exists());
+    assert_eq!(
+        crate::branch_meta::load_branch_meta(&tracedecay_dir)
+            .unwrap()
+            .branches["feature"]
+            .db_file,
+        "branches/recreated.db"
+    );
+}
+
+#[test]
+fn gc_ref_reappearance_is_refused_before_metadata_cas() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    meta.branches.get_mut("feature").unwrap().last_synced_at = "0".to_string();
+    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::Gc,
+        0,
+        u64::MAX,
+    )
+    .unwrap();
+    assert_eq!(prepared.report().removed_branches, vec!["feature"]);
+    run_git(&project_root, &["branch", "feature"]);
+
+    let error = prepared.commit().unwrap_err();
+
+    assert!(error.to_string().contains("reappeared"));
+    assert!(db.exists());
+    assert!(
+        crate::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -71,19 +181,9 @@ fn branch_admin_selection_does_not_mutate_before_commit() {
 fn nonempty_metadata_only_finish_fails_closed_without_deleting() {
     let (_temp, project_root, tracedecay_dir) = fixture();
     let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared.finish_without_database_deletion().unwrap_err();
-
+    let error = prepare_remove(&project_root, &tracedecay_dir)
+        .finish_without_database_deletion()
+        .unwrap_err();
     assert!(
         error
             .to_string()
@@ -153,364 +253,17 @@ fn branch_admin_refuses_corrupt_metadata_without_selecting_stores() {
     assert!(tracedecay_dir.join("branches/feature.db").exists());
 }
 
-fn failpoint(message: &str) -> crate::errors::Result<()> {
-    Err(crate::errors::TraceDecayError::Config {
-        message: message.to_string(),
-    })
-}
-
-fn quarantine_files(tracedecay_dir: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(tracedecay_dir.join("branches"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.contains(".branch-delete-"))
-        })
-        .collect()
-}
-
-fn recover_without_fence(tracedecay_dir: &Path) {
-    let recovery = prepare_pending_branch_admin_recovery(tracedecay_dir)
-        .unwrap()
-        .expect("pending branch deletion recovery");
-    recovery.recover(|_| Ok(()), |_| Ok(())).unwrap();
-}
-
 #[test]
-fn partial_rename_failpoint_rolls_back_entire_sqlite_family() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
+fn failed_branch_sync_rollback_retires_only_metadata() {
+    let (_temp, _project_root, tracedecay_dir) = fixture();
     let db = tracedecay_dir.join("branches/feature.db");
-    let wal = db.with_extension("db-wal");
-    std::fs::write(&wal, b"wal").unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
 
-    let error = prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::AfterMove(1) {
-                return failpoint("partial rename failpoint");
-            }
-            Ok(())
-        })
-        .unwrap_err();
+    rollback_published_branch_tracking(&tracedecay_dir, "feature", "branches/feature.db", &db)
+        .unwrap();
 
-    assert!(error.to_string().contains("partial rename failpoint"));
     assert!(db.exists());
-    assert!(wal.exists());
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-    assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn hard_linked_wal_is_rejected_before_journal_publication() {
-    let (temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let wal = db.with_extension("db-wal");
-    std::fs::write(&wal, b"wal").unwrap();
-    std::fs::hard_link(&wal, temp.path().join("wal-alias")).unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared.commit().unwrap_err();
-
-    assert!(error.to_string().contains("hard links"));
-    assert!(db.exists());
-    assert!(wal.exists());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn hard_linked_shm_is_rejected_before_journal_publication() {
-    let (temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let shm = db.with_extension("db-shm");
-    std::fs::write(&shm, b"shm").unwrap();
-    std::fs::hard_link(&shm, temp.path().join("shm-alias")).unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared.commit().unwrap_err();
-
-    assert!(error.to_string().contains("hard links"));
-    assert!(db.exists());
-    assert!(shm.exists());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-}
-
-#[test]
-fn metadata_publication_failpoint_rolls_back_quarantine() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::BeforeMetadataPublication {
-                return failpoint("metadata publication failpoint");
-            }
-            Ok(())
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("metadata publication failpoint"));
-    assert!(db.exists());
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
-}
-
-#[test]
-fn post_commit_cleanup_failpoint_is_retried_during_next_lock_acquisition() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-
-    let error = prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup {
-                return failpoint("post-commit cleanup failpoint");
-            }
-            Ok(())
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("post-commit cleanup failpoint"));
-    assert!(!db.exists());
-    assert!(
-        tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-    assert!(!quarantine_files(&tracedecay_dir).is_empty());
     assert!(
         !crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
-
-    recover_without_fence(&tracedecay_dir);
-    let retry = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-    assert_eq!(retry.report().outcome, BranchAdminOutcome::NotTracked);
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-}
-
-#[test]
-fn orphan_only_cleanup_retry_uses_explicit_committed_journal_state() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let orphan = tracedecay_dir.join("branches/orphan.db");
-    std::fs::write(&orphan, b"orphan").unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Gc,
-        u64::MAX,
-        0,
-    )
-    .unwrap();
-    assert_eq!(prepared.report().removed_orphan_dbs, vec![orphan.clone()]);
-
-    prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup {
-                return failpoint("orphan cleanup failpoint");
-            }
-            Ok(())
-        })
-        .unwrap_err();
-    let journal =
-        std::fs::read_to_string(tracedecay_dir.join(".branch-delete-transaction.json")).unwrap();
-    assert!(journal.contains(r#""state": "committed_orphans""#));
-    assert!(!orphan.exists());
-    assert!(!quarantine_files(&tracedecay_dir).is_empty());
-
-    recover_without_fence(&tracedecay_dir);
-    let retry = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Gc,
-        u64::MAX,
-        0,
-    )
-    .unwrap();
-    assert_eq!(retry.report().outcome, BranchAdminOutcome::NoChanges);
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(
-        !tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-}
-
-#[test]
-fn recreated_original_family_fails_closed_and_retains_recovery_evidence() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Remove {
-            branch: "feature".to_string(),
-        },
-        0,
-        0,
-    )
-    .unwrap();
-    let mut recreated = false;
-
-    let error = prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::BeforeRefRevalidation && !recreated {
-                std::fs::write(&db, b"recreated").unwrap();
-                recreated = true;
-            }
-            Ok(())
-        })
-        .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("unexpected original branch store")
-    );
-    assert!(
-        error
-            .to_string()
-            .contains("ambiguous source/quarantine state")
-    );
-    assert!(error.to_string().contains("recovery evidence was retained"));
-    assert_eq!(std::fs::read(&db).unwrap(), b"recreated");
-    let quarantine = quarantine_files(&tracedecay_dir);
-    assert_eq!(quarantine.len(), 1);
-    assert_eq!(std::fs::read(&quarantine[0]).unwrap(), b"feature");
-    assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
-    assert!(
-        tracedecay_dir
-            .join(".branch-delete-transaction.json")
-            .exists()
-    );
-
-    std::fs::remove_file(&db).unwrap();
-    recover_without_fence(&tracedecay_dir);
-    assert_eq!(std::fs::read(&db).unwrap(), b"feature");
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-}
-
-#[test]
-fn gc_ref_reappearance_failpoint_rolls_back_before_metadata_commit() {
-    let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
-    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
-    meta.branches.get_mut("feature").unwrap().last_synced_at = "0".to_string();
-    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
-    let prepared = prepare_branch_admin_mutation(
-        &project_root,
-        &tracedecay_dir,
-        BranchAdminAction::Gc,
-        0,
-        u64::MAX,
-    )
-    .unwrap();
-    assert_eq!(prepared.report().removed_branches, vec!["feature"]);
-    let mut recreated = false;
-
-    let error = prepared
-        .commit_with_hook(None, |phase| {
-            if phase == transaction::TransactionPhase::BeforeRefRevalidation && !recreated {
-                run_git(&project_root, &["branch", "feature"]);
-                recreated = true;
-            }
-            Ok(())
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("reappeared"));
-    assert!(db.exists());
-    assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );

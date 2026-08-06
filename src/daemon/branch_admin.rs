@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -82,9 +82,6 @@ impl HostAdmissionBrokerState {
         }
     }
 }
-
-#[cfg(test)]
-type ExternalHolderVerifier = fn(&[PathBuf]) -> Result<()>;
 
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -459,8 +456,6 @@ pub(super) struct StoreAdministration {
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
     #[cfg(unix)]
     retirement_reapers: Arc<MaintenanceReaperRegistry>,
-    #[cfg(test)]
-    external_holder_verifier: Option<ExternalHolderVerifier>,
 }
 
 impl Default for StoreAdministration {
@@ -491,8 +486,6 @@ impl Default for StoreAdministration {
             ),
             #[cfg(unix)]
             retirement_reapers: Arc::new(MaintenanceReaperRegistry::default()),
-            #[cfg(test)]
-            external_holder_verifier: None,
         }
     }
 }
@@ -737,16 +730,6 @@ impl StoreAdministration {
     ) -> Self {
         Self {
             project_servers,
-            ..Self::default()
-        }
-    }
-
-    #[cfg(all(test, unix))]
-    pub(super) fn with_external_holder_verifier(
-        external_holder_verifier: ExternalHolderVerifier,
-    ) -> Self {
-        Self {
-            external_holder_verifier: Some(external_holder_verifier),
             ..Self::default()
         }
     }
@@ -1133,15 +1116,6 @@ impl StoreAdministration {
         Ok(outcomes)
     }
 
-    #[cfg_attr(not(test), allow(clippy::unused_self))]
-    fn prove_no_external_branch_store_holders(&self, database_paths: &[PathBuf]) -> Result<()> {
-        #[cfg(test)]
-        if let Some(external_holder_verifier) = self.external_holder_verifier {
-            return external_holder_verifier(database_paths);
-        }
-        ensure_no_external_branch_store_holders(database_paths)
-    }
-
     /// Acquires daemon-wide writer administration before constructing the
     /// supplied future and holds it until that future completes.
     ///
@@ -1257,50 +1231,6 @@ impl StoreAdministration {
         branch_gc_days: u64,
         orphan_db_gc_days: u64,
     ) -> Result<crate::branch::BranchAdminReport> {
-        if let Some(recovery) = crate::branch::prepare_pending_branch_admin_recovery(data_root)? {
-            let database_paths = canonical_branch_database_paths(recovery.database_paths())?;
-            {
-                let project_servers = self.project_servers.lock().await;
-                let refresh_scheduler_busy = self
-                    .session_temporal_refresh_schedulers
-                    .owns_project_database_paths(&database_paths)
-                    .await;
-                #[cfg(unix)]
-                let scheduler_busy = cached_scheduler_owns_selected(
-                    &*self.automation_schedulers.lock().await,
-                    &database_paths,
-                ) || cached_scheduler_owns_selected(
-                    &*self.memory_repair_schedulers.lock().await,
-                    &database_paths,
-                ) || refresh_scheduler_busy;
-                #[cfg(not(unix))]
-                let scheduler_busy = refresh_scheduler_busy;
-                ensure_no_cached_store_owners(&project_servers, scheduler_busy, &database_paths)?;
-            }
-
-            let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
-            canonical_paths.sort();
-            let reservation = self
-                .session_runtime_registry()
-                .await?
-                .begin_destructive_code_maintenance(data_root, canonical_paths.iter().cloned())
-                .await?;
-            let disposition = recovery.disposition();
-            recovery.recover(
-                |paths| self.prove_no_external_branch_store_holders(paths),
-                |_| Ok(()),
-            )?;
-            match disposition {
-                crate::branch::BranchAdminRecoveryDisposition::PreCommitRollback => {
-                    reservation.abort_preserved()
-                }
-                crate::branch::BranchAdminRecoveryDisposition::CommittedCleanup => {
-                    reservation.finish_deleted()
-                }
-            }
-            .map_err(destructive_reservation_error)?;
-        }
-
         let prepared = crate::branch::prepare_branch_admin_mutation(
             project_root,
             data_root,
@@ -1339,8 +1269,15 @@ impl StoreAdministration {
             .await?
             .begin_destructive_code_maintenance(data_root, canonical_paths.iter().cloned())
             .await?;
-        let report = prepared
-            .commit_registered(|paths| self.prove_no_external_branch_store_holders(paths))?;
+        let report = match prepared.commit_destructive() {
+            Ok(report) => report,
+            Err(error) => {
+                reservation
+                    .abort_preserved()
+                    .map_err(destructive_reservation_error)?;
+                return Err(error);
+            }
+        };
         reservation
             .finish_deleted()
             .map_err(destructive_reservation_error)?;
@@ -1429,44 +1366,6 @@ fn destructive_reservation_error(
 ) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("destructive store runtime reservation failed: {error:?}"),
-    }
-}
-
-fn ensure_no_external_branch_store_holders(database_paths: &[PathBuf]) -> Result<()> {
-    let options = crate::open_store_holders::OpenStoreHolderScanOptions {
-        include_current_process: true,
-        excluded_current_process_fds: BTreeSet::new(),
-    };
-    let scan = crate::open_store_holders::scan_with_options(database_paths, &options).map_err(
-        |error| TraceDecayError::Config {
-            message: format!("failed to inspect open branch stores: {error}"),
-        },
-    )?;
-    match scan {
-        crate::open_store_holders::OpenStoreHolderScan::Supported(holders)
-            if holders.is_empty() =>
-        {
-            Ok(())
-        }
-        crate::open_store_holders::OpenStoreHolderScan::Supported(holders) => {
-            let details = holders
-                .into_iter()
-                .map(|holder| format!("pid {} ({})", holder.pid, holder.command))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(TraceDecayError::Config {
-                message: format!(
-                    "cannot delete branch stores while external processes still hold them: {details}"
-                ),
-            })
-        }
-        crate::open_store_holders::OpenStoreHolderScan::Unsupported { reason } => {
-            Err(TraceDecayError::Config {
-                message: format!(
-                    "cannot prove branch stores are closed: {reason}; destructive branch operation refused"
-                ),
-            })
-        }
     }
 }
 

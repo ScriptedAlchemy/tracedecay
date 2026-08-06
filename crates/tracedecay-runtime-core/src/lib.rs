@@ -71,7 +71,6 @@ pub mod git_discovery;
 pub mod git_repository;
 pub mod lifecycle_lease;
 pub mod memory;
-pub mod open_store_holders;
 pub mod os_str_bytes;
 pub mod path_safety;
 pub mod path_scope;
