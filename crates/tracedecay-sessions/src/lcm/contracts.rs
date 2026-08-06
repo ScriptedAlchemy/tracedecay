@@ -495,6 +495,9 @@ pub enum LcmError {
         actual: i64,
     },
     LifecycleStateNotFound,
+    Cancelled,
+    DeadlineExceeded,
+    BudgetExhausted,
     Db(String),
     Io(String),
 }
@@ -570,6 +573,13 @@ impl std::fmt::Display for LcmError {
             }
             Self::LifecycleStateNotFound => {
                 write!(f, "payload database error: lifecycle state not found")
+            }
+            Self::Cancelled => write!(f, "LCM payload verification was cancelled"),
+            Self::DeadlineExceeded => {
+                write!(f, "LCM payload verification deadline was exceeded")
+            }
+            Self::BudgetExhausted => {
+                write!(f, "LCM payload verification budget was exhausted")
             }
             Self::Db(message) => write!(f, "payload database error: {message}"),
             Self::Io(message) => write!(f, "payload IO error: {message}"),
