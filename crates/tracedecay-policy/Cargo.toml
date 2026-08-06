@@ -8,6 +8,7 @@ description = "Deterministic, side-effect-free policy evaluators for TraceDecay 
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
+schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 
