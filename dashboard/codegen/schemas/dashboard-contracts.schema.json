@@ -1360,7 +1360,7 @@
       "type": "object"
     },
     "DashboardDomainStateV1": {
-      "description": "The normative dashboard domain-state union.\n\nThe first sixteen variants are the plan's exact `DashboardDomainState`\ndiscriminated union. [`Self::Unsupported`] is the PR14 backend-gap binding\nstate: the read model's HTTP surface exists, but its live producer/source is\nnot yet wired server-side. It is never healthy or empty — the frontend\nrenders a distinct \"not yet available\" state — and it is deliberately\nseparate from [`Self::UnsupportedSchema`] (an undecodable schema/variant).",
+      "description": "The normative dashboard domain-state union.\n\nThe first sixteen variants are the plan's exact `DashboardDomainState`\ndiscriminated union. [`Self::Unsupported`] is the backend-gap binding\nstate: the read model's HTTP surface exists, but its live producer/source is\nnot yet wired server-side. It is never healthy or empty — the frontend\nrenders a distinct \"not yet available\" state — and it is deliberately\nseparate from [`Self::UnsupportedSchema`] (an undecodable schema/variant).",
       "oneOf": [
         {
           "enum": [
@@ -4135,7 +4135,7 @@
       "type": "string"
     },
     "DoctorEvidenceStateV1": {
-      "description": "Exact Doctor evidence states from Plan 09 §PR14.\n\nMissing, partial, or unknown truth never becomes healthy or clean. Only\n[`DoctorEvidenceStateV1::HealthyCompleteCoverage`] asserts a healthy result,\nand only when its finding carries complete coverage (see\n[`DoctorFindingV1::new`]).",
+      "description": "Exact Doctor evidence states.\n\nMissing, partial, or unknown truth never becomes healthy or clean. Only\n[`DoctorEvidenceStateV1::HealthyCompleteCoverage`] asserts a healthy result,\nand only when its finding carries complete coverage (see\n[`DoctorFindingV1::new`]).",
       "oneOf": [
         {
           "const": "unsupported",
@@ -4261,7 +4261,7 @@
       ]
     },
     "DoctorFindingFamilyV1": {
-      "description": "Stable Doctor finding families.\n\nThe initial list is derived from Plan 14's observable classes (advisory\nfindings from Brain/Explorer/Loom/Code/Observatory) and the legacy\n`core_doctor` checks (graph quick-check, temporal/migration health,\nconfiguration compatibility drift, semantic runtime, session ingest).\nEach family maps to one audited typed input surface. The set is kept small\nand honest; new families are added through a future versioned enum rather\nthan by widening the meaning of an existing variant.",
+      "description": "Stable Doctor finding families.\n\nThe initial list covers advisory findings from\nBrain, Explorer, Loom, Code, and Observatory, plus the legacy\n`core_doctor` checks (graph quick-check, temporal/migration health,\nconfiguration compatibility drift, semantic runtime, session ingest).\nEach family maps to one audited typed input surface. The set is kept small\nand honest; new families are added through a future versioned enum rather\nthan by widening the meaning of an existing variant.",
       "oneOf": [
         {
           "const": "advisory",
@@ -4270,7 +4270,7 @@
         },
         {
           "const": "configuration",
-          "description": "Desired-versus-effective configuration and compatibility drift\n(Plan 20 `ProjectConfigurationRuntime` / `ConfigurationControlPlane`).",
+          "description": "Desired-versus-effective configuration and compatibility drift from\n`ProjectConfigurationRuntime` / `ConfigurationControlPlane`.",
           "type": "string"
         },
         {
@@ -4280,12 +4280,12 @@
         },
         {
           "const": "storage",
-          "description": "Storage retention, size, and efficiency over Plan 26 observability read\nmodels (Plan 38 §7). Distinct from [`Self::StorageRuntime`] health: this\nfamily surfaces over-budget stores, identity-drift orphans, quarantined\nincident debris, and retention backlog. The typed\nsubclass vocabulary is [`DoctorStorageFindingKindV1`].",
+          "description": "Storage retention, size, and efficiency over canonical observability\nread models. Distinct from [`Self::StorageRuntime`] health: this\nfamily surfaces over-budget stores, identity-drift orphans, quarantined\nincident debris, and retention backlog. The typed\nsubclass vocabulary is [`DoctorStorageFindingKindV1`].",
           "type": "string"
         },
         {
           "const": "language_server",
-          "description": "Language-server / analyzer engine status (Plan 35 LSP gateway,\n`AnalyzerState`).",
+          "description": "Language-server / analyzer engine status from the LSP gateway's\n`AnalyzerState`.",
           "type": "string"
         },
         {
@@ -4295,7 +4295,7 @@
         },
         {
           "const": "observability",
-          "description": "Denominator-safe measurement and telemetry health (Plan 26 analytics /\naccounting read models, session ingest).",
+          "description": "Denominator-safe measurement and telemetry health from analytics,\naccounting read models, and session ingest.",
           "type": "string"
         }
       ]
@@ -4422,7 +4422,7 @@
       "type": "object"
     },
     "DoctorStorageFindingKindV1": {
-      "description": "Typed subclasses of the [`DoctorFindingFamilyV1::Storage`] finding family\n(Plan 38 §7).\n\nThe storage family never reports a silent overage: each subclass names one\nobservable retention/size condition Doctor surfaces over the Plan 26 size\nobservability read models. The set is closed and grows only through a future\nversioned enum, never by widening an existing subclass.",
+      "description": "Typed subclasses of the [`DoctorFindingFamilyV1::Storage`] finding family.\n\nThe storage family never reports a silent overage: each subclass names one\nobservable retention/size condition Doctor surfaces over canonical size\nobservability read models. The set is closed and grows only through a future\nversioned enum, never by widening an existing subclass.",
       "oneOf": [
         {
           "const": "over_budget_store",
@@ -6349,9 +6349,11 @@
         "matches": {
           "$ref": "#/$defs/LcmMatchesV1"
         },
-        "offset": {
-          "format": "int64",
-          "type": "integer"
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "path": {
           "type": "string"
@@ -6372,7 +6374,7 @@
         "exists",
         "query",
         "limit",
-        "offset",
+        "next_cursor",
         "engine",
         "engine_detail",
         "total",
@@ -6406,7 +6408,10 @@
         },
         "source_token_count": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "summary_node_count": {
           "format": "int64",
@@ -6414,11 +6419,17 @@
         },
         "summary_token_count": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "token_estimate_total": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -6457,12 +6468,11 @@
           },
           "type": "array"
         },
-        "offset": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "order": {
-          "type": "string"
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "path": {
           "type": "string"
@@ -6486,14 +6496,13 @@
         "exists",
         "session_id",
         "limit",
-        "offset",
-        "order",
         "counts",
         "messages",
         "summary_nodes",
         "has_more",
         "has_more_messages",
-        "has_more_summary_nodes"
+        "has_more_summary_nodes",
+        "next_cursor"
       ],
       "type": "object"
     },
@@ -6559,7 +6568,10 @@
         },
         "source_token_count": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "source_type": {
           "type": "string"
@@ -6569,7 +6581,10 @@
         },
         "token_count": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -9295,7 +9310,7 @@
     },
     "ResolvedScope": {
       "additionalProperties": false,
-      "description": "The resolved PR11 scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
+      "description": "The resolved resolved configuration scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
       "properties": {
         "project_id": {
           "$ref": "#/$defs/ProjectId"

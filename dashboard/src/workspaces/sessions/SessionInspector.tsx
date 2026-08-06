@@ -16,10 +16,10 @@
  *                      replaced them with, so a compacted region is visible as
  *                      a boundary rather than silently absent from the
  *                      transcript.
- *   the page           `limit`/`offset`/`order` are server pagination. What is
- *                      on screen is a page of a transcript, and the header says
- *                      which page — a truncated read is never presented as the
- *                      whole session.
+ *   the page           `limit` and the server's opaque continuation cursor
+ *                      bound one transcript page. What is on screen is never
+ *                      presented as the whole session when another cursor is
+ *                      available.
  *
  * A message whose `content` is null is not an empty message: the store holds
  * the turn but not its body (offloaded or dropped by retention). That is said
@@ -34,6 +34,7 @@ import {
   type LcmSummaryNodeV1,
 } from '../../contracts/generated.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
+import { useScope } from '../../data/scope/store.ts';
 import { InspectorPanel } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip';
@@ -58,23 +59,46 @@ export function SessionInspector({
   sessionId: string;
   onClose: () => void;
 }) {
-  const [offset, setOffset] = useState(0);
-  const [order, setOrder] = useState<'asc' | 'desc'>('asc');
+  const scopeKey = useScope((state) =>
+    state.scope.kind === 'all' ? 'all' : `project:${state.scope.projectId}`,
+  );
+  return (
+    <SessionInspectorPage
+      key={`${scopeKey}:${sessionId}`}
+      sessionId={sessionId}
+      onClose={onClose}
+    />
+  );
+}
+
+function SessionInspectorPage({
+  sessionId,
+  onClose,
+}: {
+  sessionId: string;
+  onClose: () => void;
+}) {
+  /** The current cursor is the top entry; the rest lets Previous replay the
+   * exact opaque cursor the server issued for the preceding page. */
+  const [cursorStack, setCursorStack] = useState<string[]>([]);
+  const cursor = cursorStack.at(-1) ?? null;
   /**
    * The page a reader asked for, held until it arrives on screen.
    *
    * It lives up here because the transcript below does not survive the trip: a
-   * new `limit`/`offset` is a new query, so the read boundary swings to its
+   * new cursor is a new query, so the read boundary swings to its
    * loading state and unmounts the whole page of rows — including the control
    * that was just activated. Focus goes to the document, and a keyboard user is
    * returned to the top of the app with no indication that anything moved. A
    * flag inside the unmounted subtree would be reinitialised by the remount and
    * could not repair it.
    */
-  const [pagedTo, setPagedTo] = useState<number | null>(null);
+  const [pageRequest, setPageRequest] = useState(0);
   const session = useEnvelope(
-    ['lcm', 'session', sessionId, offset, order],
-    `/api/plugins/hermes-lcm/session/${encodeURIComponent(sessionId)}?limit=${PAGE_SIZE}&offset=${offset}&order=${order}`,
+    ['lcm', 'session', sessionId, cursor],
+    `/api/plugins/hermes-lcm/session/${encodeURIComponent(sessionId)}?limit=${PAGE_SIZE}${
+      cursor == null ? '' : `&cursor=${encodeURIComponent(cursor)}`
+    }`,
     LcmSessionPayloadV1Schema,
   );
 
@@ -101,18 +125,16 @@ export function SessionInspector({
             ) : (
               <SessionBody
                 payload={payload}
-                order={order}
-                onOrderChange={(next) => {
-                  setOrder(next);
-                  setOffset(0);
-                  setPagedTo(0);
+                pageNumber={cursorStack.length + 1}
+                onPreviousPage={() => {
+                  setCursorStack((stack) => stack.slice(0, -1));
+                  setPageRequest((request) => request + 1);
                 }}
-                onOffsetChange={(next) => {
-                  setOffset(next);
-                  setPagedTo(next);
+                onNextPage={(nextCursor) => {
+                  setCursorStack((stack) => [...stack, nextCursor]);
+                  setPageRequest((request) => request + 1);
                 }}
-                pagedTo={pagedTo}
-                onArrived={() => setPagedTo(null)}
+                pageRequest={pageRequest}
               />
             )
             );
@@ -125,18 +147,16 @@ export function SessionInspector({
 
 function SessionBody({
   payload,
-  order,
-  onOrderChange,
-  onOffsetChange,
-  pagedTo,
-  onArrived,
+  pageNumber,
+  onPreviousPage,
+  onNextPage,
+  pageRequest,
 }: {
   payload: LcmSessionPayloadV1;
-  order: 'asc' | 'desc';
-  onOrderChange: (order: 'asc' | 'desc') => void;
-  onOffsetChange: (offset: number) => void;
-  pagedTo: number | null;
-  onArrived: () => void;
+  pageNumber: number;
+  onPreviousPage: () => void;
+  onNextPage: (cursor: string) => void;
+  pageRequest: number;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -144,11 +164,10 @@ function SessionBody({
       <CompactionBoundaries payload={payload} />
       <RawMessages
         payload={payload}
-        order={order}
-        onOrderChange={onOrderChange}
-        onOffsetChange={onOffsetChange}
-        pagedTo={pagedTo}
-        onArrived={onArrived}
+        pageNumber={pageNumber}
+        onPreviousPage={onPreviousPage}
+        onNextPage={onNextPage}
+        pageRequest={pageRequest}
       />
       <p className="td-value break-all text-3xs text-text-muted" title={payload.path}>
         {payload.storage_scope} · {payload.path}
@@ -169,9 +188,11 @@ function SessionBody({
  */
 function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
   const { counts } = payload;
+  const sourceTokens = counts.source_token_count;
+  const summaryTokens = counts.summary_token_count;
   const compaction =
-    counts.source_token_count > 0
-      ? counts.summary_token_count / counts.source_token_count
+    sourceTokens != null && summaryTokens != null && sourceTokens > 0
+      ? summaryTokens / sourceTokens
       : null;
   return (
     <div className="flex flex-col gap-2">
@@ -183,7 +204,11 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
             size="sm"
             value={splitCount(counts.message_count).value}
             unit={splitCount(counts.message_count).unit}
-            note={`~${counts.token_estimate_total.toLocaleString()} est. tokens`}
+            note={
+              counts.token_estimate_total != null
+                ? `~${counts.token_estimate_total.toLocaleString()} est. tokens`
+                : 'token estimate unavailable'
+            }
           />
         </div>
         <div className="td-raised border border-edge-subtle px-2.5 py-2">
@@ -192,7 +217,11 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
             size="sm"
             value={splitCount(counts.summary_node_count).value}
             unit={splitCount(counts.summary_node_count).unit}
-            note={`${counts.summary_token_count.toLocaleString()} of ${counts.source_token_count.toLocaleString()} source tokens`}
+            note={
+              summaryTokens != null && sourceTokens != null
+                ? `${summaryTokens.toLocaleString()} of ${sourceTokens.toLocaleString()} source tokens`
+                : 'token counts unavailable'
+            }
           />
         </div>
       </div>
@@ -201,10 +230,14 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
           Summaries hold {(compaction * 100).toFixed(1)}% of the source tokens they replaced —
           derived from the two counts above, not a stored ratio.
         </p>
-      ) : (
+      ) : sourceTokens != null && summaryTokens != null ? (
         <p className="text-3xs leading-snug text-text-muted">
           No source tokens are recorded against this session&apos;s summaries, so no compaction
           ratio exists to report.
+        </p>
+      ) : (
+        <p className="text-3xs leading-snug text-text-muted">
+          Compaction token counts are unavailable, so no ratio exists to report.
         </p>
       )}
     </div>
@@ -261,7 +294,12 @@ function CompactionBoundaries({ payload }: { payload: LcmSessionPayloadV1 }) {
 }
 
 function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
-  const retained = node.source_token_count > 0 ? node.token_count / node.source_token_count : null;
+  const sourceTokens = node.source_token_count;
+  const summaryTokens = node.token_count;
+  const retained =
+    sourceTokens != null && summaryTokens != null && sourceTokens > 0
+      ? summaryTokens / sourceTokens
+      : null;
   return (
     <li
       className="flex flex-col gap-1 border-b border-edge-subtle px-2 py-1.5 last:border-b-0"
@@ -272,7 +310,8 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
         <span className="td-legend shrink-0 text-text-secondary">depth {node.depth}</span>
         <span className="min-w-0 truncate text-3xs text-text-primary">{node.category}</span>
         <span className="td-value ml-auto shrink-0 text-3xs text-text-muted" data-cell="numeric">
-          {node.token_count.toLocaleString()} ← {node.source_token_count.toLocaleString()}
+          {summaryTokens != null ? summaryTokens.toLocaleString() : 'unavailable'} ←{' '}
+          {sourceTokens != null ? sourceTokens.toLocaleString() : 'unavailable'} tokens
         </span>
       </span>
       {retained != null ? (
@@ -295,22 +334,18 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
 /** The raw turns, one server page at a time. */
 function RawMessages({
   payload,
-  order,
-  onOrderChange,
-  onOffsetChange,
-  pagedTo,
-  onArrived,
+  pageNumber,
+  onPreviousPage,
+  onNextPage,
+  pageRequest,
 }: {
   payload: LcmSessionPayloadV1;
-  order: 'asc' | 'desc';
-  onOrderChange: (order: 'asc' | 'desc') => void;
-  onOffsetChange: (offset: number) => void;
-  pagedTo: number | null;
-  onArrived: () => void;
+  pageNumber: number;
+  onPreviousPage: () => void;
+  onNextPage: (cursor: string) => void;
+  pageRequest: number;
 }) {
-  const { messages, offset, limit } = payload;
-  const first = messages.length === 0 ? 0 : offset + 1;
-  const last = offset + messages.length;
+  const { messages, limit } = payload;
   const range = useRef<HTMLParagraphElement>(null);
 
   /**
@@ -319,41 +354,22 @@ function RawMessages({
    * Focus lands on the range line rather than the first row, because the range
    * line is the answer to the question a reader who just paged is holding —
    * which page am I on now — and it is the one element here that renders in
-   * every state, including a page past the end of the transcript.
+   * every state, including a page that contains no turns.
    *
    * Only when focus was actually orphaned. A reader who paged with the mouse
    * and is now looking somewhere else keeps what they had.
    */
   useEffect(() => {
-    if (pagedTo === null || pagedTo !== offset) return;
-    onArrived();
+    if (pageRequest === 0) return;
     if (document.activeElement === document.body) range.current?.focus();
-  }, [pagedTo, offset, onArrived]);
+  }, [pageRequest]);
 
   return (
     <div className="flex flex-col gap-1.5">
-      <Legend
-        trailing={
-          <button
-            type="button"
-            className="td-hit group shrink-0"
-            onClick={() => onOrderChange(order === 'asc' ? 'desc' : 'asc')}
-            // The order itself leads, because it is this control's visible
-            // label: an accessible name that omits the visible text leaves a
-            // speech-control user with nothing they can say (WCAG 2.5.3).
-            aria-label={`Order ${payload.order} — switch to ${order === 'asc' ? 'newest first' : 'oldest first'}`}
-          >
-            <span className="border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs text-text-secondary group-hover:text-text-primary">
-              {payload.order}
-            </span>
-          </button>
-        }
-      >
-        raw messages
-      </Legend>
+      <Legend>raw messages</Legend>
 
-      {/* Loaded range, whole-session total, ordering, and whether another page
-        * exists — all four, because any one of them alone lets a page read as
+      {/* Loaded page count, whole-session total, and whether another page
+        * exists — all three, because any one of them alone lets a page read as
         * the transcript.
         *
         * A status region, so paging announces where the reader now is instead
@@ -365,9 +381,9 @@ function RawMessages({
         tabIndex={-1}
         className="text-3xs text-text-muted tabular"
       >
-        {first}–{last} of {payload.counts.message_count.toLocaleString()} · {payload.order} order ·
-        page size {limit}
-        {payload.has_more_messages ? ' · more pages follow' : ' · last page'}
+        {messages.length} on this page · {payload.counts.message_count.toLocaleString()} in session ·
+        page {pageNumber} · page size {limit}
+        {payload.next_cursor != null ? ' · more pages follow' : ' · last page'}
       </p>
 
       {messages.length === 0 ? (
@@ -376,7 +392,7 @@ function RawMessages({
           detail={
             payload.counts.message_count === 0
               ? 'the store holds no turns for this session'
-              : 'this offset is past the end of the transcript'
+              : 'this page carried no turns'
           }
         />
       ) : (
@@ -397,8 +413,8 @@ function RawMessages({
         <button
           type="button"
           className="td-hit group disabled:opacity-40"
-          disabled={offset === 0}
-          onClick={() => onOffsetChange(Math.max(0, offset - PAGE_SIZE))}
+          disabled={pageNumber === 1}
+          onClick={onPreviousPage}
         >
           <span className={PAGER_BEZEL}>
             <ChevronLeft aria-hidden size={11} />
@@ -408,8 +424,10 @@ function RawMessages({
         <button
           type="button"
           className="td-hit group disabled:opacity-40"
-          disabled={!payload.has_more_messages}
-          onClick={() => onOffsetChange(offset + PAGE_SIZE)}
+          disabled={payload.next_cursor == null}
+          onClick={() => {
+            if (payload.next_cursor != null) onNextPage(payload.next_cursor);
+          }}
         >
           <span className={PAGER_BEZEL}>
             Next page

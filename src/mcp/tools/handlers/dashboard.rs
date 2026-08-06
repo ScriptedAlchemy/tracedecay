@@ -199,6 +199,7 @@ pub(super) async fn handle_dashboard(
     args: Value,
     retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    lcm_retrieval: Option<Arc<dyn super::SessionRetrievalServicePort>>,
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
@@ -284,12 +285,20 @@ pub(super) async fn handle_dashboard(
                         .map(|adapter| Arc::new(adapter) as Arc<dyn DashboardApplicationRuntime>)
                 })
                 .transpose()?;
+            let lcm_read_authority = lcm_retrieval
+                .zip(retained_cg.store_layout().identity.project_id.clone())
+                .map(|(retrieval, project_id)| {
+                    Arc::new(super::dashboard_lcm::DashboardLcmReadAdapter::new(
+                        retrieval, project_id,
+                    )) as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
+                });
             crate::hooks::install_dashboard_hook_readiness_projection()?;
             let state = build_state_with_automation_reconciler(
                 retained_cg.clone(),
                 DashboardStateCompositionV1 {
                     project_graph_resolver: dashboard_project_graph_resolver,
                     registered_project_session_db,
+                    lcm_read_authority,
                     registered_savings_db,
                     automation_scheduler_reconciler,
                     automation_writer,

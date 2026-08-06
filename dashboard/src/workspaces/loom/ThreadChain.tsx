@@ -122,8 +122,11 @@ export function ThreadChain({
             }
             const summary = summarizeChain(
               data.messages ?? [],
-              data.counts,
-              data.has_more_messages === true,
+              {
+                message_count: data.counts.message_count,
+                token_estimate_total: data.counts.token_estimate_total ?? undefined,
+              },
+              data.next_cursor != null,
             );
             if (summary.steps.length === 0) {
               return (
