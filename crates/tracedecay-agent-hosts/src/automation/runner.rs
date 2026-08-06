@@ -1559,6 +1559,7 @@ mod tests {
     async fn proposal_validation_does_not_wait_for_the_writer_lane() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
+        crate::register_test_schema_installer();
         let authority =
             crate::db::DatabaseAuthority::acquire_test(&path, "automation validation writer lane")
                 .unwrap();
@@ -1653,6 +1654,7 @@ mod tests {
         let project_root = temp.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
         let database_path = temp.path().join("memory.db");
+        crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(
             &database_path,
             "automation proposal digest disposition test",
@@ -1734,6 +1736,7 @@ mod tests {
         let project_root = temp.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
         let database_path = temp.path().join("memory.db");
+        crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(
             &database_path,
             "automation proposal partial digest refresh test",

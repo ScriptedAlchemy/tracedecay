@@ -5,6 +5,7 @@ use crate::store::memory::DatabaseFactStore;
 use tracedecay_domain::FactOwnerV1;
 
 async fn database(path: &Path) -> Database {
+    crate::register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "fact proposal lifecycle test").unwrap();
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize)
         .await

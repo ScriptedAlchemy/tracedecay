@@ -364,6 +364,7 @@ async fn seed_applied_fact_database(
     use crate::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactOwnerV1;
 
+    crate::register_test_schema_installer();
     let authority =
         DatabaseAuthority::acquire_test(database_path, "outcome persistence test").unwrap();
     let (database, _) = Database::publish_test_runtime(
