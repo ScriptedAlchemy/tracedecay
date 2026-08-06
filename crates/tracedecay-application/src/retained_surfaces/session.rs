@@ -103,7 +103,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 15] = [
         summary: "Preflight retained temporal context",
         description: "Measure one bounded temporal assembly against the mounted authority.",
         example: "Preflight this retained context request",
-        effect: EffectClass::Read,
+        effect: EffectClass::Administrative,
         scope: SESSION_SCOPE,
         paginated: false,
     },
