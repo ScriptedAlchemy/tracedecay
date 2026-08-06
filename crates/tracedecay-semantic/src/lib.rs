@@ -656,7 +656,11 @@ impl DaemonSemanticRuntimeHandleV1 {
     }
 
     /// Test-only binding for a pointer published without a production runtime.
-    #[cfg(any(test, feature = "test-helpers"))]
+    ///
+    /// Requires `semantic-fastembed`: the handle's query runtime is concretely
+    /// the FastEmbed runtime, and without that feature the compiled-out stub
+    /// fails compatibility verification by design, so no binding can exist.
+    #[cfg(all(any(test, feature = "test-helpers"), feature = "semantic-fastembed"))]
     pub fn bind_query_runtime_for_current(
         &self,
         authority: Arc<AdmittedProjectionArtifactV1>,
