@@ -1,20 +1,20 @@
-# PR14 core / PR17 residual daemon-owned typed workflow runtime
+# Daemon-owned typed workflow runtime: core and advanced deliveries
 
-**Status:** implementation authority for PR14's minimal real-provider runtime
-and PR17's residual advanced workflow behavior. PR18 publishes SDK names for
+**Status:** implementation authority for the core Work delivery's minimal real-provider runtime
+and the advanced workflow delivery's residual behavior. The public SDK delivery publishes SDK names for
 the same callable operations; it does not add a second runtime or defer missing
 lifecycle semantics.
 
-**Approved delivery split (2026-07-28).** PR14 owns one supported native
+**Approved delivery split (2026-07-28).** The core Work delivery owns one supported native
 provider path, leases/attempts, bounded artifacts/progress, cancel/resume,
-restart fencing, sealed terminal evidence, and projection into Work. PR17 owns
+restart fencing, sealed terminal evidence, and projection into Work. The advanced workflow delivery owns
 workflow definitions, multi-step/fan-out/synthesis/recovery, advanced
 placement, expertise/calibration, automation controls, and host/LSP handoff.
 Both use one runtime authority.
 
 Earlier runtime type/file inventories, operation registries, fixture corpora,
 phase names, and packet gates are historical evidence, not prerequisites or
-features that PR17 must recreate. Only actually independently released public
+features that the advanced workflow delivery must recreate. Only actually independently released public
 operations retain protocol compatibility. Persisted definition, run, attempt,
 effect, and receipt records use the fresh-store rule; all other retention is
 judged by the direct runtime,
@@ -45,11 +45,11 @@ leases, attempts, providers, progress, effects, retries, recovery,
 cancellation, artifacts, placement, and integration execution. Runtime
 `Completed` is evidence for Plan 24, never automatic task completion.
 
-PR17 adds no JavaScript/TypeScript workflow runtime, generated workflow source,
+The advanced workflow delivery adds no JavaScript/TypeScript workflow runtime, generated workflow source,
 Markdown parser, shell command tape, developer-plan executor, or recursive
 generic execution.
 
-## PR14/PR17 implementation defaults
+## Implementation defaults
 
 - Persist and query task/workflow relationships through the canonical embedded
   Grafeo authority in `tracedecay-graph-db`. Use small standard-library
@@ -71,7 +71,7 @@ generic execution.
   Add no workflow platform, PTY layer, `statig`, or outbox framework; retain
   the existing atomic outbox publication semantics in the owner transaction.
 
-## PR14 core and PR17 residual user outcome
+## Core and advanced user outcome
 
 After reviewing an evidence-backed Plan 24 proposal, a user can explicitly
 admit one real provider-backed step, see the exact provider/model and fallback
@@ -205,7 +205,7 @@ later eligible fallback is a new revalidated attempt.
 
 ## Native provider execution
 
-PR17 retains typed adapters for the supported native Claude Code CLI, Codex
+The advanced workflow delivery retains typed adapters for the supported native Claude Code CLI, Codex
 app-server, and explicitly allowed Codex CLI fallback.
 
 - Claude-designated work uses the configured native Claude Code CLI. Hermes
@@ -335,7 +335,7 @@ missing anchors, stale scope, or authorization loss block removal.
 
 ## Application operations and surfaces
 
-PR17 retains callable typed operations for:
+The advanced workflow delivery retains callable typed operations for:
 
 - workflow definition list/get/create-version/validate/activate/retire/diff;
 - work-backed and general typed run start/admit/inspect/status/history;
@@ -351,9 +351,9 @@ PR17 retains callable typed operations for:
 
 CLI, MCP, HTTP, dashboard, and host bindings call the same application
 operations. They contain no readiness, scheduling, provider, retry, effect, or
-Git logic. PR17 names may remain pre-stabilization bindings, but every
+Git logic. Advanced-delivery names may remain pre-stabilization bindings, but every
 SDK-facing semantic operation and lifecycle state is callable and tested.
-PR18 freezes Rust, TypeScript, HTTP, CLI, and MCP compatibility names
+The public SDK delivery freezes Rust, TypeScript, HTTP, CLI, and MCP compatibility names
 without changing this behavior.
 
 ## Work projections and observations
@@ -391,12 +391,12 @@ acceptance, or provider-dispatch authority from workflow composition.
    evidence.
 3. Project the result into every retained Plan 24 Work view and feed it into
    non-auto-applied replanning.
-   These first three slices are PR14 core.
-4. In PR17, exercise bounded fan-out, independent review, optional synthesis, capacity,
+   These first three slices are the core Work delivery.
+4. In the advanced delivery, exercise bounded fan-out, independent review, optional synthesis, capacity,
    pause/resume, restart/failover, and backup/restore through the same journey.
-5. In PR17, exercise each retained placement, stack, review, and safe integration mode
+5. In the advanced delivery, exercise each retained placement, stack, review, and safe integration mode
    through the same TaskId and explicit effect path.
-6. In PR17, bind residual lifecycle and SDK-facing operations across the selected
+6. In the advanced delivery, bind residual lifecycle and SDK-facing operations across the selected
    surfaces and emit production observations.
 
 Each slice includes its minimal contracts, persistence, configuration/policy
@@ -415,17 +415,17 @@ shadow gate counts as delivery.
 - Keep every capability above in the production loop. Compatibility aliases
   backed by actual independent release evidence delegate to canonical
   operations and own no logic. Pure source-only and branch-era callable aliases
-  are removed in place. PR18 freezes rather than invents lifecycle behavior.
+  are removed in place. The SDK delivery freezes rather than invents lifecycle behavior.
 
 ## Direct acceptance
 
-The PR14 core journey must create work, retrieve exact evidence, receive
+The core Work journey must create work, retrieve exact evidence, receive
 and explicitly accept an explained proposal, separately admit a supported real
 native provider step, watch and resume progress, inspect requested/actual route,
 artifacts and truthful outcome, and review an unapplied replan across CLI, MCP,
 HTTP, dashboard, and host/application bindings.
 
-PR17 expands the same journey for the residual capabilities below. Together
+The advanced delivery expands the same journey for the residual capabilities below. Together
 the journeys prove:
 
 - one deadline, cancellation generation, authority epoch, budget ledger,
@@ -460,11 +460,11 @@ production. A skipped native run is diagnostic coverage, not certification.
 Compact direct regressions replace giant declarative fixture catalogs and
 contract-only gates.
 
-## Not in PR14/PR17
+## Owned elsewhere
 
-- PR18 publishes and freezes the public Rust and TypeScript SDKs and
+- The public SDK delivery publishes and freezes the public Rust and TypeScript SDKs and
   compatibility policy for these already complete operations.
-- PR20 optimizes measured queue, provider, evidence, projection, and effect
+- Measured performance optimization covers queue, provider, evidence, projection, and effect
   latency.
 - JavaScript workflow execution, arbitrary shell/process tools, generic
   recursive dispatch, autonomous task/replan application, unsafe Git, and a
