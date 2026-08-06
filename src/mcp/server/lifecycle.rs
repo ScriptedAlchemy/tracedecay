@@ -6,7 +6,81 @@ use super::*;
 /// Cache duration for version checks (15 minutes).
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 
-/// Why a detached branch reopen was kicked. The two triggers differ only in
+#[derive(Default)]
+pub(crate) struct McpBackgroundTaskOwner {
+    admission: std::sync::Mutex<McpBackgroundTaskAdmission>,
+    shutdown_tasks: tokio::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
+}
+
+#[derive(Default)]
+struct McpBackgroundTaskAdmission {
+    closed: bool,
+    tasks: tokio::task::JoinSet<()>,
+}
+
+impl McpBackgroundTaskOwner {
+    fn spawn<Task>(&self, task: Task) -> bool
+    where
+        Task: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if admission.closed {
+            return false;
+        }
+        admission.tasks.spawn(task);
+        true
+    }
+
+    pub(crate) async fn shutdown(&self) -> Vec<String> {
+        let mut retained = self.shutdown_tasks.lock().await;
+        if retained.is_none() {
+            let tasks = {
+                let mut admission = self
+                    .admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                admission.closed = true;
+                std::mem::take(&mut admission.tasks)
+            };
+            *retained = Some(tasks);
+        }
+        let Some(tasks) = retained.as_mut() else {
+            return Vec::new();
+        };
+        tasks.abort_all();
+        let mut failures = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                failures.push(error.to_string());
+            }
+        }
+        retained.take();
+        failures
+    }
+}
+
+struct ReadRefreshRunningGuard(Arc<AtomicBool>);
+
+impl Drop for ReadRefreshRunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+struct BranchReopenCompletion(Arc<AtomicU64>);
+
+impl Drop for BranchReopenCompletion {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Why a retained branch reopen was kicked. The two triggers differ only in
 /// whether the reopen re-checks for drift before running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BranchReopenTrigger {
@@ -324,7 +398,7 @@ impl McpServer {
     /// run inline on the request that happened to notice the checkout, with
     /// every other caller either blocked behind the reopen lock or (worse, in
     /// [`Self::reopen_after_branch_tracking_added`]) queued on it with no
-    /// bound. Now the reopen is detached and single-flighted, and every caller
+    /// bound. Now the reopen is retained and single-flighted, and every caller
     /// — the one that noticed the drift included — serves the last complete
     /// snapshot until the swap lands.
     ///
@@ -357,12 +431,12 @@ impl McpServer {
     ///
     /// Never blocks: this used to take `branch_reopen.lock().await`, so every
     /// caller arriving during an in-flight reopen queued behind a full DB open.
-    /// It now try-locks and detaches exactly like the drift path.
+    /// It now try-locks and submits to the retained owner like the drift path.
     pub(crate) async fn reopen_after_branch_tracking_added(&self) {
         self.spawn_branch_reopen(BranchReopenTrigger::TrackingAdded);
     }
 
-    /// Single-flights and detaches one reopen onto the live branch.
+    /// Single-flights and retains one reopen onto the live branch.
     ///
     /// The `branch_reopen` guard is *moved into* the spawned task, so it is
     /// held for the reopen's real duration while no caller ever awaits it. A
@@ -375,10 +449,11 @@ impl McpServer {
         };
         let cg_cell = Arc::clone(&self.cg);
         let token_map = Arc::clone(&self.file_token_map);
-        let completions = Arc::clone(&self.branch_reopen_completions);
+        let completion = BranchReopenCompletion(Arc::clone(&self.branch_reopen_completions));
         let reconcile = self.database_owner_reconciler.clone();
         let reason = trigger.reason();
-        tokio::spawn(async move {
+        let _admitted = self.background_tasks.spawn(async move {
+            let _completion = completion;
             let _reopen_guard = reopen_guard;
             let current = cg_cell.read().await.clone();
             // Drift-triggered reopens re-check against a *fresh snapshot*: a
@@ -388,7 +463,6 @@ impl McpServer {
             // changed is that it now has a DB of its own — so it always runs,
             // exactly as the blocking version did.
             if trigger == BranchReopenTrigger::Drift && !current.branch_drifted() {
-                completions.fetch_add(1, Ordering::Release);
                 return;
             }
             match current.reopen_for_current_branch().await {
@@ -426,16 +500,14 @@ impl McpServer {
                     );
                 }
             }
-            completions.fetch_add(1, Ordering::Release);
         });
     }
 
     /// Polls until at least one branch reopen has completed past `after`, or
     /// until `timeout` elapses. Returns `true` if one landed.
     ///
-    /// Reopens are detached, so tests (and any caller that genuinely needs the
-    /// post-swap state rather than an answer) observe completion here instead
-    /// of blocking the request path.
+    /// Reopens do not block requests, so tests (and any caller that genuinely
+    /// needs the post-swap state rather than an answer) observe completion here.
     #[doc(hidden)]
     pub async fn wait_for_branch_reopen(&self, after: u64, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
@@ -521,7 +593,7 @@ impl McpServer {
     /// path, with no bound: one `git pull` ahead of an edit tool turned that
     /// call into an O(store) reindex the client waited on. The claim is still
     /// made here — so the cooldown and single-flight semantics are unchanged —
-    /// but the work is detached through the same mechanism read tools already
+    /// but the work is retained through the same mechanism read tools already
     /// use ([`Self::spawn_read_refresh_task`]), and the caller serves
     /// immediately on the current snapshot. The *next* call observes the
     /// freshly synced index.
@@ -575,7 +647,7 @@ impl McpServer {
         {
             return;
         }
-        // The detached task refreshes `file_token_map` from the synced graph on
+        // The retained task refreshes `file_token_map` from the synced graph on
         // every success — including the case where nothing was stale, because a
         // sibling MCP peer may have synced the DB between our cooldown windows.
         self.spawn_read_refresh_task(&cg, self.sync_config.full_sync_escalation_files);
@@ -586,7 +658,7 @@ impl McpServer {
     /// If read-refresh is enabled and the read cooldown has elapsed since the
     /// last background spawn, this `compare_exchange`s
     /// [`background_refresh_running`](Self::background_refresh_running) to
-    /// `true` and spawns a detached refresh, then returns immediately so the
+    /// `true` and spawns a retained refresh, then returns immediately so the
     /// caller serves the current answer with zero added latency. The *next*
     /// read observes the freshly synced index.
     ///
@@ -637,7 +709,7 @@ impl McpServer {
         self.spawn_read_refresh_task(cg, self.sync_config.full_sync_escalation_files);
     }
 
-    /// Spawns the detached D4 refresh task. The task owns cheap `Arc` clones
+    /// Spawns the retained D4 refresh task. The task owns cheap `Arc` clones
     /// of the background-refresh flag, the completion stamp, and the shared
     /// file-token map, so no `Arc<Self>` receiver is needed. Prefers diff-
     /// scoping off `last_synced_commit`; falls back to the full tree walk
@@ -647,6 +719,7 @@ impl McpServer {
     /// `true`; this task clears it on completion.
     pub(crate) fn spawn_read_refresh_task(&self, cg: &Arc<TraceDecay>, escalation: usize) {
         let running = Arc::clone(&self.background_refresh_running);
+        let running_guard = ReadRefreshRunningGuard(Arc::clone(&running));
         let done_at = Arc::clone(&self.last_background_refresh_done_at);
         let token_map = Arc::clone(&self.file_token_map);
         let refresh = Arc::clone(&self.background_refresh_writer);
@@ -655,7 +728,8 @@ impl McpServer {
             project_root: cg.project_root().to_path_buf(),
             full_sync_escalation_files: escalation,
         };
-        tokio::spawn(async move {
+        let _admitted = self.background_tasks.spawn(async move {
+            let _running = running_guard;
             match refresh(request).await {
                 Ok(Some(fresh)) => {
                     if let Ok(mut guard) = token_map.lock() {
@@ -671,7 +745,6 @@ impl McpServer {
                 }
             }
             done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
-            running.store(false, Ordering::Release);
         });
     }
 
@@ -747,5 +820,32 @@ impl McpServer {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod background_task_owner_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_aborts_joins_and_closes_background_task_admission() {
+        let owner = McpBackgroundTaskOwner::default();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        assert!(owner.spawn(async move {
+            struct DropSignal(Arc<AtomicBool>);
+            impl Drop for DropSignal {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                }
+            }
+            let _signal = DropSignal(task_dropped);
+            std::future::pending::<()>().await;
+        }));
+        tokio::task::yield_now().await;
+
+        assert!(owner.shutdown().await.is_empty());
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(!owner.spawn(async {}));
     }
 }
