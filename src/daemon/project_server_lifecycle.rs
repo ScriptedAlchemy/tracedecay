@@ -40,13 +40,14 @@ pub(super) async fn detach_project_servers(
 }
 
 pub(super) async fn shutdown_detached_project_servers(servers: Vec<Arc<crate::mcp::McpServer>>) {
-    for server in servers {
+    futures_util::future::join_all(servers.into_iter().map(|server| async move {
         let graph = server.cg().await;
         hook_v2_replay::shutdown_hook_v2_replay_consumer(&graph.hook_store_layout().data_root)
             .await;
         drop(graph);
         server.shutdown().await;
-    }
+    }))
+    .await;
 }
 
 const PROJECT_SERVER_REQUEST_DRAIN_DEADLINE: Duration = Duration::from_secs(35);
