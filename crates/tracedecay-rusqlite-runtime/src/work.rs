@@ -9,10 +9,10 @@ use tracedecay_application::{
     WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
-    ProjectionGenerationId, TaskId, WORK_PROJECTION_STATE_VERSION_V1, WorkAuthority,
-    WorkEvent, WorkProjection, WorkProjectionCoverageV1, WorkProjectionDeltaV1,
-    WorkProjectionResumeCursorV1, WorkProjectionSequenceRangeV1, WorkProjectionSequenceV1,
-    WorkProjectionSnapshotV1, WorkProjectionStateV1, WorkVersion, canonical_sha256,
+    ProjectionGenerationId, TaskId, WORK_PROJECTION_STATE_VERSION_V1, WorkAuthority, WorkEvent,
+    WorkProjection, WorkProjectionCoverageV1, WorkProjectionDeltaV1, WorkProjectionResumeCursorV1,
+    WorkProjectionSequenceRangeV1, WorkProjectionSequenceV1, WorkProjectionSnapshotV1,
+    WorkProjectionStateV1, WorkVersion, canonical_sha256,
 };
 
 use crate::exact_sql::{
