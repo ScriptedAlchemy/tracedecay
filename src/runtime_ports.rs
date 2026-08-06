@@ -1,9 +1,8 @@
 //! Composition-root registration for every process-global runtime port.
 //!
 //! The crate split left several capabilities inverted behind `OnceLock` slots
-//! in the extracted crates: `tracedecay_sessions::host_ports`,
-//! `tracedecay_agent_hosts::ports`, and
-//! `tracedecay_runtime_core::ports::branch_admin_recovery`. Each slot has a
+//! in the extracted crates: `tracedecay_sessions::host_ports` and
+//! `tracedecay_agent_hosts::ports`. Each slot has a
 //! conservative default so an unwired process still runs — it just does less
 //! (no memory injection, zero turn costs, a daemon that reports itself
 //! unavailable).
@@ -37,7 +36,6 @@ pub fn register_runtime_ports() {
     crate::agents::register_mcp_tool_catalog_ports();
     crate::automation::register_runtime_ports();
     crate::dashboard::register_runtime_ports();
-    crate::branch::register_branch_admin_recovery_gate();
 }
 
 // ---------------------------------------------------------------------------
