@@ -1,6 +1,7 @@
 //! Request routing and handlers: per-method JSON-RPC dispatch,
 //! handshake handling, resources, and `tools/call` execution.
 
+use super::dispatch_settlement::{DispatchControl, PreparedDispatchControl};
 use super::*;
 use crate::mcp::ToolResult;
 use tracedecay_sessions::WorkflowIndexReadPort;
@@ -69,28 +70,10 @@ pub(super) fn recover_lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGu
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-struct ApplicationCancellationRegistration<'a> {
-    registry: &'a std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
-    request_id: Option<String>,
-}
-
-impl Drop for ApplicationCancellationRegistration<'_> {
-    fn drop(&mut self) {
-        if let Some(request_id) = self.request_id.as_deref() {
-            recover_lock(self.registry).remove(request_id);
-        }
-    }
-}
-
 /// Application-surface plumbing prepared once per dispatch: the typed request
-/// id, deadline, cancellation signal, daemon invocation client, and the RAII
-/// cancellation registration that must outlive the dispatch await.
+/// invocation executor, retained independently from dispatch settlement.
 struct ApplicationSurfaceDispatch<'a> {
-    request_id: Option<tracedecay_application::RequestId>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
     invocation_executor: Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
-    _registration: ApplicationCancellationRegistration<'a>,
 }
 
 /// Retained name for this module's call sites; the saturating clamp is the one
@@ -99,7 +82,7 @@ pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
     tracedecay_application::clock::now_micros()
 }
 
-fn is_source_edit_tool(tool_name: &str) -> bool {
+pub(super) fn is_source_edit_tool(tool_name: &str) -> bool {
     crate::mcp::tools::tool_dispatches_source_edit_effect(tool_name)
 }
 
@@ -110,7 +93,7 @@ fn is_source_edit_tool(tool_name: &str) -> bool {
 /// other git-walking tool is recognised through the canonical MCP binding table
 /// rather than a second hand-maintained name list, so a newly bound git tool
 /// inherits the bound instead of silently running unbounded.
-fn is_controlled_read_tool(tool_name: &str) -> bool {
+pub(super) fn is_controlled_read_tool(tool_name: &str) -> bool {
     matches!(
         crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name),
         Some(
@@ -128,7 +111,7 @@ pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::mcp::tools::tool_supports_live_cancellation(tool_name)
 }
 
-fn dispatch_deadline_horizon_micros(
+pub(super) fn dispatch_deadline_horizon_micros(
     application_surface: bool,
     thirty_second_operation: bool,
 ) -> Option<i64> {
@@ -281,7 +264,7 @@ impl McpServer {
         let Some(cancelled_id) = application_surface_request_id(id, connection_scope) else {
             return false;
         };
-        recover_lock(&self.application_surface_cancellations)
+        recover_lock(self.dispatch_authority.cancellations())
             .get(&cancelled_id)
             .cloned()
             .is_some_and(|cancellation| cancellation.cancel(mcp_now_micros()))
@@ -1022,8 +1005,9 @@ impl McpServer {
         route_cache: &HookProjectRouteCache,
         implicit_project_path: Option<&Path>,
         memory_request_scope: &str,
-        pre_cancelled: bool,
         publish_activity: bool,
+        application_request_id: Option<tracedecay_application::RequestId>,
+        dispatch_control: DispatchControl,
     ) -> DispatchedToolCall {
         // Branch-drift hot-swap: if the working tree switched branches since
         // the served instance opened, reopen onto the live branch's DB so
@@ -1080,19 +1064,10 @@ impl McpServer {
         // snapshot (or an explicit transport override). Do not synchronously
         // re-read legacy configuration for every tool call.
         let ApplicationSurfaceDispatch {
-            request_id: application_request_id,
-            deadline: application_deadline,
-            cancellation: application_cancellation,
             invocation_executor: application_invocation_executor,
-            _registration,
+            ..
         } = self
-            .prepare_application_surface_dispatch(
-                &cg,
-                id,
-                tool_name,
-                memory_request_scope,
-                pre_cancelled,
-            )
+            .prepare_application_surface_dispatch(&cg, tool_name)
             .await;
         let outcome = self
             .execute_tool_dispatch(
@@ -1105,8 +1080,8 @@ impl McpServer {
                 application_invocation_executor,
                 application_invocation_target,
                 application_request_id.clone(),
-                application_deadline,
-                application_cancellation,
+                Some(dispatch_control.deadline()),
+                Some(dispatch_control.cancellation()),
             )
             .await;
         DispatchedToolCall {
@@ -1161,52 +1136,10 @@ impl McpServer {
     async fn prepare_application_surface_dispatch<'a>(
         &'a self,
         cg: &TraceDecay,
-        id: &Value,
         tool_name: &str,
-        memory_request_scope: &str,
-        pre_cancelled: bool,
     ) -> ApplicationSurfaceDispatch<'a> {
         let application_surface =
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
-        let source_edit = is_source_edit_tool(tool_name);
-        let controlled_read = is_controlled_read_tool(tool_name);
-        let request_id = tool_supports_live_cancellation(tool_name)
-            .then(|| application_surface_request_id(id, memory_request_scope))
-            .flatten()
-            .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
-        let cancellation = request_id.as_ref().and_then(|request_id| {
-            // The signal is built before the lock is taken: nothing fallible
-            // runs inside the critical section, so an unwind can never leave
-            // the registry half-updated.
-            let cancellation = tracedecay_application::CancellationSignal::active(format!(
-                "cancellation.{}",
-                request_id.as_str()
-            ))
-            .ok()?;
-            if pre_cancelled {
-                cancellation.cancel(mcp_now_micros());
-            }
-            recover_lock(&self.application_surface_cancellations)
-                .insert(request_id.as_str().to_owned(), cancellation.clone());
-            Some(cancellation)
-        });
-        let registration = ApplicationCancellationRegistration {
-            registry: &self.application_surface_cancellations,
-            request_id: request_id
-                .as_ref()
-                .map(|request_id| request_id.as_str().to_owned()),
-        };
-        let deadline = dispatch_deadline_horizon_micros(
-            application_surface.is_some() || source_edit,
-            controlled_read || source_edit,
-        )
-        .and_then(|horizon| {
-            let now = mcp_now_micros().0;
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                now.saturating_add(horizon),
-            ))
-            .ok()
-        });
         let invocation_executor = if application_surface.is_some() {
             match self.application_invocation_executor.as_deref() {
                 Some(executor) => Some(executor),
@@ -1229,11 +1162,7 @@ impl McpServer {
             None
         };
         ApplicationSurfaceDispatch {
-            request_id,
-            deadline,
-            cancellation,
             invocation_executor,
-            _registration: registration,
         }
     }
 
@@ -1788,19 +1717,60 @@ impl McpServer {
         }
 
         let fast_unavailable = self.message_search_worker_is_unavailable(&tool_name, &arguments);
-        let dispatch = self
-            .dispatch_tool_call(
-                &id,
-                &tool_name,
-                arguments,
-                timings_enabled,
-                route_cache,
-                implicit_project_path,
-                memory_request_scope,
-                pre_cancelled,
-                !fast_unavailable,
-            )
+        let PreparedDispatchControl {
+            request_id: application_request_id,
+            control,
+            _registration,
+        } = match self.prepare_dispatch_control(
+            &id,
+            &tool_name,
+            memory_request_scope,
+            pre_cancelled,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => return tool_error_response(id, &tool_name, &error),
+        };
+        let worker_server = self.dispatch_authority.server();
+        let worker_id = id.clone();
+        let worker_tool_name = tool_name.clone();
+        let worker_route_cache = route_cache.clone();
+        let worker_implicit_project_path = implicit_project_path.map(Path::to_path_buf);
+        let worker_memory_request_scope = memory_request_scope.to_owned();
+        let worker_control = control.clone();
+        let retained = control
+            .run_retained(self.dispatch_authority.registry(), async move {
+                let server = worker_server.upgrade().ok_or_else(|| {
+                    TraceDecayError::project_route(
+                        "tool_dispatch_shutdown",
+                        true,
+                        "MCP server was released before retained dispatch admission",
+                    )
+                })?;
+                Ok(server
+                    .dispatch_tool_call(
+                        &worker_id,
+                        &worker_tool_name,
+                        arguments,
+                        timings_enabled,
+                        &worker_route_cache,
+                        worker_implicit_project_path.as_deref(),
+                        &worker_memory_request_scope,
+                        !fast_unavailable,
+                        application_request_id,
+                        worker_control,
+                    )
+                    .await)
+            })
             .await;
+        tracing::trace!(
+            tool_name,
+            settlement = ?retained.settlement(),
+            "MCP tool dispatch settled"
+        );
+        let dispatch = match retained.result {
+            Ok(dispatch) => dispatch,
+            Err(failure) => return tool_error_response(id, &tool_name, failure.error()),
+        };
         if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
             return response;
         }
@@ -1826,6 +1796,7 @@ impl McpServer {
 #[cfg(test)]
 mod git_read_control_tests {
     use super::*;
+    use crate::mcp::server::dispatch_settlement::ApplicationCancellationRegistration;
 
     #[test]
     fn controlled_operations_receive_live_registration_and_bounded_deadlines() {
@@ -1881,10 +1852,8 @@ mod git_read_control_tests {
         .expect("signal");
         let registry = std::sync::Mutex::new(HashMap::from([(request_id.clone(), signal.clone())]));
         {
-            let _registration = ApplicationCancellationRegistration {
-                registry: &registry,
-                request_id: Some(request_id.clone()),
-            };
+            let _registration =
+                ApplicationCancellationRegistration::new(&registry, Some(request_id.clone()));
             signal.cancel(tracedecay_domain::UtcMicros(1));
             assert!(registry.lock().expect("registry").contains_key(&request_id));
         }

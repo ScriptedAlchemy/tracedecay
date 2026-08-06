@@ -248,9 +248,9 @@ mod tests {
     fn shard_wire_uses_canonical_binding_and_preserves_unknown_usage() {
         let binding = StoreRuntimeBindingV1::new(
             StoreShardIdV1::project(
-                BrainId::try_from("brain.runtime-wire").unwrap(),
-                UserProfileId::try_from("profile.runtime-wire").unwrap(),
-                ProjectId::try_from("project.runtime-wire").unwrap(),
+                BrainId::try_from("brain.runtime-wire".to_owned()).unwrap(),
+                UserProfileId::try_from("profile.runtime-wire".to_owned()).unwrap(),
+                ProjectId::try_from("project.runtime-wire".to_owned()).unwrap(),
             ),
             StoreIncarnationV1::new(3).unwrap(),
             StoreAuthorityEpochV1::new(5).unwrap(),

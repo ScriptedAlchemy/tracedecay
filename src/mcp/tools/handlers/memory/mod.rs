@@ -148,32 +148,6 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-/// Typed "operation exceeded deadline" problem for a bounded memory operation.
-///
-/// Reuses the retryable [`TraceDecayError::ProjectRoute`] problem shape (a
-/// stable `reason_code`, a `retryable` flag, and a human `detail`) so the MCP
-/// boundary surfaces a structured, retryable error rather than a transport
-/// hang. The deadline is a backstop, so retry is safe (writes are receipt
-/// idempotent).
-///
-/// The bound itself is applied once, centrally, at the retained memory dispatch
-/// (`dispatch_groups::dispatch_memory_operation`) off the admission-carried
-/// client deadline — mirroring the git dispatcher — so every memory operation
-/// (add/search/feedback/status) is covered uniformly rather than per handler.
-pub(super) fn memory_deadline_error(
-    operation: &str,
-    deadline: std::time::Duration,
-) -> TraceDecayError {
-    TraceDecayError::project_route(
-        "memory_operation_deadline_exceeded",
-        true,
-        format!(
-            "memory {operation} operation exceeded the {}s deadline",
-            deadline.as_secs()
-        ),
-    )
-}
-
 fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     TraceDecayError::database_operation("memory application", error)
 }
@@ -400,48 +374,47 @@ mod tests {
         (tmp, cg, fact_id)
     }
 
-    /// The typed problem the central memory-dispatch deadline raises on elapse
-    /// (see `dispatch_groups::dispatch_memory_operation`) must stay a stable,
-    /// retryable project-route problem naming the operation and its budget.
-    #[test]
-    fn memory_deadline_error_is_a_typed_retryable_problem() {
-        let err = memory_deadline_error("fact_store add", std::time::Duration::from_secs(30));
-        let (reason_code, retryable, detail) = err
-            .project_route_context()
-            .expect("an elapsed memory deadline must surface a typed project-route problem");
-        assert_eq!(reason_code, "memory_operation_deadline_exceeded");
-        assert!(retryable, "a deadline backstop is safe to retry");
-        assert!(
-            detail.contains("fact_store add") && detail.contains("deadline"),
-            "detail must name the operation and the deadline: {detail}"
-        );
-    }
-
-    /// The add path (holographic encode + serialized write) completes in a clean
-    /// tempdir well inside any interactive budget, so the central dispatch bound
-    /// is a backstop for a stalled store rather than a limit healthy adds hit.
     #[tokio::test]
-    async fn add_fact_completes_promptly() {
+    async fn fact_add_arbitrates_cancellation_against_commit() {
         let (_tmp, cg) = empty_memory().await;
-        let owner = active_project_memory_owner(&cg).unwrap();
-        let memory = active_memory(&cg);
-        let outcome = memory
-            .add_fact_v1(
-                AddFactRequest {
-                    content: "deadline-bounded add fixture".to_string(),
-                    category: MemoryCategory::General,
-                    source: None,
-                    tags: Vec::new(),
-                    entities: vec!["fixture-entity".to_string()],
-                    trust: None,
-                    metadata: json!({}),
-                },
-                MemoryOperationContext::generated(&owner, "deadline-bounded add", None).unwrap(),
-            )
-            .await
-            .map_err(memory_application_error)
-            .expect("a clean add must complete promptly");
-        assert!(outcome.fact.is_some(), "the add must persist a fact");
+        let cancelled =
+            tracedecay_application::CancellationSignal::active("fact-add-cancelled").unwrap();
+        assert!(cancelled.cancel(tracedecay_domain::UtcMicros(41)));
+        let rejected = handle_fact_store(
+            &cg,
+            json!({"action": "add", "content": "cancelled fact must not persist"}),
+            None,
+            Some(cancelled),
+        )
+        .await
+        .unwrap_err();
+        assert!(rejected.to_string().contains("interrupted"));
+        let committed =
+            tracedecay_application::CancellationSignal::active("fact-add-committed").unwrap();
+        let result = handle_fact_store(
+            &cg,
+            json!({"action": "add", "content": "commit claim wins cancellation"}),
+            None,
+            Some(committed.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            result
+                .value
+                .to_string()
+                .contains("commit claim wins cancellation")
+        );
+        assert!(committed.commit_started());
+        assert!(!committed.cancel(tracedecay_domain::UtcMicros(42)));
+        assert_eq!(
+            active_memory(&cg)
+                .list_facts_untracked_v1(None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -603,6 +576,7 @@ mod tests {
                 "project_id": "another_project",
             }),
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -621,6 +595,7 @@ mod tests {
         handle_fact_feedback(
             &cg,
             json!({ "fact_id": fact_id, "action": "helpful" }),
+            None,
             None,
         )
         .await
@@ -644,7 +619,9 @@ mod tests {
         });
 
         for _ in 0..2 {
-            handle_fact_feedback(&cg, args.clone(), None).await.unwrap();
+            handle_fact_feedback(&cg, args.clone(), None, None)
+                .await
+                .unwrap();
         }
 
         let history = active_memory(&cg)
@@ -665,6 +642,7 @@ mod tests {
                 "__mcp_request_id": "request.mcp.connection-a.first",
             }),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -675,6 +653,7 @@ mod tests {
                 "content": "stable logical memory write",
                 "__mcp_request_id": "request.mcp.connection-b.first",
             }),
+            None,
             None,
         )
         .await
@@ -724,6 +703,7 @@ mod tests {
                 "content": "request-derived memory write",
                 "__mcp_request_id": "request.mcp.reconnected.first",
             }),
+            None,
             None,
         )
         .await

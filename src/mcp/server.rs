@@ -43,6 +43,7 @@ use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
 mod connection;
 mod construction;
+mod dispatch_settlement;
 mod hook_dispatch;
 mod hook_writes;
 mod ledger;
@@ -63,6 +64,7 @@ pub(crate) use project_registry::DaemonProjectRegistryReadService;
 pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 
 pub(crate) use construction::*;
+use dispatch_settlement::RetainedDispatchAuthority;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 pub(crate) use lifecycle::{
@@ -427,9 +429,7 @@ pub struct McpServer {
     project_server_live: Option<Arc<AtomicBool>>,
     /// The transport-visible response lifecycle for a retained project route.
     project_server_lifecycle: ProjectServerResponseLifecycle,
-    /// Live MCP cancellation tokens keyed by canonical application request id.
-    application_surface_cancellations:
-        std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
+    dispatch_authority: RetainedDispatchAuthority,
 }
 
 impl McpServer {
@@ -835,7 +835,7 @@ impl McpServer {
             )
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
 
-        let server = Arc::new(Self {
+        let server = Arc::new_cyclic(|dispatch_server| Self {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
             branch_reopen_completions: Arc::new(AtomicU64::new(0)),
@@ -918,7 +918,7 @@ impl McpServer {
             application_invocation_executor,
             project_server_live,
             project_server_lifecycle: ProjectServerResponseLifecycle::default(),
-            application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
+            dispatch_authority: RetainedDispatchAuthority::new(dispatch_server.clone()),
         });
 
         tokio::task::spawn_blocking(move || {

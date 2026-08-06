@@ -8,25 +8,23 @@ use crate::tracedecay::TraceDecay;
 
 use super::super::support::{project_selector_present, tool_json};
 use super::args::{fact_id, feedback_action};
+use super::fact_store::controlled_memory_application;
 use super::{
-    config_error, memory_application, memory_application_error, memory_operation_context,
-    open_target_memory_db, refresh_target_memory_digest,
+    config_error, memory_application_error, memory_operation_context, open_target_memory_db,
+    refresh_target_memory_digest,
 };
 
 pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
     if project_selector_present(&args, &["project_path"]) {
         return Err(config_error(
             "cross-project fact_feedback writes are not supported; omit project_selector to write the active project",
         ));
     }
-    // Feedback shares the unbounded-await shape of the add path; the whole
-    // store-touching operation is bound once, centrally, by the retained memory
-    // dispatch off the admission-carried client deadline
-    // (dispatch_groups::dispatch_memory_operation).
     let note = args
         .get("note")
         .or_else(|| args.get("reason"))
@@ -42,7 +40,8 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
             .map(ToOwned::to_owned),
         note,
     };
-    let memory = memory_application(&target_memory)?;
+    let settlement_cancellation = cancellation.clone();
+    let memory = controlled_memory_application(&target_memory, cancellation)?;
     if memory
         .get_fact_v1(request.fact_id)
         .await
@@ -58,7 +57,10 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
         )
         .await
         .map_err(memory_application_error)?;
-    if !target_memory.user_scope {
+    let controlled_write_committed = settlement_cancellation
+        .as_ref()
+        .is_none_or(tracedecay_application::CancellationSignal::commit_started);
+    if controlled_write_committed && !target_memory.user_scope {
         refresh_target_memory_digest(&memory, &target_memory).await;
     }
     let value = json!({ "status": "recorded", "feedback": result });
