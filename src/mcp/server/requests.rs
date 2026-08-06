@@ -1536,6 +1536,29 @@ impl McpServer {
         match outcome {
             Ok(mut result) => {
                 Self::attach_tool_timing(&mut result, elapsed_us);
+                mark_semantic_tool_error(&mut result);
+                if !tool_result_has_semantic_error(&result)
+                    && let Err(error) =
+                        super::live_transcript_refresh::join_required_live_transcript_refresh(
+                            &tool_name,
+                            &analytics_arguments,
+                            selected_owner.is_some(),
+                            self.project_session_refresh_wake.as_ref(),
+                            self.user_session_refresh_wake.as_ref(),
+                        )
+                        .await
+                {
+                    self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
+                        project_root: cg.project_root(),
+                        session_id: analytics_session_id,
+                        tool_name: &tool_name,
+                        request_id: &request_id,
+                        arguments: &analytics_arguments,
+                        duration_us: elapsed_us,
+                        error: &error,
+                    });
+                    return tool_error_response(id, &tool_name, &error);
+                }
                 let accounting_project_root = accounting_project_root(
                     cg.project_root(),
                     selected_owner.as_ref(),
@@ -1560,15 +1583,6 @@ impl McpServer {
                     .await;
                 self.prepend_index_warnings(&cg, selected_owner.is_none(), &mut result)
                     .await;
-                mark_semantic_tool_error(&mut result);
-                if selected_owner.is_none() {
-                    self.refresh_after_live_transcript_projection(
-                        &tool_name,
-                        &analytics_arguments,
-                        &result,
-                    )
-                    .await;
-                }
                 JsonRpcResponse::success(id, result.value)
             }
             Err(error) => {
@@ -1583,34 +1597,6 @@ impl McpServer {
                 });
                 tool_error_response(id, &tool_name, &error)
             }
-        }
-    }
-
-    async fn refresh_after_live_transcript_projection(
-        &self,
-        tool_name: &str,
-        arguments: &Value,
-        result: &ToolResult,
-    ) {
-        if tool_name != "tracedecay_lcm_preflight"
-            || arguments
-                .get("transcript_projection")
-                .and_then(Value::as_bool)
-                != Some(true)
-            || tool_result_has_semantic_error(result)
-        {
-            return;
-        }
-        let user_scope = arguments.get("storage_scope").and_then(Value::as_str) == Some("user");
-        let wake = if user_scope {
-            self.user_session_refresh_wake.as_ref()
-        } else {
-            self.project_session_refresh_wake.as_ref()
-        };
-        if let Some(wake) = wake {
-            let _ = wake
-                .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
-                .await;
         }
     }
 
