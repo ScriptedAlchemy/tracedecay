@@ -46,8 +46,8 @@ never replaced wholesale.
   event content. Its MCP and custom TraceDecay LSP entries are merged with the
   existing JSON config. Upstream analyzer brokering is disabled by default so
   OpenCode's built-ins and TraceDecay never claim the same analyzer. A globally
-  installed older TraceDecay binary may not recognize `lsp bridge --stdio`
-  until official dogfood installs this branch; Doctor validates the installed
+  installed older TraceDecay binary may not recognize `lsp bridge --stdio`;
+  Doctor validates the installed
   configuration without relabeling the packaged capability unavailable.
 
 OpenCode command files are prompt-template command artifacts owned and

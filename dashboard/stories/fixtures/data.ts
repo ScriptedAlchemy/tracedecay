@@ -1167,8 +1167,8 @@ function graphSearchPayload(query = ''): Record<string, unknown> {
 const SAVINGS_PROJECTS: ReadonlyArray<readonly [string, number]> = [
   ['/fast/projects/tracedecay', 2_939_894_592],
   ['/fast/projects/tracedecay/.worktrees/sqlite-storage-runtime', 2_140_723_247],
-  ['/fast/projects/tracedecay/.worktrees/dogfood-live-repair', 2_078_590_272],
-  ['/fast/projects/tracedecay/.worktrees/dogfood-hardening', 1_946_100_344],
+  ['/fast/projects/tracedecay/.worktrees/live-repair', 2_078_590_272],
+  ['/fast/projects/tracedecay/.worktrees/runtime-hardening', 1_946_100_344],
   ['/fast/projects/tracedecay/.worktrees/pr8-migration', 1_831_192_520],
   ['/fast/projects/tracedecay/.worktrees/pr8-acceptance-runner', 1_824_171_535],
   ['/fast/projects/tracedecay/.worktrees/pr8-live-tools', 1_824_065_209],

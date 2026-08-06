@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     admission::{FairQueue, QueueItem},
-    migration_sql::WriterCommand as MigrationSqlWriterCommand,
+    exact_sql::WriterCommand as ExactSqlWriterCommand,
     telemetry::WriterTelemetry,
 };
 
@@ -23,7 +23,7 @@ use super::HARD_CHECKPOINT_RETRY_INTERVAL;
 
 pub(super) enum WorkerWake {
     Write(Option<AcceptedRequest>),
-    MigrationSql(Box<Option<MigrationSqlWriterCommand>>),
+    ExactSql(Box<Option<ExactSqlWriterCommand>>),
     IncrementalVacuum(Box<Option<IncrementalVacuumCommand>>),
     OnlineBackup(Box<Option<OnlineBackupCommand>>),
     Checkpoint(Box<Option<CheckpointCommand>>),
@@ -34,13 +34,13 @@ pub(super) enum WorkerWake {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn wait_for_work(
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
-    migration_sql_receiver: &mut mpsc::Receiver<MigrationSqlWriterCommand>,
+    exact_sql_receiver: &mut mpsc::Receiver<ExactSqlWriterCommand>,
     incremental_vacuum_receiver: &mut mpsc::Receiver<IncrementalVacuumCommand>,
     online_backup_receiver: &mut mpsc::Receiver<OnlineBackupCommand>,
     checkpoint_receiver: &mut mpsc::Receiver<CheckpointCommand>,
     shutdown_receiver: &mut mpsc::UnboundedReceiver<()>,
     input_closed: bool,
-    migration_sql_closed: bool,
+    exact_sql_closed: bool,
     incremental_vacuum_closed: bool,
     online_backup_closed: bool,
     checkpoint_closed: bool,
@@ -58,10 +58,10 @@ pub(super) async fn wait_for_work(
         {
             return Poll::Ready(WorkerWake::Checkpoint(Box::new(command)));
         }
-        if !migration_sql_closed
-            && let Poll::Ready(command) = Pin::new(&mut *migration_sql_receiver).poll_recv(context)
+        if !exact_sql_closed
+            && let Poll::Ready(command) = Pin::new(&mut *exact_sql_receiver).poll_recv(context)
         {
-            return Poll::Ready(WorkerWake::MigrationSql(Box::new(command)));
+            return Poll::Ready(WorkerWake::ExactSql(Box::new(command)));
         }
         if !incremental_vacuum_closed
             && let Poll::Ready(command) =
@@ -93,13 +93,13 @@ pub(super) async fn wait_for_work(
 pub(super) fn apply_wake(
     wake: WorkerWake,
     queue: &mut FairQueue<AcceptedRequest>,
-    migration_sql_queue: &mut VecDeque<MigrationSqlWriterCommand>,
+    exact_sql_queue: &mut VecDeque<ExactSqlWriterCommand>,
     incremental_vacuum_queue: &mut VecDeque<IncrementalVacuumCommand>,
     online_backup_queue: &mut VecDeque<OnlineBackupCommand>,
     checkpoint_queue: &mut VecDeque<CheckpointCommand>,
     telemetry: &WriterTelemetry,
     input_closed: &mut bool,
-    migration_sql_closed: &mut bool,
+    exact_sql_closed: &mut bool,
     incremental_vacuum_closed: &mut bool,
     online_backup_closed: &mut bool,
     checkpoint_closed: &mut bool,
@@ -107,9 +107,9 @@ pub(super) fn apply_wake(
     match wake {
         WorkerWake::Write(Some(item)) => enqueue(queue, item, telemetry),
         WorkerWake::Write(None) => *input_closed = true,
-        WorkerWake::MigrationSql(command) => match *command {
-            Some(command) => migration_sql_queue.push_back(command),
-            None => *migration_sql_closed = true,
+        WorkerWake::ExactSql(command) => match *command {
+            Some(command) => exact_sql_queue.push_back(command),
+            None => *exact_sql_closed = true,
         },
         WorkerWake::IncrementalVacuum(command) => match *command {
             Some(command) => incremental_vacuum_queue.push_back(command),
@@ -130,7 +130,7 @@ pub(super) fn apply_wake(
 
 /// Move every command already sitting in `receiver` into `queue`.
 ///
-/// Each auxiliary channel (migration SQL, incremental vacuum, online backup,
+/// Each auxiliary channel (exact SQL, incremental vacuum, online backup,
 /// checkpoint) drains identically — park the command, stop on empty, and latch
 /// `input_closed` once the sender is gone — so they share this one loop. The
 /// product-write channel does not: it settles duplicates through
@@ -154,13 +154,13 @@ pub(super) fn drain_command_ingress<T>(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AuxiliaryWork {
-    MigrationSql,
+    ExactSql,
     IncrementalVacuum,
     OnlineBackup,
 }
 
 pub(super) fn select_auxiliary_work(
-    migration_waiting: bool,
+    exact_sql_waiting: bool,
     incremental_vacuum_waiting: bool,
     online_backup_waiting: bool,
     product_queue_empty: bool,
@@ -171,24 +171,24 @@ pub(super) fn select_auxiliary_work(
         return None;
     }
     let waiting = |work| match work {
-        AuxiliaryWork::MigrationSql => migration_waiting,
+        AuxiliaryWork::ExactSql => exact_sql_waiting,
         AuxiliaryWork::IncrementalVacuum => incremental_vacuum_waiting,
         AuxiliaryWork::OnlineBackup => online_backup_waiting,
     };
     let order = match next {
-        AuxiliaryWork::MigrationSql => [
-            AuxiliaryWork::MigrationSql,
+        AuxiliaryWork::ExactSql => [
+            AuxiliaryWork::ExactSql,
             AuxiliaryWork::IncrementalVacuum,
             AuxiliaryWork::OnlineBackup,
         ],
         AuxiliaryWork::IncrementalVacuum => [
             AuxiliaryWork::IncrementalVacuum,
             AuxiliaryWork::OnlineBackup,
-            AuxiliaryWork::MigrationSql,
+            AuxiliaryWork::ExactSql,
         ],
         AuxiliaryWork::OnlineBackup => [
             AuxiliaryWork::OnlineBackup,
-            AuxiliaryWork::MigrationSql,
+            AuxiliaryWork::ExactSql,
             AuxiliaryWork::IncrementalVacuum,
         ],
     };

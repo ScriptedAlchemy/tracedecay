@@ -72,7 +72,7 @@ pub(super) async fn query_has_rows(
     conn: &impl QueryExecutor,
     query: &str,
 ) -> tracedecay_runtime_core::errors::Result<bool> {
-    // Existence only — but the migration SQL channel materializes a whole
+    // Existence only — but the exact SQL channel materializes a whole
     // result set before handing back the first row, and caps that at
     // MAX_QUERY_ROWS. An audit query matching more violations than the cap
     // therefore failed the entire invariant pass with a materialization-limit

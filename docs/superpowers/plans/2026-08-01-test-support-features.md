@@ -104,7 +104,7 @@ while every test target in that crate does. This is the pattern
 | `src/db/engine/mod.rs` | 9, 22 | `mod test_support`, `pub use test_support::TestConnection` |
 | `src/db/engine/connection.rs` | 9 | `use super::Statement` |
 | `src/db/engine/connection.rs` | 21, 23, 27 | `Runtime::{validate, last_insert_rowid, begin_deferred}` decls |
-| `src/db/engine/connection.rs` | 54, 59, 73 | same three impls for `MigrationSqlHandle` |
+| `src/db/engine/connection.rs` | 54, 59, 73 | same three impls for `ExactSqlHandle` |
 | `src/db/engine/connection.rs` | 187, 197 | `Connection::{prepare, last_insert_rowid}` |
 | `src/db/engine/connection.rs` | 218, 229 | `Connection::transaction`, the `Deferred` match arm |
 | `src/db/engine/transaction.rs` | 17 | `TransactionBehavior::Deferred` variant |

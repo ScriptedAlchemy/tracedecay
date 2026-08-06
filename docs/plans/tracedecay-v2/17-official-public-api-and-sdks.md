@@ -11,21 +11,20 @@ retained Rust SDK for native consumers, with no Python package.
 
 Earlier operation inventories, compatibility matrices, generated declarations,
 package fixtures, and conformance packets are historical evidence, not
-prerequisites or artifacts that PR18 must recreate. Published operation names,
-wire schemas, SDK APIs, and persisted cursors or receipts remain compatibility
-contracts; all other retention is judged by the direct cross-language,
+prerequisites or artifacts that PR18 must recreate. Only actually
+independently released public operation names, wire schemas, and SDK APIs may
+retain protocol compatibility. Persisted cursors and receipts use the V2
+fresh-store rule; all other retention is judged by the direct cross-language,
 lifecycle, platform, and regression behavior below.
 
 PR18's first Rust and TypeScript package shapes are not yet published;
 branch acceptance and generated schemas do not create an older supported SDK
-contract. Pure request/response APIs change in place only when they have not
-potentially reached an independently deployed dogfood client or host
-installation. Potentially deployed shapes retain negotiation/conformance until
-an authorized installed-client/host census proves absence. Persisted cursors,
-idempotency keys, journals, checkpoints, and receipts may already exist through
-dogfood and retain backward-read/recovery until a separately authorized
-registered-store/profile census proves absence. Public package compatibility
-starts at the first evidenced publication.
+contract. Branch-local V2 request/response APIs change in place. Persisted
+cursors, idempotency keys, journals, checkpoints, and receipts accept only
+their exact final shape; any other database, store, spool, file, or projection
+returns typed `ResetRequired` and requires explicit reset or recreation. No
+storage reader, migration, backfill, dual write, or census path exists. Public
+package protocol compatibility starts only at an actual independent release.
 
 ## User outcome
 
@@ -104,10 +103,9 @@ when their syntax is idiomatic to the surface.
 ### Compatibility and lifecycle behavior
 
 Each accepted operation proves semantic and lifecycle parity across CLI, MCP,
-HTTP, Rust, and TypeScript. Compatibility with an older shape is tested
-when release evidence, an independently deployed dogfood client, or a live host
-installation establishes that shape; potentially deployed shapes remain in
-conformance until an authorized installed-client/host census proves absence.
+HTTP, Rust, and TypeScript. Compatibility with an older shape is tested when
+actual independent release evidence establishes that public protocol shape;
+the documented release support policy governs its conformance.
 Conformance covers supported syntax,
 protocol/capability range, required authorization, paging or stream shape,
 retry class, cancellation support, reconnect/resume behavior, stable errors,
@@ -118,11 +116,9 @@ requirement or acceptance artifact.
 After the first evidenced publication, additive changes within a major
 protocol version preserve compatibility and breaking changes negotiate a new
 major version with an actionable error. Before publication, a transient
-request/response API changes in place only when it has not potentially reached
-an independently deployed dogfood client or host installation; otherwise
-negotiation/conformance remains until the installed-client/host census. The
-potentially persisted cursors, keys, journals, checkpoints, and receipts remain
-governed by the registered-store census rule above.
+request/response API changes in place. Persisted V2 state accepts only its
+exact final shape; any other shape returns `ResetRequired` and requires
+explicit reset or recreation, never a reader or conversion.
 The policy retains the full required/optional field, default, nullability, open
 object, union/enum, numeric narrowing, identifier, error, stream-event, cursor,
 operation rename/removal, retry-class, and capability-removal behavior.
@@ -194,11 +190,10 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
 - Choose public names and request/response shapes at the daemon application
   boundary for every supported operation, including all PR12 base families and
   the accepted PR17 additions.
-- Preserve names proven on `origin/master` or in a published package/release as
+- Preserve names proven by an actual independent public release as
   compatibility aliases that delegate to the canonical operation. Pure
-  source-only names are replaced in place; branch-era callable names remain
-  until a separately authorized installed-client/host census proves absence.
-  A compatibility name may translate syntax but
+  source-only and branch-era callable names are replaced in place. A
+  compatibility name may translate syntax but
   owns no readiness, scoring, routing, scheduling, provider selection,
   storage, or lifecycle logic.
 - Define pagination cursors, stream events, cancellation and retry classes,
@@ -240,9 +235,9 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
 ## Replacement and deletion
 
 PR18 removes source-only temporary PR17 spellings directly. Callable PR17
-spellings potentially retained by dogfood clients or host files remain aliases
-until an authorized installed-client/host census proves absence; branch
-sequencing alone creates no public compatibility window.
+spellings change in place unless release or live-host evidence establishes a
+predecessor; aliases then follow that explicit compatibility disposition.
+Branch sequencing alone creates no public compatibility window.
 It also removes duplicate surface-specific models, generated-type-only sample
 packages, and any SDK-side business or retry decision that competes with the
 daemon. Stable compatibility aliases remain thin delegates.

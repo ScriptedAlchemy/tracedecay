@@ -86,8 +86,8 @@ impl DaemonHandshake {
 /// Version of this tracedecay binary, advertised in daemon handshakes and
 /// compared against peers to detect stale daemons after `tracedecay update`.
 ///
-/// This is the build version, not the released one: two dogfood builds of the
-/// same release differ only by commit, and a daemon left running from the
+/// This is the build version, not the released one: two checkout builds of
+/// the same release differ only by commit, and a daemon left running from the
 /// previous build is exactly the skew this comparison exists to catch.
 pub(crate) fn binary_version() -> &'static str {
     crate::version::build_version()

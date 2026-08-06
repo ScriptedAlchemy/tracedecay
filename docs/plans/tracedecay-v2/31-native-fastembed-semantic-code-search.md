@@ -10,12 +10,13 @@ results become immutable runtime prerequisites for semantic composition.
 
 PR9 baseline/profile and generation versions are reproducibility identities,
 not evidence that a predecessor wire contract shipped. Pure source-only/internal
-PR9/PR10 request helpers change in place. Wire-visible request revisions retain
-negotiation until an authorized installed-client/host census proves absence.
-Index/profile manifests, generations, model bindings, and activation receipts
-are persisted and may exist in dogfood stores; compatibility readers and
-migration/rebuild recovery remain required until the registered-store census
-proves absence.
+PR9/PR10 request helpers, wire-visible V2 request revisions, index/profile
+manifests, generations, model bindings, and activation receipts change in
+place. Only their exact final persisted shape is accepted; any other database,
+store, spool, file, or projection returns typed `ResetRequired` and requires
+explicit reset or recreation. No storage reader, migration, backfill, dual
+write, or census path exists. Public protocol compatibility is separate and
+requires actual independent release evidence.
 
 **Operational qualification (2026-07-27).** The callable semantic machinery
 does not mean the live profile is currently serving semantic results. Semantic
@@ -428,7 +429,7 @@ measurements.
   The enclosing response may add only a typed semantic/rerank outcome outside
   that subpayload, its digest, and cursor identity; strict mode fails closed.
 
-## Plan 15 evaluation handoff and migration
+## Plan 15 evaluation handoff and fresh-store reset
 
 PR10 ships a versioned sanitized corpus covering exact names, natural-language
 intent, mixed queries, renamed symbols, same-name cross-scope cases, no-answer
@@ -453,9 +454,9 @@ and zero-recall-query gates under immutable-generation compatibility. No HNSW,
 DiskANN, ScaNN, vector database, precision, or quantization choice is
 mandatory. Public benchmark rank cannot select a production profile.
 
-Legacy vectors are never trusted or republished. Migration records
-`rebuild_from_retained_eligible_code | drop_with_receipt | quarantine_unreadable`
-and proves every active generation was rebuilt from canonical documents.
+Non-final vectors are never trusted, republished, or converted. They return
+`ResetRequired`; an operator explicitly resets or recreates the generation from
+current canonical documents without using the old vector as input.
 
 ## Current delivery audit
 
@@ -582,14 +583,14 @@ and normal CI.
    cold offline rollback. Direct regressions cover hydration, authorization,
    privacy-domain isolation, activation, and rollback.
 6. **Developer evaluation:** use reproducible checked-in Linux workloads,
-   rebuild-only migration, exact-flat oracle comparisons, focused
+   explicit reset/recreation checks, exact-flat oracle comparisons, focused
    channel/fusion/calibration/rerank ablations, privacy/non-interference checks,
    and current/10x resource observations. Optional ANN and reranker branches
    begin only after the exact-flat shadow checkpoint and cannot enter the
    critical path without a passing comparison.
 7. **Activation and verification:** only a passing Plan 15 result may make
    semantics eligible for the existing configuration activation. Run staged
-   shadow/cohort behavior, rollback, migration, privacy, architecture, direct
+   shadow/cohort behavior, rollback, fresh-store reset, privacy, architecture, direct
    tests, Linux evaluation, and normal all-feature cross-platform CI. Status
    and Doctor behavior are exercised through the production lifecycle states;
    activation still requires the remaining evaluation and indexing evidence.
@@ -642,7 +643,7 @@ eligible.
 PR10 is complete when semantic projection, atomic publication, PR9-preserving
 search, bounded generic fusion/reranking/redundancy, artifact/offline lifecycle,
 configuration, production status/Doctor behavior, corpus/resource/privacy
-tests, fault recovery, rollback, rebuild-only migration, the Linux developer
+tests, fault recovery, rollback, explicit reset/recreation, the Linux developer
 evaluation, and normal CI pass. PR11/PR12/PR14 still own application, public
 transport, and dashboard adapters. No separate
 semantic endpoint, vector database, browser inference runtime, or model-specific

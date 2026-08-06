@@ -22,7 +22,7 @@ impl StoreRuntimeHandle {
         }
 
         let authority = self.database_authority("authorize graph metadata")?;
-        let handle = self.authorized_migration_sql_handle(authority)?;
+        let handle = self.authorized_exact_sql_handle(authority)?;
 
         Ok(GraphRuntimeMetadata {
             _runtime: self,

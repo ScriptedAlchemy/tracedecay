@@ -427,7 +427,7 @@ pub async fn install_final_graph_memory_schema(
     crate::db::migrations::create_schema_connection(connection).await?;
     let transaction = connection.authorized_long_lease_transaction().await?;
     transaction
-        .execute_schema_batch_step(&format!(
+        .execute_authority_revalidated_batch(&format!(
             "{SEMANTIC_VECTOR_GRAPH_SCHEMA_V2}
              PRAGMA application_id = 1413760818;
              PRAGMA user_version = 1;",

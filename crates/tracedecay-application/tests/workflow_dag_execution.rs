@@ -12,11 +12,11 @@ use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
     AttemptId, ManifestDigest, ProjectId, ProviderId, RunId, TaskId, UtcMicros, WorkArtifactId,
     WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId, WorkProviderBackendV1,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinition,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinition, WorkflowDefinitionId,
     WorkflowOperationRef, WorkflowOutputArtifact, WorkflowOutputName, WorkflowOutputReference,
-    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEventContext,
-    WorkflowRunEvent, WorkflowRunProjection, WorkflowRunStatus, WorkflowStepEffectOutcome,
-    WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepOutput, WorkflowStep,
+    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,
+    WorkflowRunProjection, WorkflowRunStatus, WorkflowStep, WorkflowStepEffectOutcome,
+    WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepOutput,
 };
 
 fn id<T>(value: &str) -> T
@@ -101,16 +101,12 @@ struct MemoryRunStorage {
 }
 
 impl WorkflowRunStoragePort for MemoryRunStorage {
-    fn projection(
-        &self,
-        run_id: &RunId,
-    ) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
+    fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
         let events = self.events.lock().unwrap();
         let history = events
             .get(run_id)
             .ok_or(WorkflowRunStorageError::NotFound)?;
-        WorkflowRunProjection::rebuild(history)
-            .map_err(|_| WorkflowRunStorageError::InvalidHistory)
+        WorkflowRunProjection::rebuild(history).map_err(|_| WorkflowRunStorageError::InvalidHistory)
     }
 
     fn append(

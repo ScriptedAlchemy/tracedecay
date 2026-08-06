@@ -5,7 +5,6 @@ const DASHBOARD_EVENT_NAMES = [
   'heartbeat',
   'project_registry',
   'storage_telemetry',
-  'code_index',
   // Live agent activity, coalesced server-side to at most 2/s per family per
   // project. Named events are opt-in, so a new family must be listed here.
   'hook_activity',

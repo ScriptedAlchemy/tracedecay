@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn mutating_no_argument_pragmas_are_denied() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
     for pragma in [
         "PRAGMA cache_flush",
@@ -15,7 +15,7 @@ fn mutating_no_argument_pragmas_are_denied() {
         assert!(
             matches!(
                 error,
-                MigrationSqlError::Sqlite {
+                ExactSqlError::Sqlite {
                     code: Some(23),
                     extended_code: Some(23),
                     ..
@@ -29,7 +29,7 @@ fn mutating_no_argument_pragmas_are_denied() {
 #[test]
 fn connection_local_memory_release_pragma_is_allowed() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
     channel
         .execute_batch("PRAGMA shrink_memory".to_owned())
@@ -37,9 +37,9 @@ fn connection_local_memory_release_pragma_is_allowed() {
 }
 
 #[test]
-fn migration_read_policy_allows_integrity_diagnostic_arguments() {
+fn exact_sql_read_policy_allows_integrity_diagnostic_arguments() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch("CREATE TABLE pragma_probe (value INTEGER)".to_owned())
         .unwrap();
@@ -53,7 +53,7 @@ fn migration_read_policy_allows_integrity_diagnostic_arguments() {
         let rows = transaction.query(statement(pragma, vec![])).unwrap();
         assert_eq!(
             rows.rows[0].values,
-            vec![MigrationSqlValue::Text("ok".to_owned())],
+            vec![ExactSqlValue::Text("ok".to_owned())],
             "{pragma} must remain classified as a read-only diagnostic"
         );
     }
@@ -62,7 +62,7 @@ fn migration_read_policy_allows_integrity_diagnostic_arguments() {
         .unwrap();
     assert_eq!(
         table_info.rows[0].values[1],
-        MigrationSqlValue::Text("value".to_owned())
+        ExactSqlValue::Text("value".to_owned())
     );
     transaction.rollback().unwrap();
 }

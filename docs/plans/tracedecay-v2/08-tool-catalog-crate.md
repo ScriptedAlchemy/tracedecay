@@ -106,17 +106,14 @@ duplicating business logic.
 - **PR11 — daemon:** bind each executable capability to the single tracedecayd/application authority. Catalog consumers never open a database or bypass application authorization.
 - **PR11 — profiles:** define explicit capability sets and hard ceilings for default, compact, administrative, and host-limited surfaces. Absence is explicit, not a hidden fallback.
 - **PR11 — compatibility:** retain a deprecated name as a `SurfaceBinding`
-  when `origin/master`, a published package/release, an independently deployed
-  client, or a live host installation proves a supported caller; a direct
-  compatibility test alone is not release evidence. Pure source-only names are
-  replaced in place. A branch-era callable name that may have reached dogfood
-  clients or installed host files remains a binding until a separately
-  authorized installed-host/profile census proves absence. Until then it
-  delegates to the canonical operation or returns an actionable negotiated
-  upgrade result, never a generic unknown-operation response. After
-  census-authorized retirement it behaves as an ordinary unknown name;
-  authorized callers may use ordinary discovery guidance. No retired-name
-  tombstone registry or compatibility ledger exists.
+  only when actual independent public release evidence proves a supported
+  caller; a direct compatibility test alone is not release evidence. Pure
+  source-only names are replaced in place, as are branch-era V2 callable names.
+  A binding survives only for that released public protocol; it delegates to
+  the canonical operation or returns an actionable negotiated upgrade result,
+  never a generic unknown-operation response. After retirement it behaves as
+  an ordinary unknown name; authorized callers may use ordinary discovery
+  guidance. No retired-name tombstone registry or compatibility ledger exists.
 - **PR12 — bindings:** map CLI commands, MCP tools, HTTP operations, and LSP
   methods to the same CapabilityId and typed application handler where the
   protocol exposes a callable product operation. Dashboard binding, dashboard

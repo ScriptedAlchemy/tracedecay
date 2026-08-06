@@ -601,7 +601,6 @@ impl CommandFamily {
             | Commands::HookUserSessionReview => Self::Hook,
             Commands::Upgrade { .. }
             | Commands::Update { .. }
-            | Commands::Dogfood
             | Commands::PostUpdate { .. }
             | Commands::PackageHook { .. }
             | Commands::Channel { .. } => Self::Update,
@@ -1162,22 +1161,15 @@ async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Resul
         } => {
             update_cmd::run_update_command(no_heal, no_reinstall)?;
         }
-        Commands::Dogfood => {
-            update_cmd::run_dogfood_command()?;
-        }
         Commands::PostUpdate {
             no_heal,
             no_reinstall,
             lifecycle_lease_token,
-            strict,
-            mode,
         } => {
             update_cmd::run_post_update_command(
                 no_heal,
                 no_reinstall,
                 lifecycle_lease_token.as_deref(),
-                strict,
-                mode,
             )
             .await?;
         }
@@ -1350,7 +1342,6 @@ impl CommandStartupPolicy {
             | Commands::HostBundle { .. }
             | Commands::Upgrade { .. }
             | Commands::Update { .. }
-            | Commands::Dogfood
             | Commands::PostUpdate { .. }
             | Commands::PackageHook { .. }
             | Commands::Uninstall { .. }

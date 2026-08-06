@@ -292,7 +292,7 @@ window.
 
 ## Local development
 
-For checkout dogfooding, install the generated Cursor projection after edits:
+For local development, install the generated Cursor projection after edits:
 
 ```bash
 tracedecay install --agent cursor

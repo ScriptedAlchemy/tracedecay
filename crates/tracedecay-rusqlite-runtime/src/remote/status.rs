@@ -32,14 +32,14 @@ impl RemoteSqliteStorageV1 {
 }
 
 fn count(
-    row: &crate::migration_sql::MigrationSqlRow,
+    row: &crate::exact_sql::ExactSqlRow,
     index: usize,
 ) -> Result<u64, RemoteSqliteStorageErrorV1> {
     match row.values.get(index) {
-        Some(MigrationSqlValue::Integer(value)) => {
+        Some(ExactSqlValue::Integer(value)) => {
             u64::try_from(*value).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
         }
-        Some(MigrationSqlValue::Null) => Ok(0),
+        Some(ExactSqlValue::Null) => Ok(0),
         _ => Err(RemoteSqliteStorageErrorV1::Corruption),
     }
 }

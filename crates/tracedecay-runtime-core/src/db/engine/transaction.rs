@@ -3,8 +3,8 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use tracedecay_rusqlite_runtime::migration_sql::{
-    MigrationSqlAttachment, MigrationSqlTransaction as RuntimeTransaction,
+use tracedecay_rusqlite_runtime::exact_sql::{
+    ExactSqlAttachment, ExactSqlTransaction as RuntimeTransaction,
 };
 
 use super::{
@@ -62,8 +62,7 @@ impl Transaction {
         let filename = path.to_str().ok_or_else(|| {
             super::Error::invalid_operation("SQLite attachment path is not valid UTF-8")
         })?;
-        let attachment =
-            MigrationSqlAttachment::new(filename.to_owned(), database_name.to_owned())?;
+        let attachment = ExactSqlAttachment::new(filename.to_owned(), database_name.to_owned())?;
         tokio::task::spawn_blocking(move || {
             lock_runtime(&runtime)?
                 .as_ref()
@@ -116,16 +115,16 @@ impl Transaction {
         .map_err(join_error)?
     }
 
-    /// Executes one separately authorized schema batch without the ordinary
+    /// Executes one separately authorized authority-revalidated batch without the ordinary
     /// statement deadline.
-    pub async fn execute_schema_batch_step(&self, sql: &str) -> Result<()> {
+    pub async fn execute_authority_revalidated_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
         tokio::task::spawn_blocking(move || {
             lock_runtime(&runtime)?
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
-                .execute_schema_batch_step(sql)
+                .execute_authority_revalidated_batch(sql)
                 .map(|_| ())
                 .map_err(super::Error::from)
         })
@@ -180,19 +179,19 @@ impl Transaction {
 fn lock_runtime<T>(runtime: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
     runtime
         .lock()
-        .map_err(|_| super::Error::Runtime("migration SQL transaction lock poisoned".to_owned()))
+        .map_err(|_| super::Error::Runtime("exact SQL transaction lock poisoned".to_owned()))
 }
 
 fn join_error(error: tokio::task::JoinError) -> super::Error {
-    super::Error::Runtime(format!("migration SQL transaction task failed: {error}"))
+    super::Error::Runtime(format!("exact SQL transaction task failed: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use tracedecay_rusqlite_runtime::migration_sql::{
-        MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+    use tracedecay_rusqlite_runtime::exact_sql::{
+        ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
     };
 
     use super::{
@@ -202,8 +201,8 @@ mod tests {
 
     struct AllowWrites;
 
-    impl MigrationSqlWriteAuthority for AllowWrites {
-        fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+    impl ExactSqlWriteAuthority for AllowWrites {
+        fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
             Ok(())
         }
     }
@@ -220,11 +219,11 @@ mod tests {
         let Err(Error::Runtime(message)) = result else {
             panic!("poisoned transaction lock must return a runtime error");
         };
-        assert_eq!(message, "migration SQL transaction lock poisoned");
+        assert_eq!(message, "exact SQL transaction lock poisoned");
     }
 
     #[tokio::test]
-    async fn only_long_lease_transaction_exposes_long_schema_steps() {
+    async fn only_long_lease_transaction_exposes_authority_revalidated_batches() {
         let directory = tempfile::TempDir::new().unwrap();
         let connection = TestConnection::open_with_write_authority(
             &directory.path().join("engine.sqlite3"),
@@ -233,7 +232,7 @@ mod tests {
         let ordinary = connection.transaction().await.unwrap();
 
         let error = ordinary
-            .execute_schema_batch_step("CREATE TABLE forbidden (id INTEGER)")
+            .execute_authority_revalidated_batch("CREATE TABLE forbidden (id INTEGER)")
             .await
             .unwrap_err();
 
@@ -245,7 +244,7 @@ mod tests {
             .await
             .unwrap();
         long_lease
-            .execute_schema_batch_step("CREATE TABLE allowed (id INTEGER)")
+            .execute_authority_revalidated_batch("CREATE TABLE allowed (id INTEGER)")
             .await
             .unwrap();
         long_lease.commit().await.unwrap();

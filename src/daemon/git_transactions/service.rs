@@ -127,7 +127,9 @@ where
         &self,
         input: GitIndexPreviewInputV1,
     ) -> Result<(), GitIndexTransactionPortError> {
-        self.store.save_preview_input(input).map_err(map_store_error)
+        self.store
+            .save_preview_input(input)
+            .map_err(map_store_error)
     }
 
     pub(crate) fn read_preview_input(

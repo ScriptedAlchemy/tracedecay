@@ -14,21 +14,22 @@ Both use one runtime authority.
 
 Earlier runtime type/file inventories, operation registries, fixture corpora,
 phase names, and packet gates are historical evidence, not prerequisites or
-features that PR17 must recreate. Published operations and persisted
-definition, run, attempt, effect, and receipt records retain compatibility and
-migration obligations; all other retention is judged by the direct runtime,
+features that PR17 must recreate. Only actually independently released public
+operations retain protocol compatibility. Persisted definition, run, attempt,
+effect, and receipt records use the fresh-store rule; all other retention is
+judged by the direct runtime,
 provider, recovery, platform, and regression behavior below.
 
 No Plan 32 workflow/lease/attempt contract is established on `origin/master` or
 in a published package/release. Pure source-only/internal request helpers take
-their final shape in place. Wire-visible request revisions retain negotiation
-until an authorized installed-client/host census proves absence. Definition,
-run, lease, attempt, effect, journal, and receipt records are persisted product
-data and may exist in dogfood stores; their
-backward-read/migration/recovery obligations remain fail-closed until the
-registered-store census proves absence. Definition and authority versions
-below remain product-data history and fencing identities, not by themselves
-evidence that a second wire-contract version shipped.
+their final shape in place, as do wire-visible V2 request revisions and
+branch-local V2 definition, run, lease, attempt, effect, journal, and receipt
+records. Only their exact final persisted shape is accepted; any other
+database, store, spool, file, or projection returns typed `ResetRequired` and
+requires explicit reset or recreation. No storage reader, migration, backfill,
+dual write, or census path exists. Definition and authority versions below
+remain product-data history and fencing identities, not by themselves evidence
+that a second public wire-contract version shipped.
 
 ## Decision
 
@@ -410,10 +411,9 @@ shadow gate counts as delivery.
   fixture corpora, generated provider/catalog registries, declaration parity,
   and repeated authority prose.
 - Keep every capability above in the production loop. Compatibility aliases
-  backed by release evidence or retained pending the installed-client/host
-  census delegate to canonical operations and own no logic. Pure source-only
-  aliases are removed in place; branch-era callable aliases remain until the
-  census proves absence. PR18 freezes rather than invents lifecycle behavior.
+  backed by actual independent release evidence delegate to canonical
+  operations and own no logic. Pure source-only and branch-era callable aliases
+  are removed in place. PR18 freezes rather than invents lifecycle behavior.
 
 ## Direct acceptance
 

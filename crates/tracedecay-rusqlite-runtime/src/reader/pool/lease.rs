@@ -20,7 +20,7 @@ use super::outcome::{ReaderAcquireError, interruption, map_worker_error, validat
 use super::{
     AvailableWorker, DEFERRED_SNAPSHOT_END_LIMIT, PoolInner, ReaderLane, SNAPSHOT_END_GRACE,
 };
-use crate::migration_sql::{MigrationSqlError, MigrationSqlRows, MigrationSqlStatement};
+use crate::exact_sql::{ExactSqlError, ExactSqlRows, ExactSqlStatement};
 
 struct Checkout<E: ReaderQueryExecutor> {
     inner: Arc<PoolInner<E>>,
@@ -160,12 +160,12 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             .map_err(map_worker_error)
     }
 
-    pub(super) fn execute_migration_query(
+    pub(super) fn execute_exact_sql_query(
         &mut self,
-        statement: MigrationSqlStatement,
-    ) -> Result<MigrationSqlRows, MigrationSqlError> {
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
         if self.snapshot_active {
-            return Err(MigrationSqlError::ReaderUnavailable(
+            return Err(ExactSqlError::ReaderUnavailable(
                 ReaderWorkerError::SnapshotAlreadyActive.to_string(),
             ));
         }
@@ -173,17 +173,17 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             .worker
             .client
             .begin()
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         self.snapshot_active = true;
         self.checkout
             .worker
             .client
-            .execute_migration_query(statement)
+            .execute_exact_sql_query(statement)
     }
 
-    pub(super) fn begin_migration_snapshot(&mut self) -> Result<(), MigrationSqlError> {
+    pub(super) fn begin_exact_sql_snapshot(&mut self) -> Result<(), ExactSqlError> {
         if self.snapshot_active {
-            return Err(MigrationSqlError::ReaderUnavailable(
+            return Err(ExactSqlError::ReaderUnavailable(
                 ReaderWorkerError::SnapshotAlreadyActive.to_string(),
             ));
         }
@@ -191,24 +191,24 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             .worker
             .client
             .begin()
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         self.snapshot_active = true;
-        self.checkout.worker.client.pin_migration()
+        self.checkout.worker.client.pin_exact_sql()
     }
 
-    pub(super) fn execute_active_migration_query(
+    pub(super) fn execute_active_exact_sql_query(
         &mut self,
-        statement: MigrationSqlStatement,
-    ) -> Result<MigrationSqlRows, MigrationSqlError> {
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
         if !self.snapshot_active {
-            return Err(MigrationSqlError::ReaderUnavailable(
+            return Err(ExactSqlError::ReaderUnavailable(
                 ReaderWorkerError::SnapshotNotActive.to_string(),
             ));
         }
         self.checkout
             .worker
             .client
-            .execute_migration_query(statement)
+            .execute_exact_sql_query(statement)
     }
 
     pub(super) fn read_store_size(

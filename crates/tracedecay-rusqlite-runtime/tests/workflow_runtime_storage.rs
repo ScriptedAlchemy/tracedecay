@@ -10,9 +10,9 @@ use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProviderId, RepositoryId, RunId, TaskId, ThreadId,
     UtcMicros, WorkCommandId, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkflowDefinitionId, WorkflowDefinition, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEventContext,
-    WorkflowRunEvent, WorkflowStepId, WorkflowStep, WorktreeId, canonical_sha256,
+    WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
+    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,
+    WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::workflow::{
     WorkflowSqliteAuthority, WorkflowSqliteAuthorityBuildError,

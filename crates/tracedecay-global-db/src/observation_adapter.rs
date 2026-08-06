@@ -729,7 +729,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore<'_> {
     ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
         let handle = self
             .runtime
-            .authorized_migration_sql_handle(self.write_authority.clone())
+            .authorized_exact_sql_handle(self.write_authority.clone())
             .map_err(|error| {
                 projection_runtime_error(runtime_storage_error(
                     "project observation",
@@ -763,7 +763,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore<'_> {
     ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
         let handle = self
             .runtime
-            .authorized_migration_sql_handle(self.write_authority.clone())
+            .authorized_exact_sql_handle(self.write_authority.clone())
             .map_err(|error| {
                 projection_runtime_error(runtime_storage_error(
                     "rebuild observation projection",

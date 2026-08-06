@@ -164,8 +164,8 @@ pub(super) async fn ensure_registered_project_route(
 /// that admits strictly less than the resolver behind it therefore refuses
 /// projects whose data is entirely intact.
 ///
-/// That is exactly what strands a profile parked at a forward-only migration
-/// boundary: forward recovery can bring the daemon up on a fresh registry while
+/// That is exactly what strands a profile after an interrupted migration:
+/// recovery can bring the daemon up on a fresh registry while
 /// every project keeps its in-repo enrollment marker and its profile store, and
 /// the first daemon-brokered call — including the post-update startup-health
 /// probe, which cannot pass `allow_init` — was rejected as "not enrolled". The

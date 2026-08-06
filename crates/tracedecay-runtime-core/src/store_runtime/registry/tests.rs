@@ -308,16 +308,16 @@ async fn epochs_are_monotonic_across_registries_and_respect_a_retained_floor() {
 }
 
 #[test]
-fn migration_sql_authority_rechecks_opened_file_identity() {
-    use tracedecay_rusqlite_runtime::migration_sql::{
-        MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+fn exact_sql_authority_rechecks_opened_file_identity() {
+    use tracedecay_rusqlite_runtime::exact_sql::{
+        ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
     };
 
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("identity.db");
     std::fs::write(&database_path, []).unwrap();
     let authority =
-        crate::db::DatabaseAuthority::acquire_test(&database_path, "migration SQL identity test")
+        crate::db::DatabaseAuthority::acquire_test(&database_path, "exact SQL identity test")
             .unwrap();
     let current_identity = crate::db::sqlite_generation_identity(&database_path).unwrap();
     let authority = RuntimeDatabaseWriteAuthority {
@@ -327,8 +327,8 @@ fn migration_sql_authority_rechecks_opened_file_identity() {
     };
 
     assert!(matches!(
-        MigrationSqlWriteAuthority::verify(&authority, MigrationSqlWriteIntent::Execute),
-        Err(MigrationSqlError::AuthorityDenied(message))
+        ExactSqlWriteAuthority::verify(&authority, ExactSqlWriteIntent::Execute),
+        Err(ExactSqlError::AuthorityDenied(message))
             if message == "database file identity changed after registry attachment"
     ));
 }

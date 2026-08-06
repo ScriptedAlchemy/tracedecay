@@ -136,13 +136,13 @@ impl WorkAttemptPersistencePort for WorkSqliteStorage {
 pub(crate) fn attempt_params_owned(
     authority: &WorkAuthority,
     identity: &WorkAttemptIdentityV1,
-) -> Vec<MigrationSqlValue> {
+) -> Vec<ExactSqlValue> {
     authority_params_owned(authority)
         .into_iter()
         .chain([
-            MigrationSqlValue::Text(identity.task_id().as_str().to_owned()),
-            MigrationSqlValue::Text(identity.run_id().as_str().to_owned()),
-            MigrationSqlValue::Text(identity.attempt_id().as_str().to_owned()),
+            ExactSqlValue::Text(identity.task_id().as_str().to_owned()),
+            ExactSqlValue::Text(identity.run_id().as_str().to_owned()),
+            ExactSqlValue::Text(identity.attempt_id().as_str().to_owned()),
         ])
         .collect()
 }
@@ -170,7 +170,7 @@ pub(crate) fn load_registered_attempt_snapshot(
     let Some(row) = rows.rows.first() else {
         return Ok(None);
     };
-    let payload = migration_text(&row.values, 0).ok_or(AttemptStoreError::Unavailable)?;
+    let payload = exact_sql_text(&row.values, 0).ok_or(AttemptStoreError::Unavailable)?;
     let attempt = decode_attempt(payload)?;
     if attempt.identity() != identity {
         return Err(AttemptStoreError::Unavailable);
@@ -201,11 +201,11 @@ pub(crate) fn load_registered_attempt_history(
     .map_err(|_| AttemptStoreError::Unavailable)?;
     let mut history = Vec::new();
     for row in rows.rows {
-        let revision = migration_integer(&row.values, 0).ok_or(AttemptStoreError::Unavailable)?;
+        let revision = exact_sql_integer(&row.values, 0).ok_or(AttemptStoreError::Unavailable)?;
         if usize::try_from(revision).ok() != Some(history.len() + 1) {
             return Err(AttemptStoreError::Unavailable);
         }
-        let payload = migration_text(&row.values, 1).ok_or(AttemptStoreError::Unavailable)?;
+        let payload = exact_sql_text(&row.values, 1).ok_or(AttemptStoreError::Unavailable)?;
         let attempt = decode_attempt(payload)?;
         if attempt.identity() != identity {
             return Err(AttemptStoreError::Unavailable);
@@ -222,7 +222,7 @@ pub(crate) fn load_registered_attempt_history(
 }
 
 pub(crate) fn registered_recovery_candidates(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     authority: &WorkAuthority,
 ) -> AttemptStoreResult<Vec<WorkAttemptV1>> {
     let rows = registered_work_query(
@@ -242,14 +242,14 @@ pub(crate) fn registered_recovery_candidates(
     rows.rows
         .into_iter()
         .map(|row| {
-            let payload = migration_text(&row.values, 0).ok_or(AttemptStoreError::Unavailable)?;
+            let payload = exact_sql_text(&row.values, 0).ok_or(AttemptStoreError::Unavailable)?;
             decode_attempt(payload)
         })
         .collect()
 }
 
 pub(crate) fn append_registered_attempt(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     authority: &WorkAuthority,
     command_id: &WorkCommandId,
     input_digest: &ManifestDigest,
@@ -357,17 +357,17 @@ pub(crate) fn load_registered_attempt_idempotency(
            AND command_id = ?6",
         authority_params_owned(authority)
             .into_iter()
-            .chain([MigrationSqlValue::Text(command_id.to_owned())])
+            .chain([ExactSqlValue::Text(command_id.to_owned())])
             .collect(),
     )
     .map_err(|_| AttemptStoreError::Unavailable)?;
     let Some(row) = rows.rows.first() else {
         return Ok(None);
     };
-    let digest = migration_text(&row.values, 0)
+    let digest = exact_sql_text(&row.values, 0)
         .ok_or(AttemptStoreError::Unavailable)?
         .to_owned();
-    let payload = migration_text(&row.values, 1)
+    let payload = exact_sql_text(&row.values, 1)
         .ok_or(AttemptStoreError::Unavailable)?
         .to_owned();
     Ok(Some((digest, payload)))
@@ -382,16 +382,14 @@ fn load_artifact_payload(
         "SELECT byte_length, payload
          FROM work_artifact_payloads
          WHERE digest = ?1",
-        vec![MigrationSqlValue::Text(
-            artifact.digest().as_str().to_owned(),
-        )],
+        vec![ExactSqlValue::Text(artifact.digest().as_str().to_owned())],
     )
     .map_err(|_| AttemptStoreError::Unavailable)?;
     let row = rows.rows.first().ok_or(AttemptStoreError::Unavailable)?;
-    let byte_length = migration_integer(&row.values, 0)
+    let byte_length = exact_sql_integer(&row.values, 0)
         .and_then(|value| u64::try_from(value).ok())
         .ok_or(AttemptStoreError::Unavailable)?;
-    let payload = migration_blob(&row.values, 1)
+    let payload = exact_sql_blob(&row.values, 1)
         .ok_or(AttemptStoreError::Unavailable)?
         .to_vec();
     if byte_length != artifact.byte_length()
@@ -404,7 +402,7 @@ fn load_artifact_payload(
 }
 
 fn persist_artifact_payload(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     attempt: &WorkAttemptV1,
     artifact: &WorkArtifactRefV1,
     payload: &[u8],
@@ -420,17 +418,15 @@ fn persist_artifact_payload(
         "SELECT byte_length, payload
          FROM work_artifact_payloads
          WHERE digest = ?1",
-        vec![MigrationSqlValue::Text(
-            artifact.digest().as_str().to_owned(),
-        )],
+        vec![ExactSqlValue::Text(artifact.digest().as_str().to_owned())],
     )
     .map_err(|_| AttemptStoreError::Unavailable)?;
     if let Some(row) = existing.rows.first() {
-        let stored_length = migration_integer(&row.values, 0)
+        let stored_length = exact_sql_integer(&row.values, 0)
             .and_then(|value| u64::try_from(value).ok())
             .ok_or(AttemptStoreError::Unavailable)?;
         let stored_payload =
-            migration_blob(&row.values, 1).ok_or(AttemptStoreError::Unavailable)?;
+            exact_sql_blob(&row.values, 1).ok_or(AttemptStoreError::Unavailable)?;
         return if stored_length == artifact.byte_length() && stored_payload == payload {
             Ok(())
         } else {
@@ -439,16 +435,16 @@ fn persist_artifact_payload(
     }
     transaction
         .execute(
-            migration_statement(
+            exact_sql_statement(
                 "INSERT INTO work_artifact_payloads (digest, byte_length, payload)
                  VALUES (?1, ?2, ?3)",
                 vec![
-                    MigrationSqlValue::Text(artifact.digest().as_str().to_owned()),
-                    MigrationSqlValue::Integer(
+                    ExactSqlValue::Text(artifact.digest().as_str().to_owned()),
+                    ExactSqlValue::Integer(
                         i64::try_from(artifact.byte_length())
                             .map_err(|_| AttemptStoreError::InvalidRequest)?,
                     ),
-                    MigrationSqlValue::Blob(payload.to_vec()),
+                    ExactSqlValue::Blob(payload.to_vec()),
                 ],
             )
             .map_err(|_| AttemptStoreError::Unavailable)?,
@@ -480,15 +476,15 @@ pub(crate) fn validate_registered_attempt_projection(
            AND task_id = ?6",
         authority_params_owned(authority)
             .into_iter()
-            .chain([MigrationSqlValue::Text(
+            .chain([ExactSqlValue::Text(
                 attempt.identity().task_id().as_str().to_owned(),
             )])
             .collect(),
     )
     .map_err(|_| AttemptStoreError::Unavailable)?;
     let row = rows.rows.first().ok_or(AttemptStoreError::Conflict)?;
-    let owner_sequence = migration_integer(&row.values, 0).ok_or(AttemptStoreError::Unavailable)?;
-    let payload = migration_text(&row.values, 1).ok_or(AttemptStoreError::Unavailable)?;
+    let owner_sequence = exact_sql_integer(&row.values, 0).ok_or(AttemptStoreError::Unavailable)?;
+    let payload = exact_sql_text(&row.values, 1).ok_or(AttemptStoreError::Unavailable)?;
     let projection: WorkProjection =
         serde_json::from_str(payload).map_err(|_| AttemptStoreError::Unavailable)?;
     if projection.authority() != authority {
@@ -505,7 +501,7 @@ pub(crate) fn validate_registered_attempt_projection(
 }
 
 pub(crate) fn persist_registered_attempt_event(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
     command_id: &WorkCommandId,
     input_digest: &ManifestDigest,
@@ -515,7 +511,7 @@ pub(crate) fn persist_registered_attempt_event(
     let payload = serde_json::to_string(attempt).map_err(|_| AttemptStoreError::Unavailable)?;
     transaction
         .execute(
-            migration_statement(
+            exact_sql_statement(
                 "INSERT INTO work_attempt_events_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
                     task_id, run_id, attempt_id, revision, command_id, input_digest, attempt_payload
@@ -523,10 +519,10 @@ pub(crate) fn persist_registered_attempt_event(
                 attempt_params_owned(authority, attempt.identity())
                     .into_iter()
                     .chain([
-                        MigrationSqlValue::Integer(to_sql_u64(revision)?),
-                        MigrationSqlValue::Text(command_id.as_str().to_owned()),
-                        MigrationSqlValue::Text(input_digest.as_str().to_owned()),
-                        MigrationSqlValue::Text(payload),
+                        ExactSqlValue::Integer(to_sql_u64(revision)?),
+                        ExactSqlValue::Text(command_id.as_str().to_owned()),
+                        ExactSqlValue::Text(input_digest.as_str().to_owned()),
+                        ExactSqlValue::Text(payload),
                     ])
                     .collect(),
             )
@@ -537,7 +533,7 @@ pub(crate) fn persist_registered_attempt_event(
 }
 
 pub(crate) fn persist_registered_attempt_snapshot(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
     previous: Option<&WorkAttemptV1>,
     attempt: &WorkAttemptV1,
@@ -546,11 +542,11 @@ pub(crate) fn persist_registered_attempt_snapshot(
     let payload = serde_json::to_string(attempt).map_err(|_| AttemptStoreError::Unavailable)?;
     let mut values = attempt_params_owned(authority, attempt.identity());
     values.extend([
-        MigrationSqlValue::Integer(to_sql_u64(revision)?),
-        MigrationSqlValue::Text(attempt.lease().lease_id().as_str().to_owned()),
-        MigrationSqlValue::Integer(to_sql_u64(attempt.lease().epoch().get())?),
-        MigrationSqlValue::Text(attempt_state(attempt.state()).to_owned()),
-        MigrationSqlValue::Text(payload),
+        ExactSqlValue::Integer(to_sql_u64(revision)?),
+        ExactSqlValue::Text(attempt.lease().lease_id().as_str().to_owned()),
+        ExactSqlValue::Integer(to_sql_u64(attempt.lease().epoch().get())?),
+        ExactSqlValue::Text(attempt_state(attempt.state()).to_owned()),
+        ExactSqlValue::Text(payload),
     ]);
     let (sql, values) = match previous {
         None => (
@@ -562,9 +558,9 @@ pub(crate) fn persist_registered_attempt_snapshot(
         ),
         Some(previous) => {
             values.extend([
-                MigrationSqlValue::Integer(to_sql_u64(revision - 1)?),
-                MigrationSqlValue::Text(previous.lease().lease_id().as_str().to_owned()),
-                MigrationSqlValue::Integer(to_sql_u64(previous.lease().epoch().get())?),
+                ExactSqlValue::Integer(to_sql_u64(revision - 1)?),
+                ExactSqlValue::Text(previous.lease().lease_id().as_str().to_owned()),
+                ExactSqlValue::Integer(to_sql_u64(previous.lease().epoch().get())?),
             ]);
             (
                 "UPDATE work_attempt_snapshots_v1
@@ -589,7 +585,7 @@ pub(crate) fn persist_registered_attempt_snapshot(
         }
     };
     let changed = transaction
-        .execute(migration_statement(sql, values).map_err(|_| AttemptStoreError::Unavailable)?)
+        .execute(exact_sql_statement(sql, values).map_err(|_| AttemptStoreError::Unavailable)?)
         .map_err(|_| AttemptStoreError::Unavailable)?;
     if changed.changed_rows != 1 {
         return Err(AttemptStoreError::Conflict);
@@ -598,7 +594,7 @@ pub(crate) fn persist_registered_attempt_snapshot(
 }
 
 pub(crate) fn persist_registered_attempt_artifacts(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
     attempt: &WorkAttemptV1,
     revision: u64,
@@ -607,15 +603,15 @@ pub(crate) fn persist_registered_attempt_artifacts(
         let params = attempt_params_owned(authority, attempt.identity())
             .into_iter()
             .chain([
-                MigrationSqlValue::Text(artifact.artifact_id().as_str().to_owned()),
-                MigrationSqlValue::Text(artifact.digest().as_str().to_owned()),
-                MigrationSqlValue::Integer(to_sql_u64(artifact.byte_length())?),
-                MigrationSqlValue::Integer(to_sql_u64(revision)?),
+                ExactSqlValue::Text(artifact.artifact_id().as_str().to_owned()),
+                ExactSqlValue::Text(artifact.digest().as_str().to_owned()),
+                ExactSqlValue::Integer(to_sql_u64(artifact.byte_length())?),
+                ExactSqlValue::Integer(to_sql_u64(revision)?),
             ])
             .collect();
         let outcome = transaction
             .execute(
-                migration_statement(
+                exact_sql_statement(
                     "INSERT INTO work_attempt_artifacts_v1 (
                         project_id, repository_id, worktree_id, actor_id, policy_digest,
                         task_id, run_id, attempt_id, artifact_id, digest, byte_length, first_revision
@@ -654,9 +650,9 @@ pub(crate) fn persist_registered_attempt_artifacts(
             attempt_params_owned(authority, attempt.identity())
                 .into_iter()
                 .chain([
-                    MigrationSqlValue::Text(artifact.artifact_id().as_str().to_owned()),
-                    MigrationSqlValue::Text(artifact.digest().as_str().to_owned()),
-                    MigrationSqlValue::Integer(to_sql_u64(artifact.byte_length())?),
+                    ExactSqlValue::Text(artifact.artifact_id().as_str().to_owned()),
+                    ExactSqlValue::Text(artifact.digest().as_str().to_owned()),
+                    ExactSqlValue::Integer(to_sql_u64(artifact.byte_length())?),
                 ])
                 .collect(),
         )
@@ -664,7 +660,7 @@ pub(crate) fn persist_registered_attempt_artifacts(
         if rows
             .rows
             .first()
-            .and_then(|row| migration_integer(&row.values, 0))
+            .and_then(|row| exact_sql_integer(&row.values, 0))
             != Some(1)
         {
             return Err(AttemptStoreError::InvalidRequest);
@@ -674,7 +670,7 @@ pub(crate) fn persist_registered_attempt_artifacts(
 }
 
 pub(crate) fn persist_registered_terminal_evidence(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
     attempt: &WorkAttemptV1,
     revision: u64,
@@ -685,7 +681,7 @@ pub(crate) fn persist_registered_terminal_evidence(
     let payload = serde_json::to_string(terminal).map_err(|_| AttemptStoreError::Unavailable)?;
     transaction
         .execute(
-            migration_statement(
+            exact_sql_statement(
                 "INSERT INTO work_attempt_terminal_evidence_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
                     task_id, run_id, attempt_id, revision, terminal_payload
@@ -693,8 +689,8 @@ pub(crate) fn persist_registered_terminal_evidence(
                 attempt_params_owned(authority, attempt.identity())
                     .into_iter()
                     .chain([
-                        MigrationSqlValue::Integer(to_sql_u64(revision)?),
-                        MigrationSqlValue::Text(payload),
+                        ExactSqlValue::Integer(to_sql_u64(revision)?),
+                        ExactSqlValue::Text(payload),
                     ])
                     .collect(),
             )
@@ -705,7 +701,7 @@ pub(crate) fn persist_registered_terminal_evidence(
 }
 
 pub(crate) fn persist_registered_attempt_idempotency(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
     command_id: &WorkCommandId,
     input_digest: &ManifestDigest,
@@ -715,7 +711,7 @@ pub(crate) fn persist_registered_attempt_idempotency(
     let payload = serde_json::to_string(attempt).map_err(|_| AttemptStoreError::Unavailable)?;
     transaction
         .execute(
-            migration_statement(
+            exact_sql_statement(
                 "INSERT INTO work_attempt_idempotency_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
                     command_id, input_digest, task_id, run_id, attempt_id, revision, attempt_payload
@@ -723,15 +719,13 @@ pub(crate) fn persist_registered_attempt_idempotency(
                 authority_params_owned(authority)
                     .into_iter()
                     .chain([
-                        MigrationSqlValue::Text(command_id.as_str().to_owned()),
-                        MigrationSqlValue::Text(input_digest.as_str().to_owned()),
-                        MigrationSqlValue::Text(attempt.identity().task_id().as_str().to_owned()),
-                        MigrationSqlValue::Text(attempt.identity().run_id().as_str().to_owned()),
-                        MigrationSqlValue::Text(
-                            attempt.identity().attempt_id().as_str().to_owned(),
-                        ),
-                        MigrationSqlValue::Integer(to_sql_u64(revision)?),
-                        MigrationSqlValue::Text(payload),
+                        ExactSqlValue::Text(command_id.as_str().to_owned()),
+                        ExactSqlValue::Text(input_digest.as_str().to_owned()),
+                        ExactSqlValue::Text(attempt.identity().task_id().as_str().to_owned()),
+                        ExactSqlValue::Text(attempt.identity().run_id().as_str().to_owned()),
+                        ExactSqlValue::Text(attempt.identity().attempt_id().as_str().to_owned()),
+                        ExactSqlValue::Integer(to_sql_u64(revision)?),
+                        ExactSqlValue::Text(payload),
                     ])
                     .collect(),
             )

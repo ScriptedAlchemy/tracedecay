@@ -1,16 +1,15 @@
 # Holographic Memory — Prioritized Triage & Implementation Plan
 
-> **Archived record — not implementation authority.** This document preserves
+> **Historical record — not implementation authority.** This document preserves
 > historical audit synthesis and follow-up rationale. Current requirements come
 > only from the `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts,
 > source-string checks, snapshots, receipts, PR packets, and task ordering below
 > are not rebuild instructions; validate current memory behavior directly.
-> The schema/backfill items below are evidence-backed only for the audited live
-> `.tracedecay.db` memory tables described in this record. Pure source/request
-> shapes do not acquire a migration path from this archive. Any branch-written
-> memory table, archive, journal, checkpoint, or receipt remains in the
-> migration/recovery inventory until a separately authorized registered-store
-> census proves absence.
+> The schema/backfill items below are historical audit evidence only. Current
+> memory persistence accepts only the exact final shape; any other database,
+> store, file, journal, checkpoint, or receipt returns typed `ResetRequired`
+> and requires explicit reset or recreation. No storage reader, migration,
+> backfill, dual write, or census path remains.
 
 Status: synthesis of four upstream audits on the `master` working tree. This is
 the single actionable summary the root triage (`t_fd962a8a`) consumes. Every

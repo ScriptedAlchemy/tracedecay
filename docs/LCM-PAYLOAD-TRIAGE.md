@@ -8,10 +8,9 @@
 > deletion semantics remain product safety boundaries and must be validated
 > through current runtime behavior.
 
-Status: **triage complete**. This is the decision record and single entry point for the
-LCM external-payload retention/GC effort. It does not re-specify anything — the four
-normative specs below do — it records the **triage verdict**, **reconciles the open
-items the specs deferred to this card**, and **fixes the implementation decomposition**.
+Status: **historical triage complete**. This record preserves the former
+LCM external-payload retention/GC decomposition; it is not a current V2 entry
+point or implementation plan.
 
 The five discovery/planning children (`t_c2443a7f` audit, `t_f14bb734` contract,
 `t_bbd369f2` GC design, `t_0ab1c041` visibility spec, `t_f0e07c5c` test plan) all
@@ -19,16 +18,17 @@ landed. This card validated their work against source and decided the build orde
 
 ## 1. Verdict
 
-**The plan is complete, internally consistent, and grounded in current source.** Four
-artifacts form a closed spec set with explicit cross-references and a single normative
-hierarchy ("the contract wins; the others fill in what it deliberately left open"):
+**Historical verdict.** At the time recorded, four artifacts formed a closed spec set
+with explicit cross-references and a single normative hierarchy ("the contract wins;
+the others fill in what it deliberately left open"). Current V2 requirements do not
+use that hierarchy as acceptance authority:
 
 | Spec | Role | Owns |
 |---|---|---|
 | [`LCM-PAYLOAD-LIFECYCLE.md`](LCM-PAYLOAD-LIFECYCLE.md) | **contract (what/why)** | ownership model OM-1/2, lifecycle state machine, deletion contract D-1..D-4 + SD-1/2, grace GP-1..4, idempotency, missing/dangling/corrupted handling, security §13 |
 | [`LCM-PAYLOAD-GC.md`](LCM-PAYLOAD-GC.md) | **design (how)** | `delete_external_payload`, 4-phase reaper, schema-v5 marker store, config knobs, dry-run report, consolidated safety checklist |
 | [`LCM-PAYLOAD-VISIBILITY.md`](LCM-PAYLOAD-VISIBILITY.md) | **spec (what operators see)** | canonical `payload_health` data model, healthy/warning/error classifier, dashboard/doctor/MCP/CLI surfaces, dry-run gate |
-| [`LCM-PAYLOAD-GC-TEST-PLAN.md`](LCM-PAYLOAD-GC-TEST-PLAN.md) | **test plan (prove it)** | 64 named cases (DEL/FS/PHA/PHB/PHC/PHD/TS/GC/CFG/DRY/VIS), fixtures, testability hooks, coverage matrix |
+| Historical GC test matrix | retired | Current coverage follows the V2 product plans and direct behavior; the archived named-case inventory is not an acceptance authority. |
 
 Plus the storage/deletion audit in Kanban `t_c2443a7f` (comment 34) which is the
 ground-truth map the contract's §2 was built from.

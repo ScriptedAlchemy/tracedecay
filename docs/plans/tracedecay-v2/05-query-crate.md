@@ -196,10 +196,12 @@ Every product surface can run the same bounded query use case and receive determ
   availability. Rename candidates are not durable clean-generation evidence.
 - **PR9 — lexical ranking:** centralize tokenizer/profile versions, lexical
   normalization, deterministic fusion, diversity, and explanations. `V1` may
-  name the initial final profile. Because profile bindings and indexes may be
-  persisted by dogfood, preserve predecessor compatibility/rebuild recovery
-  until a separately authorized registered-store/profile census proves
-  absence; fixtures alone do not establish publication.
+  name the initial final profile. V2 profile bindings, indexes, and all related
+  persisted state accept only their exact final shape; any other shape returns
+  typed `ResetRequired` and requires explicit reset or recreation. There is no
+  storage compatibility/rebuild reader, migration, backfill, dual write, or
+  census path. Independently released public query protocols are separate from
+  persisted-state admission; fixtures alone do not establish publication.
 - **PR10 — semantic:** add local semantic candidate and bounded rerank channels only with exact model, tokenizer, dimension, metric, normalization, runtime, index-generation, privacy, and watermark compatibility.
 - **PR10 — fallback:** when semantic or rerank execution is unavailable, preserve the pre-stage lexical result bytes and order when the selected profile permits fallback; otherwise fail explicitly.
 - **PR11 — composition:** expose typed query services to application and pure policy evaluators without importing application or policy into this crate.

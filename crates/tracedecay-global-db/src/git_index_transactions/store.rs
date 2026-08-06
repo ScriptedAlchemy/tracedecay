@@ -7,10 +7,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
-    GitIndexTransactionBeginResultV1, GitIndexTransactionRecordV1,
-    GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
-    GitIndexTransactionTerminalWriteV1, MAX_GIT_INDEX_PREVIEW_INPUT_BYTES,
-    MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionRecordV1, GitIndexTransactionStoreError,
+    GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
+    MAX_GIT_INDEX_PREVIEW_INPUT_BYTES, MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
 };
 
 use crate::{RegisteredGlobalDb, registered::RegisteredGlobalDbWriteTransaction};

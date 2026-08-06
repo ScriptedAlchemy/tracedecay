@@ -200,10 +200,10 @@ pub(in super::super) async fn ensure_observation_projection_schema(
 pub(in super::super) async fn ensure_observation_projection_performance_indexes(
     conn: &Connection,
 ) -> Result<(), Error> {
-    // Install each historical-data index as its own durable schema step. These
+    // Install each historical-data index as its own durable authority-revalidated batch. These
     // cannot share the lease-bounded all-schema transaction: an interrupted
     // later build would otherwise roll back every earlier completed build. The
-    // explicit schema-step API keeps shutdown cancellation while allowing one
+    // explicit revalidated-batch API keeps shutdown cancellation while allowing one
     // real-scale SQLite index build to use the schema transaction's fixed
     // 120-second lease instead of the ordinary 30-second statement deadline.
     for sql in [
@@ -233,7 +233,7 @@ pub(in super::super) async fn ensure_observation_projection_performance_indexes(
          ON observation_projection_dispositions (observation_id, receipt_id);",
     ] {
         let transaction = conn.authorized_long_lease_transaction().await?;
-        transaction.execute_schema_batch_step(sql).await?;
+        transaction.execute_authority_revalidated_batch(sql).await?;
         transaction.commit().await?;
     }
     Ok(())

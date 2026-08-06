@@ -18,13 +18,12 @@ to recreate PR8's original module tree, Rust type spellings, schema names,
 suite registration, fixture filenames, benchmark scripts, or command list.
 
 The session-temporal schema versions 2 and 3 were introduced on this integration
-branch, but registered-store admission and live dogfood mean version-2 rows may
-already exist outside Git history. Until a separately authorized census of
-every registered live/profile store proves absence, the v2-to-v3
-migration/recovery and backward-read obligations remain required and fail
-closed. This plan authorizes no live-store inspection. The pre-existing
-`session_messages` and `lcm_*` storage families independently retain their
-released/live forward-migration and compatibility-projection obligations.
+branch. They use the V2 fresh-store cutover: only the exact final persisted
+shape is accepted. Any other database, store, spool, file, or projection
+returns typed `ResetRequired` and requires explicit reset or recreation. No
+storage reader, migration, backfill, dual write, or census path exists. This
+plan authorizes no live-store inspection; `session_messages` and `lcm_*` are
+not upgrade sources.
 
 ## Outcome
 
@@ -149,10 +148,10 @@ coverage to empty-complete.
 
 ## Retrieval pipeline
 
-This is the sole temporal retrieval kernel. Legacy `message_search` and
-`lcm_grep`/load/describe/expand/query bindings translate into this request and
-delegate; they do not keep separate ranking, hydration, context, pagination, or
-freshness logic. `src/mcp/server.rs`,
+This is the sole temporal retrieval kernel. Only independently released
+`message_search` and `lcm_grep`/load/describe/expand/query protocols may
+translate into this request and delegate; they do not keep separate ranking,
+hydration, context, pagination, or freshness logic. `src/mcp/server.rs`,
 `src/mcp/tools/handlers/session/message_search.rs`, and
 `src/mcp/tools/handlers/session/lcm_handlers/mod.rs` are translation/rendering
 adapters only: they do not query LCM tables, call `get_session_message`,
@@ -330,7 +329,7 @@ compact task-linked narrative second, and exact chronology only by authorized
 expansion. Summaries accelerate retrieval but cannot replace raw messages or
 external anchored evidence.
 
-No PR8 domain record, store port, SQL table, migration receipt, refresh key,
+No PR8 domain record, store port, SQL table, schema-admission receipt, refresh key,
 cursor, query request, or application request contains `TaskId`. The
 executable-work application translates an authorized `TaskId` into an ordinary
 PR8 request without changing PR8 storage, sequencing, authority, or scope.
@@ -442,11 +441,9 @@ reads.
   `expand_derived_members(snapshot, id, after_ordinal, limit)`.
 - `summary.rs::SessionSummaryStore` owns immutable summary publication and leaf
   eligibility.
-- `migration.rs::SessionTemporalMigrationStore` owns idempotent batch/receipt
-  persistence and version-conflict rejection.
 - `refresh.rs::SessionRefreshStore` owns begin-or-join, progress, cancellation,
   recovery, and terminal source-coverage receipts.
-- `crates/tracedecay-store/tests/session_contract/{projection,retrieval,summary,migration,refresh}.rs`
+- `crates/tracedecay-store/tests/session_contract/{projection,retrieval,summary,refresh}.rs`
   own the corresponding port contracts.
 
 ### Query and application
@@ -475,12 +472,12 @@ reads.
 - `crates/tracedecay-usecases/src/session/types.rs` owns application request, result,
   freshness, abstention, and coverage views.
 
-### Database, daemon, compatibility, and migration
+### Database, daemon, and final-store admission
 
 - `crates/tracedecay-global-db/src/session_temporal/schema.rs::ensure_session_temporal_schema`
-  owns the schema-version-2 to schema-version-3 DDL migration, exact
-  column/index validation, append-only triggers, derived evidence/member
-  tables, source-manifest tables, and receipt columns.
+  validates the exact final schema, append-only triggers, derived
+  evidence/member tables, source-manifest tables, and receipt columns. Any
+  other shape returns typed `ResetRequired` before interpretation.
 - `crates/tracedecay-global-db/src/schema_contract/definitions.rs` registers every new table,
   foreign key, trigger, and index; `crates/tracedecay-global-db/src/schema_stages.rs` keeps their
   installation atomic.
@@ -491,36 +488,13 @@ reads.
   loading; read paths cannot create or rotate keys.
 - `crates/tracedecay-global-db/src/session_temporal/operations/publication.rs::publish_immutable_summary`
   owns canonical atomic summary publication.
-- `crates/tracedecay-global-db/src/session_temporal/operations/compatibility.rs` writes dashboard
-  compatibility projections last in the same transaction.
-- `crates/tracedecay-migrate/src/consolidate/sqlite/temporal.rs::forward_migrate_legacy_sources`
-  owns eligible sanitized legacy forward migration, derives spans/bursts from
-  migrated occurrences, and writes idempotent receipts. It skips quarantined or
-  unsanitized input and never imports a derived row as authority.
 - `src/daemon/session_temporal_refresh_scheduler.rs` owns durable restart
   recovery and source scanning; it does not own query ranking or hydration.
 - `src/mcp/tools/handlers/session/message_search.rs` and
-  `src/mcp/tools/handlers/session/lcm_handlers/mod.rs` translate legacy requests to
-  the application service. Missing service wiring returns typed unavailable or
-  deferred output and never probes legacy storage.
-
-Legacy field mapping is normative:
-
-- `knowledge_at` is the source row's recorded authoritative ingest time; when
-  absent, it is the migration operation's single frozen start watermark, never
-  the provider message timestamp;
-- `valid_time` is `Known` only for a parsed, source-supported provider event
-  time and is `Unknown` otherwise;
-- source identity binds legacy database identity, table kind, provider/session
-  identity, and stable row identity; provider order binds the legacy sequence
-  plus projection output ordinal;
-- every imported row carries a verified sanitization receipt;
-- missing identity/order, invalid time, absent sanitization evidence,
-  quarantine, and payload conflict produce typed skip receipts with row
-  identity and reason;
-- compatibility-projection rows carry a migration-origin marker and are
-  ineligible as migration input, preventing migrate/write-compatibility/rerun
-  self-import.
+  `src/mcp/tools/handlers/session/lcm_handlers/mod.rs` translate an evidenced
+  independently released request protocol to the application service. Missing
+  service wiring returns typed unavailable or deferred output and never probes
+  an older persisted shape.
 
 The schema-v3 derived projection tables are:
 
@@ -546,15 +520,9 @@ session_derived_evidence_members(
 `idx_session_derived_evidence_anchor`,
 `idx_session_derived_evidence_thread_order`, and
 `idx_session_derived_evidence_members_occurrence`, then validates each exact
-column and index shape before recording schema version 3.
-
-Until dashboard bindings migrate, physical `session_messages` and `lcm_*`
-tables remain explicitly non-authoritative dashboard compatibility projections because SQLite views
-cannot preserve the dashboard's direct FTS
-`MATCH`/rank/snippet/rowid behavior. Final cutover removes or renames physical
-legacy tables only after zero production legacy reads/writes and validated
-parity. Compatibility tables never rank, hydrate, paginate, or report
-freshness.
+column and index shape before opening the final store. A prior
+`session_messages` or `lcm_*` shape returns `ResetRequired`; no compatibility
+projection, reader, conversion, or data import is retained.
 
 ## Direct production verification
 
@@ -564,7 +532,7 @@ Current direct tests and ordinary repository checks must exercise:
 
 - independent knowledge and valid time in all temporal modes, immutable
   occurrence/assertion/copy/derived/summary authority, and deterministic
-  one-shot, incremental, migrated, and restart rebuilds;
+  one-shot, incremental, and restart rebuilds;
 - exact-literal retrieval, stable fusion/provenance, contradiction-first
   dedupe, canonical diversity, rank-final hydration, and lossless authorized
   expansion with positional typed omissions;
@@ -577,9 +545,9 @@ Current direct tests and ordinary repository checks must exercise:
   explanations, logs, or dynamic sinks;
 - source-aware refresh joining, atomic progress, cancellation, idempotent
   runtime receipts, restart recovery, and truthful mixed freshness;
-- forward migration and compatibility delegation through the production
-  callers, including typed skip reasons, repeated-upgrade idempotency, and no
-  self-import from compatibility projections; and
+- exact-final-schema admission, typed `ResetRequired` for every other
+  persisted shape, explicit reset/recreation, and no legacy import or
+  compatibility projection; and
 - side-effect-free public reads and one production temporal kernel, with no
   writable fallback, alternate cursor/hydration path, project-registry fanout,
   or copied external-evidence authority.
@@ -595,7 +563,7 @@ machine-independent threshold or separate acceptance artifact.
   complete Plan 13 anchors and independent knowledge/valid time.
 - Rebuildable projections and indexes include derived member manifests,
   exact-literal support, source manifests, and receipt digests; deterministic
-  rebuild and schema v2-to-v3 migration/recovery tests pass.
+  rebuild and exact-final-schema/`ResetRequired` tests pass.
 - One temporal kernel serves message, Turn, session, thread, agent, span/burst,
   summary, direct-anchor, LCM, and workflow-recovery reads.
 - Compact candidates are temporally resolved, fused with full retriever
@@ -617,10 +585,10 @@ machine-independent threshold or separate acceptance artifact.
   GitHub, CI, diagnostic, Git, receipt, task, and `rh_` evidence stays on Plan
   13 anchors and in owning stores.
 - PR8 remains task-agnostic and single-root. The scope plan owns cross-project
-  composition, Plan 24 owns TaskId composition, the dashboard journey owns its
-  binding cutover, and final migration owns physical legacy-table removal.
+  composition, Plan 24 owns TaskId composition, and the dashboard journey owns
+  its binding; explicit reset/recreation leaves no physical legacy table path.
 - Current direct regressions exercise every behavior above through the
-  callable temporal retrieval, compatibility, refresh, and expansion paths,
+  callable current temporal retrieval, refresh, and expansion paths,
   with ordinary repository checks covering supported features. Obsolete
   artifact-name, source-layout, command, or test-count parity is not an
   acceptance criterion.

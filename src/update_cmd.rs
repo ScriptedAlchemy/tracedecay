@@ -15,9 +15,8 @@
 //! artifact there would leave the receipt stale until the next reseal.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::cli::PostUpdateMode;
 use tracedecay::upgrade::UpgradeOutcome;
 use tracedecay::user_config::UserConfig;
 
@@ -245,45 +244,6 @@ where
     refresh(tracedecay::daemon::DaemonServiceState::RunningEnabled)
 }
 
-fn refresh_forward_only_daemon_service_after_update(
-    previous_state: tracedecay::daemon::DaemonServiceState,
-    spec: &tracedecay::daemon::DaemonServiceSpec,
-) -> tracedecay::errors::Result<()> {
-    match refresh_daemon_service_with_spec(previous_state, spec)? {
-        Some((service_path, socket_path)) => {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Forward-only daemon service refreshed at {}",
-                service_path.display()
-            );
-            print_daemon_transport_location(&socket_path);
-            Ok(())
-        }
-        None if tracedecay::daemon::daemon_reachable() => {
-            Err(tracedecay::errors::TraceDecayError::Config {
-                message:
-                    "forward-only post-update found a reachable unmanaged daemon after maintenance"
-                        .to_string(),
-            })
-        }
-        None => {
-            // Forward-only maintenance targets RunningEnabled, and the
-            // convergence gate below refuses anything less — so a missing
-            // service unit must be installed here, not skipped. Skipping made
-            // dogfood fail unconditionally on a host whose unit was removed.
-            // The post-update already holds the lifecycle lease, so this must
-            // use the under-lease install (the public wrapper re-acquires and
-            // deadlocks against ourselves).
-            let service_path = tracedecay::daemon::install_service_under_lease(spec, true)?;
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Forward-only daemon service installed at {}",
-                service_path.display()
-            );
-            print_daemon_transport_location(&spec.socket_path);
-            Ok(())
-        }
-    }
-}
-
 pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
     let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire_with_timeout(
         "daemon restart",
@@ -477,254 +437,22 @@ pub(crate) async fn run_post_update_command(
     no_heal: bool,
     no_reinstall: bool,
     lifecycle_lease_token: Option<&str>,
-    strict: bool,
-    mode: PostUpdateMode,
 ) -> tracedecay::errors::Result<()> {
-    if mode == PostUpdateMode::DogfoodRecoverInactive {
-        if lifecycle_lease_token.is_some() {
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: "dogfood inactive recovery cannot inherit an updater lease".to_string(),
-            });
-        }
-        let current_exe = std::env::current_exe().map_err(|error| {
-            tracedecay::errors::TraceDecayError::Config {
-                message: format!("could not resolve the dogfood recovery executable: {error}"),
-            }
-        })?;
-        let spec = tracedecay::daemon::service_spec(current_exe, None)?;
-        let service_path = tracedecay::daemon::enforce_forward_only_service_recovery(&spec)?;
-        if let Some(path) = service_path {
-            eprintln!(
-                "Forward-only recovery retained the new inactive service unit at {}",
-                path.display()
-            );
-        }
-        return Ok(());
-    }
-
-    if mode == PostUpdateMode::DogfoodForwardOnly {
-        if lifecycle_lease_token.is_some() {
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: "dogfood forward-only post-update cannot inherit an updater lease"
-                    .to_string(),
-            });
-        }
-        if !strict {
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: "dogfood forward-only post-update requires --strict".to_string(),
-            });
-        }
-        return run_forward_only_post_update_command(no_heal, no_reinstall).await;
-    }
-
     if let Some(token) = lifecycle_lease_token {
         let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_or_inherited(
             "post-update",
             Some(token),
         )?;
-        return run_post_update_tasks(no_heal, no_reinstall, strict, &lifecycle_lease).await;
+        return run_post_update_tasks(no_heal, no_reinstall, &lifecycle_lease).await;
     }
 
     let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire("post-update")?;
-    let previous_daemon_state = guard.previous_state();
     let operation_result = match guard.lifecycle_lease() {
-        Ok(lifecycle_lease) => {
-            run_post_update_tasks(no_heal, no_reinstall, strict, lifecycle_lease).await
-        }
+        Ok(lifecycle_lease) => run_post_update_tasks(no_heal, no_reinstall, lifecycle_lease).await,
         Err(error) => Err(error),
     };
     let restore_result = guard.finish();
-    let readiness_result = if strict {
-        tracedecay::daemon::wait_for_installed_service_state(previous_daemon_state)
-    } else {
-        Ok(())
-    };
-    let restoration_result = combine_operation_and_restore(
-        "post-update daemon restoration",
-        restore_result,
-        readiness_result,
-    );
-    combine_operation_and_restore("post-update", operation_result, restoration_result)
-}
-
-async fn run_forward_only_post_update_command(
-    no_heal: bool,
-    no_reinstall: bool,
-) -> tracedecay::errors::Result<()> {
-    let current_exe =
-        std::env::current_exe().map_err(|error| tracedecay::errors::TraceDecayError::Config {
-            message: format!("could not resolve the dogfood post-update executable: {error}"),
-        })?;
-    let spec = tracedecay::daemon::service_spec(current_exe, None)?;
-    let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire_forward_only_with_timeout(
-        "dogfood forward-only post-update",
-        &spec,
-        DAEMON_RESTART_LEASE_TIMEOUT,
-    )
-    .map_err(|error| forward_only_failure(&spec, error))?;
-    let previous_daemon_state = guard.previous_state();
-    let target_daemon_state = dogfood_forward_only_target_state(previous_daemon_state);
-    let operation_result = match guard.lifecycle_lease() {
-        Ok(lifecycle_lease) => {
-            run_forward_only_post_update_tasks(
-                no_heal,
-                no_reinstall,
-                lifecycle_lease,
-                target_daemon_state,
-                &spec,
-            )
-            .await
-        }
-        Err(error) => Err(error),
-    };
-    guard.finish_without_restore();
-
-    if let Err(error) = operation_result {
-        return Err(forward_only_failure(&spec, error));
-    }
-    let stage_started = Instant::now();
-    if let Err(error) = tracedecay::daemon::wait_for_installed_service_state(target_daemon_state) {
-        return Err(forward_only_failure(&spec, error));
-    }
-    report_dogfood_stage("daemon-service-ready", stage_started);
-    let stage_started = Instant::now();
-    if let Err(error) = verify_forward_only_binary_version(&spec.tracedecay_bin) {
-        return Err(forward_only_failure(&spec, error));
-    }
-    report_dogfood_stage("installed-version-check", stage_started);
-    let stage_started = Instant::now();
-    if let Err(error) =
-        tracedecay::doctor::wait_for_daemon_startup_health(startup_health_timeout()).await
-    {
-        return Err(forward_only_failure(&spec, error));
-    }
-    report_dogfood_stage("daemon-convergence", stage_started);
-    let stage_started = Instant::now();
-    let result = tracedecay::doctor::run_doctor(None)
-        .await
-        .map_err(|error| forward_only_failure(&spec, error));
-    report_dogfood_stage("doctor", stage_started);
-    result
-}
-
-fn report_dogfood_stage(stage: &str, started: Instant) {
-    eprintln!(
-        "[dogfood timing] stage={stage} elapsed_ms={}",
-        started.elapsed().as_millis()
-    );
-}
-
-/// How long post-update Doctor validation waits for daemon schema migration and
-/// compatibility projections to converge. Large profiles legitimately take more
-/// than a few minutes on first start after a schema change (observed: a ~90 GB
-/// profile converging well past the previous 3-minute deadline while perfectly
-/// healthy), and an expired deadline here strands an otherwise-successful
-/// update with the managed daemon disabled. Overridable for constrained
-/// environments via TRACEDECAY_STARTUP_HEALTH_TIMEOUT_SECS.
-fn startup_health_timeout() -> std::time::Duration {
-    std::env::var("TRACEDECAY_STARTUP_HEALTH_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .map(std::time::Duration::from_secs)
-        .unwrap_or(std::time::Duration::from_mins(30))
-}
-
-fn dogfood_forward_only_target_state(
-    _previous_state: tracedecay::daemon::DaemonServiceState,
-) -> tracedecay::daemon::DaemonServiceState {
-    tracedecay::daemon::DaemonServiceState::RunningEnabled
-}
-
-async fn run_forward_only_post_update_tasks(
-    no_heal: bool,
-    no_reinstall: bool,
-    lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
-    target_daemon_state: tracedecay::daemon::DaemonServiceState,
-    spec: &tracedecay::daemon::DaemonServiceSpec,
-) -> tracedecay::errors::Result<()> {
-    eprintln!("\nPreparing forward-only dogfood maintenance.");
-    tracedecay::daemon::verify_installed_service_quiesced_under_lease()?;
-
-    let stage_started = Instant::now();
-    run_post_update_mutations(no_heal, no_reinstall, true, lifecycle_lease).await?;
-    report_dogfood_stage("post-update-integrations", stage_started);
-    let stage_started = Instant::now();
-    let result = refresh_forward_only_daemon_service_after_update(target_daemon_state, spec);
-    report_dogfood_stage("daemon-service-refresh", stage_started);
-    result
-}
-
-fn verify_forward_only_binary_version(binary: &Path) -> tracedecay::errors::Result<()> {
-    let output = std::process::Command::new(binary)
-        .arg("--version")
-        .output()
-        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "could not execute retained dogfood binary '{}': {error}",
-                binary.display()
-            ),
-        })?;
-    let version = String::from_utf8_lossy(&output.stdout);
-    let expected = format!("tracedecay {}", tracedecay::version::build_version());
-    if output.status.success() && version.trim() == expected {
-        return Ok(());
-    }
-    Err(tracedecay::errors::TraceDecayError::Config {
-        message: format!(
-            "retained dogfood binary version check failed for '{}': status {}, output {:?}, expected {:?}",
-            binary.display(),
-            output.status,
-            version.trim(),
-            expected,
-        ),
-    })
-}
-
-fn forward_only_failure(
-    spec: &tracedecay::daemon::DaemonServiceSpec,
-    operation_error: tracedecay::errors::TraceDecayError,
-) -> tracedecay::errors::TraceDecayError {
-    match tracedecay::daemon::enforce_forward_only_service_recovery(spec) {
-        Ok(service_path) => tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "dogfood forward-only post-update failed: {operation_error}; managed daemon is inactive; retained new binary '{}'{}; recover only with this binary or a newer compatible build",
-                spec.tracedecay_bin.display(),
-                service_path.map_or_else(
-                    || ", no managed service unit was installed".to_string(),
-                    |path| format!(" and new service unit '{}'", path.display())
-                ),
-            ),
-        },
-        Err(recovery_error) => tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "dogfood forward-only post-update failed: {operation_error}; retained new binary '{}', but managed-daemon inactivity could not be proven: {recovery_error}; do not run an older binary",
-                spec.tracedecay_bin.display(),
-            ),
-        },
-    }
-}
-
-pub(crate) fn run_dogfood_command() -> tracedecay::errors::Result<()> {
-    let current_exe =
-        std::env::current_exe().map_err(|error| tracedecay::errors::TraceDecayError::Config {
-            message: format!("could not resolve source-built executable: {error}"),
-        })?;
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/dogfood.sh");
-    let status = std::process::Command::new("bash")
-        .arg(&script)
-        .env("TRACEDECAY_DOGFOOD_SOURCE_BINARY", &current_exe)
-        .status()
-        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
-            message: format!("failed to launch {}: {error}", script.display()),
-        })?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!("dogfood installer failed with status: {status}"),
-        })
-    }
+    combine_operation_and_restore("post-update", operation_result, restore_result)
 }
 
 // Windows must drop the lease before replacing a running executable, while
@@ -745,9 +473,8 @@ fn prepare_post_update_lease(
     Some(lease)
 }
 
-/// The binary to re-exec for `post-update`: the freshly installed one when
-/// the upgrade reported where it landed, otherwise the currently running
-/// binary. This keeps source-built dogfood on the source-built binary.
+/// The binary to re-exec for `post-update`: freshly installed when reported,
+/// otherwise the currently running binary.
 fn post_update_binary(installed: Option<&Path>) -> tracedecay::errors::Result<String> {
     let current = std::env::current_exe().ok();
     post_update_binary_from(installed, current.as_deref()).map_or_else(tracedecay_bin_on_path, Ok)
@@ -812,10 +539,8 @@ pub(crate) fn partition_reinstall_results(
         tracedecay::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
     )>,
 ) -> ReinstallOutcome {
-    // Carry the reason, not just the name: a swallowed error here left
-    // `dogfood` reporting "failed for: claude, cursor, hermes, kimi" with no
-    // way to learn why short of reading the installer source. Matches the
-    // existing "<environment>: ..." entry format used below.
+    // Carry the reason, not just the name, so the operator can diagnose a
+    // failed integration refresh without reading the installer source.
     let mut failed = Vec::new();
     for (id, result) in results {
         match result {
@@ -880,47 +605,6 @@ pub(crate) fn install_pass_covers_tracked_agents(
     tracked.iter().all(|id| refreshed.contains(id))
 }
 
-fn reinstall_failure_result(failed: &[String], strict: bool) -> tracedecay::errors::Result<()> {
-    if strict {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "dogfood agent integration refresh failed for: {}",
-                failed.join(", ")
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Only warnings whose [`StoreDurabilityClass`](tracedecay::migrate::durability::StoreDurabilityClass)
-/// proves the underlying data `Durable` can fail a `--strict` post-update.
-/// This is the fix for the diagnosed dogfood failure: mounting/migrating a
-/// 15GB `sessions.db` got interrupted, and because every health-pass warning
-/// used to be treated as fatal under `--strict`, that single advisory
-/// warning about recoverable session data failed the whole upgrade and
-/// disabled the daemon. See `tracedecay::doctor::heal` and
-/// `tracedecay::migrate::durability` for the classification this consults.
-fn health_pass_failure_result(
-    report: &tracedecay::doctor::heal::HealthPassReport,
-    strict: bool,
-) -> tracedecay::errors::Result<()> {
-    let blocking: Vec<&str> = report
-        .warnings
-        .iter()
-        .filter(|warning| warning.blocks_strict_upgrade())
-        .map(|warning| warning.message.as_str())
-        .collect();
-    if strict && !blocking.is_empty() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "dogfood post-update health pass failed: {}",
-                blocking.join("; ")
-            ),
-        });
-    }
-    Ok(())
-}
-
 /// Re-runs full `install()` + `post_install()` for every tracked agent so tool
 /// permissions, hooks, and MCP config stay in sync with the running binary — a
 /// superset of `refresh_generated_plugins`, which rewrites generated artifacts
@@ -981,7 +665,6 @@ async fn reinstall_tracked_agents_with_lease(
 pub(crate) async fn run_post_update_tasks(
     no_heal: bool,
     no_reinstall: bool,
-    strict: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
     eprintln!("\nPreparing safe post-update maintenance.");
@@ -989,8 +672,7 @@ pub(crate) async fn run_post_update_tasks(
     let previous_daemon_state =
         tracedecay::daemon::verify_installed_service_quiesced_under_lease()?;
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
-    let mutation_result =
-        run_post_update_mutations(no_heal, no_reinstall, strict, lifecycle_lease).await;
+    let mutation_result = run_post_update_mutations(no_heal, no_reinstall, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
     combine_operation_and_restore("post-update maintenance", mutation_result, restart_result)
 }
@@ -998,17 +680,13 @@ pub(crate) async fn run_post_update_tasks(
 async fn run_post_update_mutations(
     no_heal: bool,
     no_reinstall: bool,
-    strict: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
     refresh_generated_plugins().await?;
     if no_heal {
         eprintln!("Skipping post-update health pass (--no-heal).");
     } else {
-        let report =
-            tracedecay::doctor::heal::run_post_update_health_pass_under_lease(lifecycle_lease)
-                .await;
-        health_pass_failure_result(&report, strict)?;
+        tracedecay::doctor::heal::run_post_update_health_pass_under_lease(lifecycle_lease).await;
     }
 
     if no_reinstall {
@@ -1076,7 +754,7 @@ async fn run_post_update_mutations(
                  it will be retried on the next tracedecay command.",
                     failed.join(", ")
                 );
-                reinstall_failure_result(&failed, strict)
+                Ok(())
             }
         };
     reconcile_materialized_managed_skills_after_update();
@@ -1106,19 +784,14 @@ fn reconcile_materialized_managed_skills_after_update() {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
-    #[cfg(unix)]
-    use super::verify_forward_only_binary_version;
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
-        dogfood_forward_only_target_state, health_pass_failure_result,
         host_owns_canonical_component_set, install_pass_covers_tracked_agents, normalize_bin_path,
         partition_reinstall_results, post_update_binary, post_update_binary_from,
-        prepare_post_update_lease, refresh_generated_plugins_at, reinstall_failure_result,
-        restart_daemon_service_with, run_install_then_refresh,
+        prepare_post_update_lease, refresh_generated_plugins_at, restart_daemon_service_with,
+        run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -1229,38 +902,6 @@ mod tests {
         drop(held);
     }
 
-    #[test]
-    fn dogfood_forward_only_always_validates_a_running_enabled_daemon() {
-        for previous in [
-            tracedecay::daemon::DaemonServiceState::Missing,
-            tracedecay::daemon::DaemonServiceState::StoppedDisabled,
-            tracedecay::daemon::DaemonServiceState::StoppedEnabled,
-            tracedecay::daemon::DaemonServiceState::RunningDisabled,
-            tracedecay::daemon::DaemonServiceState::RunningEnabled,
-        ] {
-            assert_eq!(
-                dogfood_forward_only_target_state(previous),
-                tracedecay::daemon::DaemonServiceState::RunningEnabled
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn forward_only_version_probe_rejects_a_retained_wrong_version() {
-        let dir = TempDir::new().expect("temp dir");
-        let binary = dir.path().join("new binary with spaces");
-        std::fs::write(&binary, "#!/bin/sh\nprintf 'tracedecay 0.0.0-wrong\\n'\n")
-            .expect("fake binary");
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
-            .expect("binary permissions");
-
-        let error = verify_forward_only_binary_version(&binary)
-            .expect_err("wrong retained version must fail");
-
-        assert!(error.to_string().contains("version check failed"));
-        assert!(error.to_string().contains("0.0.0-wrong"));
-    }
     use tracedecay::user_config::UserConfig;
 
     fn config_err(message: &str) -> tracedecay::errors::TraceDecayError {
@@ -1488,59 +1129,6 @@ mod tests {
             }
             ReinstallOutcome::AllOk => panic!("a real install() failure must gate markers"),
         }
-    }
-
-    #[test]
-    fn only_strict_post_update_propagates_integration_failures() {
-        let failed = vec!["claude".to_string(), "hermes".to_string()];
-
-        assert!(reinstall_failure_result(&failed, false).is_ok());
-        let error = reinstall_failure_result(&failed, true)
-            .expect_err("strict dogfood must fail")
-            .to_string();
-        assert!(error.contains("claude, hermes"));
-    }
-
-    #[test]
-    fn strict_post_update_propagates_health_pass_failures_only() {
-        let failed = tracedecay::doctor::heal::HealthPassReport {
-            warnings: vec![tracedecay::doctor::heal::HealthPassWarning::durable(
-                "could not open the global DB",
-            )],
-            ..Default::default()
-        };
-        let advisory = tracedecay::doctor::heal::HealthPassReport {
-            remaining_findings: vec!["stale non-temp registry row".to_string()],
-            ..Default::default()
-        };
-
-        assert!(health_pass_failure_result(&failed, false).is_ok());
-        let error = health_pass_failure_result(&failed, true)
-            .expect_err("strict dogfood must fail on health-pass errors")
-            .to_string();
-        assert!(error.contains("could not open the global DB"));
-        assert!(health_pass_failure_result(&advisory, true).is_ok());
-    }
-
-    /// The diagnosed bug: a warning about a store whose durability class is
-    /// not `Durable` (e.g. a `sessions.db` mount/repair failure -- dominated
-    /// by recoverable transcript/evidence data) must never fail `--strict`,
-    /// even though it is still surfaced to the operator.
-    #[test]
-    fn strict_post_update_never_fails_on_non_durable_store_warnings() {
-        let recoverable_only = tracedecay::doctor::heal::HealthPassReport {
-            warnings: vec![tracedecay::doctor::heal::HealthPassWarning::about_store(
-                "could not mount the current project session store for repair: interrupted",
-                tracedecay::migrate::durability::StoreShardKind::ProjectSessions,
-            )],
-            ..Default::default()
-        };
-
-        assert!(health_pass_failure_result(&recoverable_only, false).is_ok());
-        assert!(
-            health_pass_failure_result(&recoverable_only, true).is_ok(),
-            "a recoverable-store warning must never fail a strict post-update"
-        );
     }
 
     /// Markers advance only when every tracked agent reinstalled (AllOk).

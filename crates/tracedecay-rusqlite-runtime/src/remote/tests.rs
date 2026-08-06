@@ -40,7 +40,7 @@ use tracedecay_store::{
 
 use crate::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
-    migration_sql::{MigrationSqlWriteAuthority, MigrationSqlWriteIntent},
+    exact_sql::{ExactSqlWriteAuthority, ExactSqlWriteIntent},
     reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
 };
 
@@ -73,8 +73,8 @@ impl ReaderQueryExecutor for NoReads {
 
 struct AllowSchema;
 
-impl MigrationSqlWriteAuthority for AllowSchema {
-    fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+impl ExactSqlWriteAuthority for AllowSchema {
+    fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
         Ok(())
     }
 }
@@ -83,7 +83,7 @@ struct Fixture {
     _directory: TempDir,
     _writer: PersistentWriter,
     _readers: ReaderPool<NoReads>,
-    handle: MigrationSqlHandle,
+    handle: ExactSqlHandle,
     binding: StoreRuntimeBindingV1,
 }
 
@@ -131,7 +131,7 @@ fn fixture_with_schema(schema: Option<&str>) -> Fixture {
         NoReads,
     )
     .unwrap();
-    let handle = MigrationSqlHandle::attach(&writer, &readers)
+    let handle = ExactSqlHandle::attach(&writer, &readers)
         .unwrap()
         .with_write_authority(Arc::new(AllowSchema))
         .unwrap();
@@ -385,7 +385,7 @@ fn capture_is_encrypted_and_idempotent() {
     )
     .unwrap();
     let bytes = match &ciphertext.rows[0].values[0] {
-        MigrationSqlValue::Blob(bytes) => bytes,
+        ExactSqlValue::Blob(bytes) => bytes,
         value => panic!("expected ciphertext blob, got {value:?}"),
     };
     assert!(
@@ -414,12 +414,9 @@ fn capture_rejects_sequence_gaps_and_corrupt_ciphertext() {
     fixture
         .handle
         .execute(
-            MigrationSqlStatement::new(
+            ExactSqlStatement::new(
                 "UPDATE remote_spool_frames SET ciphertext = ?1 WHERE event_id = ?2".to_owned(),
-                vec![
-                    MigrationSqlValue::Blob(vec![0; 32]),
-                    text(&receipt.event_id),
-                ],
+                vec![ExactSqlValue::Blob(vec![0; 32]), text(&receipt.event_id)],
             )
             .unwrap(),
         )

@@ -36,18 +36,19 @@ rendering zero. This behavior shipped in `7d1e1d1f5` and was hardened in
 Earlier event-file layouts, implementation ownership lists, fixture matrices,
 benchmark packets, panel paths, and aggregate gate manifests are historical
 evidence, not prerequisites or artifacts that later work must recreate.
-Published event/metric names and persisted observability records remain
-compatibility contracts; all other retention is judged by the direct
-measurement, privacy, lifecycle, platform, and regression behavior below.
+Only actually independently released public event/metric names retain protocol
+compatibility; persisted observability records use the fresh-store rule. All
+other retention is judged by the direct measurement, privacy, lifecycle,
+platform, and regression behavior below.
 
 The Plan 26 Work/topology event family is absent from `origin/master` and a
 published release. Its `V1` suffixes alone do not imply a V2 sibling. Transient
-source-only/internal emission helpers may change in place. Wire-visible event
-revisions retain negotiated readers and writers until an authorized
-installed-client/host census proves absence. Event files, stored observability
-rows, accounting projections, checkpoints, and receipts may exist through
-dogfood; their compatibility reader and migration/recovery obligations remain
-until the registered-store/profile census proves absence.
+source-only/internal emission helpers, wire-visible V2 event revisions, event
+files, stored observability rows, accounting projections, checkpoints, and
+receipts change in place. Only their exact final persisted shape is accepted;
+any other database, store, spool, file, or projection returns typed
+`ResetRequired` and requires explicit reset or recreation. No storage reader,
+migration, backfill, dual write, or census path exists.
 
 ## Outcome
 

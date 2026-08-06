@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn load_authority_state(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     brain_id: &BrainId,
 ) -> Result<CurrentRemoteAuthorityStateV1, RemoteSqliteStorageErrorV1> {
     let rows = query(
@@ -12,7 +12,7 @@ pub(super) fn load_authority_state(
     )?;
     let row = one_row(rows)?;
     let binding_json = match row.values.get(1) {
-        Some(MigrationSqlValue::Text(value)) => value,
+        Some(ExactSqlValue::Text(value)) => value,
         _ => return Err(RemoteSqliteStorageErrorV1::Corruption),
     };
     let binding: StoreRuntimeBindingV1 =
@@ -21,16 +21,16 @@ pub(super) fn load_authority_state(
         return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
     }
     let authority_json = match row.values.first() {
-        Some(MigrationSqlValue::Text(value)) => value,
+        Some(ExactSqlValue::Text(value)) => value,
         _ => return Err(RemoteSqliteStorageErrorV1::Corruption),
     };
     serde_json::from_str(authority_json).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
 pub(super) fn load_enrollment(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     sql: &str,
-    params: Vec<MigrationSqlValue>,
+    params: Vec<ExactSqlValue>,
 ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1> {
     let rows = query(handle, sql, params).map_err(map_enrollment_error)?;
     let row = enrollment_one_row(rows, RemoteEnrollmentAuthorityErrorV1::GrantNotFound)?;
@@ -39,9 +39,9 @@ pub(super) fn load_enrollment(
 }
 
 pub(super) fn enrollment_one_row(
-    rows: MigrationSqlRows,
+    rows: ExactSqlRows,
     missing: RemoteEnrollmentAuthorityErrorV1,
-) -> Result<crate::migration_sql::MigrationSqlRow, RemoteEnrollmentAuthorityErrorV1> {
+) -> Result<crate::exact_sql::ExactSqlRow, RemoteEnrollmentAuthorityErrorV1> {
     let mut rows = rows.rows.into_iter();
     match (rows.next(), rows.next()) {
         (Some(row), None) => Ok(row),
@@ -51,11 +51,11 @@ pub(super) fn enrollment_one_row(
 }
 
 pub(super) fn enrollment_row_text(
-    row: &crate::migration_sql::MigrationSqlRow,
+    row: &crate::exact_sql::ExactSqlRow,
     index: usize,
 ) -> Result<&str, RemoteEnrollmentAuthorityErrorV1> {
     match row.values.get(index) {
-        Some(MigrationSqlValue::Text(value)) => Ok(value),
+        Some(ExactSqlValue::Text(value)) => Ok(value),
         _ => Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict),
     }
 }

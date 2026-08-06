@@ -85,9 +85,7 @@ CREATE TABLE remote_observation_events (
 ) STRICT;
 ";
 
-pub fn validate_remote_schema(
-    handle: &MigrationSqlHandle,
-) -> Result<(), RemoteSqliteStorageErrorV1> {
+pub fn validate_remote_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStorageErrorV1> {
     let tables = remote_tables(handle)?;
     if tables.is_empty() {
         return Err(RemoteSqliteStorageErrorV1::MigrationRequired);
@@ -115,7 +113,7 @@ pub fn validate_remote_schema(
     ] {
         handle
             .query(
-                MigrationSqlStatement::new(sql.to_owned(), Vec::new())?,
+                ExactSqlStatement::new(sql.to_owned(), Vec::new())?,
                 READ_WAIT,
             )
             .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
@@ -123,9 +121,7 @@ pub fn validate_remote_schema(
     Ok(())
 }
 
-fn remote_tables(
-    handle: &MigrationSqlHandle,
-) -> Result<BTreeSet<String>, RemoteSqliteStorageErrorV1> {
+fn remote_tables(handle: &ExactSqlHandle) -> Result<BTreeSet<String>, RemoteSqliteStorageErrorV1> {
     let names = REQUIRED_REMOTE_TABLES
         .iter()
         .copied()
@@ -146,7 +142,7 @@ fn remote_tables(
         .collect::<Vec<_>>()
         .join(", ");
     let rows = handle.query(
-        MigrationSqlStatement::new(
+        ExactSqlStatement::new(
             format!(
                 "SELECT name FROM sqlite_master
                  WHERE type = 'table' AND name IN ({placeholders})"

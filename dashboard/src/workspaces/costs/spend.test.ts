@@ -13,8 +13,8 @@ const LIVE_PROJECTS = [
   { path: '/fast/projects/tracedecay', tokens_saved: 2_939_894_592 },
   { path: '/w/sqlite-storage-runtime-current', tokens_saved: 2_140_723_247 },
   { path: '/w/sqlite-storage-runtime', tokens_saved: 2_101_200_356 },
-  { path: '/w/dogfood-live-repair', tokens_saved: 2_078_590_272 },
-  { path: '/w/dogfood-hardening', tokens_saved: 1_946_100_344 },
+  { path: '/w/live-repair', tokens_saved: 2_078_590_272 },
+  { path: '/w/runtime-hardening', tokens_saved: 1_946_100_344 },
   { path: '/w/pr8-migration', tokens_saved: 1_831_192_520 },
   { path: '/w/pr8-acceptance-runner', tokens_saved: 1_824_171_535 },
   { path: '/w/pr8-live-tools', tokens_saved: 1_824_065_209 },
@@ -51,7 +51,7 @@ describe('summarizeProjectSpread', () => {
       '/fast/projects/tracedecay',
       '/w/sqlite-storage-runtime-current',
       '/w/sqlite-storage-runtime',
-      '/w/dogfood-live-repair',
+      '/w/live-repair',
     ]);
     expect(spread.deviations[0]!.deviation).toBeLessThan(-0.5);
     expect(spread.deviations[1]!.deviation).toBeGreaterThan(0.5);

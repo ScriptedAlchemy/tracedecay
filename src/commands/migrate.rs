@@ -17,10 +17,6 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
         MigrateAction::RehearseProfileBackup { backup, restore } => {
             handle_migrate_rehearse_profile_backup(backup, restore)
         }
-        MigrateAction::CleanupSources {
-            manifest,
-            confirm_token,
-        } => handle_migrate_cleanup_sources(manifest, confirm_token),
     }
 }
 
@@ -260,27 +256,6 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
-}
-
-fn handle_migrate_cleanup_sources(
-    manifest: String,
-    confirm_token: String,
-) -> tracedecay::errors::Result<()> {
-    let manifest = tracedecay::migrate::manifest::load_manifest(manifest)?;
-    if manifest.confirmation_token != confirm_token {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "confirmation token does not match migration manifest".to_string(),
-        });
-    }
-    let cleanup_report = tracedecay::migrate::manifest::cleanup_migration_sources(&manifest)
-        .map_err(|err| tracedecay::errors::TraceDecayError::Config {
-            message: err.to_string(),
-        })?;
-    println!(
-        "migration cleanup-sources: {} source artifact(s) removed",
-        cleanup_report.removed_artifacts
-    );
-    Ok(())
 }
 
 fn handle_migrate_backup_profile(

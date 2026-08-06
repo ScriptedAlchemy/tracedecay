@@ -1,60 +1,49 @@
-# PR19 Cutover and Runtime Plan
+# PR19 Runtime Fresh-Store Reset
 
-> **Archived provenance — not current requirements.** This document records
-> historical planning and execution evidence. Current scope and acceptance come
-> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> Historical planning evidence only. Current scope and acceptance come from
+> [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
 > [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
-> V2 plan. Do not recreate its task checklists, file inventories,
-> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
-> test names/counts, generated-byte/source-shape checks, PR closure gates, or
-> platform gate lattice.
-> Historical version/compatibility/migration language applies only to APIs or
-> data proven on `origin/master`, in a published release, or in live
-> persistence. Pure source-only/internal API shapes change in place.
-> Potentially deployed branch-era callable APIs remain compatible until an
-> authorized installed-client/host census proves absence; any branch-written
-> store, spool, file, journal, checkpoint, receipt, or projection remains in
-> cutover recovery until the registered-store/profile census proves absence.
+> V2 plan. Do not recreate branch/worktree/SHA protocols, gate lattices,
+> generated-byte/source-shape checks, or transition-era inventories.
 
-**Goal:** Complete API migration apply, migrate released data atomically to one
-V2 writer, retire aliases/V1, and extract runtime adapters after inversion.
+**Goal:** Admit one exact final V2 persisted shape, return `ResetRequired` for
+every other shape, and retain only independently released public API protocol
+compatibility.
 
-## Historical file and interface inventory
+Every TraceDecay database, store, spool, file, journal, checkpoint, receipt,
+and projection accepts only its exact final shape. A non-final shape is refused
+before interpretation and requires an explicit reset or recreation. There is
+no stored-data reader, conversion, backfill, dual write, shadow read, census,
+or recovery path, including for data written by an older installed binary.
 
-- Plan 34 planner/apply and source-edit reconciliation.
-- Global/store schema migration, backup/restore, writer admission, cutover
-  receipts, aliases/archive policy.
-- Runtime extraction described by `05c-adapter-runtime-pr19.md`.
+## Scope
 
-Interfaces: `MigrationPlan`, versioned `MigrationManifest`,
-`MigrationCheckpoint`, `BackupVerification`, `CutoverGrant`,
-`CutoverReceipt`, `AliasDisposition`, and `ArchiveExpiryReceipt`.
+- Validate final-shape admission at each persisted-state open boundary.
+- Preserve one fenced writer and canonical daemon route for a valid final
+  store.
+- Provide an explicit reset/recreation action scoped to a refused target.
+- Delete storage-transition code and source-only aliases after internal callers
+  move.
+- Retain a public protocol façade only with evidence of an actual independent
+  package or API release; it delegates to the canonical operation and owns no
+  storage or lifecycle behavior.
 
-## Historical ordered slices
+## Direct acceptance
 
-P0. Inventory every V1/compatibility/runtime path and disposition.
-P1. Complete Plan 34 API-migration preview/apply/rollback journey.
-P2. Run resumable migration with verified backup and checkpoints.
-P3. Atomically fence and promote exactly one V2 writer.
-P4. Retire compatibility façades and aliases with public evidence.
-P5. Extract dependency-inverted rusqlite/daemon/MCP/LSP adapters.
-P6. Expire archives and delete V1 only after retention conditions.
+- Exact-final fixtures admit through the canonical daemon route.
+- Every older, partial, unknown, unversioned, or foreign persisted fixture
+  returns `ResetRequired` before read, write, replay, or projection.
+- Explicit reset/recreation creates a clean final store without consuming old
+  bytes.
+- Tests prove no stored-data reader, converter, backfill, dual write, shadow
+  read, census, or recovery route remains.
+- Retained public protocol compatibility is independently release-evidenced
+  and preserves canonical authorization, errors, redaction, effects,
+  pagination, streaming, cancellation, and retry behavior.
 
-## Product outcome contributed
+## Not in PR19
 
-The work contributed resumable released-data migration, verified backup and
-restore, atomic single-writer cutover, compatibility retirement, and
-dependency-inverted runtime extraction. Current direct behavior, recovery, and
-acceptance live in the applicable numbered V2 plan.
-
-## Historical migration, rollback, measurement, and deletion notes
-
-Migration is resumable and roll-forward. Before promotion, rollback restores
-the verified backup; after promotion, recovery advances V2 and never re-enables
-V1 writes. Measure plan/apply, migration throughput, downtime, restart,
-package/runtime edit classes, and backup/restore.
-
-Delete each alias, V1 schema/path, old adapter, and archive only after its
-inventory disposition, production caller search, released-data fixture,
-rollback/recovery, cross-platform package, SDK/host, and retention evidence
-passes.
+- Persisted-data conversion, rollback, retention, or recovery workflows.
+- Memory special handling.
+- Transition dashboards, execution ledgers, schema-only conformance suites, or
+  placeholder acceptance baselines.

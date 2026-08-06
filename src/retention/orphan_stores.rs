@@ -7,7 +7,7 @@
 //! A project-root migration re-registers a repository under a new identity and
 //! silently strands the prior store on disk. Registry GC removes the
 //! stale *registry row* but never the on-disk store *data*, so the payload
-//! accumulates invisibly (measured at ~41 GB in one dogfood profile). This
+//! accumulates invisibly (measured at ~41 GB in one observed profile). This
 //! module makes those stores a typed finding — carrying age and size — and
 //! collects them under an owner-visible retention window.
 //!

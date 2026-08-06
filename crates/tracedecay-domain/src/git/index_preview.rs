@@ -192,8 +192,7 @@ fn validate_git_commit_identity(identity: &GitCommitIdentityV1) -> Result<(), Do
     validate_path_label(&identity.email, "git index commit identity email")
 }
 
-const GIT_INDEX_PREVIEW_INPUT_DIGEST_DOMAIN_V1: &str =
-    "tracedecay.git-index.preview-input.v1";
+const GIT_INDEX_PREVIEW_INPUT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.preview-input.v1";
 pub const MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS: usize = 256;
 pub const MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS: i64 = 30_000_000;
 

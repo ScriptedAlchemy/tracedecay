@@ -1350,7 +1350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dogfood_recovery_transcript_fact_failure_rolls_back_entire_batch() {
+    async fn transcript_fact_failure_rolls_back_entire_batch() {
         let directory = tempfile::tempdir().unwrap();
         let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
             &directory.path().join("sessions.db"),

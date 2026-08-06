@@ -6,31 +6,30 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ManifestDigest, RunId, WorkflowRunProjection, canonical_sha256};
 
-use crate::migration_sql::{
-    MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, MigrationSqlTransaction,
-    MigrationSqlValue,
+use crate::exact_sql::{
+    ExactSqlError, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
 };
 
 use super::{WorkflowSqliteAuthority, sql_integer, sql_text};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn unavailable(_: MigrationSqlError) -> WorkflowRunStorageError {
+fn unavailable(_: ExactSqlError) -> WorkflowRunStorageError {
     WorkflowRunStorageError::Unavailable
 }
 
 fn statement(
     sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlStatement, WorkflowRunStorageError> {
-    MigrationSqlStatement::new(sql.to_owned(), params).map_err(unavailable)
+    params: Vec<ExactSqlValue>,
+) -> Result<ExactSqlStatement, WorkflowRunStorageError> {
+    ExactSqlStatement::new(sql.to_owned(), params).map_err(unavailable)
 }
 
 fn query(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlRows, WorkflowRunStorageError> {
+    params: Vec<ExactSqlValue>,
+) -> Result<ExactSqlRows, WorkflowRunStorageError> {
     transaction
         .query(statement(sql, params)?)
         .map_err(unavailable)
@@ -49,7 +48,7 @@ fn digest<T: serde::Serialize>(value: &T) -> Result<ManifestDigest, WorkflowRunS
 }
 
 fn row_projection(
-    rows: &MigrationSqlRows,
+    rows: &ExactSqlRows,
     payload_index: usize,
 ) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
     let row = rows.rows.first().ok_or(WorkflowRunStorageError::NotFound)?;
@@ -57,10 +56,7 @@ fn row_projection(
 }
 
 impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
-    fn projection(
-        &self,
-        run_id: &RunId,
-    ) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
+    fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
         let rows = self
             .storage
             .handle
@@ -69,7 +65,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
                     "SELECT projection_payload
                      FROM workflow_run_heads
                      WHERE run_id = ?1",
-                    vec![MigrationSqlValue::Text(run_id.as_str().to_owned())],
+                    vec![ExactSqlValue::Text(run_id.as_str().to_owned())],
                 )?,
                 READ_TIMEOUT,
             )
@@ -90,8 +86,8 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
              FROM workflow_run_events
              WHERE run_id = ?1 AND command_id = ?2",
             vec![
-                MigrationSqlValue::Text(request.event.run_id().as_str().to_owned()),
-                MigrationSqlValue::Text(request.event.command_id().as_str().to_owned()),
+                ExactSqlValue::Text(request.event.run_id().as_str().to_owned()),
+                ExactSqlValue::Text(request.event.command_id().as_str().to_owned()),
             ],
         )?;
         if let Some(row) = replay.rows.first() {
@@ -110,7 +106,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
                 "SELECT projection_payload
                  FROM workflow_run_heads
                  WHERE run_id = ?1",
-                vec![MigrationSqlValue::Text(
+                vec![ExactSqlValue::Text(
                     request.event.run_id().as_str().to_owned(),
                 )],
             )?;
@@ -124,7 +120,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
             "SELECT sequence, projection_payload
              FROM workflow_run_heads
              WHERE run_id = ?1",
-            vec![MigrationSqlValue::Text(
+            vec![ExactSqlValue::Text(
                 request.event.run_id().as_str().to_owned(),
             )],
         )?;
@@ -164,16 +160,16 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
                      event_payload, event_digest
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 vec![
-                    MigrationSqlValue::Text(request.event.run_id().as_str().to_owned()),
-                    MigrationSqlValue::Integer(
+                    ExactSqlValue::Text(request.event.run_id().as_str().to_owned()),
+                    ExactSqlValue::Integer(
                         i64::try_from(request.event.sequence())
                             .map_err(|_| WorkflowRunStorageError::InvalidHistory)?,
                     ),
-                    MigrationSqlValue::Text(request.event.command_id().as_str().to_owned()),
-                    MigrationSqlValue::Text(request.event.input_digest().as_str().to_owned()),
-                    MigrationSqlValue::Integer(request.event.occurred_at().0),
-                    MigrationSqlValue::Text(event_payload),
-                    MigrationSqlValue::Text(event_digest.as_str().to_owned()),
+                    ExactSqlValue::Text(request.event.command_id().as_str().to_owned()),
+                    ExactSqlValue::Text(request.event.input_digest().as_str().to_owned()),
+                    ExactSqlValue::Integer(request.event.occurred_at().0),
+                    ExactSqlValue::Text(event_payload),
+                    ExactSqlValue::Text(event_digest.as_str().to_owned()),
                 ],
             )?)
             .map_err(unavailable)?;
@@ -188,14 +184,14 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
                      projection_digest = excluded.projection_digest,
                      last_event_digest = excluded.last_event_digest",
                 vec![
-                    MigrationSqlValue::Text(request.event.run_id().as_str().to_owned()),
-                    MigrationSqlValue::Integer(
+                    ExactSqlValue::Text(request.event.run_id().as_str().to_owned()),
+                    ExactSqlValue::Integer(
                         i64::try_from(projection.sequence())
                             .map_err(|_| WorkflowRunStorageError::InvalidHistory)?,
                     ),
-                    MigrationSqlValue::Text(projection_payload),
-                    MigrationSqlValue::Text(projection_digest.as_str().to_owned()),
-                    MigrationSqlValue::Text(event_digest.as_str().to_owned()),
+                    ExactSqlValue::Text(projection_payload),
+                    ExactSqlValue::Text(projection_digest.as_str().to_owned()),
+                    ExactSqlValue::Text(event_digest.as_str().to_owned()),
                 ],
             )?)
             .map_err(unavailable)?;

@@ -275,11 +275,11 @@ path = "tests/live_daemon_suite.rs"
 axum = "0.8"
 tower = "0.5"
 tree-sitter = "0.26"
+constant_time_eq = "0.5.0"
 tracedecay-agent-hosts = { path = "crates/tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "crates/tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-automation = { path = "crates/tracedecay-automation", version = "0.1.0" }
-tracedecay-capture = { path = "crates/tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "crates/tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "crates/tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-dashboard-api = { path = "crates/tracedecay-dashboard-api", version = "0.1.0" }
@@ -300,7 +300,6 @@ tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version
 tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", version = "0.1.0", optional = true, default-features = false }
 tracedecay-rusqlite-runtime = { path = "crates/tracedecay-rusqlite-runtime", version = "0.1.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
-tracedecay-sqlite-parity-protocol = { path = "crates/tracedecay-sqlite-parity-protocol", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-usecases = { path = "crates/tracedecay-usecases", version = "0.1.0" }
@@ -309,10 +308,8 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 ureq = { version = "3", features = ["json"] }
 url = "2"
-webpki-roots = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 thiserror = "2"
@@ -333,9 +330,7 @@ memmap2 = "0.9"
 crossterm = "0.28"
 fs2 = "0.4"
 same-file = "1"
-reflink-copy = "0.1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-amari-holographic = "0.23.0"
 regex = "1.12.3"
 shell-words = "1.1"
 open = "5.3"
@@ -344,28 +339,21 @@ tiktoken-rs = { version = "0.12", optional = true }
 # We deliberately use the raw watcher (not notify-debouncer-full) and debounce
 # ourselves so a monorepo's git-ref churn coalesces into a single sync.
 notify = "6"
-hmac = { version = "0.13.0", features = ["zeroize"] }
 zeroize = "1.9.0"
 keyring = { version = "4.1.5", features = ["v1"] }
 tempfile = "3"
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
 lsp-types = "0.97.0"
-yaml-edit = { version = "0.2.3", default-features = false }
 schemars = "1.2.1"
 futures-util = "0.3.33"
-tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
-rustls-pemfile = "2.2.0"
-hyper = { version = "1.11.0", features = ["http1", "server"] }
-hyper-util = { version = "0.1.20", features = ["tokio", "service"] }
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
-toml_edit = "0.25.13"
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"
 tar = "0.4"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 xattr = "1"
 
 # `statfs(2)` for daemon store-locality detection (src/daemon/store_runtime/
@@ -375,14 +363,7 @@ xattr = "1"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-fsys = "1.1.0"
 zip = { version = "8", default-features = false, features = ["deflate"] }
-# Volume APIs for the same store-locality detection: `GetDriveTypeW` is what
-# separates a network drive from attached storage on Windows.
-windows-sys = { version = "0.61", features = [
-    "Win32_Storage_FileSystem",
-    "Win32_System_WindowsProgramming",
-] }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_System_Com",
@@ -404,7 +385,7 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 # sleeps.
 tokio = { version = "1", features = ["full", "test-util"] }
 jsonschema = { version = "0.46.8", default-features = false }
-static_assertions = "1.1.0"
+tracedecay-sqlite-parity-protocol = { path = "crates/tracedecay-sqlite-parity-protocol", version = "0.1.0" }
 # Test builds opt into the query kernel's `*_for_test` constructors; the
 # feature stays off for production builds.
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0", features = ["test-helpers"] }

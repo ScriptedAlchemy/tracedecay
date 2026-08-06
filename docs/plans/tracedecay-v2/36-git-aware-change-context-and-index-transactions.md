@@ -274,22 +274,15 @@ provable terminal outcome.
    mechanics. An unavailable daemon or capability leaves the operation
    explicitly preview-only or unavailable; no transport falls back to local
    mutation.
-5. **Preserve evidenced published compatibility.** Existing supported APIs
-   proven on `origin/master` or in a published release, together with
-   persisted provenance/anchors proven in live or released storage and
-   supported CLI/MCP names,
-   `HunkRef`/receipt behavior, and rendering, remain compatible delegates to
-   the production kernels. Pure source-only PR12 bindings change in place;
-   branch-era callable names remain until an authorized installed-client/host
-   census proves absence. Branch-written provenance, anchors,
-   snapshots, indexes, journals, and receipts remain backward-readable until a
-   separately authorized registered-store/profile census proves absence.
-   Forward migration imports only prior read-only evidence whose typed
-   Plan 16 identity, object format, exact ref/commit relationship, and content
-   digest validate; unverifiable path/ref/SHA, inferred topology, cached
-   conflict, or mutable-log rows remain quarantined. Migration never invents a
-   stack edge, approval, conflict-free result, integration commit, or success
-   receipt.
+5. **Preserve independently released public compatibility.** A supported public
+   API with release evidence, including documented CLI/MCP names,
+   `HunkRef`/receipt behavior, and rendering, remains a delegate to the
+   production kernels. Pure source-only bindings change in place. Fresh V2
+   profiles do not retain branch-written provenance, anchors, snapshots,
+   indexes, journals, or receipts as a second data authority. Git history and
+   native object identity remain the source for commit/ref evidence; no product
+   path infers a stack edge, approval, conflict-free result, integration commit,
+   or success receipt from cached branch state.
 
 ## Replacement and deletion
 
@@ -298,13 +291,13 @@ provable terminal outcome.
   authorized immutable revision directly in `stack_snapshot`, preflight,
   apply, status, cancellation, receipt, and recovery. Branch names, paths,
   provider order, or graph proximity never infer an edge.
-- Remove schema-, port-, table-, migration-, catalog-, and adapter-only PR15
-  phases. Add only the storage and adapters required inside the callable
+- Remove schema-, port-, table-, catalog-, and adapter-only PR15 phases. Add
+  only the storage and adapters required inside the callable
   preflight/apply/recovery slices.
 - Remove cached conflict guesses, path-keyed worktree mutation logs, untyped
   SHA/ref inputs, and any alternate per-transport Git implementation.
-  Compatibility names and valid stored evidence remain supported delegates or
-  migrated records; they cannot retain divergent Git or authorization logic.
+  Release-evidenced public names remain delegates; they cannot retain divergent
+  Git or authorization logic.
 - Remove the exhaustive fixture matrix, benchmark harness, checked-in
   placeholder baseline, and gates that prove declarations agree. Keep the
   direct product journey, focused safety/failure cases, native-Git parity, and

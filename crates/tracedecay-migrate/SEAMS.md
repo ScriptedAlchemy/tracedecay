@@ -164,24 +164,7 @@ are three-line wrappers over the already-`pub`
 `tracedecay_runtime_core::storage::classify_registry_storage_fields`, so they
 follow `global_db` (seam 1) rather than needing a design of their own.
 
-## 7. `test-transport` is not forwarded to the kernel
-
-`memory_cutover.rs:50` and `:56` call
-`storage::set_durable_atomic_write_fault_for_test`, which
-`tracedecay-runtime-core` gates behind `#[cfg(any(test, feature =
-"test-transport"))]`. This crate's `test-transport` feature currently forwards
-only to `tracedecay-rusqlite-runtime/test-transport`, so the two calls do not
-resolve under `--all-features`.
-
-The one-line fix is to add `tracedecay-runtime-core/test-transport` to the
-feature list — **deliberately not done yet**, because
-`cargo check -p tracedecay-runtime-core --features test-transport` is itself
-red (kernel seam 1, the same `daemon/store_runtime` blocker as seam 3 above).
-Forwarding today would make `cargo check -p tracedecay-migrate --all-features`
-die inside the kernel and hide this crate's own 66 remaining diagnostics. Land
-it together with kernel seam 1.
-
-## 8. `project_registry` — resolved, nothing owed
+## 7. `project_registry` — resolved, nothing owed
 
 The earlier catalog flagged a `project_registry` ambiguity. There are no
 `root_seam::project_registry` references in this crate; the only

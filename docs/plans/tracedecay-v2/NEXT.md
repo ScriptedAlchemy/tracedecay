@@ -28,8 +28,8 @@ next direct user journeys. Numbered plans own the detailed semantics.
 
 ## Current blockers
 
-- `cargo dogfood` remains unsuccessful: Doctor reports unavailable authority
-  audit data and Cursor Core has an unresolved component-ownership conflict.
+- Doctor reports unavailable authority audit data and Cursor Core has an
+  unresolved component-ownership conflict.
   Plans 09 and 27 own the corresponding product repairs.
 - Semantic search is unavailable because the active configuration snapshot is
   invalid. Plan 20 owns snapshot repair and Plan 31 owns semantic activation;

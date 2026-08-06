@@ -208,9 +208,9 @@ async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
 
 /// Enrolls `project_root` on disk exactly as a previously-initialized project
 /// is enrolled — an in-repo enrollment marker plus a materialized profile store
-/// — without touching the profile registry. This is the on-disk shape a profile
-/// parked at the forward-only migration boundary recovers with: the derived
-/// registry is fresh, every project's durable enrollment survives.
+/// — without touching the profile registry. This is the on-disk shape retained
+/// while the derived registry is rebuilt: every project's durable enrollment
+/// survives.
 #[cfg(unix)]
 fn enroll_project_on_disk_only(
     project_root: &std::path::Path,
@@ -229,13 +229,12 @@ fn enroll_project_on_disk_only(
     layout
 }
 
-/// Regression: a post-boundary post-update runs its startup-health probe as an
-/// ordinary daemon tool call, which cannot pass `allow_init`. Before this fix
-/// the pre-admission guard consulted only the profile registry, so a project
-/// whose store was fully intact on disk was refused as "not enrolled", the
-/// forward-only post-update treated that as fatal, and the boundary re-parked.
-/// Admission must instead honour the same durable enrollment the authoritative
-/// layout resolver consults first, so the existing store is mounted.
+/// Regression: the post-update startup-health probe runs as an ordinary daemon
+/// tool call, which cannot pass `allow_init`. Before this fix the pre-admission
+/// guard consulted only the profile registry, so a project whose store was
+/// fully intact on disk was refused as "not enrolled". Admission must instead
+/// honour the same durable enrollment the authoritative layout resolver
+/// consults first, so the existing store is mounted.
 #[cfg(unix)]
 #[tokio::test]
 async fn durably_enrolled_project_is_admitted_after_a_registry_reset() {

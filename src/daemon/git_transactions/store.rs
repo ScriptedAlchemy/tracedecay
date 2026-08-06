@@ -18,11 +18,10 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesQueryV1,
-    CodeRecoveryRepositoriesQueryV1, GitIndexPreviewInputReadV1,
-    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,
-    GitIndexTransactionRecordV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
-    GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
-    MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
+    CodeRecoveryRepositoriesQueryV1, GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionRecordV1, GitIndexTransactionStore,
+    GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
+    GitIndexTransactionTerminalWriteV1, MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
 };
 
 #[cfg(test)]
@@ -537,8 +536,7 @@ impl GitIndexTransactionStore for SharedDaemonGitIndexTransactionStore {
         observed_at: UtcMicros,
         limit: usize,
     ) -> GitIndexTransactionStoreResult<usize> {
-        self.inner
-            .purge_expired_preview_inputs(observed_at, limit)
+        self.inner.purge_expired_preview_inputs(observed_at, limit)
     }
 
     fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {

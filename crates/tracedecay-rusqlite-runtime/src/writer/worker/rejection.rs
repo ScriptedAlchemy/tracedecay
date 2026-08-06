@@ -10,7 +10,7 @@ use tracedecay_store::{RuntimeCancellationStageV1, RuntimeSubmitOutcomeV1, Unava
 use crate::{
     RuntimeWriteAuthorityStage,
     admission::{FairQueue, QueueItem},
-    migration_sql::{WriterCommand as MigrationSqlWriterCommand, reject_writer_command},
+    exact_sql::{WriterCommand as ExactSqlWriterCommand, reject_writer_command},
     telemetry::WriterTelemetry,
 };
 
@@ -66,7 +66,7 @@ pub(super) fn reject_all(queue: &mut FairQueue<AcceptedRequest>, telemetry: &Wri
     }
 }
 
-pub(super) fn reject_all_migration_sql(queue: &mut VecDeque<MigrationSqlWriterCommand>) {
+pub(super) fn reject_all_exact_sql(queue: &mut VecDeque<ExactSqlWriterCommand>) {
     for command in queue.drain(..) {
         reject_writer_command(command);
     }

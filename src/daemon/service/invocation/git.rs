@@ -273,13 +273,7 @@ pub(super) async fn execute_git_read(
         let repository_id = selected_scope.repository_id.clone();
         let worktree_id = selected_scope.worktree_id.clone();
         let snapshot = match tokio::task::spawn_blocking(move || {
-            capture_exact_snapshot(
-                &root,
-                project_id,
-                repository_id,
-                worktree_id,
-                observed_at,
-            )
+            capture_exact_snapshot(&root, project_id, repository_id, worktree_id, observed_at)
         })
         .await
         {
@@ -455,7 +449,9 @@ pub(super) async fn execute_git_preview(
     let operation = request.operation;
     let authority_owner = owner.clone();
     let authority =
-        match tokio::task::spawn_blocking(move || authority_owner.current_authority(operation)).await {
+        match tokio::task::spawn_blocking(move || authority_owner.current_authority(operation))
+            .await
+        {
             Ok(Ok(authority)) => authority,
             Ok(Err(error)) => {
                 return application_problem(wire_request_id, map_git_port_problem(error));
@@ -507,7 +503,10 @@ pub(super) async fn execute_git_preview(
             let input = match GitIndexPreviewInputV1::new_commit(
                 preview_id,
                 snapshot,
-                request.commit_intent.clone().expect("validated commit intent"),
+                request
+                    .commit_intent
+                    .clone()
+                    .expect("validated commit intent"),
                 authority.evaluated_at,
                 UtcMicros(authority.evaluated_at.0.saturating_add(30_000_000)),
             ) {
@@ -767,7 +766,10 @@ fn build_git_preview_request(
             input
                 .hunks
                 .iter()
-                .find(|hunk| hunk.compute_digest().is_ok_and(|candidate| candidate == *digest))
+                .find(|hunk| {
+                    hunk.compute_digest()
+                        .is_ok_and(|candidate| candidate == *digest)
+                })
                 .cloned()
                 .ok_or_else(invalid_git_request)
         })

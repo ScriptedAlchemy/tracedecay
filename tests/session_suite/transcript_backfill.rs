@@ -154,7 +154,7 @@ fn metadata_usage(metadata_json: Option<&str>) -> Option<serde_json::Value> {
 }
 
 #[tokio::test]
-async fn dogfood_recovery_admission_publishes_schema_with_transcript_backfill_pending() {
+async fn admission_publishes_schema_with_transcript_backfill_pending() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let (transcript, offsets) = write_tagged_transcript(&tmp);
@@ -245,7 +245,7 @@ async fn dogfood_recovery_admission_publishes_schema_with_transcript_backfill_pe
 }
 
 #[tokio::test]
-async fn dogfood_recovery_backfill_batches_resume_from_durable_cursor_after_restarts() {
+async fn backfill_batches_resume_from_durable_cursor_after_restarts() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let (transcript, offsets) = write_tagged_transcript(&tmp);
@@ -335,7 +335,7 @@ async fn dogfood_recovery_backfill_batches_resume_from_durable_cursor_after_rest
 }
 
 #[tokio::test]
-async fn dogfood_recovery_backfill_adds_claude_usage_counters_from_message_usage() {
+async fn backfill_adds_claude_usage_counters_from_message_usage() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let runtime = project_runtime(&tmp, &project).await;
@@ -409,7 +409,7 @@ async fn dogfood_recovery_backfill_adds_claude_usage_counters_from_message_usage
 }
 
 #[tokio::test]
-async fn dogfood_recovery_backfill_attaches_codex_turn_usage_to_assistant_line() {
+async fn backfill_attaches_codex_turn_usage_to_assistant_line() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let runtime = project_runtime(&tmp, &project).await;
@@ -457,7 +457,7 @@ async fn dogfood_recovery_backfill_attaches_codex_turn_usage_to_assistant_line()
 }
 
 #[tokio::test]
-async fn dogfood_recovery_backfill_tolerates_missing_files_and_marks_done() {
+async fn backfill_tolerates_missing_files_and_marks_done() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let gone = tmp.path().join("deleted-transcript.jsonl");
@@ -506,7 +506,7 @@ async fn dogfood_recovery_backfill_tolerates_missing_files_and_marks_done() {
 }
 
 #[tokio::test]
-async fn dogfood_recovery_backfill_leaves_already_dated_rows_untouched() {
+async fn backfill_leaves_already_dated_rows_untouched() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let (transcript, offsets) = write_tagged_transcript(&tmp);
@@ -544,7 +544,7 @@ async fn dogfood_recovery_backfill_leaves_already_dated_rows_untouched() {
 }
 
 #[tokio::test]
-async fn dogfood_recovery_backfill_preserves_existing_usage_and_metadata() {
+async fn backfill_preserves_existing_usage_and_metadata() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let runtime = project_runtime(&tmp, &project).await;

@@ -37,8 +37,8 @@ use crate::{
         MaintenanceCheckpointMode, RusqliteCheckpointDriver, WriterCheckpointController,
     },
     connection::{self, OpenedDatabaseFile, file_family::SqliteFamilyGuard},
-    migration_sql::{
-        WriterCommand as MigrationSqlWriterCommand, reject_writer_command, run_writer_command,
+    exact_sql::{
+        WriterCommand as ExactSqlWriterCommand, reject_writer_command, run_writer_command,
     },
     read_consistency::CommittedWatermarkPublisher,
     telemetry::WriterTelemetry,
@@ -62,7 +62,7 @@ use ingress::{
     select_auxiliary_work, wait_for_work,
 };
 use rejection::{
-    cancel_waiting, reject_all, reject_all_incremental_vacuum, reject_all_migration_sql,
+    cancel_waiting, reject_all, reject_all_exact_sql, reject_all_incremental_vacuum,
     reject_all_online_backup, reject_incremental_vacuum, reject_online_backup, reject_unauthorized,
 };
 
@@ -78,7 +78,7 @@ pub(super) struct Worker {
     pub(super) binding: StoreRuntimeBindingV1,
     pub(super) config: AdmissionConfigV1,
     pub(super) receiver: mpsc::Receiver<AcceptedRequest>,
-    pub(super) migration_sql_receiver: mpsc::Receiver<MigrationSqlWriterCommand>,
+    pub(super) exact_sql_receiver: mpsc::Receiver<ExactSqlWriterCommand>,
     pub(super) incremental_vacuum_receiver: mpsc::Receiver<IncrementalVacuumCommand>,
     pub(super) online_backup_receiver: mpsc::Receiver<OnlineBackupCommand>,
     pub(super) checkpoint_receiver: mpsc::Receiver<CheckpointCommand>,
@@ -234,12 +234,12 @@ impl Worker {
         runtime: Runtime,
     ) {
         let mut queue = FairQueue::default();
-        let mut migration_sql_queue = VecDeque::new();
+        let mut exact_sql_queue = VecDeque::new();
         let mut incremental_vacuum_queue = VecDeque::new();
         let mut online_backup_queue = VecDeque::new();
         let mut checkpoint_queue = VecDeque::new();
         let mut input_closed = false;
-        let mut migration_sql_closed = false;
+        let mut exact_sql_closed = false;
         let mut incremental_vacuum_closed = false;
         let mut online_backup_closed = false;
         let mut checkpoint_closed = false;
@@ -259,9 +259,9 @@ impl Worker {
                 &mut checkpoint_closed,
             );
             drain_command_ingress(
-                &mut self.migration_sql_receiver,
-                &mut migration_sql_queue,
-                &mut migration_sql_closed,
+                &mut self.exact_sql_receiver,
+                &mut exact_sql_queue,
+                &mut exact_sql_closed,
             );
             drain_command_ingress(
                 &mut self.incremental_vacuum_receiver,
@@ -283,7 +283,7 @@ impl Worker {
             }
             if self.shutdown_requested.load(Ordering::Acquire)
                 && queue.is_empty()
-                && migration_sql_queue.is_empty()
+                && exact_sql_queue.is_empty()
                 && incremental_vacuum_queue.is_empty()
                 && online_backup_queue.is_empty()
             {
@@ -292,12 +292,12 @@ impl Worker {
             }
             if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
                 reject_all(&mut queue, &self.telemetry);
-                reject_all_migration_sql(&mut migration_sql_queue);
+                reject_all_exact_sql(&mut exact_sql_queue);
                 reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
                 reject_all_online_backup(&mut online_backup_queue);
                 checkpoint_queue.clear();
                 if input_closed
-                    && migration_sql_closed
+                    && exact_sql_closed
                     && incremental_vacuum_closed
                     && online_backup_closed
                     && checkpoint_closed
@@ -306,13 +306,13 @@ impl Worker {
                 }
                 let wake = runtime.block_on(wait_for_work(
                     &mut self.receiver,
-                    &mut self.migration_sql_receiver,
+                    &mut self.exact_sql_receiver,
                     &mut self.incremental_vacuum_receiver,
                     &mut self.online_backup_receiver,
                     &mut self.checkpoint_receiver,
                     &mut self.shutdown_receiver,
                     input_closed,
-                    migration_sql_closed,
+                    exact_sql_closed,
                     incremental_vacuum_closed,
                     online_backup_closed,
                     checkpoint_closed,
@@ -321,13 +321,13 @@ impl Worker {
                 apply_wake(
                     wake,
                     &mut queue,
-                    &mut migration_sql_queue,
+                    &mut exact_sql_queue,
                     &mut incremental_vacuum_queue,
                     &mut online_backup_queue,
                     &mut checkpoint_queue,
                     &self.telemetry,
                     &mut input_closed,
-                    &mut migration_sql_closed,
+                    &mut exact_sql_closed,
                     &mut incremental_vacuum_closed,
                     &mut online_backup_closed,
                     &mut checkpoint_closed,
@@ -340,7 +340,7 @@ impl Worker {
                 continue;
             }
             if let Some(auxiliary) = select_auxiliary_work(
-                !migration_sql_queue.is_empty(),
+                !exact_sql_queue.is_empty(),
                 !incremental_vacuum_queue.is_empty(),
                 !online_backup_queue.is_empty(),
                 queue.is_empty(),
@@ -348,10 +348,10 @@ impl Worker {
                 next_auxiliary,
             ) {
                 match auxiliary {
-                    AuxiliaryWork::MigrationSql => {
-                        let command = migration_sql_queue
+                    AuxiliaryWork::ExactSql => {
+                        let command = exact_sql_queue
                             .pop_front()
-                            .expect("migration SQL queue checked non-empty");
+                            .expect("exact SQL queue checked non-empty");
                         if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
                             run_writer_command(
                                 checkpoint.connection_mut(),
@@ -390,7 +390,7 @@ impl Worker {
                         } else {
                             reject_online_backup(command);
                         }
-                        next_auxiliary = AuxiliaryWork::MigrationSql;
+                        next_auxiliary = AuxiliaryWork::ExactSql;
                     }
                 }
                 if !queue.is_empty() {
@@ -400,7 +400,7 @@ impl Worker {
             }
             if queue.is_empty() {
                 if input_closed
-                    && migration_sql_closed
+                    && exact_sql_closed
                     && incremental_vacuum_closed
                     && online_backup_closed
                     && checkpoint_closed
@@ -409,13 +409,13 @@ impl Worker {
                 }
                 let wake = runtime.block_on(wait_for_work(
                     &mut self.receiver,
-                    &mut self.migration_sql_receiver,
+                    &mut self.exact_sql_receiver,
                     &mut self.incremental_vacuum_receiver,
                     &mut self.online_backup_receiver,
                     &mut self.checkpoint_receiver,
                     &mut self.shutdown_receiver,
                     input_closed,
-                    migration_sql_closed,
+                    exact_sql_closed,
                     incremental_vacuum_closed,
                     online_backup_closed,
                     checkpoint_closed,
@@ -427,13 +427,13 @@ impl Worker {
                     apply_wake(
                         wake,
                         &mut queue,
-                        &mut migration_sql_queue,
+                        &mut exact_sql_queue,
                         &mut incremental_vacuum_queue,
                         &mut online_backup_queue,
                         &mut checkpoint_queue,
                         &self.telemetry,
                         &mut input_closed,
-                        &mut migration_sql_closed,
+                        &mut exact_sql_closed,
                         &mut incremental_vacuum_closed,
                         &mut online_backup_closed,
                         &mut checkpoint_closed,
@@ -747,7 +747,7 @@ mod auxiliary_scheduling_tests {
             Some(AuxiliaryWork::IncrementalVacuum)
         );
         assert_eq!(
-            select_auxiliary_work(true, true, false, false, false, AuxiliaryWork::MigrationSql,),
+            select_auxiliary_work(true, true, false, false, false, AuxiliaryWork::ExactSql,),
             None
         );
     }
@@ -766,8 +766,8 @@ mod auxiliary_scheduling_tests {
             Some(AuxiliaryWork::IncrementalVacuum)
         );
         assert_eq!(
-            select_auxiliary_work(true, true, false, true, false, AuxiliaryWork::MigrationSql,),
-            Some(AuxiliaryWork::MigrationSql)
+            select_auxiliary_work(true, true, false, true, false, AuxiliaryWork::ExactSql,),
+            Some(AuxiliaryWork::ExactSql)
         );
         assert_eq!(
             select_auxiliary_work(true, true, true, true, false, AuxiliaryWork::OnlineBackup,),

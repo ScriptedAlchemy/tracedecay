@@ -143,7 +143,7 @@ pub mod registered_schema {
     async fn unregistered_outcome(connection: &Connection) -> Result<()> {
         let transaction = connection.authorized_long_lease_transaction().await?;
         transaction
-            .execute_schema_batch_step(
+            .execute_authority_revalidated_batch(
                 "CREATE TABLE runtime_core_registered_fixture(id INTEGER PRIMARY KEY) STRICT;
                  PRAGMA application_id = 1413763634;
                  PRAGMA user_version = 1;",

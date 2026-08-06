@@ -20,12 +20,12 @@ use super::*;
 
 struct AtomicWriteAuthority(Arc<AtomicBool>);
 
-impl MigrationSqlWriteAuthority for AtomicWriteAuthority {
-    fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+impl ExactSqlWriteAuthority for AtomicWriteAuthority {
+    fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
         if self.0.load(Ordering::Acquire) {
             Ok(())
         } else {
-            Err(MigrationSqlError::AuthorityDenied("revoked".to_owned()))
+            Err(ExactSqlError::AuthorityDenied("revoked".to_owned()))
         }
     }
 }
@@ -34,9 +34,9 @@ struct SlowSchemaAuthority {
     execute_batch_checks: AtomicUsize,
 }
 
-impl MigrationSqlWriteAuthority for SlowSchemaAuthority {
-    fn verify(&self, intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
-        if intent == MigrationSqlWriteIntent::ExecuteBatch
+impl ExactSqlWriteAuthority for SlowSchemaAuthority {
+    fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+        if intent == ExactSqlWriteIntent::ExecuteBatch
             && self.execute_batch_checks.fetch_add(1, Ordering::AcqRel) < 3
         {
             std::thread::sleep(Duration::from_millis(100));
@@ -49,13 +49,13 @@ struct RevokeDuringSchemaStep {
     execute_batch_checks: AtomicUsize,
 }
 
-impl MigrationSqlWriteAuthority for RevokeDuringSchemaStep {
-    fn verify(&self, intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
-        if intent == MigrationSqlWriteIntent::ExecuteBatch
+impl ExactSqlWriteAuthority for RevokeDuringSchemaStep {
+    fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+        if intent == ExactSqlWriteIntent::ExecuteBatch
             && self.execute_batch_checks.fetch_add(1, Ordering::AcqRel) >= 1
         {
-            return Err(MigrationSqlError::AuthorityDenied(
-                "revoked during schema step".to_owned(),
+            return Err(ExactSqlError::AuthorityDenied(
+                "revoked during authority-revalidated batch".to_owned(),
             ));
         }
         Ok(())
@@ -83,7 +83,7 @@ impl ReaderQueryExecutor for NoReads {
         _snapshot: &rusqlite::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
-        unreachable!("migration SQL queries bypass the closed product read executor")
+        unreachable!("exact SQL queries bypass the closed product read executor")
     }
 }
 
@@ -96,9 +96,9 @@ struct Fixture {
 fn binding() -> StoreRuntimeBindingV1 {
     serde_json::from_value(serde_json::json!({
         "shard_id": {
-            "brain_id": "brain.migration-sql",
-            "profile_id": "profile.migration-sql",
-            "scope": { "kind": "project", "project_id": "project.migration-sql" }
+            "brain_id": "brain.exact-sql",
+            "profile_id": "profile.exact-sql",
+            "scope": { "kind": "project", "project_id": "project.exact-sql" }
         },
         "incarnation": 3,
         "authority_epoch": 11
@@ -116,7 +116,7 @@ fn locator(binding: &StoreRuntimeBindingV1, byte: char) -> VerifiedStoreLocatorV
 
 fn fixture(writer_digest: char, reader_digest: char) -> Fixture {
     let directory = TempDir::new().unwrap();
-    let path = directory.path().join("migration.sqlite3");
+    let path = directory.path().join("exact-sql.sqlite3");
     rusqlite::Connection::open(&path).unwrap();
     let path = path.canonicalize().unwrap();
     let binding = binding();
@@ -145,8 +145,8 @@ fn fixture(writer_digest: char, reader_digest: char) -> Fixture {
     }
 }
 
-fn statement(sql: &str, params: Vec<MigrationSqlValue>) -> MigrationSqlStatement {
-    MigrationSqlStatement::new(sql.to_owned(), params).unwrap()
+fn statement(sql: &str, params: Vec<ExactSqlValue>) -> ExactSqlStatement {
+    ExactSqlStatement::new(sql.to_owned(), params).unwrap()
 }
 
 mod authority;

@@ -3,7 +3,7 @@
 //! Definitions, activations, and single-use handoff tokens share the registered Work SQLite channel
 //! (`RegisteredGlobalDb::workflow_storage`). This drops the whole
 //! `HostAdmissionTestRuntimeV1` — the daemon's admitted composition root, not
-//! just the migration-SQL handle — and reopens it at the same profile/project
+//! just the exact-SQL handle — and reopens it at the same profile/project
 //! paths, so a real physical restart (not a logical replay) is what proves
 //! durability here.
 
@@ -15,8 +15,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkflowDefinitionId, WorkflowDefinition, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowStepId, WorkflowStep, WorktreeId, canonical_sha256,
+    WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
+    WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
 };
 
 fn id<T>(value: &str) -> T

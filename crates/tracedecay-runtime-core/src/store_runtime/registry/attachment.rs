@@ -59,10 +59,10 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
     ///
     /// Implementations must return a handle over their owned writer/readers;
     /// they must never reopen the locator path.
-    fn migration_sql_handle(
+    fn exact_sql_handle(
         &self,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String> {
-        Err("physical runtime has no migration SQL channel".to_owned())
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, String> {
+        Err("physical runtime has no exact SQL channel".to_owned())
     }
 
     /// Reads the retained attachment's bounded reserved-health telemetry.

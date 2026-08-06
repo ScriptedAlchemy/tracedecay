@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use constant_time_eq::constant_time_eq;
 use tracedecay_domain::ManifestDigest;
 
 use crate::gateway::AdmittedRoot;
@@ -373,10 +374,9 @@ impl LspSessionRegistry {
         let Some(session) = self.sessions.get(access.session_id()) else {
             return Err(LspEndpointError::AuthenticationFailed);
         };
-        if !constant_time_eq(
-            session.credential.as_bytes(),
-            access.credential().as_bytes(),
-        ) {
+        let expected = session.credential.as_bytes();
+        let actual = access.credential().as_bytes();
+        if expected.len() != actual.len() || !constant_time_eq(expected, actual) {
             return Err(LspEndpointError::AuthenticationFailed);
         }
         if session.expires_at_ms <= now_ms
@@ -551,17 +551,6 @@ where
     pub fn into_registry(self) -> LspSessionRegistry {
         self.registry
     }
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    let max_len = left.len().max(right.len());
-    let mut difference = left.len() ^ right.len();
-    for index in 0..max_len {
-        let left = left.get(index).copied().unwrap_or_default();
-        let right = right.get(index).copied().unwrap_or_default();
-        difference |= usize::from(left ^ right);
-    }
-    difference == 0
 }
 
 #[cfg(test)]
@@ -940,5 +929,14 @@ mod tests {
             format!("{credential:?}"),
             "LspSessionCredential([redacted])"
         );
+    }
+
+    #[test]
+    fn constant_time_eq_handles_equal_different_length_and_empty_inputs() {
+        assert!(constant_time_eq(b"same", b"same"));
+        assert!(!constant_time_eq(b"same", b"diff"));
+        assert!(!constant_time_eq(b"same", b"same!"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(!constant_time_eq(b"", b"x"));
     }
 }

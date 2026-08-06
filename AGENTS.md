@@ -127,8 +127,6 @@ compiles.
   keep file ownership disjoint, and coordinate shared integration centrally.
 - Commit coherent completed fixes incrementally with explanatory conventional
   messages instead of holding a large mixed working tree.
-- Keep `cargo dogfood` as the fast development-build path; do not add a
-  separate release-dogfood mode for local iteration.
 - Resolve conflicts and integrate parallel work from relevant transcripts,
   plans, and Git history so intent—not whichever side is newer—wins.
 - Before final review, checkpoint the lane, merge the latest explicit clean-main
@@ -150,8 +148,6 @@ compiles.
   the operator's real TraceDecay or agent-host data.
 - Missing registries and unavailable authorities are typed states, not
   transport errors or successful empty results.
-- Dogfood targets the real managed profile; back up live databases before
-  mutation and never run a second daemon against that profile.
 - LCM retrieval, including paginated summary sources, hydrates through canonical
   redaction/content authority from each message's owning store; raw rows and
   ranked candidate metadata are not authoritative backfill.

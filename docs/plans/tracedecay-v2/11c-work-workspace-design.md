@@ -10,12 +10,13 @@ channel encodes a stated measurement, absence is drawn, degenerate
 distributions are said rather than drawn, caps are captioned.
 
 Plan 24's contract rule applies here: pure source-only/internal Work view
-helpers change in place. Wire-visible DTO revisions and branch-era routes may
-survive in dogfood clients, navigation, saved views, bookmarks, or installed
-host surfaces and retain negotiation/aliases/migration until an authorized
-installed-client/live-profile/host census proves absence. Product graph/item
-versions remain UI-visible history/CAS identities rather than by themselves
-evidence for another wire version.
+helpers, branch-local V2 DTO revisions, and routes change in place.
+Persisted V2 state accepts only its exact final shape; any other database,
+store, spool, file, or projection returns typed `ResetRequired` and requires
+explicit reset or recreation. No storage reader, migration, backfill, dual
+write, or census path exists. Product graph/item versions remain UI-visible
+history/CAS identities rather than by themselves evidence for another wire
+version.
 
 The user explicitly requires a first-class TraceDecay task graph/Kanban
 inspired by Hermes but more powerful; it is a product feature, not roadmap

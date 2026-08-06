@@ -20,8 +20,7 @@ use tracedecay_policy::{GitConflictRiskV1, GitEffectClassifierV1};
 use tracedecay_store::{
     GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
     GitIndexTransactionBeginResultV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
-    GitIndexTransactionStoreResult,
-    GitIndexTransactionTerminalWriteV1,
+    GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
 };
 use tracedecay_tool_catalog::CapabilityId;
 

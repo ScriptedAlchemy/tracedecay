@@ -4,7 +4,7 @@
 //! The `SQLite` runtime admits a bounded number of rows per query and refuses
 //! anything larger outright rather than truncating it. `tracedecay_health`
 //! failed on a real 296 K-line index with "failed to query test marker ids: …
-//! migration SQL query materialization exceeded its limit", and the same class
+//! exact SQL query materialization exceeded its limit", and the same class
 //! of defect applied to every other unbounded whole-table or whole-partition
 //! read.
 //!

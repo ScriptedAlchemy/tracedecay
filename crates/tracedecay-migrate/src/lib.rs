@@ -8,9 +8,6 @@
 //!   whether a failure touching it may block an upgrade or must stay
 //!   opportunistic.
 //! - [`inventory`] carries the planning vocabulary a preflight scan produces.
-//! - [`manifest`] is the durable plan plus the forward-only crash checkpoint
-//!   that lets an interrupted migration resume from where it stopped.
-//!
 //! Runtime schema migration is intentionally absent. Existing stores either
 //! match the compiled final schema exactly or require explicit reset.
 //!
@@ -21,7 +18,6 @@ pub mod durability;
 pub mod final_v2;
 pub mod hermes;
 pub mod inventory;
-pub mod manifest;
 pub mod profile_backup;
 mod profile_identity;
 pub mod registry;

@@ -11,9 +11,9 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior, params};
 use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesQueryV1,
-    CodeRecoveryRepositoriesQueryV1, GitIndexTransactionBeginRequestV1,
-    GitIndexPreviewInputReadV1, GitIndexTransactionBeginResultV1,
-    GitIndexTransactionStoreError, GitIndexTransactionTerminalWriteV1,
+    CodeRecoveryRepositoriesQueryV1, GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionStoreError,
+    GitIndexTransactionTerminalWriteV1,
 };
 
 use super::read::GitIndexReadExecutor;

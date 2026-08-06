@@ -9,7 +9,7 @@ use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
 
 /// Absolute wall-clock budget for one `tracedecay status` invocation, covering
 /// project resolution and every daemon RPC. Override with
-/// `TRACEDECAY_STATUS_DEADLINE_MS` (milliseconds) for tests and dogfood.
+/// `TRACEDECAY_STATUS_DEADLINE_MS` (milliseconds) for tests.
 const DEFAULT_STATUS_COMMAND_DEADLINE: Duration = Duration::from_secs(30);
 
 fn status_command_deadline() -> Duration {

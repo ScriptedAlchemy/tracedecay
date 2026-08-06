@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn execute_batch_execute_and_query_use_owned_dtos() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch(
             "CREATE TABLE migrated (
@@ -21,11 +21,11 @@ fn execute_batch_execute_and_query_use_owned_dtos() {
         .execute(statement(
             "INSERT INTO migrated VALUES (?, ?, ?, ?, ?)",
             vec![
-                MigrationSqlValue::Integer(7),
-                MigrationSqlValue::Real(2.5),
-                MigrationSqlValue::Text("owned".to_owned()),
-                MigrationSqlValue::Blob(vec![1, 2, 3]),
-                MigrationSqlValue::Null,
+                ExactSqlValue::Integer(7),
+                ExactSqlValue::Real(2.5),
+                ExactSqlValue::Text("owned".to_owned()),
+                ExactSqlValue::Blob(vec![1, 2, 3]),
+                ExactSqlValue::Null,
             ],
         ))
         .unwrap();
@@ -46,13 +46,13 @@ fn execute_batch_execute_and_query_use_owned_dtos() {
     );
     assert_eq!(
         rows.rows,
-        vec![MigrationSqlRow {
+        vec![ExactSqlRow {
             values: vec![
-                MigrationSqlValue::Integer(7),
-                MigrationSqlValue::Real(2.5),
-                MigrationSqlValue::Text("owned".to_owned()),
-                MigrationSqlValue::Blob(vec![1, 2, 3]),
-                MigrationSqlValue::Null,
+                ExactSqlValue::Integer(7),
+                ExactSqlValue::Real(2.5),
+                ExactSqlValue::Text("owned".to_owned()),
+                ExactSqlValue::Blob(vec![1, 2, 3]),
+                ExactSqlValue::Null,
             ],
         }]
     );
@@ -60,43 +60,43 @@ fn execute_batch_execute_and_query_use_owned_dtos() {
 
 #[test]
 fn statement_admission_limits_accept_boundaries_and_reject_oversize() {
-    assert!(MigrationSqlStatement::new("x".repeat(MAX_SQL_BYTES), vec![]).is_ok());
+    assert!(ExactSqlStatement::new("x".repeat(MAX_SQL_BYTES), vec![]).is_ok());
     assert!(matches!(
-        MigrationSqlStatement::new("x".repeat(MAX_SQL_BYTES + 1), vec![]),
-        Err(MigrationSqlError::RequestLimitExceeded)
+        ExactSqlStatement::new("x".repeat(MAX_SQL_BYTES + 1), vec![]),
+        Err(ExactSqlError::RequestLimitExceeded)
     ));
     assert!(
-        MigrationSqlStatement::new(
+        ExactSqlStatement::new(
             "SELECT 1".to_owned(),
-            vec![MigrationSqlValue::Null; MAX_SQL_PARAMETERS],
+            vec![ExactSqlValue::Null; MAX_SQL_PARAMETERS],
         )
         .is_ok()
     );
     assert!(matches!(
-        MigrationSqlStatement::new(
+        ExactSqlStatement::new(
             "SELECT 1".to_owned(),
-            vec![MigrationSqlValue::Null; MAX_SQL_PARAMETERS + 1],
+            vec![ExactSqlValue::Null; MAX_SQL_PARAMETERS + 1],
         ),
-        Err(MigrationSqlError::RequestLimitExceeded)
+        Err(ExactSqlError::RequestLimitExceeded)
     ));
 }
 
 #[test]
 fn batch_admission_rejects_oversize_before_enqueue() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
     let error = channel
         .execute_batch("x".repeat(MAX_SQL_BYTES + 1))
         .unwrap_err();
 
-    assert!(matches!(error, MigrationSqlError::RequestLimitExceeded));
+    assert!(matches!(error, ExactSqlError::RequestLimitExceeded));
 }
 
 #[test]
 fn validate_checks_syntax_and_schema_on_the_writer_actor() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
     let missing = channel
         .validate(statement("SELECT value FROM missing_table", vec![]))
@@ -105,14 +105,14 @@ fn validate_checks_syntax_and_schema_on_the_writer_actor() {
         .validate(statement("SELECT FROM", vec![]))
         .unwrap_err();
 
-    assert!(matches!(missing, MigrationSqlError::Sqlite { .. }));
-    assert!(matches!(syntax, MigrationSqlError::Sqlite { .. }));
+    assert!(matches!(missing, ExactSqlError::Sqlite { .. }));
+    assert!(matches!(syntax, ExactSqlError::Sqlite { .. }));
 }
 
 #[test]
 fn batch_reports_last_insert_rowid() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch(
             "CREATE TABLE batch_id (
@@ -139,8 +139,8 @@ fn batch_reports_last_insert_rowid() {
 #[test]
 fn rowid_is_handle_local_and_changes_only_after_applied_insert() {
     let fixture = fixture('a', 'a');
-    let channel_a = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-    let channel_b = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel_a = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel_b = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel_a
         .execute_batch(
             "CREATE TABLE rowids (
@@ -154,13 +154,13 @@ fn rowid_is_handle_local_and_changes_only_after_applied_insert() {
     let a = channel_a
         .execute(statement(
             "INSERT INTO rowids(value) VALUES (?)",
-            vec![MigrationSqlValue::Text("a".to_owned())],
+            vec![ExactSqlValue::Text("a".to_owned())],
         ))
         .unwrap();
     let b = channel_b
         .execute(statement(
             "INSERT INTO rowids(value) VALUES (?)",
-            vec![MigrationSqlValue::Text("b".to_owned())],
+            vec![ExactSqlValue::Text("b".to_owned())],
         ))
         .unwrap();
     assert_eq!(a.last_insert_rowid, 1);
@@ -169,7 +169,7 @@ fn rowid_is_handle_local_and_changes_only_after_applied_insert() {
     let update = channel_a
         .execute(statement(
             "UPDATE rowids SET value = ? WHERE id = 1",
-            vec![MigrationSqlValue::Text("updated".to_owned())],
+            vec![ExactSqlValue::Text("updated".to_owned())],
         ))
         .unwrap();
     channel_a
@@ -184,7 +184,7 @@ fn rowid_is_handle_local_and_changes_only_after_applied_insert() {
     let ignored = channel_a
         .execute(statement(
             "INSERT OR IGNORE INTO rowids(value) VALUES (?)",
-            vec![MigrationSqlValue::Text("b".to_owned())],
+            vec![ExactSqlValue::Text("b".to_owned())],
         ))
         .unwrap();
     let upsert_update = channel_a
@@ -205,8 +205,8 @@ fn rowid_is_handle_local_and_changes_only_after_applied_insert() {
         .execute(statement(
             "INSERT INTO rowids(id, value) VALUES (?, ?)",
             vec![
-                MigrationSqlValue::Integer(41),
-                MigrationSqlValue::Text("explicit".to_owned()),
+                ExactSqlValue::Integer(41),
+                ExactSqlValue::Text("explicit".to_owned()),
             ],
         ))
         .unwrap();
@@ -217,7 +217,7 @@ fn rowid_is_handle_local_and_changes_only_after_applied_insert() {
 #[test]
 fn partial_batch_error_still_publishes_applied_insert_rowid() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch(
             "CREATE TABLE partial_rowid (
@@ -236,7 +236,7 @@ fn partial_batch_error_still_publishes_applied_insert_rowid() {
         )
         .unwrap_err();
 
-    assert!(matches!(error, MigrationSqlError::Sqlite { .. }));
+    assert!(matches!(error, ExactSqlError::Sqlite { .. }));
     assert_eq!(channel.last_insert_rowid(), 1);
 
     let transaction = channel.begin_immediate().unwrap();
@@ -247,7 +247,7 @@ fn partial_batch_error_still_publishes_applied_insert_rowid() {
                 .to_owned(),
         )
         .unwrap_err();
-    assert!(matches!(error, MigrationSqlError::Sqlite { .. }));
+    assert!(matches!(error, ExactSqlError::Sqlite { .. }));
     assert_eq!(channel.last_insert_rowid(), 2);
     transaction.rollback().unwrap();
     assert_eq!(channel.last_insert_rowid(), 2);
@@ -256,7 +256,7 @@ fn partial_batch_error_still_publishes_applied_insert_rowid() {
 #[test]
 fn transaction_insert_returning_publishes_rowid() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch(
             "CREATE TABLE returning_rowid (
@@ -275,7 +275,7 @@ fn transaction_insert_returning_publishes_rowid() {
         ))
         .unwrap();
 
-    assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(1)]);
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(1)]);
     assert_eq!(channel.last_insert_rowid(), 1);
     transaction.rollback().unwrap();
 }

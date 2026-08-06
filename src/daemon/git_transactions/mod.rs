@@ -39,11 +39,11 @@ pub(crate) fn canonicalize_repository_root(repository_root: &Path) -> std::io::R
 }
 
 pub(crate) use journal::{DurableGitIndexJournal, GitIndexJournalError};
+#[cfg(all(unix, any(test, feature = "test-transport")))]
+pub(crate) use native::capture_exact_snapshot_for_test;
 pub(crate) use native::{
     DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor, capture_exact_snapshot,
 };
-#[cfg(all(unix, any(test, feature = "test-transport")))]
-pub(crate) use native::capture_exact_snapshot_for_test;
 pub(crate) use owner::{
     DaemonGitAuthorityStateV1, DaemonGitIndexTransactionServiceRegistry, DaemonGitInvocationOwner,
     DaemonProjectGitIndexTransactionService,

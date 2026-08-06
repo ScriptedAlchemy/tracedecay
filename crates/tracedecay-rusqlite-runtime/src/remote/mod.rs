@@ -29,9 +29,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::StoreRuntimeBindingV1;
 
-use crate::migration_sql::{
-    MigrationSqlError, MigrationSqlHandle, MigrationSqlRows, MigrationSqlStatement,
-    MigrationSqlValue,
+use crate::exact_sql::{
+    ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlValue,
 };
 use tracedecay_application::{
     OperationBudgetUsage,
@@ -75,19 +74,19 @@ pub enum RemoteSqliteStorageErrorV1 {
     #[error("remote Brain storage is unavailable")]
     Unavailable,
     #[error(transparent)]
-    Sql(#[from] MigrationSqlError),
+    Sql(#[from] ExactSqlError),
 }
 
 #[derive(Clone)]
 pub struct RemoteSqliteStorageV1 {
-    handle: MigrationSqlHandle,
+    handle: ExactSqlHandle,
     binding: StoreRuntimeBindingV1,
     keyring: Arc<dyn RemoteSpoolKeyringV1>,
 }
 
 impl RemoteSqliteStorageV1 {
     pub fn attach(
-        handle: MigrationSqlHandle,
+        handle: ExactSqlHandle,
         binding: StoreRuntimeBindingV1,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
     ) -> Result<Self, RemoteSqliteStorageErrorV1> {
@@ -132,7 +131,7 @@ impl RemoteSqliteStorageV1 {
             serde_json::to_string(state).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let writer_json =
             serde_json::to_string(writer).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        self.handle.execute(MigrationSqlStatement::new(
+        self.handle.execute(ExactSqlStatement::new(
             "INSERT INTO remote_authorities (
                     brain_id, runtime_binding_json, authority_state_json, writer_json, updated_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -148,7 +147,7 @@ impl RemoteSqliteStorageV1 {
                 text(&runtime_binding_json),
                 text(&authority_state_json),
                 text(&writer_json),
-                MigrationSqlValue::Integer(updated_at.0),
+                ExactSqlValue::Integer(updated_at.0),
             ],
         )?)?;
         Ok(())
@@ -166,7 +165,7 @@ impl RemoteSqliteStorageV1 {
             serde_json::to_string(grant).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let admission_json =
             serde_json::to_string(admission).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let result = self.handle.execute(MigrationSqlStatement::new(
+        let result = self.handle.execute(ExactSqlStatement::new(
             "INSERT INTO remote_enrollment_grants (
                 grant_id, grant_json, admission_json, consumed_at
              ) VALUES (?1, ?2, ?3, NULL)
@@ -263,7 +262,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
         )
         .map_err(map_enrollment_error)?;
         let row = enrollment_one_row(rows, RemoteEnrollmentAuthorityErrorV1::GrantNotFound)?;
-        if !matches!(row.values.get(1), Some(MigrationSqlValue::Null)) {
+        if !matches!(row.values.get(1), Some(ExactSqlValue::Null)) {
             return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
         }
         serde_json::from_str(enrollment_row_text(&row, 0)?)
@@ -282,7 +281,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
         )
         .map_err(map_enrollment_error)?;
         let row = enrollment_one_row(rows, RemoteEnrollmentAuthorityErrorV1::GrantNotFound)?;
-        if !matches!(row.values.get(1), Some(MigrationSqlValue::Null)) {
+        if !matches!(row.values.get(1), Some(ExactSqlValue::Null)) {
             return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
         }
         serde_json::from_str(enrollment_row_text(&row, 0)?)
@@ -302,7 +301,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?;
         let rows = transaction
             .query(
-                MigrationSqlStatement::new(
+                ExactSqlStatement::new(
                     "SELECT grant_json, admission_json, consumed_at
                      FROM remote_enrollment_grants WHERE grant_id = ?1"
                         .to_owned(),
@@ -312,7 +311,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
             )
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?;
         let row = enrollment_one_row(rows, RemoteEnrollmentAuthorityErrorV1::GrantNotFound)?;
-        if !matches!(row.values.get(2), Some(MigrationSqlValue::Null)) {
+        if !matches!(row.values.get(2), Some(ExactSqlValue::Null)) {
             return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
         }
         let stored_grant: EnrollmentGrantV1 =
@@ -352,7 +351,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
         transaction
             .execute(
-                MigrationSqlStatement::new(
+                ExactSqlStatement::new(
                     "INSERT INTO remote_enrollments (
                         enrollment_id, brain_id, node_id, revision, credential_fingerprint,
                         enrollment_json, commit_receipt_json
@@ -362,7 +361,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
                         text(enrollment.enrollment_id.as_str()),
                         text(enrollment.brain_id.as_str()),
                         text(enrollment.node_id.as_str()),
-                        MigrationSqlValue::Integer(
+                        ExactSqlValue::Integer(
                             i64::try_from(enrollment.revision)
                                 .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?,
                         ),
@@ -376,12 +375,12 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
         let consumed = transaction
             .execute(
-                MigrationSqlStatement::new(
+                ExactSqlStatement::new(
                     "UPDATE remote_enrollment_grants SET consumed_at = ?1
                      WHERE grant_id = ?2 AND consumed_at IS NULL"
                         .to_owned(),
                     vec![
-                        MigrationSqlValue::Integer(consumed_at.0),
+                        ExactSqlValue::Integer(consumed_at.0),
                         text(grant.grant_id.as_str()),
                     ],
                 )
@@ -425,7 +424,7 @@ impl RemoteEnrollmentCredentialLookupPortV1 for RemoteSqliteStorageV1 {
             vec![
                 text(brain_id.as_str()),
                 text(node_id.as_str()),
-                MigrationSqlValue::Integer(revision),
+                ExactSqlValue::Integer(revision),
             ],
         )
     }
@@ -489,7 +488,7 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
             .query(statement(
                 "SELECT event_id, frame_digest FROM remote_spool_frames
                  WHERE enrollment_id = ?1 AND sequence = ?2",
-                vec![text(enrollment_id), MigrationSqlValue::Integer(sequence)],
+                vec![text(enrollment_id), ExactSqlValue::Integer(sequence)],
             )?)
             .map_err(map_persistence_error)?;
         if let Some(row) = existing.rows.first() {
@@ -516,16 +515,16 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
                 vec![
                     text(&event_id),
                     text(enrollment_id),
-                    MigrationSqlValue::Integer(sequence),
+                    ExactSqlValue::Integer(sequence),
                     optional_text(command.sequence.previous_event_id.as_deref()),
                     text(digest.as_str()),
-                    MigrationSqlValue::Integer(
+                    ExactSqlValue::Integer(
                         i64::try_from(encrypted.key_revision)
                             .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
                     ),
-                    MigrationSqlValue::Blob(encrypted.nonce.to_vec()),
-                    MigrationSqlValue::Blob(encrypted.ciphertext),
-                    MigrationSqlValue::Integer(command.captured_at.0),
+                    ExactSqlValue::Blob(encrypted.nonce.to_vec()),
+                    ExactSqlValue::Blob(encrypted.ciphertext),
+                    ExactSqlValue::Integer(command.captured_at.0),
                 ],
             )?)
             .map_err(map_persistence_error)?;
@@ -610,7 +609,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         let pre_state = decode_spool_state(row.clone())?;
         if pre_state.state != transition.from
             || pre_state.last_attempt != transition.replay_attempt
-            || !matches!(row.values.get(3), Some(MigrationSqlValue::Integer(_)))
+            || !matches!(row.values.get(3), Some(ExactSqlValue::Integer(_)))
         {
             return Err(RemoteCapturePersistenceErrorV1::Corruption);
         }
@@ -656,10 +655,10 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
                     text(replay_state_name(transition.to)),
                     optional_text(receipt_json.as_deref()),
                     optional_text(finding_json.as_deref()),
-                    MigrationSqlValue::Integer(i64::from(terminal)),
+                    ExactSqlValue::Integer(i64::from(terminal)),
                     text(&transition.event_id),
                     text(replay_state_name(transition.from)),
-                    MigrationSqlValue::Integer(
+                    ExactSqlValue::Integer(
                         i64::try_from(transition.replay_attempt)
                             .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
                     ),
@@ -704,7 +703,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
             )?)
             .map_err(map_persistence_error)?;
         let row = persistence_one_row(rows)?;
-        if !matches!(row.values.get(1), Some(MigrationSqlValue::Null)) {
+        if !matches!(row.values.get(1), Some(ExactSqlValue::Null)) {
             return Err(RemoteCapturePersistenceErrorV1::Corruption);
         }
         let last_attempt = row_u64(&row, 0)?;
@@ -717,13 +716,13 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
                  SET last_attempt = ?1, attempt_started_at = ?2
                  WHERE event_id = ?3 AND last_attempt = ?4 AND attempt_started_at IS NULL",
                 vec![
-                    MigrationSqlValue::Integer(
+                    ExactSqlValue::Integer(
                         i64::try_from(replay_attempt)
                             .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
                     ),
-                    MigrationSqlValue::Integer(observed_at.0),
+                    ExactSqlValue::Integer(observed_at.0),
                     text(event_id),
-                    MigrationSqlValue::Integer(
+                    ExactSqlValue::Integer(
                         i64::try_from(last_attempt)
                             .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
                     ),
@@ -749,7 +748,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
                  WHERE event_id = ?1 AND last_attempt = ?2 AND attempt_started_at IS NOT NULL",
                 vec![
                     text(event_id),
-                    MigrationSqlValue::Integer(
+                    ExactSqlValue::Integer(
                         i64::try_from(replay_attempt)
                             .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
                     ),
@@ -778,7 +777,7 @@ fn random_nonce() -> Result<[u8; 12], RemoteCapturePersistenceErrorV1> {
 }
 
 fn validate_previous_frame(
-    transaction: &crate::migration_sql::MigrationSqlTransaction,
+    transaction: &crate::exact_sql::ExactSqlTransaction,
     command: &AdmittedRemoteCaptureV1,
 ) -> Result<(), RemoteCapturePersistenceErrorV1> {
     if command.sequence.sequence == 1 {
@@ -792,7 +791,7 @@ fn validate_previous_frame(
              WHERE enrollment_id = ?1 AND sequence = ?2",
             vec![
                 text(command.enrollment_id.as_str()),
-                MigrationSqlValue::Integer(previous_sequence),
+                ExactSqlValue::Integer(previous_sequence),
             ],
         )?)
         .map_err(map_persistence_error)?;
@@ -808,32 +807,32 @@ fn validate_previous_frame(
 }
 
 fn query(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlRows, RemoteSqliteStorageErrorV1> {
-    let statement = MigrationSqlStatement::new(sql.to_owned(), params)?;
+    params: Vec<ExactSqlValue>,
+) -> Result<ExactSqlRows, RemoteSqliteStorageErrorV1> {
+    let statement = ExactSqlStatement::new(sql.to_owned(), params)?;
     Ok(handle.query(statement, READ_WAIT)?)
 }
 
 fn statement(
     sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlStatement, RemoteCapturePersistenceErrorV1> {
-    MigrationSqlStatement::new(sql.to_owned(), params).map_err(map_persistence_error)
+    params: Vec<ExactSqlValue>,
+) -> Result<ExactSqlStatement, RemoteCapturePersistenceErrorV1> {
+    ExactSqlStatement::new(sql.to_owned(), params).map_err(map_persistence_error)
 }
 
-fn text(value: &str) -> MigrationSqlValue {
-    MigrationSqlValue::Text(value.to_owned())
+fn text(value: &str) -> ExactSqlValue {
+    ExactSqlValue::Text(value.to_owned())
 }
 
-fn optional_text(value: Option<&str>) -> MigrationSqlValue {
-    value.map_or(MigrationSqlValue::Null, text)
+fn optional_text(value: Option<&str>) -> ExactSqlValue {
+    value.map_or(ExactSqlValue::Null, text)
 }
 
 fn one_row(
-    rows: MigrationSqlRows,
-) -> Result<crate::migration_sql::MigrationSqlRow, RemoteSqliteStorageErrorV1> {
+    rows: ExactSqlRows,
+) -> Result<crate::exact_sql::ExactSqlRow, RemoteSqliteStorageErrorV1> {
     let mut rows = rows.rows.into_iter();
     match (rows.next(), rows.next()) {
         (Some(row), None) => Ok(row),
@@ -842,31 +841,31 @@ fn one_row(
 }
 
 fn row_text(
-    row: &crate::migration_sql::MigrationSqlRow,
+    row: &crate::exact_sql::ExactSqlRow,
     index: usize,
 ) -> Result<&str, RemoteCapturePersistenceErrorV1> {
     match row.values.get(index) {
-        Some(MigrationSqlValue::Text(value)) => Ok(value),
+        Some(ExactSqlValue::Text(value)) => Ok(value),
         _ => Err(RemoteCapturePersistenceErrorV1::Corruption),
     }
 }
 
 fn row_blob(
-    row: &crate::migration_sql::MigrationSqlRow,
+    row: &crate::exact_sql::ExactSqlRow,
     index: usize,
 ) -> Result<&[u8], RemoteCapturePersistenceErrorV1> {
     match row.values.get(index) {
-        Some(MigrationSqlValue::Blob(value)) => Ok(value),
+        Some(ExactSqlValue::Blob(value)) => Ok(value),
         _ => Err(RemoteCapturePersistenceErrorV1::Corruption),
     }
 }
 
 fn row_u64(
-    row: &crate::migration_sql::MigrationSqlRow,
+    row: &crate::exact_sql::ExactSqlRow,
     index: usize,
 ) -> Result<u64, RemoteCapturePersistenceErrorV1> {
     match row.values.get(index) {
-        Some(MigrationSqlValue::Integer(value)) => {
+        Some(ExactSqlValue::Integer(value)) => {
             u64::try_from(*value).map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)
         }
         _ => Err(RemoteCapturePersistenceErrorV1::Corruption),
@@ -874,8 +873,8 @@ fn row_u64(
 }
 
 fn persistence_one_row(
-    rows: MigrationSqlRows,
-) -> Result<crate::migration_sql::MigrationSqlRow, RemoteCapturePersistenceErrorV1> {
+    rows: ExactSqlRows,
+) -> Result<crate::exact_sql::ExactSqlRow, RemoteCapturePersistenceErrorV1> {
     let mut rows = rows.rows.into_iter();
     match (rows.next(), rows.next()) {
         (Some(row), None) => Ok(row),
@@ -884,12 +883,12 @@ fn persistence_one_row(
 }
 
 fn decode_spool_state(
-    row: crate::migration_sql::MigrationSqlRow,
+    row: crate::exact_sql::ExactSqlRow,
 ) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
     let state = parse_replay_state(row_text(&row, 0)?)?;
     let receipt = match row.values.get(1) {
-        Some(MigrationSqlValue::Null) => None,
-        Some(MigrationSqlValue::Text(value)) => Some(
+        Some(ExactSqlValue::Null) => None,
+        Some(ExactSqlValue::Text(value)) => Some(
             serde_json::from_str(value).map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?,
         ),
         _ => return Err(RemoteCapturePersistenceErrorV1::Corruption),

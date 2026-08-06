@@ -9,13 +9,13 @@
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
 > Historical version/compatibility/migration language cannot resurrect
-> source-only/internal branch scaffolding. Compatibility begins before package
-> publication when an independently deployed dogfood client or host
-> installation may retain an API/schema revision, and remains until the
-> authorized installed-client/host census proves absence. Potentially persisted
-> cursors, idempotency keys, journals, checkpoints, and receipts keep
-> backward-read/recovery until the registered-store/profile census proves
-> absence.
+> source-only/internal branch scaffolding. Only an actually independently
+> released public API/schema revision may retain protocol compatibility.
+> Persisted cursors, idempotency keys, journals, checkpoints, and receipts
+> accept only their exact final shape; every other database, store, spool, file,
+> or projection returns typed `ResetRequired` and requires explicit reset or
+> recreation. No storage reader, migration, backfill, dual write, or census
+> path exists.
 
 **Goal:** Publish Rust and TypeScript SDKs for accepted PR12–PR17
 operations without inventing lifecycle semantics. (The originally planned
@@ -51,14 +51,15 @@ catalog with equivalent authentication, scope, lifecycle, paging/SSE,
 cancellation, idempotency, and typed outcomes. Current direct behavior and
 acceptance live in the applicable numbered V2 plan.
 
-## Historical migration, rollback, measurement, and deletion notes
+## Historical release, reset, measurement, and deletion notes
 
-Before first publication, generated schemas change in place only when they
-have not potentially reached an independently deployed dogfood client or host
-installation. Potentially deployed schemas remain negotiated until an
-authorized installed-client/host census proves absence. After an evidenced
-package release, schemas follow the accepted major-version compatibility
-policy. Rollback unpublishes or yanks a package release according to registry
+Before first publication, generated schemas change in place. V2 branch-local
+data uses the fresh-store cutover: only the exact final persisted shape is
+accepted, and every other shape returns typed `ResetRequired` for explicit
+reset or recreation. No storage reader, migration, backfill, dual write, or
+census path survives. After an actual independent package release, public
+schemas follow the accepted major-version compatibility policy. Rollback
+unpublishes or yanks a package release according to registry
 policy but never changes server semantics. Measure generation, package size,
 startup, paging/SSE overhead, and conformance duration. Delete private client
 wrappers and aliases only after two-language (Rust and TypeScript)

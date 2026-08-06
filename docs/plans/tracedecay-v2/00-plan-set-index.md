@@ -8,23 +8,20 @@ direct tests, and normal CI. The repository is not green.
 
 This file is the sole authority for V2 precedence, rejected mechanisms,
 delivery order, and acceptance. Numbered plans own semantic product behavior,
-failure semantics, migrations, and direct acceptance; they are not independent
+failure semantics, fresh-store cutover, and direct acceptance; they are not independent
 queues and do not require one crate-first pull request per document. `NEXT.md`
 tracks current outcomes and blockers only. `GAP-LEDGER-PR8-PR14.md` and
 `pr9/00-contract-spine.md` are historical records, not parallel authorities.
 
 The `TraceDecay V2` roadmap name is independent of contract/schema versioning.
-A predecessor proven on `origin/master`, in a published package/release, an
-independently deployed client, a live host installation, or a live persisted
-format requires the applicable compatibility, deprecation, reader/writer,
-contract-version, or migration path. Pure source-only/internal contracts change
-in place; PR sequence, branch history, tests, historical plans, and a `V1`
-suffix alone do not establish publication. Wire-visible revisions remain
-negotiated until an authorized installed-client/host census proves absence.
-Anything potentially installed or written to a store, spool, file, or
-persisted projection fail-closes as live and keeps compatibility,
-backward-read, and migration/recovery until a separately authorized census
-proves absence.
+Only an actually independently released public wire/API protocol may retain an
+evidence-backed compatibility disposition. V2 persistence is a fresh-store
+cutover: the exact final schema/shape is the only accepted TraceDecay database,
+store, spool, file, or projection. Any other persisted shape returns typed
+`ResetRequired` and requires explicit reset or recreation. There is no storage
+compatibility reader, migration, backfill, dual write, or census path, even for
+data written by an older installed binary. PR sequence, branch history, tests,
+historical plans, and a `V1` suffix alone do not establish a public release.
 
 Core Work and the minimal Plan 24/32 runtime ship in PR14; PR17 retains
 residual advanced workflow capability.
@@ -79,7 +76,7 @@ PR6 delivered:
 
 PR7 delivered the canonical project/profile memory and fact path, evidence and
 provenance, corrections and trust, curation, migration, deletion lineage, and
-dogfood hardening, retained by direct behavioral cargo tests (performance
+runtime hardening, retained by direct behavioral cargo tests (performance
 baseline remains provisional/pending). PR8 delivered the shared
 Session/LCM temporal-retrieval kernel, explicit refresh, stable temporal
 pagination, summary lineage, and compatibility delegation. The active slice is
@@ -91,20 +88,19 @@ sub-slices of the active delivery band, not acceptance of PR9–PR14:
 - daemon shutdown cancellation now reaches startup transcript discovery,
   provider ingest, projection drain, and code-index reconciliation, and
   cancelled startup ingest does not run finalization or downstream backfill;
-- configuration startup forward-repair materializes newly registered defaults
-  into older stored snapshots, and the production configuration client now
-  performs exact-project mutations, republishes the pinned snapshot, and records
-  runtime activation;
-- the dogfood path classifies terminal corruption/authority failures separately
+- configuration startup materializes defaults only in a newly created final
+  snapshot; a non-final persisted snapshot returns `ResetRequired`, and the
+  production configuration client performs exact-project mutations,
+  republishes the pinned final snapshot, and records runtime activation;
+- the runtime startup path classifies terminal corruption/authority failures separately
   from retryable convergence, scopes convergence to the active project store,
   reuses a source-stamped dashboard build when inputs are unchanged, and reports
   stage timings;
 - foreground code search serves the prior complete immutable generation without
   waiting for an in-flight refresh, and bundled-SQLite FTS blob corruption has a
   direct open-and-self-heal regression;
-- the Memory V2 owner archive covers all 33 authoritative families with
-  physical-adapter parity, referential closure, digest-bound cutover receipts,
-  idempotent import, and public-read/cutover regressions; and
+- Memory facts are project-wide; branch retirement neither moves nor merges
+  them; and
 - the dashboard retains the daemon's production invocation executor, its
   daemon-hosted Settings mutation is directly tested, and its focused backend
   suite executes the diagnostics and workspace routes recorded below.
@@ -117,7 +113,7 @@ suite.
 
 **Open operational evidence (owner recorded, 2026-07-27).**
 
-- `cargo dogfood` still does not exit successfully. Doctor currently reports
+- Doctor currently reports
   `authority_audit_unavailable`, and Cursor Core has a component-ownership
   conflict. Plan 09 owns Doctor composition; Plan 27 and the PR12/PR13
   integration slice own host lifecycle/ownership repair. The Plan 27 host
@@ -126,7 +122,8 @@ suite.
   [Plan 27](27-cross-host-agent-plugin-bundles.md)) do not close this Cursor
   Core ownership conflict, which remains open.
 - Semantic search is disabled by an invalid configuration snapshot. Plan 20
-  owns snapshot validity and forward repair; Plan 31 owns semantic activation.
+  owns final-snapshot validity and explicit reset/recreation; Plan 31 owns
+  semantic activation.
   Exact, lexical, and graph retrieval remain the required available fallback.
 - A live profile was observed 237 minutes stale (the index later reported
   285 minutes stale while this reconciliation was being checked). Plan 25 and
@@ -174,7 +171,7 @@ reveal/trust-root evidence, or giant gate scaffolds. Acceptance is direct
 product tests plus simple Linux-only developer benchmarks/evals and truthful
 pass/fail/pending summaries; normal Linux/macOS/Windows CI continues to support
 the product's default features. This rule does not remove product-runtime
-receipts for atomic effects, migrations, Git transactions, daemon operations,
+receipts for atomic effects, Git transactions, daemon operations,
 or rollback, nor immutable code/vector/session generation identity and real
 source/content digests.
 
@@ -196,8 +193,9 @@ acceptance gates:
   durable result, and rollback or forward recovery appropriate to the real
   commit boundary.
 
-Migration, compatibility, recovery, and truthful partial/unavailable behavior
-remain direct product requirements. Git never rewrites published history,
+Actual released public-protocol compatibility, recovery, and truthful
+partial/unavailable behavior remain direct product requirements. Git never
+rewrites published history,
 resolves semantic conflicts, or performs autonomous branch/ref mutation.
 
 ## Rejected and superseded decisions
@@ -313,7 +311,7 @@ Quoted text is user speech; plan/design consequences are labeled separately.
 10. **The sparse circular single-project Brain is rejected.** The circle
     communicated no readable property and the selected-project view was too
     sparse. Geometry must encode a named real measurement.
-11. **A Brain with no visible live neurons after real dogfooding is rejected.**
+11. **A Brain with no visible live neurons during active agent work is rejected.**
     Real activity should visibly fire when agents work; missing activity must
     remain truthful rather than simulated.
 12. **Bland vertical lists that consume large screen area are rejected.**
@@ -493,7 +491,7 @@ proximity tiers; and prove bounded backpressure, restart, OpenCode
 custom-LSP duplicate-analyzer avoidance, and truthful provider-unavailable
 behavior,
 including an explicit Cline-family route or evidence-backed typed unavailable
-result. Dogfood the official install/upgrade/repair/uninstall flow for Kimi
+result. Exercise the official install/upgrade/repair/uninstall flow for Kimi
 Code and OpenCode; prove competing-extension, interrupted-lifecycle,
 host-by-host rollback, and the direct feedback rollback switch. Normal
 Linux/macOS/Windows CI covers supported-host default-feature compatibility.
@@ -802,55 +800,44 @@ unauthorized behavior, and local/remote semantic parity. LSP only opens the
 owning surface; it retrieves no task body and mutates no work. Compilation,
 generated declaration coverage, or schema equality alone is not acceptance.
 
-**Not in this PR.** Data cutover and V1 deletion belong to PR19.
+**Not in this PR.** Final-schema enforcement and V1 deletion belong to PR19.
 
-## PR19 — V2 becomes the only product path
+## PR19 — final V2 fresh-store reset
 
-**User outcome.** Existing installations migrate predecessor APIs and persisted
-families proven in released/live use plus potentially deployed or persisted
-branch-era families not eliminated by an authorized census, cut over to the V2
-product with bounded recovery, and finish with one supported implementation.
+**User outcome.** TraceDecay opens only the exact final V2 persisted shape.
+An existing database, store, spool, file, or projection with any other shape
+returns typed `ResetRequired`; the operator explicitly resets or recreates it.
+Independently released public wire/API protocols keep only their separately
+evidence-backed compatibility surface.
 
-**End-to-end production path.** A destination-committed resumable backfill
-converts released data, isolated read-only shadow comparison verifies product
-behavior, an explicit bounded cutover makes V2 default, and recovery restores
-the V1 archive forward into verified V2 under a new fence. Superseded V1 and
-migration-only paths are deleted only after the recovery window and the
-applicable authorized installed-client/host/registered-store census.
+**End-to-end production path.** Store admission validates the exact final
+schema before any read, write, replay, or projection. Mismatch reports
+`ResetRequired` before interpretation; explicit reset or recreation makes a
+clean final store. No old data is converted, read, shadowed, backfilled, or
+dual-written.
 
 **Implementation and deletion.**
 
-- Record explicit compatibility dispositions for every published API, every
-  callable name or protocol revision potentially retained by a dogfood
-  client/host, and every stored datum potentially present in a released or live
-  format that crosses the cutover. Pure source-only/internal API shapes change
-  in place; potentially installed names and branch-written stores,
-  spools, files, and projections remain in the inventory until the applicable
-  authorized installed-host/live-profile census proves absence.
-- Do not retain reverse cutover, long-lived dual write, lazy read migration,
-  production shadow reads, or V1 as renewed authority.
-- Remove superseded V1 implementations, adapters, flags, branches, and
-  migration-only machinery only when their recovery boundary closes and the
-  applicable authorized census proves no installed consumer or registered store
-  depends on them.
+- Record compatibility dispositions only for actual independently released
+  public APIs and wire protocols; they never authorize a persisted-state
+  reader or conversion.
+- Reject every non-final persisted shape with `ResetRequired`; retain no
+  reverse cutover, compatibility reader, migration, backfill, dual write,
+  shadow read, or census machinery.
+- Delete superseded V1 implementations, adapters, flags, branches, and all
+  storage-transition machinery with the reset.
 
-**Library-first implementation defaults.** Use the existing SQLite
-`VACUUM INTO`/backup path, migration and fault-injection seams, and proptest
-coverage. They replace a new backup copier, migration orchestration framework,
-and separate crash/property harness while retaining maintenance fencing,
-isolated staged import, bounded transactions, durable checkpoints, semantic
-verification, atomic cutover, and forward-only recovery. If a source or
-platform cannot produce and verify the required snapshot, block cutover and
-use the existing explicit backup fallback; do not add a migration framework or
-claim success from schema-only evidence.
+**Library-first implementation defaults.** Reuse exact-schema validation,
+SQLite reset/create, and fault-injection seams. An operator-owned backup may
+preserve bytes for inspection, never as conversion input. Do not add migration
+or recovery orchestration or claim success from schema-only evidence.
 
-**Direct acceptance.** Migrate representative released data, interrupt and
-resume every phase, compare direct product journeys, cut over atomically,
-restore from the archive into a new V2 fence, and prove deletion,
-compatibility, and rollback-window behavior before deleting the old path.
+**Direct acceptance.** Prove final-schema admission, typed `ResetRequired` for
+every incompatible persisted shape, explicit reset/recreation, and no legacy
+read/write/conversion path. Verify independently released public wire/API
+compatibility separately from storage admission.
 
-**Not in this PR.** V1 archives are bounded recovery input, not a second product
-or permanent read path.
+**Not in this PR.** V1 persisted state is not a recovery input or read path.
 
 ## PR20 — measured product speed
 
@@ -965,7 +952,8 @@ benchmarks do not ship.
   [17](17-official-public-api-and-sdks.md),
   [19](19-system-defragmentation-convergence-and-extensibility.md),
   [34](34-workspace-refactoring-and-api-migration.md), and every component
-  migration section whose released data or API crosses the cutover.
+  section whose independently released public API protocol crosses the
+  fresh-store boundary.
 - PR20: [Plan 33](33-end-to-end-performance-optimization.md) and
   [Plan 38](38-storage-retention-size-and-efficiency.md)'s compaction and
   size-telemetry budgets.
@@ -976,7 +964,7 @@ remaining slices rather than owning one PR: the Doctor storage finding
 family lands with PR14 (plan 09 over plan 26 read models); automatic
 branch-DB lifecycle and registry orphan detection/collection land with the
 storage-runtime S11 window; session retention with raw/projected dedup
-extends the staged LCM GC cards. Measured driver: one dogfood profile
+extends the staged LCM GC cards. Measured driver: one isolated validation profile
 reached 256 GB and was reduced to ~75 GB purely by removing data the
 product should never have retained. All plan 38 sections (§1–§7) have now
 landed on this branch (2026-07-23) — branch lifecycle, registry orphan

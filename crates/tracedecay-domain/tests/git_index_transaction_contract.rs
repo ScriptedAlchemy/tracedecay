@@ -8,8 +8,8 @@ use tracedecay_domain::{
     GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
     GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
-    GitOperationStateV1, HunkDirectionV1, HunkRefV1, ManifestDigest,
-    MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    GitOperationStateV1, HunkDirectionV1, HunkRefV1, MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS,
+    ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T

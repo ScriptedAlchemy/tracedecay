@@ -12,6 +12,7 @@ categories = ["development-tools", "parsing"]
 include = ["/src/**", "/tests/**", "/README.md"]
 
 [dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 hex = "0.4"
 serde_json = "1"
 sha2 = "0.11"

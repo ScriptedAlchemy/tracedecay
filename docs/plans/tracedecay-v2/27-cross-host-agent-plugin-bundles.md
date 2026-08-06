@@ -32,16 +32,14 @@ Cursor Core component-ownership conflict. Exact test names, counts, generated
 matrices, and intermediate registration scaffolding are historical evidence,
 not acceptance requirements.
 
-Installed host/provider formats and names retain compatibility when a released
-bundle/package or live host installation proves them. Pure transient PR13
-source-only/internal helpers may change in place. Wire-visible request
-revisions, Kimi Code, OpenCode, and other dogfood install manifests, generated
-host files, local queues, checkpoints, and receipts are potentially deployed or
-live formats. Their negotiation, readers, and migration/rollback remain until a
-separately authorized installed-client/host/profile census proves absence;
-fixture versions and PR sequencing alone remain insufficient evidence.
-Bundle/protocol negotiation remains required for actual installed-version
-skew.
+Only actually independently released host/provider protocols and names retain
+compatibility. Pure transient PR13 source-only/internal helpers and
+wire-visible V2 request revisions change in place. Generated host files, local
+queues, checkpoints, receipts, and every other persisted V2 state accept only
+their exact final shape; any other database, store, spool, file, or projection
+returns typed `ResetRequired` and requires explicit reset or recreation. No
+storage reader, migration, backfill, dual write, or census path exists.
+Bundle/protocol negotiation remains separate for actual released-version skew.
 
 ## PR13 user outcome
 
@@ -284,10 +282,11 @@ the host observation replay spool.
 
 - Delete source-only PR6 compatibility generators and duplicate integration
   scaffolds once all package projections consume the single existing manifest.
-  Potentially installed manifests, generated host files, queues, checkpoints,
-  receipts, callable names, and protocol revisions remain readable/negotiable
-  until an authorized installed-host/profile census proves absence; branch
-  history alone creates no public compatibility window.
+  Actual independently released protocol names and revisions follow their
+  public support policy. Persisted manifests, generated host files, queues,
+  checkpoints, and receipts never become a compatibility input: a non-final
+  shape returns `ResetRequired`; branch history alone creates no public
+  compatibility window.
 - Remove the generic source-connector contract, generic capability catalog,
   future work/task/native-execution projection fields, exact type/file/schema
   inventories, enumerated fixture-directory manifests, Cartesian host

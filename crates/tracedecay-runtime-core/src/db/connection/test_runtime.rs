@@ -320,12 +320,12 @@ impl Database {
             TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing
                 if graph_shard =>
             {
-                let exact = database.retained_runtime().exact_schema().map_err(|error| {
-                    test_runtime_error(
-                        "require exact final test schema",
-                        format!("{error:?}"),
-                    )
-                })?;
+                let exact = database
+                    .retained_runtime()
+                    .exact_schema()
+                    .map_err(|error| {
+                        test_runtime_error("require exact final test schema", format!("{error:?}"))
+                    })?;
                 if exact.contract().kind()
                     != crate::store_runtime::schema::StoreSchemaKindV2::GraphMemory
                 {

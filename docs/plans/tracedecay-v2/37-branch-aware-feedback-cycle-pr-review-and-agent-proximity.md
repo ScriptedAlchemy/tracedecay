@@ -29,14 +29,13 @@ exact source layouts, schema registries, and fixture matrices are evidence only
 unless separately declared public or persisted API.
 
 The PR12 feedback-read and TraceDecay LSP extension payloads have no
-predecessor on `origin/master` or in a published package/release, but packaged
-hosts or independently deployed dogfood clients may retain prior revisions.
-Keep LSP negotiation and prior-revision decoding until a separately authorized
-installed-client/host census proves absence. Durable
-feedback findings, review snapshots, cursors, journals, checkpoints, and
-receipts remain backward-readable/recoverable until a separately authorized
-registered-store/profile census proves absence; branch history, an
-experimental version tag, or a fixture alone is not release evidence.
+predecessor on `origin/master` or in a published package/release. Branch-local
+V2 payloads and durable feedback findings, review snapshots, cursors, journals,
+checkpoints, and receipts change in place. Persisted feedback accepts only its
+exact final shape; any other database, store, spool, file, or projection returns
+typed `ResetRequired` and requires explicit reset or recreation. No storage
+reader, migration, backfill, dual write, or census path exists; branch history,
+an experimental version tag, or a fixture alone is not release evidence.
 
 ## PR12 baseline reader and LSP context contract
 
@@ -283,12 +282,10 @@ feedback requires exact saved-content or clean-generation identity.
   and schema inventories, standalone milestone gates, giant lifecycle ×
   provider fixture matrices, and placeholder benchmark packets.
 - Remove reserved PR15/PR17 fields from PR13 schemas. Later callable
-  operations add inputs to the current writer shape while retained decoders
-  accept potentially installed prior revisions and responses emit each
-  client's negotiated retained revision. Release, persistence, an independently
-  deployed client, or a live host installation establishes a versioned
-  predecessor; the authorized installed-client/host census gates reader/writer
-  and negotiation retirement.
+  operations add inputs to the current writer shape. An actually independently
+  released public protocol may negotiate its documented revision at the
+  transport boundary; persisted feedback never gains a prior-shape reader and
+  returns `ResetRequired` when non-final.
 - Remove adapter-local findings, proximity fanout/dedupe, suggestion streams,
   task linking, and evidence stores. The canonical owners above remain.
 - Do not remove or reduce any pillar, surface, lifecycle/provider state,

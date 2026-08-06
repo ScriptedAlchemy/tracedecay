@@ -23,19 +23,18 @@ it must not be attributed to the user.
 
 Earlier component names, route inventories, fixture matrices, packet names,
 script lists, and frontend gate layouts are historical implementation evidence,
-not prerequisites or artifacts that PR14 or PR17 must recreate. Published URLs
-and persisted deep links retain compatibility and migration obligations; all
-other retention is judged by the user journeys, behavior, accessibility,
+not prerequisites or artifacts that PR14 or PR17 must recreate. Only actually
+independently released public URLs/deep links may retain protocol compatibility;
+persisted navigation uses the fresh-store rule. All other retention is judged
+by the user journeys, behavior, accessibility,
 performance, platform, and regression requirements below.
 
-That compatibility applies to URLs/deep links evidenced on `origin/master`, in
-a published release, or in live persisted navigation. Pure source-only/internal
-view helpers and design tokens change to their final shape in place.
-Wire-visible DTO revisions and branch-era routes may already be retained by
-dogfood clients, navigation, saved views, bookmarks, or installed host
-surfaces, so negotiation/aliases/migration remain until a separately authorized
-installed-client/live-profile navigation census proves absence; references and
-tests alone are not persistence evidence.
+Pure source-only/internal view helpers, design tokens, wire-visible V2 DTO
+revisions, and branch-era routes change in place. Persisted navigation accepts
+only its exact final shape; any other database, store, spool, file, or
+projection returns typed `ResetRequired` and requires explicit reset or
+recreation. No storage reader, migration, backfill, dual write, or census path
+exists; references and tests alone are not release evidence.
 
 Current implementation (2026-07-25): the legacy multi-app dashboard (shell,
 holographic, lcm, graph, code-diagnostics, savings, settings as separate

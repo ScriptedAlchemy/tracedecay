@@ -215,7 +215,7 @@ Bash, Ruby, Lua, Dart, PHP. Roughly 100-300 lines of port work each. Order by gr
 
 ### Phase 4: medium scanners
 
-Rust, Python, C++, C#, Scala, Kotlin, Swift. ~300-800 lines each. The Rust grammar deserves special care because tracedecay's own dogfooding depends on it.
+Rust, Python, C++, C#, Scala, Kotlin, Swift. ~300-800 lines each. The Rust grammar deserves special care because TraceDecay itself includes substantial Rust.
 
 ### Phase 5: markdown
 
