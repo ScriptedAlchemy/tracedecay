@@ -147,6 +147,8 @@ pub(super) async fn coordinate_daemon_shutdown<Prepare>(
 where
     Prepare: Future<Output = DaemonShutdownPlan> + Send + 'static,
 {
+    lifecycle.wait_for_finished_shutdown_coordinator().await;
+    lifecycle.join_finished_shutdown_coordinator().await;
     lifecycle.begin_draining();
     let attempt = match lifecycle.claim_shutdown_coordination() {
         DaemonShutdownClaim::Terminal(receipt) => {
@@ -157,14 +159,12 @@ where
             drop(prepare);
             attempt
         }
-        DaemonShutdownClaim::Run {
-            attempt,
-            mut failures,
-        } => {
+        DaemonShutdownClaim::Run { attempt, failures } => {
             let coordinator_lifecycle = lifecycle.clone();
             let runner_lifecycle = lifecycle.clone();
             let coordinator_attempt = Arc::clone(&attempt);
-            tokio::spawn(async move {
+            let mut coordinator_failures = failures.clone();
+            let coordinator = async move {
                 let runner = tokio::spawn(async move {
                     match tokio::time::timeout_at(shutdown_deadline, prepare).await {
                         Ok(plan) => {
@@ -180,25 +180,37 @@ where
                         error.to_string(),
                     ),
                 };
-                failures.record(&receipt);
-                failures.apply(&mut receipt);
+                coordinator_failures.record(&receipt);
+                coordinator_failures.apply(&mut receipt);
                 coordinator_lifecycle.finish_shutdown_attempt(
                     &coordinator_attempt,
                     Arc::new(receipt),
-                    failures,
+                    coordinator_failures,
                 );
-            });
+            };
+            if !lifecycle.spawn_shutdown_coordinator(&attempt, coordinator) {
+                let receipt = Arc::new(DaemonShutdownReceipt::coordinator_failed(
+                    shutdown_deadline,
+                    "daemon shutdown coordinator ownership was lost".to_owned(),
+                ));
+                let mut failures = failures;
+                failures.record(&receipt);
+                lifecycle.finish_shutdown_attempt(&attempt, receipt, failures);
+            }
             attempt
         }
     };
 
-    match attempt.wait_for_receipt().await {
+    let receipt = match attempt.wait_for_receipt().await {
         Ok(receipt) => receipt,
         Err(error) => Arc::new(DaemonShutdownReceipt::coordinator_failed(
             shutdown_deadline,
             error,
         )),
-    }
+    };
+    lifecycle.wait_for_finished_shutdown_coordinator().await;
+    lifecycle.join_finished_shutdown_coordinator().await;
+    receipt
 }
 
 async fn run_daemon_shutdown(

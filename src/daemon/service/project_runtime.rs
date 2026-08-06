@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard};
 
-use tokio::sync::watch;
+use tokio::sync::{Mutex as AsyncMutex, watch};
 use tracedecay_lsp::FeedbackCycleRuntimePort;
 
 use crate::application::feedback::Pr12FeedbackCycleRuntime;
@@ -21,9 +21,7 @@ use super::invocation::{
     RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
-mod reaper;
 mod shutdown;
-use reaper::RuntimeReaper;
 use shutdown::ShutdownState;
 
 #[cfg(test)]
@@ -422,7 +420,10 @@ pub(crate) struct ProjectRuntimeRegistryV1 {
     runtimes: Arc<StdMutex<BTreeMap<PathBuf, ProjectRuntime>>>,
     reservation_changed: watch::Sender<u64>,
     reservation_blocking_changed: Arc<(StdMutex<u64>, Condvar)>,
-    shutdown_reaper: RuntimeReaper,
+    /// The blocking drain is retained independently of whichever async
+    /// shutdown caller first requested it. A retry can therefore join the
+    /// same work after that caller is cancelled.
+    shutdown_task: Arc<AsyncMutex<Option<tokio::task::JoinHandle<()>>>>,
     closed: Arc<AtomicBool>,
     shutdown_started: Arc<AtomicBool>,
     shutdown_complete: watch::Sender<ShutdownState>,
@@ -440,7 +441,7 @@ impl Default for ProjectRuntimeRegistryV1 {
             runtimes: Arc::new(StdMutex::new(BTreeMap::new())),
             reservation_changed,
             reservation_blocking_changed: Arc::new((StdMutex::new(0), Condvar::new())),
-            shutdown_reaper: RuntimeReaper::new("tracedecay-runtime-shutdown-reaper"),
+            shutdown_task: Arc::new(AsyncMutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             shutdown_started: Arc::new(AtomicBool::new(false)),
             shutdown_complete,

@@ -62,7 +62,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
-    let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
 
     let lifecycle = DaemonLifecycle::default();
     let sync_config = crate::config::SyncConfig::default().with_env_overrides();
@@ -126,8 +126,8 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     }
     lifecycle.begin_draining();
     drop(listener);
-    let hard_backstop_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
-    let shutdown_deadline = hard_backstop_deadline - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
+    let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
+        - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
     let maintenance_cancel = maintenance.clone();
     let maintenance_join = maintenance.clone();
     let project_open = project_open_tasks(&project_open_gates).await;
@@ -138,6 +138,8 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let replay_join = store_administration.clone();
     let startup_ingest_servers = project_servers_for_shutdown(&store_administration).await;
     let http_application_cancel = http_application_service.shutdown_signal();
+    let semantic_artifact_gc_cancel = semantic_artifact_gc.clone();
+    let semantic_artifact_gc_join = semantic_artifact_gc;
     let owner_phases = vec![
         vec![
             shutdown_coordination::ShutdownOwner::new(
@@ -151,6 +153,11 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 "maintenance",
                 move || maintenance_cancel.cancel(),
                 move |deadline| async move { maintenance_join.shutdown_until(deadline).await },
+            ),
+            shutdown_coordination::ShutdownOwner::with_deadline_result(
+                "semantic_artifact_gc",
+                move || semantic_artifact_gc_cancel.cancel(),
+                move |_| async move { semantic_artifact_gc_join.shutdown().await },
             ),
             shutdown_coordination::ShutdownOwner::with_deadline_result(
                 "http_application",
@@ -323,7 +330,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
-    let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
     let sync_config = crate::config::SyncConfig::default().with_env_overrides();
     let profile_database = engine
         .store_administration
@@ -402,79 +409,74 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // will never be served.
     drop(listener);
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
-    let hard_backstop_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
-    let shutdown_deadline = hard_backstop_deadline - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
-    let shutdown_completed = tokio::time::timeout_at(hard_backstop_deadline, async {
-        // Keep auxiliary process creation blocked until every scheduler and client
-        // task is drained or abandoned. A killed app-server call may retry before
-        // unwinding, so a shorter guard leaves a shutdown-time respawn race.
-        let _codex_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
-        log_daemon_event(
-            "daemon_shutdown",
-            &[("socket", socket_path.display().to_string())],
-        );
-        let shutdown_lifecycle = engine.lifecycle.clone();
-        let shutdown_engine = engine.clone();
-        let shutdown = shutdown_orchestration::coordinate_daemon_shutdown(
-            &shutdown_lifecycle,
-            shutdown_deadline,
-            async move {
-                let mut owner_phases = shutdown_engine.shutdown_owner_phases().await;
-                let http_application_owner =
-                    shutdown_coordination::ShutdownOwner::with_deadline_result(
-                        "http_application",
-                        {
-                            let signal = http_application_service.shutdown_signal();
-                            move || signal.cancel()
-                        },
-                        move |_| async move { http_application_service.shutdown().await },
-                    );
-                match owner_phases.first_mut() {
-                    Some(producers) => producers.push(http_application_owner),
-                    None => owner_phases.push(vec![http_application_owner]),
-                }
-                let server_engine = shutdown_engine.clone();
-                shutdown_orchestration::DaemonShutdownPlan::new(
-                    client_tasks,
-                    owner_phases,
-                    async move { server_engine.shutdown_servers(shutdown_deadline).await },
-                )
-            },
-        )
-        .await;
-        if !shutdown.in_flight.is_clean() || !shutdown.clients.is_clean() {
-            log_daemon_event(
-                "daemon_shutdown",
-                &[
-                    ("outcome", "client_drain_timeout".to_string()),
-                    (
-                        "deadline_secs",
-                        DAEMON_CLIENT_DRAIN_DEADLINE.as_secs().to_string(),
-                    ),
-                    (
-                        "checkpoint",
-                        "skipped_active_clients_were_aborted".to_string(),
-                    ),
-                ],
+    let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
+        - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
+    // The coordinator owns every spawned shutdown task and applies this one
+    // deadline to each of them. Awaiting its receipt keeps the Codex spawn
+    // fence active until those owners have either joined or reported timeout;
+    // an outer timeout here would strand that coordinator during process exit.
+    let _codex_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
+    log_daemon_event(
+        "daemon_shutdown",
+        &[("socket", socket_path.display().to_string())],
+    );
+    let shutdown_lifecycle = engine.lifecycle.clone();
+    let shutdown_engine = engine.clone();
+    let semantic_artifact_gc_cancel = semantic_artifact_gc.clone();
+    let semantic_artifact_gc_join = semantic_artifact_gc;
+    let shutdown = shutdown_orchestration::coordinate_daemon_shutdown(
+        &shutdown_lifecycle,
+        shutdown_deadline,
+        async move {
+            let mut owner_phases = shutdown_engine.shutdown_owner_phases().await;
+            let semantic_artifact_gc_owner =
+                shutdown_coordination::ShutdownOwner::with_deadline_result(
+                    "semantic_artifact_gc",
+                    move || semantic_artifact_gc_cancel.cancel(),
+                    move |_| async move { semantic_artifact_gc_join.shutdown().await },
+                );
+            let http_application_owner = shutdown_coordination::ShutdownOwner::with_deadline_result(
+                "http_application",
+                {
+                    let signal = http_application_service.shutdown_signal();
+                    move || signal.cancel()
+                },
+                move |_| async move { http_application_service.shutdown().await },
             );
-        }
-        log_background_shutdown_receipt(&shutdown.background);
-        log_project_server_shutdown_receipt(&shutdown.project_servers);
-    })
-    .await
-    .is_ok();
-    if !shutdown_completed {
+            match owner_phases.first_mut() {
+                Some(producers) => {
+                    producers.push(semantic_artifact_gc_owner);
+                    producers.push(http_application_owner);
+                }
+                None => owner_phases.push(vec![semantic_artifact_gc_owner, http_application_owner]),
+            }
+            let server_engine = shutdown_engine.clone();
+            shutdown_orchestration::DaemonShutdownPlan::new(
+                client_tasks,
+                owner_phases,
+                async move { server_engine.shutdown_servers(shutdown_deadline).await },
+            )
+        },
+    )
+    .await;
+    if !shutdown.in_flight.is_clean() || !shutdown.clients.is_clean() {
         log_daemon_event(
             "daemon_shutdown",
             &[
-                ("outcome", "hard_backstop_timeout".to_string()),
+                ("outcome", "client_drain_timeout".to_string()),
                 (
                     "deadline_secs",
-                    DAEMON_SHUTDOWN_DEADLINE.as_secs().to_string(),
+                    DAEMON_CLIENT_DRAIN_DEADLINE.as_secs().to_string(),
+                ),
+                (
+                    "checkpoint",
+                    "skipped_active_clients_were_aborted".to_string(),
                 ),
             ],
         );
     }
+    log_background_shutdown_receipt(&shutdown.background);
+    log_project_server_shutdown_receipt(&shutdown.project_servers);
     endpoint_cleanup
 }
 

@@ -35,8 +35,18 @@ pub(crate) struct DaemonActivity {
 #[derive(Default)]
 struct DaemonShutdownCoordinator {
     in_flight: Option<Arc<DaemonShutdownAttempt>>,
+    coordinator_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    coordinator_completed: Arc<tokio::sync::Notify>,
     terminal: Option<Arc<DaemonShutdownReceipt>>,
     failures: DaemonShutdownFailures,
+}
+
+struct DaemonShutdownCoordinatorCompletion(Arc<tokio::sync::Notify>);
+
+impl Drop for DaemonShutdownCoordinatorCompletion {
+    fn drop(&mut self) {
+        self.0.notify_waiters();
+    }
 }
 
 pub(super) struct DaemonShutdownAttempt {
@@ -132,6 +142,113 @@ impl DaemonLifecycle {
         DaemonShutdownClaim::Run {
             attempt,
             failures: shutdown.failures.clone(),
+        }
+    }
+
+    /// Retain the coordinator independently of any caller that is merely
+    /// waiting for its receipt. The task is joined after it publishes that
+    /// receipt, so cancelling a first waiter cannot detach shutdown work.
+    pub(super) fn spawn_shutdown_coordinator<Task>(
+        &self,
+        attempt: &Arc<DaemonShutdownAttempt>,
+        task: Task,
+    ) -> bool
+    where
+        Task: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let coordinator_task = {
+            let shutdown = self
+                .inner
+                .shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(&shutdown.coordinator_task)
+        };
+        let mut coordinator_task = match coordinator_task.try_lock() {
+            Ok(task) => task,
+            Err(_) => return false,
+        };
+        let shutdown = self
+            .inner
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !shutdown
+            .in_flight
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, attempt))
+            || coordinator_task.is_some()
+        {
+            return false;
+        }
+        let completed = Arc::clone(&shutdown.coordinator_completed);
+        drop(shutdown);
+        *coordinator_task = Some(tokio::spawn(async move {
+            let _completion = DaemonShutdownCoordinatorCompletion(completed);
+            task.await;
+        }));
+        true
+    }
+
+    /// A receipt is sent immediately before the coordinator returns. Await
+    /// task completion while leaving its handle in lifecycle ownership, so a
+    /// cancelled waiter cannot detach the final coordinator exit.
+    pub(super) async fn wait_for_finished_shutdown_coordinator(&self) {
+        loop {
+            let completed = {
+                let shutdown = self
+                    .inner
+                    .shutdown
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                Arc::clone(&shutdown.coordinator_completed)
+            };
+            let notified = completed.notified();
+            let coordinator_task = {
+                let shutdown = self
+                    .inner
+                    .shutdown
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                Arc::clone(&shutdown.coordinator_task)
+            };
+            let finished = coordinator_task
+                .lock()
+                .await
+                .as_ref()
+                .is_none_or(tokio::task::JoinHandle::is_finished);
+            if finished {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Reap only an already-finished coordinator. Its join cannot suspend,
+    /// which keeps cancellation from taking ownership out of lifecycle state.
+    pub(super) async fn join_finished_shutdown_coordinator(&self) {
+        let task = {
+            let shutdown = self
+                .inner
+                .shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let coordinator_task = Arc::clone(&shutdown.coordinator_task);
+            drop(shutdown);
+            let mut coordinator_task = coordinator_task.lock().await;
+            if coordinator_task
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                coordinator_task.take()
+            } else {
+                None
+            }
+        };
+        if let Some(task) = task {
+            if let Err(error) = task.await {
+                tracing::error!(%error, "daemon shutdown coordinator task failed after receipt");
+            }
         }
     }
 

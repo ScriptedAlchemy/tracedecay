@@ -1359,9 +1359,9 @@ async fn portable_shutdown_aborts_stuck_client_then_uses_remaining_store_budget(
     }
 
     let started_at = tokio::time::Instant::now();
-    let hard_backstop_deadline = started_at + super::super::DAEMON_SHUTDOWN_DEADLINE;
+    let shutdown_budget_deadline = started_at + super::super::DAEMON_SHUTDOWN_DEADLINE;
     let shutdown_deadline =
-        hard_backstop_deadline - super::super::bootstrap::DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
+        shutdown_budget_deadline - super::super::bootstrap::DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
     let lifecycle = DaemonLifecycle::default();
     let activity = lifecycle.try_enter().expect("admit stuck client");
     let client_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1454,7 +1454,7 @@ async fn portable_shutdown_aborts_stuck_client_then_uses_remaining_store_budget(
     assert!(receipt.clients.is_clean());
     assert!(receipt.background.unfinished().is_empty());
     assert!(receipt.project_servers.is_clean());
-    assert!(tokio::time::Instant::now() < hard_backstop_deadline);
+    assert!(tokio::time::Instant::now() < shutdown_budget_deadline);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

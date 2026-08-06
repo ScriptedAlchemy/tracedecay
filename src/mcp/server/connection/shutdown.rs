@@ -17,7 +17,16 @@ struct McpShutdownState {
     running: AtomicBool,
     done: AtomicBool,
     terminal: std::sync::Mutex<Option<crate::daemon::ShutdownStatus>>,
+    coordinator_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     changed: tokio::sync::Notify,
+}
+
+struct McpShutdownCoordinatorCompletion(Arc<McpShutdownState>);
+
+impl Drop for McpShutdownCoordinatorCompletion {
+    fn drop(&mut self) {
+        self.0.changed.notify_waiters();
+    }
 }
 
 impl Default for McpShutdownCompletion {
@@ -37,26 +46,107 @@ impl McpShutdownCompletion {
     where
         Work: Future<Output = crate::daemon::ShutdownStatus> + Send + 'static,
     {
-        if let Some(status) = self.terminal_status() {
-            return status;
-        }
-        if self
-            .state
-            .running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
+        let mut work = Some(work);
+        loop {
+            self.join_finished_coordinator().await;
+            if !self.state.running.load(Ordering::Acquire) {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+            }
+            if let Some(status) = self.terminal_status() {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+                return status;
+            }
+
+            let mut coordinator_task = self.state.coordinator_task.lock().await;
+            if coordinator_task.is_some() {
+                let running = self.state.running.load(Ordering::Acquire);
+                drop(coordinator_task);
+                if running {
+                    return self.wait_for_terminal_status_until(deadline).await;
+                }
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+                continue;
+            }
+            if self
+                .state
+                .running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                drop(coordinator_task);
+                return self.wait_for_terminal_status_until(deadline).await;
+            }
+            if let Some(status) = self.terminal_status() {
+                self.state.running.store(false, Ordering::Release);
+                drop(coordinator_task);
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+                return status;
+            }
+
+            let Some(work) = work.take() else {
+                self.state.finish(crate::daemon::ShutdownStatus::Failed(
+                    "MCP shutdown coordinator lost its work future".to_owned(),
+                ));
+                drop(coordinator_task);
+                return crate::daemon::ShutdownStatus::Failed(
+                    "MCP shutdown coordinator lost its work future".to_owned(),
+                );
+            };
             let state = Arc::clone(&self.state);
-            let runner = tokio::spawn(work);
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
+                let _completion = McpShutdownCoordinatorCompletion(Arc::clone(&state));
+                let runner = tokio::spawn(work);
                 let status = match runner.await {
                     Ok(status) => status,
                     Err(error) => crate::daemon::ShutdownStatus::Failed(error.to_string()),
                 };
                 state.finish(status);
             });
+            *coordinator_task = Some(task);
+            drop(coordinator_task);
+            return self.wait_for_terminal_status_until(deadline).await;
         }
-        self.wait_for_terminal_status_until(deadline).await
+    }
+
+    async fn join_finished_coordinator(&self) {
+        let result = {
+            let mut coordinator_task = self.state.coordinator_task.lock().await;
+            let Some(task) = coordinator_task.as_mut() else {
+                return;
+            };
+            if !task.is_finished() {
+                return;
+            }
+            let result = task.await;
+            coordinator_task.take();
+            result
+        };
+        if let Err(error) = result {
+            tracing::error!(%error, "MCP shutdown coordinator task failed after receipt");
+            self.state
+                .finish(crate::daemon::ShutdownStatus::Failed(error.to_string()));
+        }
+    }
+
+    async fn wait_for_finished_coordinator(&self) {
+        loop {
+            let notified = self.state.changed.notified();
+            let finished = self
+                .state
+                .coordinator_task
+                .lock()
+                .await
+                .as_ref()
+                .is_none_or(tokio::task::JoinHandle::is_finished);
+            if finished {
+                return;
+            }
+            notified.await;
+        }
     }
 
     fn terminal_status(&self) -> Option<crate::daemon::ShutdownStatus> {
@@ -73,18 +163,26 @@ impl McpShutdownCompletion {
     ) -> crate::daemon::ShutdownStatus {
         loop {
             if let Some(status) = self.terminal_status() {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
                 return status;
             }
             if !self.state.running.load(Ordering::Acquire) {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
                 return crate::daemon::ShutdownStatus::TimedOut;
             }
             let notified = self.state.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if let Some(status) = self.terminal_status() {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
                 return status;
             }
             if !self.state.running.load(Ordering::Acquire) {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
                 return crate::daemon::ShutdownStatus::TimedOut;
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
@@ -139,12 +237,15 @@ impl McpServer {
         deadline: tokio::time::Instant,
     ) -> crate::daemon::ShutdownStatus {
         self.shutdown
-            .coordinate_until(deadline, Arc::clone(self).run_shutdown())
+            .coordinate_until(deadline, Arc::clone(self).run_shutdown(deadline))
             .await
     }
 
-    async fn run_shutdown(self: Arc<Self>) -> crate::daemon::ShutdownStatus {
-        let mut failures = self.shutdown_background_tasks().await;
+    async fn run_shutdown(
+        self: Arc<Self>,
+        deadline: tokio::time::Instant,
+    ) -> crate::daemon::ShutdownStatus {
+        let mut failures = self.shutdown_background_tasks_until(deadline).await;
 
         let uptime = self.stats.started_at.elapsed();
         let tool_calls = self.stats.tool_calls.load(Ordering::Relaxed);
@@ -207,7 +308,20 @@ impl McpServer {
     }
 
     pub(crate) async fn shutdown_background_tasks(&self) -> Vec<String> {
-        let failures = self.background_tasks.shutdown().await;
+        self.shutdown_background_tasks_until(
+            tokio::time::Instant::now() + crate::daemon::DAEMON_SHUTDOWN_DEADLINE,
+        )
+        .await
+    }
+
+    async fn shutdown_background_tasks_until(&self, deadline: tokio::time::Instant) -> Vec<String> {
+        let mut failures = Vec::new();
+        if let Err(error) =
+            crate::mcp::tools::handlers::dashboard::shutdown_dashboard_until(deadline).await
+        {
+            failures.push(format!("dashboard shutdown: {error}"));
+        }
+        failures.extend(self.background_tasks.shutdown().await);
         if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
             worker.shutdown().await;
         }
